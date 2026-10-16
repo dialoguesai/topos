@@ -90,6 +90,15 @@ AGGREGATE_REGISTRY: Dict[str, ScopeAggregateSpec] = {
         fields={"length": "LENGTH(content)"},
         has_dataset_col=False,
     ),
+    # The coding tools' own scope (CONTRACTS.md §2.5): the same table and groups. A caller that is
+    # not the owner also never counts a share_excluded row (run_aggregate, below).
+    "ai_coding_sessions:read": ScopeAggregateSpec(
+        table="ai_chat_messages",
+        time_col="event_at",
+        group_bys={"sender_type": "sender_type", "source_id": "source_id"},
+        fields={"length": "LENGTH(content)"},
+        has_dataset_col=False,
+    ),
     "schedule:read": ScopeAggregateSpec(
         table="calendar_events",
         time_col="starts_at",
@@ -429,7 +438,13 @@ def run_aggregate(
     if guard is not None and not guard.sees_everything:
         from ..storage.adapters.sqlite.stores import _NATIVE_ID_COL
         from ..features.lifecycle.record_protection import RecordProtectionStore
+        from ..storage.share_excluded import share_excluded_clause
 
+        # A row the owner keeps from every share (ai_chat_messages.share_excluded) is not a number
+        # anyone else gets either: the count is part of the answer.
+        excluded = share_excluded_clause(conn, table=scope.table)
+        if excluded:
+            where.append(excluded[len(" AND "):])
         blocked_records = sorted(RecordProtectionStore(conn).blocked_ids(scope.table))
         if blocked_records:
             id_column = _NATIVE_ID_COL.get(scope.table)

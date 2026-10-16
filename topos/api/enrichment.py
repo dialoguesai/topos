@@ -630,82 +630,17 @@ def _load_canonical_messages_for_enrichment(
     return records
 
 
-async def _find_unprocessed_messages(
-    source_id: str,
-    dataset_id: Optional[str] = None,
-    job_names: Optional[List[str]] = None,
-) -> List[Dict[str, Any]]:
-    """Find canonical messages that haven't been enriched yet.
+def _legacy_ai_chat_messages_for_source(db_conn, source_id: str, *, dataset_id: Optional[str]) -> List[Dict[str, Any]]:
+    """The ai_chat_messages fallback read for chat sources whose group-aware load yields nothing.
 
-    Reads the source's OWN canonical table (group-aware) as the source of
-    truth; the legacy ai_chat_messages read remains as a fallback for chat
-    sources whose loader group yields nothing.
-
-    Args:
-        source_id: Source identifier
-        dataset_id: Optional dataset ID to filter by (extracts user_id for filtering)
-        job_names: List of enrichment job names to check
-
-    Returns:
-        List of canonical messages that need enrichment
+    Every SELECT skips ``share_excluded = 1`` (CONTRACTS.md §2.6): a row the owner keeps from every
+    share is never handed to an enrichment job from here either. Empty list on any failure.
     """
-    # Get source definition
-    source_def = REGISTRY.get(source_id)
-    if not source_def:
-        raise ValueError(f"Source {source_id} not found")
+    from ..storage.share_excluded import share_excluded_clause
 
-    from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
-
-    configured_jobs = effective_canonical_enrichment_jobs(source_def)
-    if not configured_jobs:
-        return []
-
-    # Determine which jobs to check (default to all canonical enrichment jobs)
-    jobs_to_check = job_names or configured_jobs
-    
-    # Get database connection
-    db_conn = get_db_connection()
-    if not db_conn:
-        logger.warning("No database connection available for enrichment")
-        return []
-
-    # Group-aware canonical load — works for EVERY source (browser, journal,
-    # transcripts, chat), not just ai_chat ones. The legacy ai_chat_messages
-    # read below remains only as a fallback when this yields nothing.
-    generic_messages = _load_canonical_messages_for_enrichment(
-        db_conn, source_def, dataset_id=dataset_id
-    )
-    if generic_messages:
-        from ..enrichment.catalog import catalog_spec_version
-
-        enriched: Optional[set[str]] = None
-        job_table_map = {job.get_job_name(): job.get_derived_table() for job in CANONICAL_JOBS}
-        for job_name in jobs_to_check:
-            table_name = job_table_map.get(job_name)
-            if table_name:
-                job_ids = _get_enriched_message_ids(
-                    table_name,
-                    db_conn,
-                    min_spec_version=catalog_spec_version(job_name),
-                )
-                enriched = job_ids if enriched is None else (enriched & job_ids)
-            else:
-                logger.warning("Unknown enrichment job: %s (skipping check)", job_name)
-        if enriched is None:
-            enriched = set()
-        unprocessed_generic = [
-            msg
-            for msg in generic_messages
-            if (_record_identifier(msg) or msg.get("message_id")) not in enriched
-        ]
-        logger.debug(
-            "Group-aware loader: %d/%d unprocessed for source_id=%s",
-            len(unprocessed_generic),
-            len(generic_messages),
-            source_id,
-        )
-        return unprocessed_generic
-
+    excluded = share_excluded_clause(db_conn)
+    excluded_m = share_excluded_clause(db_conn, alias="m")
+    canonical_messages: List[Dict[str, Any]] = []
     # Read canonical messages directly from ai_chat_messages table
     # This is the source of truth per architecture design
     try:
@@ -787,12 +722,12 @@ async def _find_unprocessed_messages(
             logger.debug("Debug: All conversations in table: %s", all_convs[:5] if all_convs else "none")
             
             # Try query with user_id filter first
-            query = """
+            query = f"""
                 SELECT m.message_id, m.conversation_id, m.sender_type, m.sender_id,
                        m.event_at, m.content, m.content_rendered, m.metadata_json, m.sequence, m.source_id
                 FROM ai_chat_messages m
                 INNER JOIN ai_chat_conversations c ON m.conversation_id = c.conversation_id
-                WHERE m.source_id = ? AND c.owner_user_id = ?
+                WHERE m.source_id = ? AND c.owner_user_id = ?{excluded_m}
                 ORDER BY m.event_at ASC
             """
             cursor = db_conn.execute(query, (source_id, user_id))
@@ -802,11 +737,11 @@ async def _find_unprocessed_messages(
             # If no results with user_id filter, fall back to source_id only (for local mode)
             if result_count == 0:
                 logger.debug("Debug: No messages found with user_id filter, falling back to source_id only")
-                query = """
+                query = f"""
                     SELECT message_id, conversation_id, sender_type, sender_id,
                            event_at, content, content_rendered, metadata_json, sequence, source_id
                     FROM ai_chat_messages
-                    WHERE source_id = ?
+                    WHERE source_id = ?{excluded}
                     ORDER BY event_at ASC
                 """
                 cursor = db_conn.execute(query, (source_id,))
@@ -821,11 +756,11 @@ async def _find_unprocessed_messages(
                 has_conversations_table,
                 dataset_id,
             )
-            query = """
+            query = f"""
                 SELECT message_id, conversation_id, sender_type, sender_id,
                        event_at, content, content_rendered, metadata_json, sequence, source_id
                 FROM ai_chat_messages
-                WHERE source_id = ?
+                WHERE source_id = ?{excluded}
                 ORDER BY event_at ASC
             """
             cursor = db_conn.execute(query, (source_id,))
@@ -862,6 +797,87 @@ async def _find_unprocessed_messages(
         logger.error("Failed to read canonical messages from ai_chat_messages table: %s", e)
         return []
     
+    return canonical_messages
+
+
+async def _find_unprocessed_messages(
+    source_id: str,
+    dataset_id: Optional[str] = None,
+    job_names: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Find canonical messages that haven't been enriched yet.
+
+    Reads the source's OWN canonical table (group-aware) as the source of
+    truth; the legacy ai_chat_messages read remains as a fallback for chat
+    sources whose loader group yields nothing.
+
+    Args:
+        source_id: Source identifier
+        dataset_id: Optional dataset ID to filter by (extracts user_id for filtering)
+        job_names: List of enrichment job names to check
+
+    Returns:
+        List of canonical messages that need enrichment
+    """
+    # Get source definition
+    source_def = REGISTRY.get(source_id)
+    if not source_def:
+        raise ValueError(f"Source {source_id} not found")
+
+    from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
+
+    configured_jobs = effective_canonical_enrichment_jobs(source_def)
+    if not configured_jobs:
+        return []
+
+    # Determine which jobs to check (default to all canonical enrichment jobs)
+    jobs_to_check = job_names or configured_jobs
+    
+    # Get database connection
+    db_conn = get_db_connection()
+    if not db_conn:
+        logger.warning("No database connection available for enrichment")
+        return []
+
+    # Group-aware canonical load — works for EVERY source (browser, journal,
+    # transcripts, chat), not just ai_chat ones. The legacy ai_chat_messages
+    # read below remains only as a fallback when this yields nothing.
+    generic_messages = _load_canonical_messages_for_enrichment(
+        db_conn, source_def, dataset_id=dataset_id
+    )
+    if generic_messages:
+        from ..enrichment.catalog import catalog_spec_version
+
+        enriched: Optional[set[str]] = None
+        job_table_map = {job.get_job_name(): job.get_derived_table() for job in CANONICAL_JOBS}
+        for job_name in jobs_to_check:
+            table_name = job_table_map.get(job_name)
+            if table_name:
+                job_ids = _get_enriched_message_ids(
+                    table_name,
+                    db_conn,
+                    min_spec_version=catalog_spec_version(job_name),
+                )
+                enriched = job_ids if enriched is None else (enriched & job_ids)
+            else:
+                logger.warning("Unknown enrichment job: %s (skipping check)", job_name)
+        if enriched is None:
+            enriched = set()
+        unprocessed_generic = [
+            msg
+            for msg in generic_messages
+            if (_record_identifier(msg) or msg.get("message_id")) not in enriched
+        ]
+        logger.debug(
+            "Group-aware loader: %d/%d unprocessed for source_id=%s",
+            len(unprocessed_generic),
+            len(generic_messages),
+            source_id,
+        )
+        return unprocessed_generic
+
+    # The legacy ai_chat_messages read, as a fallback for chat sources only (share_excluded rows skipped).
+    canonical_messages = _legacy_ai_chat_messages_for_source(db_conn, source_id, dataset_id=dataset_id)
     if not canonical_messages:
         logger.debug("No canonical messages found for source_id=%s, dataset_id=%s", source_id, dataset_id)
         return []
@@ -1207,16 +1223,20 @@ async def _get_enrichment_status_core(
         if has_conversations_table and dataset_id:
             # Join with conversations table to filter by owner_user_id
             user_id = dataset_id.split(":")[0] if ":" in dataset_id else dataset_id
-            query = """
+            from ..storage.share_excluded import share_excluded_clause
+
+            query = f"""
                 SELECT COUNT(*)
                 FROM ai_chat_messages m
                 LEFT JOIN ai_chat_conversations c ON m.conversation_id = c.conversation_id
-                WHERE m.source_id = ? AND c.owner_user_id = ?
+                WHERE m.source_id = ? AND c.owner_user_id = ?{share_excluded_clause(db_conn, alias='m')}
             """
             cursor = db_conn.execute(query, (source_id, user_id))
         else:
+            from ..storage.share_excluded import share_excluded_clause
+
             # Direct query without user filtering
-            query = "SELECT COUNT(*) FROM ai_chat_messages WHERE source_id = ?"
+            query = "SELECT COUNT(*) FROM ai_chat_messages WHERE source_id = ?" + share_excluded_clause(db_conn)
             cursor = db_conn.execute(query, (source_id,))
         
         total = cursor.fetchone()[0]

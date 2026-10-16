@@ -15,6 +15,10 @@ PROFILE_REGISTRY = {
     # Allow per-source profile ids to map to the shared ChatGPT profile.
     "chatgpt_file_ingestion": CHATGPT_DEV_PROFILE,
     "chatgpt_ui_conversation": CHATGPT_DEV_PROFILE,
+    # The AI coding tools (CONTRACTS.md §2.5): the same ai_chat_messages counts.
+    "claude_code_sessions": CHATGPT_DEV_PROFILE,
+    "codex_sessions": CHATGPT_DEV_PROFILE,
+    "cursor_sessions": CHATGPT_DEV_PROFILE,
 }
 
 

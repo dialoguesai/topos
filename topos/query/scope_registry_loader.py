@@ -68,6 +68,10 @@ _CONCEPT_HINTS: Dict[str, tuple] = {
     "messages:read": ("message", "messages", "text", "texts", "imessage", "sms",
                       "conversation", "conversations", "thread"),
     "ai_conversations:read": ("chatgpt", "assistant", "ai"),
+    # The coding tools' own area (CONTRACTS.md §2.5): a bare "ai_coding_sessions" snaps here by its
+    # prefix (rule 1 above); these words catch an invented id such as "coding_sessions" or "agent_work".
+    "ai_coding_sessions:read": ("coding", "code", "claude", "codex", "cursor", "agent", "session",
+                                "sessions", "repo", "building", "built", "debug", "debugging"),
     "activity:read": ("activity", "browsing", "browser", "web", "website", "visits", "history"),
     "work_context:read": ("work", "job", "career", "employer", "employment", "project",
                           "projects", "role", "skills"),

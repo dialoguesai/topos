@@ -40,6 +40,11 @@ SOURCE_INTENT: Dict[str, float] = {
     "chatgpt_ui_conversation": 0.7,
     "chatgpt_file_ingestion": 0.7,
     "chatgpt_ingestion": 0.7,
+    # Coding sessions: what the owner asked an agent to build, and about which project. Deliberate
+    # work, like a commit (github_activity 0.9), with an assistant's share of the words (chatgpt 0.7).
+    "claude_code_sessions": 0.8,
+    "codex_sessions": 0.8,
+    "cursor_sessions": 0.8,
     "imessage": 0.5,
     "browser_visits": 0.2,
     "browser_events": 0.2,

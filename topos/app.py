@@ -42,6 +42,7 @@ from .api import (
     source_install as source_install_routes,
     source_scrub as source_scrub_routes,
     source_retention as source_retention_routes,
+    owner_sources as owner_sources_routes,
     sources as sources_routes,
     sync as sync_routes,
     user_identity as user_identity_routes,
@@ -171,6 +172,7 @@ app.include_router(home_chat_routes.router)
 app.include_router(privacy_disclose_routes.router)
 app.include_router(nsfw_maintenance_routes.router)
 app.include_router(source_retention_routes.router)
+app.include_router(owner_sources_routes.router)
 app.include_router(compute_remote_routes.router)
 app.include_router(engine_run_routes.router)
 app.include_router(data_commit_routes.router)

@@ -25,7 +25,7 @@ from .registry import handles
 
 
 def _sync_settings(conn: Any, dataset_id: str, source_id: str) -> Dict[str, Any]:
-    """Checkpoint + schedule fields for a schedulable source (iMessage); {} otherwise."""
+    """Checkpoint + schedule fields for a schedulable source (the runner table says which); {} otherwise."""
     from ...ingestion.local_sync_schedule import describe_sync_settings
 
     return describe_sync_settings(conn, dataset_id, source_id)
@@ -501,8 +501,6 @@ async def handle_source_sync(message: Dict[str, Any]) -> Optional[Dict[str, Any]
     source_id = (payload.get("source_id") or "").strip()
     dataset_id = (payload.get("dataset_id") or "").strip()
     sync_options = payload.get("sync_options")
-    if source_id == "imessage" and not sync_options:
-        sync_options = {"mode": "3m"}
     logger.debug(
         "[PIPELINE:SYNC] Engine received source_sync request: source_id=%s dataset_id=%s sync_options=%s (req_id=%s)",
         source_id,
@@ -515,10 +513,12 @@ async def handle_source_sync(message: Dict[str, Any]) -> Optional[Dict[str, Any]
     source = REGISTRY.get(source_id)
     if not source or getattr(source, "source_type", None) != "local_sync":
         return {"id": req_id, "status": "error", "error": "sync only applies to local_sync sources"}
-    if source_id not in ("imessage", "signal"):
-        return {"id": req_id, "status": "error", "error": f"sync not implemented for source_id={source_id}"}
+    # The runner table (CONTRACTS.md §2.8) is the one list of sources a door may sync. A caller that
+    # sends no options gets the runner's default there (iMessage: the 3-month window), on every door.
+    from ...ingestion.local_sync_jobs import enqueue_local_sync, runner_for
 
-    from ...ingestion.local_sync_jobs import enqueue_local_sync
+    if runner_for(source_id) is None:
+        return {"id": req_id, "status": "error", "error": f"sync not implemented for source_id={source_id}"}
 
     outcome = await enqueue_local_sync(
         source_id=source_id,

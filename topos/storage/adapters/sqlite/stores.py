@@ -502,6 +502,7 @@ class SQLiteCanonicalStore:
 
         if disclosure_tier != "owner_raw" or getattr(current_principal(), "cls", None) != OWNER_APP:
             from ....features.lifecycle.record_protection import RecordProtectionStore
+            from ...share_excluded import share_excluded_present
 
             blocked = sorted(RecordProtectionStore(self._conn).blocked_ids(table))
             if blocked:
@@ -509,6 +510,11 @@ class SQLiteCanonicalStore:
                 # pagination nor remove an otherwise visible positive control.
                 clauses.append("record_id NOT IN (" + ",".join("?" for _ in blocked) + ")")
                 params.extend(blocked)
+            if table == "ai_chat_messages" and share_excluded_present(self._conn, table):
+                # A row the owner keeps from every share (CONTRACTS.md §2.6): never below the owner's
+                # own tier, in any mode, and never counted. The scope→table selection for a grantee
+                # is this list, so the withhold sits here, like the NSFW one below.
+                clauses.append("record_id NOT IN (SELECT message_id FROM ai_chat_messages WHERE share_excluded = 1)")
         if disclosure_tier != "owner_raw" and table in _NSFW_TAGGED_TABLES:
             # Below the owner's tier a flagged row is withheld. No list spec carries `content_nsfw`, so the
             # grantee filters downstream (`exclude_nsfw_rows_for_grantee`, the summary scrub) read no flag and

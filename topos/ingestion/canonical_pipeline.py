@@ -1042,6 +1042,12 @@ def load_canonical_records_for_signal(
             out_records.append(_prepare_signal_record(record))
         return out_records
 
+    # A row the owner keeps from every share (share_excluded, CONTRACTS.md §2.6) is never reloaded
+    # into a derivation: nothing derived may carry it. No column (an older database): no filter.
+    from ..storage.share_excluded import share_excluded_clause
+
+    excluded = share_excluded_clause(db_conn)
+
     if group == "ai_messages":
         # writer_class is the role gate's cap: a reprocess/backfill that dropped
         # it would re-derive a grantee's row as the owner's speech.
@@ -1051,7 +1057,7 @@ def load_canonical_records_for_signal(
             SELECT message_id, conversation_id, sender_type, content, event_at, source_id,
                    {writer_col}
             FROM ai_chat_messages
-            WHERE source_id=?
+            WHERE source_id=?{excluded}
             ORDER BY event_at DESC
             LIMIT ?
             """,
@@ -1078,7 +1084,7 @@ def load_canonical_records_for_signal(
         SELECT message_id, conversation_id, sender_type, content, event_at, source_id,
                {writer_col}
         FROM ai_chat_messages
-        WHERE source_id=?
+        WHERE source_id=?{excluded}
         ORDER BY event_at DESC
         LIMIT ?
         """,
