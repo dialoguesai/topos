@@ -412,3 +412,33 @@ def test_wait_prints_the_cap_notice_while_pending(home: Path, monkeypatch):
     assert result.exit_code == 2
     assert result.stdout.count("Topos limit reached (5 active). Archive one to continue.") == 1
     assert result.stdout.count(USER_CODE) == 1
+
+
+def test_wait_in_one_command_survives_the_poller_still_starting(home: Path, monkeypatch):
+    """`topos-node pair --wait` in ONE command: the detached poller takes a moment to write its own pid, so
+    the record the parent leaves must already carry it — with the real `_pid_alive`, a record without a
+    pid reads as a helper that died, and --wait fails before the code is even shown."""
+    key = _key()
+    cp = _FakeCP(key=key, env_path=home / ".topos" / ".env")
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    monkeypatch.setattr(pair_cmd, "_pid_alive", lambda pid: pid is not None and int(pid) == os.getpid())
+
+    spawned: list = []
+
+    def _spawn() -> int:
+        spawned.append(os.getpid())  # a child that is alive but has not written anything yet
+        return os.getpid()
+
+    def _sleep(_seconds: float) -> None:
+        # The child catches up while the parent waits: one poll approves and delivers.
+        if spawned and not spawned[-1] == "ran":
+            spawned.append("ran")
+            pair_cmd.run_poller(sleep=lambda _s: None)
+
+    monkeypatch.setattr(pair_cmd, "_spawn_poller", _spawn)
+    monkeypatch.setattr(pair_cmd, "_wait_sleep", _sleep)
+    result = CliRunner().invoke(main, ["pair", "--wait"])
+    assert result.exit_code == 0, result.output + result.stderr
+    assert f"Paired with {MASKED}." in result.output
+    rec = json.loads((home / ".topos" / "pairing.json").read_text())
+    assert rec["state"] == "delivered" and rec["poller_pid"] == os.getpid()

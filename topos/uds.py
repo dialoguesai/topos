@@ -142,8 +142,21 @@ def _register_peer_connection(sock) -> Optional[int]:
         return None
     with _peer_processes_lock:
         proc = _peer_processes.get(pid)
+        if proc is not None:
+            proc.connections += 1
+            return pid
+    executable = _pid_executable(pid)
+    team, team_known = None, False
+    if executable and door_team_ids():
+        # Attested AT ACCEPT, against the executable of the process that connected (security review F4): the
+        # lazy lookup codesigned a path later, and a path can be swapped under a pid. Only with an allowlist,
+        # so a node without one never runs codesign.
+        team, team_known = _team_id_of(executable), True
+    with _peer_processes_lock:
+        proc = _peer_processes.get(pid)
         if proc is None:
-            proc = _peer_processes[pid] = _PeerProcess(pid, _pid_executable(pid))
+            proc = _peer_processes[pid] = _PeerProcess(pid, executable)
+            proc.team, proc.team_known = team, team_known
         proc.connections += 1
     return pid
 

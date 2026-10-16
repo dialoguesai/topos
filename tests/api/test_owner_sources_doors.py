@@ -361,3 +361,34 @@ def test_a_build_without_the_hardening_module_still_enables_and_says_so(node, mo
         response = client.post(BASE + f"/sources/{SOURCE}/enable", json={"backfill": "all"})
     assert response.status_code == 200, response.text
     assert response.json()["hardening"] is None
+
+
+# --- the owner's coding agent ----------------------------------------------------
+
+
+def test_an_enrolled_agent_on_the_socket_reads_the_scope_and_the_status_but_changes_nothing(node) -> None:
+    """CONTRACTS §1.2 / owner_door_routes.OWNER_AGENT_ROUTES let an enrolled agent GET /scope (the MCP server's
+    session context and sources_status call it with the agent's label); the mutations stay the owner's."""
+    from topos.auth import resolve_request_principal
+    from topos.principal import OWNER_AGENT, Principal
+
+    app, conn, _reader = node
+    app.dependency_overrides[resolve_request_principal] = lambda: Principal(OWNER_AGENT, "uds", client_id="agent-claude-code")
+    try:
+        with TestClient(app) as client:
+            scope = client.get(BASE + "/scope")
+            assert scope.status_code == 200, scope.text
+            assert scope.json()["topos_id"] == TOPOS
+            status = client.get(BASE + f"/sources/{SOURCE}")
+            assert status.status_code == 200, status.text
+            for path in (f"/sources/{SOURCE}/preview", f"/sources/{SOURCE}/enable", f"/sources/{SOURCE}/pause",
+                         f"/sources/{SOURCE}/resume", f"/sources/{SOURCE}/sync"):
+                response = client.post(BASE + path, json={})
+                assert response.status_code == 403 and response.json()["detail"] == "owner_socket_required", path
+        # the class is minted on the socket only: the same word on another channel is nobody
+        app.dependency_overrides[resolve_request_principal] = lambda: Principal(OWNER_AGENT, "local_http", client_id="agent-claude-code")
+        with TestClient(app) as client:
+            assert client.get(BASE + "/scope").status_code == 403
+    finally:
+        app.dependency_overrides.pop(resolve_request_principal, None)
+    assert conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0] == 0

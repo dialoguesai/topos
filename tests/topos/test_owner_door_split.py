@@ -521,3 +521,26 @@ def test_the_door_allowlist_does_not_switch_global_attestation_on(socket_dir, mo
     monkeypatch.delenv("TOPOS_OWNER_DOOR_TEAM_IDS")
     monkeypatch.setenv("TOPOS_UDS_TEAM_IDS", "TEAMGLOBAL")
     assert uds.door_team_ids() == frozenset({"TEAMGLOBAL"})    # a global P4.1 allowlist counts for the doors too
+
+
+def test_every_registered_type_is_a_named_read_or_dangerous_nothing_falls_through() -> None:
+    """Security review F1 (16 Oct): the set is derived by subtraction, so a type is open on the socket only when
+    someone named it a read; the reviewer's list of mutating types the old set missed is dangerous now."""
+    open_types = hub.owner_door_open_types()
+    assert set(HANDLERS) == open_types | set(hub.DANGEROUS_TYPES)
+    assert not (open_types & set(hub.DANGEROUS_TYPES))
+    assert hub.OWNER_DOOR_MUTATIONS <= hub.DANGEROUS_TYPES
+    for t in ("put_facts_llm_config", "put_conversation_context_llm_config", "put_disk_space_policy",
+              "put_user_identity", "store_message", "put_source_settings", "source_enrichment_delete",
+              "put_derivation_pack", "put_pack_offer", "run_pack_backfill", "put_fact_verdict", "put_fact_conflict",
+              "put_community_name", "consent_upgrade_step", "start_ingestion", "put_packet_resolution_config",
+              "put_exposure_profile_config", "put_signal_settings", "home_chat_memory", "app_ingest",
+              "mcp_client_request_elevation", "compute_invoke", "llm_generation", "messenger_person_curate",
+              "replay_projection", "upsert_home_chat_session", "set_device_name"):
+        assert t in hub.DANGEROUS_TYPES, t
+    changes = ("put_", "post_", "patch_", "store_", "delete_", "start_", "finish_", "import_", "run_", "set_",
+               "update_", "upsert_", "promote_", "revise_", "advance_", "auto_", "consent_", "migrate_")
+    for t in open_types:
+        assert not t.startswith(changes), f"{t} is open by name but shaped like a change"
+    for t in hub.OWNER_DOOR_OPEN_TYPES:
+        assert t in HANDLERS, f"{t} names no registered type"

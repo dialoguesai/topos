@@ -44,15 +44,41 @@ def _agent_label(request: "Optional[Request]") -> str:
         return ""
 
 
+def _socket_agent_already_resolved(label: str) -> Optional[Principal]:
+    """The agent principal the socket wrapper minted for THIS request, when it names the label's client.
+
+    ``uds.UDSChannelApp`` resolves every socket request once, before the route, and sets the result as the
+    request's principal; ``require_api_key`` and a route's own ``Depends(resolve_request_principal)`` reuse it
+    rather than verifying the same label (and writing ``last_used_at``) a second and third time. The context is
+    per request and reset when it ends, so nothing outlives the verification it came from.
+    """
+    from .mcp_clients import AGENT_CLIENT_ID_PREFIX, AGENT_LABEL_PREFIX
+    from .principal import current_principal
+
+    current = current_principal()
+    if getattr(current, "cls", None) != OWNER_AGENT or getattr(current, "channel", None) != "uds":
+        return None
+    if not label.startswith(AGENT_LABEL_PREFIX) or "." not in label:
+        return None
+    short = label[len(AGENT_LABEL_PREFIX):].split(".", 1)[0]
+    if short and str(getattr(current, "client_id", "") or "") == f"{AGENT_CLIENT_ID_PREFIX}{short}":
+        return current
+    return None
+
+
 def _owner_agent_on_socket(label: str) -> Principal:
     """The agent principal for a label presented on the socket, or the 401.
 
-    Verified against the registry on every call: a revoked row refuses the very
-    next request, and there is no cache anywhere for a stale admission to live in.
+    Verified against the registry once per request: a revoked row refuses the very
+    next request, and there is no cache anywhere for a stale admission to live in —
+    the one reuse is the principal the socket wrapper minted for this same request.
     """
     from .core.state import get_db_connection
     from .mcp_clients import verify_agent_label
 
+    resolved = _socket_agent_already_resolved(label)
+    if resolved is not None:
+        return resolved
     conn = get_db_connection()
     row = verify_agent_label(conn, label) if conn else None
     if row is None:

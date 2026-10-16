@@ -889,7 +889,10 @@ def read_cursor_batch(
             return _batch(rows, ledger, scanned, touched, jsonl_preferred, no_rewind)
         if db.connection() is None:
             return _batch(rows, ledger, scanned, touched, jsonl_preferred, no_rewind)
-        touched += 1
+        # The DB counts as touched only when a composer was READ below: the IDE moves the WAL's mtime for as
+        # long as it is open, and the runner loops while files_touched > 0, so a signature change alone must
+        # not keep an hourly sync re-reading every composer.
+        db_read = False
         headers = db.headers()
         composers: List[Tuple[datetime, str, Dict[str, Any], Optional[Dict[str, Any]], List[Dict[str, Any]]]] = []
         for composer_id in db.composer_ids():
@@ -950,6 +953,7 @@ def read_cursor_batch(
                     and activity.timestamp() < since_unix:
                 continue
             ledger.conversations_seen += 1
+            db_read = True
             composer_rows, consumed = _read_composer(
                 db, composer_id, data, header, entries, offset=offset, base_count=base_count, ledger=ledger,
                 skip=skip, since_unix=since_unix, secrets=secrets, limit=batch_size - len(rows), db_mtime=db_mtime,
@@ -965,6 +969,8 @@ def read_cursor_batch(
                     break
         if complete:
             cursors.put(SOURCE_ID, str(db_path), size=db_size, mtime=db_mtime, offset=0, record_count=0)
+        if db_read:
+            touched += 1
         return _batch(rows, ledger, scanned, touched, jsonl_preferred, no_rewind)
     finally:
         db.close()

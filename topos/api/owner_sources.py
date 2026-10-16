@@ -37,10 +37,15 @@ _ENABLE_FIELDS = frozenset({"skip", "backfill"})
 _SYNC_FIELDS = frozenset({"session_path"})
 
 
-def _owner(principal) -> None:
-    from topos.principal import OWNER_APP
+def _owner(principal, *, reads: bool = False) -> None:
+    """The owner on the socket; with ``reads``, the owner's enrolled coding agent too (CONTRACTS §1.2 puts
+    ``GET /scope`` and the status block on its route list: the MCP server's session context and
+    sources_status call them with the agent's label). Every change stays the owner's, and the agent class
+    is minted on the socket only, so the same word on any other channel is nobody."""
+    from topos.principal import OWNER_AGENT, OWNER_APP
 
-    if principal is None or principal.cls != OWNER_APP or principal.channel != "uds":
+    allowed = (OWNER_APP, OWNER_AGENT) if reads else (OWNER_APP,)
+    if principal is None or principal.cls not in allowed or principal.channel != "uds":
         raise HTTPException(403, "owner_socket_required", headers=_NO_STORE)
 
 
@@ -88,7 +93,7 @@ def _body(payload: Optional[dict], allowed: frozenset) -> Dict[str, Any]:
 
 @router.get("/scope")
 async def owner_scope(principal=Depends(resolve_request_principal)):
-    _owner(principal)
+    _owner(principal, reads=True)
     from topos.ingestion.ai_tool_sync import NOT_PAIRED, NOT_PAIRED_SENTENCE, resolve_owner_scope
 
     try:
@@ -102,7 +107,7 @@ async def owner_scope(principal=Depends(resolve_request_principal)):
 
 @router.get("/sources/{source_id}")
 async def source_status(source_id: str, principal=Depends(resolve_request_principal)):
-    _owner(principal)
+    _owner(principal, reads=True)
     sid = _ai_source(source_id)
     from topos.ingestion.ai_tool_sync import describe_ai_tool_source
 

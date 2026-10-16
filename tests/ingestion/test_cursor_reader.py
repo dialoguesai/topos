@@ -10,6 +10,7 @@ Cursor's live ``state.vscdb``.
 from __future__ import annotations
 
 import importlib
+import os
 import shutil
 import sqlite3
 from datetime import datetime, timezone
@@ -309,3 +310,24 @@ def test_session_path_jsonl_reads_only_that_file(reader, env):
     batch = _read(reader, env, session_path=str(env.jsonl))
     assert [r["thread_id"] for r in batch.rows] == [COMPOSER_JSONL] * 3
     assert batch.scanned_files == 1
+
+
+def test_a_db_write_that_adds_no_bubble_does_not_count_as_touched(reader, env, writer):
+    """The IDE moves the WAL's mtime constantly while it is open; the runner loops while the reader reports a
+    touched file, so a signature change that produced no composer read must not count — or an hourly sync
+    re-reads every composer for as long as Cursor is open."""
+    store = FakeCursorStore()
+    assert len(_read(reader, env, store).rows) == TOTAL_ROWS
+    append_bubble(writer, COMPOSER_NORMAL, {
+        "bubbleId": "bubble-n13", "type": 2, "text": "Done.", "createdAt": "2026-10-15T10:06:00.000Z",
+    })
+    second = _read(reader, env, store)
+    assert [r["id"] for r in second.rows] == ["cursor:bubble-n13"] and second.files_touched == 1
+    wal = Path(str(env.db) + "-wal")
+    assert wal.exists() and wal.stat().st_size > 0
+    stamp = wal.stat().st_mtime + 7
+    os.utime(wal, (stamp, stamp))  # checkpoint chatter: the signature moved, no composer did
+    third = _read(reader, env, store)
+    assert third.rows == [] and third.files_touched == 0
+    fourth = _read(reader, env, store)
+    assert fourth.rows == [] and fourth.files_touched == 0

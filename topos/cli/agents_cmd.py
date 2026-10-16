@@ -24,6 +24,7 @@ import os
 import sqlite3
 import stat
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -122,7 +123,30 @@ def _pairing_record_approves(client: str) -> bool:
     return (
         str(record.get("state") or "") in _APPROVED_STATES
         and str(agent.get("client") or "") == client
+        # Spent by the enrolment it backed (`_spend_pairing_approval`): a disconnected agent re-enrols only on
+        # a fresh approval, never by replaying the file (rev-1 security finding 12).
+        and not agent.get("enrolled_at")
     )
+
+
+def _spend_pairing_approval(client: str) -> None:
+    """Record on the pairing file that its approval minted THIS client's label, so it is not an approval again."""
+    record = read_pairing_record()
+    if not record:
+        return
+    agent = dict(record.get("agent") or {}) if isinstance(record.get("agent"), dict) else {}
+    if str(agent.get("client") or "") != client:
+        return
+    agent["enrolled_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    record = {**record, "agent": agent}
+    try:
+        from topos.cli.pair_cmd import write_pairing
+
+        write_pairing(record)
+    except Exception:  # noqa: BLE001 — a build without pair's writer: the file itself, 0600
+        path = mcp_server.topos_dir() / "pairing.json"
+        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
 
 
 def write_label_file(client: str, label: str, *, agents_dir: Optional[Path] = None) -> Path:
@@ -216,6 +240,8 @@ def agents_add(name: str, as_json: bool, approved: bool) -> None:
             raise click.ClickException("the registry minted no label")
         path = write_label_file(client, label)
         del label
+        if approved:
+            _spend_pairing_approval(client)
     finally:
         conn.close()
     payload = {

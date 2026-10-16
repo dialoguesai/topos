@@ -438,9 +438,18 @@ def _put_taint_marker(cursors: Any, key: str, epoch: float) -> None:
 
 
 def _tool_use_taint(block: Dict[str, Any]) -> bool:
+    """A tool call touches a Topos surface by its name or by ANY of its inputs — the shell command, but also the
+    path a Read/Grep/Edit names (security review F6: ``~/.topos/database.db`` read through a file tool)."""
     inputs = block.get("input")
-    command = inputs.get("command") if isinstance(inputs, dict) else None
-    return taints(block.get("name"), command if isinstance(command, str) else None)
+    text: Optional[str] = None
+    if isinstance(inputs, str):
+        text = inputs
+    elif inputs is not None:
+        try:
+            text = json.dumps(inputs, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            text = str(inputs)
+    return taints(block.get("name"), text)
 
 
 def _scan_subagents(session_dir: Path, cursors: Any, ledger: Ledger) -> Optional[float]:

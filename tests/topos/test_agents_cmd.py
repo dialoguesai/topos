@@ -319,3 +319,25 @@ def test_pending_or_denied_record_is_not_an_approval(home, registry, monkeypatch
         pairing.write_text(json.dumps({"state": state, "mode": "add_agent", "agent": {"client": "claude-code"}}))
         assert _run(["add", "claude-code", "--approved"]).exit_code == 2, state
     assert registry.minted == []
+
+
+def test_an_approval_backs_one_enrolment_and_cannot_be_replayed_after_a_disconnect(home, registry, monkeypatch):
+    """rev-1 security finding 12, the other half: the approval the pairing record carries is spent by the
+    enrolment it backed. After `agents disconnect`, `agents add --approved` with the same record must not
+    re-enrol the agent — that needs a fresh `pair --add-agent` approval, not a stale file."""
+    monkeypatch.setattr(agents_cmd, "_can_prompt", lambda: False)
+    pairing = home / ".topos" / "pairing.json"
+    pairing.write_text(json.dumps({"state": "delivered", "mode": "create", "agent": {"client": "claude-code"}}))
+    first = _run(["add", "claude-code", "--approved"])
+    assert first.exit_code == 0, first.stdout + first.stderr
+    assert registry.minted == ["claude-code"]
+    spent = json.loads(pairing.read_text())
+    assert spent["agent"]["client"] == "claude-code" and spent["agent"].get("enrolled_at")
+    assert LABEL not in pairing.read_text()
+
+    registry.revoke_agent(None, client="claude-code")
+    registry.minted.clear()
+    again = _run(["add", "claude-code", "--approved"])
+    assert again.exit_code == 2, "a spent approval re-enrolled a disconnected agent"
+    assert registry.minted == []
+    assert "fresh approval" in (again.stdout + again.stderr) or "pair --add-agent" in (again.stdout + again.stderr)

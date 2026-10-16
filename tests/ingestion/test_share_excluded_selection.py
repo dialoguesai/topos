@@ -9,6 +9,8 @@ must return only the plain one. A table that predates the column is unaffected.
 
 from __future__ import annotations
 
+import json
+
 import sqlite3
 from pathlib import Path
 
@@ -136,3 +138,15 @@ def test_a_table_without_the_column_is_read_as_before(tmp_path) -> None:
     db.execute("ALTER TABLE ai_chat_messages ADD COLUMN share_excluded INTEGER NOT NULL DEFAULT 0")
     assert share_excluded_clause(db) == " AND share_excluded = 0"
     assert share_excluded_clause(db, alias="m") == " AND m.share_excluded = 0"
+
+
+def test_record_share_excluded_reads_the_column_or_the_metadata_in_either_shape() -> None:
+    from topos.storage.share_excluded import record_share_excluded
+
+    assert record_share_excluded({"share_excluded": 1})
+    assert record_share_excluded({"metadata_json": {"share_excluded": True}})
+    assert record_share_excluded({"metadata_json": json.dumps({"share_excluded": True})})
+    assert not record_share_excluded({"metadata_json": json.dumps({"share_excluded": False})})
+    assert not record_share_excluded({"metadata_json": "not json"})
+    assert not record_share_excluded({"share_excluded": 0, "metadata_json": None})
+    assert not record_share_excluded("row")

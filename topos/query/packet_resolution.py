@@ -191,6 +191,12 @@ def effective_packet_resolution(
             effective, reason = "scores_only", "owner_agent_special_class"
         elif str(disclosure_tier or "") != "owner_raw":
             effective, reason = "scores_only", "non_owner_floor"
+        elif setting == "facts_all":
+            # The consented-client ceiling (mcp_clients.ELEVATION_CEILING) holds for the agent too: the
+            # per-PREDICATE special gate (facts_direct) opens exactly at facts_all, so the owner's own dial
+            # would hand the agent health/beliefs facts through facts:read, whatever the scope's dimensions say
+            # (security review F3, 16 Oct 2026). Special-class CONTENT stays owner-first-party.
+            effective, reason = "facts", "owner_agent_ruling_capped"
         else:
             effective, reason = setting, "owner_agent_ruling"
         return {"setting": setting, "effective": effective, "reason": reason,

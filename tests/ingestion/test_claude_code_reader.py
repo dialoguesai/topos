@@ -545,3 +545,16 @@ def test_the_default_root_is_the_claude_projects_folder_but_is_never_opened_here
 
     assert claude_code_reader.DEFAULT_ROOT == Path.home() / ".claude" / "projects"
     assert SOURCE_ID == "claude_code_sessions"
+
+
+def test_a_tool_call_taints_by_any_input_that_names_a_topos_surface_not_only_a_shell_command() -> None:
+    """Security review F6: a Read/Grep/Edit of ~/.topos/… is a Topos touch as much as `topos-node status` is."""
+    from topos.ingestion.sources.claude_code_reader import _tool_use_taint
+
+    assert _tool_use_taint({"type": "tool_use", "name": "Read", "input": {"file_path": "/Users/someone/.topos/database.db"}})
+    assert _tool_use_taint({"type": "tool_use", "name": "Grep", "input": {"pattern": "key", "path": "/Users/someone/.topos/"}})
+    assert _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "topos-node status --json"}})
+    assert _tool_use_taint({"type": "tool_use", "name": "mcp__plugin_topos__query_scope", "input": {"scope_id": "messages:read"}})
+    assert not _tool_use_taint({"type": "tool_use", "name": "Read", "input": {"file_path": "/Users/someone/project/README.md"}})
+    assert not _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "ls -la"}})
+    assert not _tool_use_taint({"type": "tool_use", "name": "Edit", "input": None})

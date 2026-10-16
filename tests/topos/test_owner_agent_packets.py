@@ -86,8 +86,9 @@ def test_a_normal_scope_resolves_to_the_owners_dial_even_when_the_binding_is_hos
     set_engine_config_value(conn, ENGINE_CONFIG_KEY_PACKET_RESOLUTION, setting)
     monkeypatch.setattr(pr, "primary_binding_locality", lambda _c: dict(HOSTED))
     info = _resolve(conn, "messages:read")
-    assert info["effective"] == setting
-    assert info["reason"] == "owner_agent_ruling"
+    # The agent's ceiling is `facts` (the consented-client rule): the owner's facts_all reads as facts for it.
+    assert info["effective"] == ("facts" if setting == "facts_all" else setting)
+    assert info["reason"] == ("owner_agent_ruling_capped" if setting == "facts_all" else "owner_agent_ruling")
     assert info["local"] is False
     # Control: the owner's app on the same hosted binding is still floored (unchanged).
     app = effective_packet_resolution(
@@ -156,3 +157,21 @@ def test_owner_agent_tier_honours_an_explicit_downgrade_and_the_grantee_flag():
     assert resolve_disclosure_tier(
         principal=AGENT, scope_id="messages:read", is_grantee_request=True,
     ) == "default_disclosure"
+
+
+def test_the_agent_never_reads_at_facts_all_even_when_the_owner_does(conn, monkeypatch):
+    """Security review F3: facts_direct's per-predicate special gate opens exactly at facts_all, so the owner's
+    own dial would hand the agent health/beliefs facts through facts:read. The ceiling is `facts`, as for a
+    consented client (mcp_clients.ELEVATION_CEILING); the special-class scopes stay scores_only."""
+    set_engine_config_value(conn, ENGINE_CONFIG_KEY_PACKET_RESOLUTION, "facts_all")
+    monkeypatch.setattr(pr, "primary_binding_locality", lambda _c: dict(LOCAL))
+    info = _resolve(conn, "facts:read")
+    assert info["setting"] == "facts_all"
+    assert info["effective"] == "facts" and info["reason"] == "owner_agent_ruling_capped"
+    assert _resolve(conn, "health:read")["effective"] == "scores_only"
+    # The owner's own app keeps its dial.
+    app = effective_packet_resolution(
+        conn, requester_id="mcp", disclosure_tier="owner_raw", owner_id="",
+        principal=Principal(cls="owner_app", channel="uds"), scope_id="facts:read",
+    )
+    assert app["effective"] == "facts_all"

@@ -388,11 +388,14 @@ def _owner_agent_refusal(message: Dict[str, Any], msg_type: str) -> Optional[Dic
 # socket. Only the socket server's ASGI wrapper sets a socket peer (``uds.current_socket_peer``); in-process callers
 # have none and pass by construction.
 #
-# The set is MUTATIONS ONLY. The owner_only and signal_* families are read from the registry at import, so a type
-# registered tomorrow is dangerous the day it lands unless it is listed in ``OWNER_DOOR_READ_TYPES``: nothing falls
-# through. Reads are untouched. Enabling and syncing a bundled transcript source is the owner's own files read into
-# his own node and is not in the set. The flag ``TOPOS_OWNER_DOOR_SPLIT`` is on by default (P0.11: the Mac app and
-# the CLI never use the socket; the only real socket callers of these doors are the dev proxy and
+# The set FAILS CLOSED (security review F1, 16 Oct 2026): the reads are named — ``OWNER_DOOR_READ_TYPES`` inside the
+# owner_only / signal_* / permissions_v2_* families, ``OWNER_DOOR_OPEN_TYPES`` and the ``get_``/``list_`` shapes
+# elsewhere, the recipient relay types — and EVERY other registered type is dangerous on the real socket, so a type
+# registered tomorrow is dangerous the day it lands unless someone names it a read. The hand-enumerated
+# ``OWNER_DOOR_MUTATIONS`` below is documentation of what P0.11 found and is asserted to be a subset. Enabling and
+# syncing a bundled transcript source is the owner's own files read into his own node and is carved out
+# (``_door_exempt``). The flag ``TOPOS_OWNER_DOOR_SPLIT`` is on by default (P0.11: the Mac app and the CLI never use
+# the socket for a change; the only real socket callers of these doors are the dev proxy and
 # ``scripts/permissions_v2/owner_entailment_review.py``, each with its leg above).
 #: One flag and one message for both halves of the split: this one and the socket-layer gate for the HTTP routes
 #: that never reach the dispatcher (``uds.owner_door_gate``, census in ``owner_door_routes``; spike P0.11b).
@@ -429,7 +432,31 @@ OWNER_DOOR_READ_TYPES = frozenset({
     "signal_list_topic_cluster_members", "signal_list_topic_clusters", "signal_list_vectors",
     "signal_search_vectors", "signal_timeline_daily", "signal_vector_source_text",
 })
-#: Mutations outside those families that P0.11 and the contract name: ungated today for any socket process.
+#: Reads outside the owner_only / signal_* / permissions_v2_* families that are not ``get_``/``list_`` by shape:
+#: open on the socket. A name here is a promise that the handler changes nothing. Node-wide dials, imports,
+#: installs, jobs, generation and planting doors are NOT here, whatever they are called (the security review's
+#: list: put_*, store_message, app_ingest, consent_upgrade_step, start_ingestion, source_enrichment_*,
+#: messenger_person_*, home_chat_memory, mcp_client_request_elevation, compute_invoke, llm_generation).
+OWNER_DOOR_OPEN_TYPES = frozenset({
+    "aggregate", "query", "query_live", "healthcheck",
+    "blackhole_check_text", "blackhole_status",
+    "complexity_influence", "complexity_summary", "complexity_timeline", "complexity_topics_daily",
+    "describe_local_export", "graph_summary", "read_jsonl_file", "replay_projection_preview",
+    "enrichment_catalog", "enrichment_coverage", "enrichment_preview", "enrichment_progress",
+    "enrichment_status_source", "source_enrichments_list",
+    "messenger_analytics_communities", "messenger_analytics_graph", "messenger_analytics_importance",
+    "messenger_analytics_periods", "messenger_analytics_sources", "messenger_contact_graph",
+    "messenger_curation_history", "messenger_directed_edges", "messenger_luck_surface", "messenger_naming_queue",
+    "messenger_person_graph", "messenger_person_provenance", "messenger_relationship_signals",
+    "messenger_relationships",
+    "ollama_install_status", "ollama_list_models", "ollama_pull_status",
+    "routine_has_active_run", "tools_index", "tools_index_status", "tools_retrieve", "truth_prompts",
+    "verify_claim", "llm_cancel",
+})
+#: Name shapes that are reads wherever they appear.
+OWNER_DOOR_OPEN_PREFIXES = ("get_", "list_")
+#: Mutations outside those families that P0.11 and the contract name (documentation: the set below is derived by
+#: subtraction and this list is asserted to be inside it).
 OWNER_DOOR_MUTATIONS = frozenset({
     # routines: they can mail other people (routines.py); a run executes one
     "create_routine", "patch_routine", "delete_routine", "delete_routine_runs", "create_routine_run",
@@ -445,17 +472,22 @@ OWNER_DOOR_MUTATIONS = frozenset({
 })
 
 
-def _dangerous_types() -> frozenset:
-    """The set, derived from the registry as it stands at import: every owner_only type, every ``signal_*`` type,
-    every ``permissions_v2_*`` type that is not a share door, every ``delete_*`` type, minus the reads named above,
-    plus the mutations named above."""
-    from .registry import HANDLERS, OWNER_ONLY_MESSAGE_TYPES
+def owner_door_open_types() -> frozenset:
+    """Every registered type that is open on the real socket: the named reads, the ``get_``/``list_`` shapes and
+    the recipient relay types (decided by their stamp, never by a socket peer)."""
+    from .registry import HANDLERS
 
-    families = set(OWNER_ONLY_MESSAGE_TYPES)
-    families |= {t for t in HANDLERS if t.startswith("signal_")}
-    families |= {t for t in HANDLERS if t.startswith("permissions_v2_")} - NON_OWNER_RELAY_TYPES
-    dangerous = (families - OWNER_DOOR_READ_TYPES) | {t for t in HANDLERS if t.startswith("delete_")}
-    return frozenset(dangerous | (OWNER_DOOR_MUTATIONS & set(HANDLERS)))
+    open_types = set(OWNER_DOOR_READ_TYPES) | set(OWNER_DOOR_OPEN_TYPES) | set(NON_OWNER_RELAY_TYPES)
+    open_types |= {t for t in HANDLERS if t.startswith(OWNER_DOOR_OPEN_PREFIXES)}
+    return frozenset(open_types & set(HANDLERS))
+
+
+def _dangerous_types() -> frozenset:
+    """The set, derived from the registry as it stands at import by SUBTRACTION: every registered type that is
+    not an open read. Fail closed: a new type is dangerous until it is named a read."""
+    from .registry import HANDLERS
+
+    return frozenset(set(HANDLERS) - owner_door_open_types())
 
 
 DANGEROUS_TYPES = _dangerous_types()

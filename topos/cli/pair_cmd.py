@@ -437,6 +437,21 @@ def run_poller(*, sleep: Callable[[float], None] = time.sleep, now: Callable[[],
             return _finish("approved", ack_error="the control plane did not confirm delivery; the key is saved")
 
 
+def _note_poller_pid(record: Dict[str, Any], pid: int) -> None:
+    """Put the child's pid on the record the parent just wrote, unless the child got there first.
+
+    The poller records its own pid, but it takes a moment to start, and a record without one reads as a
+    helper that died: `pair --wait` in one command, or a `pair` re-run a moment later, would give up (or
+    start a second pairing) before the child wrote anything. Only the still-pending record the parent left
+    (same code, no pid) is touched: a child that already advanced the state is never rolled back."""
+    current = read_pairing()
+    if (not current or current.get("state") != "pending" or current.get("poller_pid")
+            or current.get("user_code") != record.get("user_code")):
+        return
+    current["poller_pid"] = pid
+    write_pairing(current)
+
+
 # --- the command ---------------------------------------------------------------
 
 
@@ -603,6 +618,7 @@ def pair_command(ctx, as_json: bool, wait: bool, manual: bool, client_name: str,
     write_pairing(record)
     pid = _spawn_poller()
     record["poller_pid"] = pid
+    _note_poller_pid(record, pid)
     if wait:
         _wait(ctx, as_json=as_json)
         return
