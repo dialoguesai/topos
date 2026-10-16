@@ -116,4 +116,7 @@ def test_what_this_branch_sheds_and_what_it_moves_off_the_loop():
         "list_database_tables", "get_table_count", "get_table_rows", "get_table_schema", "signal_data_health",
         "enrichment_progress", "get_upgrade_status", "get_user_identity", "put_user_identity", "connection_info",
         # Lane 172: reads every JSONL file under the ingestion directory to count its lines.
-        "list_jsonl_files"}
+        "list_jsonl_files",
+        # HT lane: the owner's home-chat timing rows. Written after the turn has ended, so no owner waits on them,
+        # and read back as aggregates; off the loop so a write that waits for the gate never stalls it.
+        "record_home_chat_turn_timings", "get_home_chat_turn_timings_summary"}
