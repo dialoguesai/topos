@@ -105,10 +105,10 @@ def test_exit_3_when_not_paired():
     assert PLANTED not in result.stdout + result.stderr
 
 
-def test_exit_4_when_the_node_is_down():
-    path = _socket_path()
-    if path.exists():
-        path.unlink()
+def test_exit_4_when_the_node_is_down(tmp_path, monkeypatch):
+    # A socket path of its own that nothing ever listened on: the session-wide path can still be answered by a
+    # fake node a neighbouring test is tearing down (Linux CI answered "not paired" here), which is not "down".
+    monkeypatch.setenv("TOPOS_UDS_PATH", str(tmp_path / "nobody-home" / "engine.sock"))
     result = _run(["sync", "claude_code_sessions", "--quiet"])
     assert result.exit_code == 4
     assert "Topos isn't running" in result.stderr + result.stdout

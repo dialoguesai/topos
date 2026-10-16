@@ -470,7 +470,10 @@ def verify_owner_confirmation(presented: Optional[str], *, path: Optional[Path] 
             or not isinstance(expires_at, (int, float)):
         return False
     moment = time.time() if now is None else float(now)
-    if moment > float(expires_at) or float(expires_at) - st.st_mtime > OWNER_CONFIRM_MAX_LIFE_S:
+    # The cap is read against the file's own mtime, which the writer set a hair AFTER computing expires_at and
+    # which some filesystems round to the second (Linux CI runners; APFS keeps nanoseconds): one second of
+    # slack, so a confirmation written at the cap is not refused for the timestamp's granularity.
+    if moment > float(expires_at) or float(expires_at) - st.st_mtime > OWNER_CONFIRM_MAX_LIFE_S + 1.0:
         return False
     if not secrets.compare_digest(presented.strip().encode("utf-8"), token.encode("utf-8")):
         return False
