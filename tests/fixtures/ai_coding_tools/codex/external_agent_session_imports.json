@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "imports": [
+    {
+      "external_agent": "claude_code",
+      "external_session_id": "f1f1f1f1-aaaa-4aaa-8aaa-f1f1f1f1f1f1",
+      "thread_id": "0a1b2c3d-5555-4eee-8eee-eeeeeeee0005",
+      "imported_at": "2026-10-15T09:00:00Z"
+    }
+  ]
+}

@@ -223,6 +223,10 @@ from .transcripts_v1 import (
     MIGRATION_ID as TRANSCRIPTS_V1_ID,
     apply_transcripts_v1_up,
 )
+from .ai_coding_sessions_v1 import (
+    MIGRATION_ID as AI_CODING_SESSIONS_V1_ID,
+    apply_ai_coding_sessions_v1_up,
+)
 from .calendar_events_scheduling_v1 import (
     MIGRATION_ID as CALENDAR_EVENTS_SCHEDULING_V1_ID,
     apply_calendar_events_scheduling_v1_up,
@@ -294,6 +298,10 @@ from .retire_url_classification_v1 import (
 from .entity_review_candidate_bar_v1 import (
     MIGRATION_ID as ENTITY_REVIEW_CANDIDATE_BAR_V1_ID,
     apply_entity_review_candidate_bar_v1_up,
+)
+from .ingestion_file_cursors_v1 import (
+    MIGRATION_ID as INGESTION_FILE_CURSORS_V1_ID,
+    apply_ingestion_file_cursors_v1_up,
 )
 
 ApplyFn = Callable[[sqlite3.Connection], object]
@@ -463,6 +471,17 @@ MIGRATIONS: List[MigrationSpec] = [
     # predates it. One nullable column on ai_chat_conversations, PRAGMA-guarded; no row is read or changed. A chat's
     # later titles go there, outside every review and context revision, so a title never withholds a message.
     _spec(83, AI_CHAT_LATEST_TITLE_V1_ID, apply_ai_chat_latest_title_v1_up, always_run=True),
+    # 84 lands at a release cut like 63, 69, 75 and 76: registering it stamps the schema
+    # version past any engine that predates it. One small table (per-file read cursors for
+    # the AI coding-tool transcript readers, CONTRACTS §2.6); no row is read or changed.
+    # 83 is the AI-chat titles step above; the runner applies by id.
+    _spec(84, INGESTION_FILE_CURSORS_V1_ID, apply_ingestion_file_cursors_v1_up),
+    # 85 lands at the AI-tool on-ramp release cut (CONTRACTS.md §2.6; 83 is the AI-chat titles step, 84 is
+    # L4's file cursors): `ai_chat_messages.share_excluded` (INTEGER NOT NULL DEFAULT 0, additive) and the
+    # owner-only `ai_chat_message_facets` table. `always_run` because the ai_chat tables are created lazily
+    # by the first import, possibly after this step ran once; both DDL steps are PRAGMA/IF NOT EXISTS
+    # guarded and read no row.
+    _spec(85, AI_CODING_SESSIONS_V1_ID, apply_ai_coding_sessions_v1_up, always_run=True),
 ]
 
 
@@ -534,4 +553,6 @@ __all__ = [
     "ENTITY_REVIEW_CANDIDATE_BAR_V1_ID",
     "JOURNAL_ORIGIN_DIMENSION_V1_ID",
     "RETIRE_URL_CLASSIFICATION_V1_ID",
+    "INGESTION_FILE_CURSORS_V1_ID",
+    "AI_CODING_SESSIONS_V1_ID",
 ]

@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .__version__ import __version__
 from .api import (
+    agent_dispatch as agent_dispatch_routes,
     analytics as analytics_routes,
     connected_apps as connected_apps_routes,
     app_registry as app_registry_routes,
@@ -42,6 +43,7 @@ from .api import (
     source_install as source_install_routes,
     source_scrub as source_scrub_routes,
     source_retention as source_retention_routes,
+    owner_sources as owner_sources_routes,
     sources as sources_routes,
     sync as sync_routes,
     user_identity as user_identity_routes,
@@ -68,6 +70,14 @@ from .core.logging import align_uvicorn_loggers, configure_logging
 from .extensions import load_extensions
 from .core import state
 from .core.handlers import handle_control_plane_request
+
+try:
+    # AI-tool on-ramp, lane L1 (onramp/l1-access) adds these to auth.py: a 401 for an invalid or revoked agent
+    # label whose body is {"error", "message"} at top level once the handler below is registered. At integration
+    # this becomes a plain import; until L1 merges the guard keeps this tree importable.
+    from .auth import AgentLabelRefused, agent_label_refusal_handler
+except ImportError:  # pragma: no cover - L1 not merged into this tree
+    AgentLabelRefused = agent_label_refusal_handler = None  # type: ignore[assignment]
 from .control_plane_client import ControlPlaneClient
 from .engine.registration import (
     build_engine_heartbeat_message_async,
@@ -129,6 +139,9 @@ app.include_router(health_routes.router)
 app.include_router(shell_routes.router)
 app.include_router(upgrades_routes.router)
 app.include_router(local_mcp_routes.router)
+app.include_router(agent_dispatch_routes.router)  # AI-tool on-ramp: the agent's one door to the dispatcher (L2)
+if AgentLabelRefused is not None:  # L1's 401 for a bad agent label, answered as {"error", "message"} (CONTRACTS §1.1)
+    app.add_exception_handler(AgentLabelRefused, agent_label_refusal_handler)
 app.include_router(llm_routes.router)
 app.include_router(db_routes.router)
 app.include_router(sync_routes.router)
@@ -171,6 +184,7 @@ app.include_router(home_chat_routes.router)
 app.include_router(privacy_disclose_routes.router)
 app.include_router(nsfw_maintenance_routes.router)
 app.include_router(source_retention_routes.router)
+app.include_router(owner_sources_routes.router)
 app.include_router(compute_remote_routes.router)
 app.include_router(engine_run_routes.router)
 app.include_router(data_commit_routes.router)

@@ -894,3 +894,9 @@ def test_S11_the_http_door_is_the_owners_alone(http_door, monkeypatch):
     with TestClient(http_door) as client:
         legacy = client.put(f"/sources/imessage/settings?dataset_id={DATASET}", json={"proof_standing": {"action": "preview"}})
         assert legacy.json()["proof_standing"] == {"error": "owner_authority_required"}
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

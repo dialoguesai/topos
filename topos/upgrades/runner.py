@@ -741,12 +741,16 @@ def _exec_none(step: Dict[str, Any], conn: sqlite3.Connection) -> Dict[str, Any]
     return {"noop": True, "id": step.get("id")}
 
 
+from .hardening import exec_local_hardening as _exec_local_hardening  # noqa: E402
+
+
 DEFAULT_EXECUTORS: Dict[str, ExecutorFn] = {
     "enrichment_reprocess": _exec_enrichment_reprocess,
     "engine_endpoint": _exec_engine_endpoint,
     "canonical_reprocess": _exec_canonical_reprocess,
     "derived_rebuild": _exec_derived_rebuild,
     "reembed": _exec_reembed,
+    "local_hardening": _exec_local_hardening,
     "none": _exec_none,
 }
 

@@ -25,6 +25,10 @@ EXPECTED_POSTURES = {
     "chatgpt_ui_conversation": "mixed",
     "imessage": "mixed",
     "signal": "mixed",
+    # 2026-10-15, the AI-tool on-ramp (CONTRACTS.md §2.5): coding-session transcripts, role per row
+    "claude_code_sessions": "mixed",
+    "codex_sessions": "mixed",
+    "cursor_sessions": "mixed",
     "demo_messenger_file": "mixed",
     "browser_visits": "ambient",
     # 2026-09-04, added with the transcripts lane; the registry declares this posture

@@ -1050,8 +1050,21 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
+      "steps": [
+        {
+          "id": "harden-home-permissions",
+          "kind": "local_hardening",
+          "title": "Keep ~/.topos private to this account",
+          "why": "AI-tool on-ramp security review, finding 13: ~/.topos was 0755 and database.db, its -wal/-shm and the logs 0644, readable by every other account on the computer, while the AI-tool transcripts a node now copies in are 0700 at their source. Clamps the folder (and logs/, profiles/, agents/, backups/) to 0700 and the data files to 0600, and records whether the owner key persisted (DIGEST J6: an unwritable ~/.topos leaves the node in legacy mode with every direct-HTTP door open).",
+          "params": {},
+          "progress": "synchronous (milliseconds)",
+          "idempotent": "chmod to a fixed mode; a second run reports changed=0",
+          "estimated_duration": "<1s",
+          "order": 1
+        }
+      ],
       "notes": [
+        "topos-node pair / start --headless / service install|uninstall|status (AI-tool on-ramp, lane L7). The node persists the control plane's topos_id in engine_config once, like user_id. TOPOS_KEY in ~/.topos/.env now wins over a TOPOS_KEY exported in the shell (ignored with a warning); --set-topos-key and --topos-key need a terminal.",
         "Additive ai_chat_latest_title_v1 migration, order 83, adds one nullable column (ai_chat_conversations.latest_title); no row is read or changed. A chat's later titles go there, outside every review and Off-limits context revision, so the upgrade stales no review and no search index. Migration ledger enables pre-upgrade backup and downgrade protection."
       ]
     }

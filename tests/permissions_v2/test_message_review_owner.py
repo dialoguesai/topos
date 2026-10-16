@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 import pytest
+from tests.owner_socket_client import OwnerConfirmedClient  # the owner's own process confirms its changes (P0.11b)
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from tests.permissions_v2.test_direct_message_evidence import setup
@@ -26,7 +27,7 @@ def api(legacy, monkeypatch):
 
 def test_verified_owner_socket_preview_returns_only_to_owner(api):
     app,payload=api
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         result=client.post(PATH,json=payload)
     assert result.status_code==200
     assert result.json()['content']=='I am working on Synthetic message at work.'
@@ -65,7 +66,7 @@ def test_busy_owner_assessment_returns_conflict_without_acknowledging_window(api
         raise PolicyError("message_review_busy")
 
     runtime.get_runtime().automatic_message_reviews = lambda: SimpleNamespace(start=busy)
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         response = client.post(PATH, json={**payload, "operation": "automatic_start",
                                           "request": {"after": 1, "before": 2}})
     assert response.status_code == 409
@@ -79,7 +80,7 @@ def test_owner_socket_pages_the_whole_window_and_refuses_a_foreign_binding(api):
     with resolver._read() as (conn,_):
         event=canonical_utc_microseconds(conn.execute('SELECT event_at FROM conversation_messages').fetchone()[0])//1000000
     request={'after':event-15*86400,'before':event+86400,'limit':5}
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         every=client.post(PATH,json={**payload,'operation':'queue_page','request':request})
         uncertain=client.post(PATH,json={**payload,'operation':'queue_page',
                                          'request':{**request,'filter':'withheld_uncertain'}})

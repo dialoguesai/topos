@@ -262,7 +262,7 @@ def test_owner_only_types_are_absent_from_the_local_mcp_tool_list():
     owner_only = _runtime_owner_only()
     assert owner_only, "owner-only marker registry is empty; the gate would be vacuous"
 
-    proxy = REPO_ROOT / "topos" / "mcp_stdio_proxy.py"
+    proxy = REPO_ROOT / "topos" / "mcp_server.py"
     tree = ast.parse(proxy.read_text(encoding="utf-8"))
 
     published = sorted(owner_only & _mcp_tool_names(tree))

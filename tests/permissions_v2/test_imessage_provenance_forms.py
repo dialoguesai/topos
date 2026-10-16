@@ -893,3 +893,9 @@ def test_G8_the_sync_stores_a_caption_without_its_placeholder():
     assert _build_content_from_row({"text": "\ufffc Synthetic caption ", "cache_has_attachments": 1}) == "Synthetic caption"
     assert _build_content_from_row({"text": "\ufffc\ufffc", "cache_has_attachments": 1}) == "[attachment]"
     assert _build_content_from_row({"text": " Synthetic message "}) == "Synthetic message"
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""
