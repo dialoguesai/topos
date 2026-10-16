@@ -353,7 +353,7 @@ def _owner_mode_refusal(message: Dict[str, Any]) -> Dict[str, Any]:
 # the signal and owner-only gates, so the agent hears one code for everything off its list.
 from ... import principal as _principal_module  # noqa: E402
 
-OWNER_AGENT = getattr(_principal_module, "OWNER_AGENT", "owner_agent")
+OWNER_AGENT = _principal_module.OWNER_AGENT
 OWNER_AGENT_ALLOWED_TYPES = frozenset({"query", "aggregate", "get_sources"})
 
 

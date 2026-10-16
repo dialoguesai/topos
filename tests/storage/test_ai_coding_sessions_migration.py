@@ -79,9 +79,6 @@ def test_the_facets_table_is_owner_only_storage_keyed_by_message_id(tmp_path) ->
     assert conn.execute(f"SELECT project_key FROM {FACETS_TABLE}").fetchall() == [("beacon",)]
 
 
-@pytest.mark.xfail(strict=True, reason="request to the owner-access lane: add ai_chat_message_facets to "
-                                       "data_explorer_tables.OWNER_ONLY_TABLES (a file this lane does not own); "
-                                       "remove this marker when the patch lands")
 def test_the_facets_table_is_hidden_from_the_data_explorer() -> None:
     from topos.data_explorer_tables import OWNER_ONLY_TABLES
 

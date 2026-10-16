@@ -281,7 +281,7 @@ def owner_agent_route_allowed(principal, scope) -> bool:
     §1.2 list."""
     from . import owner_door_routes, principal as principal_module
 
-    if getattr(principal, "cls", None) != getattr(principal_module, "OWNER_AGENT", "owner_agent"):
+    if getattr(principal, "cls", None) != principal_module.OWNER_AGENT:
         return True
     return owner_door_routes.owner_agent_route_allowed(str(scope.get("method") or ""), str(scope.get("path") or ""))
 

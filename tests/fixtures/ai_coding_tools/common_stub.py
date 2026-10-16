@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import contextlib
 import re
+import os
 import sys
 import types
 from dataclasses import dataclass, field
@@ -158,6 +159,16 @@ def stubbed_common() -> Iterator[types.ModuleType]:
     """Install the stub package + module in ``sys.modules`` and drop any cached
     reader module, so the readers bind the stub on import. Restores on exit so a
     later test in the same session sees L4's real module when it exists."""
+    if os.environ.get("TOPOS_TEST_REAL_COMMON") == "1":
+        # Integration run: bind the readers to L4's real helpers instead of the stub
+        # (the stub exists only so this lane's guards ran before L4's module did).
+        import importlib
+
+        importlib.import_module(COMMON_NAME)
+        for name in READER_MODULES:
+            sys.modules.pop(name, None)
+        yield sys.modules[COMMON_NAME]
+        return
     names = (PACKAGE_NAME, COMMON_NAME) + READER_MODULES
     saved = {name: sys.modules.get(name) for name in names}
     package = types.ModuleType(PACKAGE_NAME)

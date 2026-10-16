@@ -33,7 +33,7 @@ from ..auth import resolve_request_principal
 from ..core.handlers import OWNER_AGENT_ALLOWED_TYPES, handle_control_plane_request
 from ..principal import OWNER_APP
 
-OWNER_AGENT = getattr(_principal_module, "OWNER_AGENT", "owner_agent")
+OWNER_AGENT = _principal_module.OWNER_AGENT
 
 router = APIRouter(prefix="/api/local/agent", tags=["agent-dispatch"])
 

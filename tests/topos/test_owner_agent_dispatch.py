@@ -69,7 +69,6 @@ async def test_owner_agent_is_refused_on_the_mutations_with_their_own_owner_door
     assert _refused(resp), resp
 
 
-@pytest.mark.xfail(strict=True, reason="L2: OWNER_AGENT_ALLOWED_TYPES in core/handlers/__init__.py (CONTRACTS §1.2)")
 @pytest.mark.parametrize("msg_type", UNGATED_MUTATIONS)
 async def test_owner_agent_is_refused_on_the_ungated_mutations(msg_type):
     assert msg_type in HANDLERS and msg_type not in OWNER_ONLY_MESSAGE_TYPES
