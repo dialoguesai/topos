@@ -428,10 +428,19 @@ def main(
 from topos.cli.reprocess_cmd import reprocess_command  # noqa: E402
 from topos.cli.profile_cmd import profile_group  # noqa: E402
 from topos.cli.setup_models_cmd import setup_models_command  # noqa: E402
+from topos.cli.agents_cmd import agents_group  # noqa: E402
+from topos.cli.sources_cmd import sources_group  # noqa: E402
+from topos.cli.status_cmd import doctor_command, status_command  # noqa: E402
+from topos.mcp_server import mcp_command  # noqa: E402
 
 main.add_command(reprocess_command)
 main.add_command(profile_group)
 main.add_command(setup_models_command)
+main.add_command(agents_group)
+main.add_command(sources_group)
+main.add_command(status_command)
+main.add_command(doctor_command)
+main.add_command(mcp_command)
 
 
 if __name__ == "__main__":

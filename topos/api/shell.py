@@ -14,12 +14,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
+import sqlite3
 import threading
 from time import time
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
+from ..core import state
 from ..core.logging import get_log_file_path
+from ..owner_key import _env_path as owner_env_path
 from ..runtime_update import (
     DEFAULT_PACKAGE_NAME,
     UpdateCheckError,
@@ -38,6 +43,55 @@ _apply_lock = threading.Lock()
 _apply_state: dict[str, object] = {"applying": False, "last_result": None}
 
 
+_OWNER_KEY_LINE_RE = re.compile(r"^TOPOS_OWNER_KEY=\S+$", re.M)
+
+
+def _control_plane_state(status: Optional[dict]) -> str:
+    """`topos-node status`'s word for the control-plane link (CONTRACTS §4).
+
+    Derived from ``ControlPlaneClient.get_connection_status()``: a rejected key
+    is the ``auth`` failure category whatever the backoff state says, since
+    that is the one a human must fix by pairing again rather than by waiting.
+    """
+    if not status:
+        return "unknown"
+    if status.get("connected") or status.get("state") == "connected":
+        return "connected"
+    if status.get("last_failure_category") == "auth":
+        return "rejected"
+    if status.get("state") == "degraded":
+        return "degraded"
+    return "offline"
+
+
+def _owner_key_persisted() -> bool:
+    """Whether ~/.topos/.env holds a TOPOS_OWNER_KEY line — the value itself is never read out."""
+    try:
+        text = owner_env_path().read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return _OWNER_KEY_LINE_RE.search(text) is not None
+
+
+def _identity_present() -> tuple[bool, bool]:
+    """``(user_id present, topos_id present)`` from engine_config, as bools only."""
+    try:
+        conn = state.get_db_connection()
+    except Exception:  # noqa: BLE001 — a status never fails on the database
+        conn = None
+    if conn is None:
+        return False, False
+    try:
+        rows = conn.execute(
+            "SELECT key FROM engine_config WHERE key IN ('user_id', 'topos_id')"
+            " AND value IS NOT NULL AND value != ''"
+        ).fetchall()
+    except sqlite3.Error:
+        return False, False
+    keys = {str(r[0]) for r in rows}
+    return "user_id" in keys, "topos_id" in keys
+
+
 def _client_is_local(request: Request) -> bool:
     # Applying an update is the one mutating action here; a LAN peer must not
     # be able to trigger it even though the node binds 0.0.0.0. ("testclient"
@@ -52,6 +106,9 @@ async def shell_status() -> dict:
 
     info = get_update_info()
     log_file = get_log_file_path()
+    cp_client = state.control_plane_client
+    cp_status = cp_client.get_connection_status() if hasattr(cp_client, "get_connection_status") else None
+    user_id_present, topos_id_present = _identity_present()
     return {
         "name": "topos-node",
         "version": get_runtime_version(),
@@ -70,6 +127,13 @@ async def shell_status() -> dict:
         # field (its CodingKeys are explicit), which needs its own signed build —
         # shipping the data first means that release is a display change only.
         "models": prewarm_status(),
+        # Additive, for `topos-node status` / `doctor` over the owner socket
+        # (CONTRACTS §4): the link state as a word, and presence bits — never
+        # a key, an id value or a body from anywhere else.
+        "control_plane": _control_plane_state(cp_status),
+        "owner_key_persisted": _owner_key_persisted(),
+        "user_id_present": user_id_present,
+        "topos_id_present": topos_id_present,
     }
 
 
