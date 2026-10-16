@@ -291,6 +291,10 @@ from .entity_review_candidate_bar_v1 import (
     MIGRATION_ID as ENTITY_REVIEW_CANDIDATE_BAR_V1_ID,
     apply_entity_review_candidate_bar_v1_up,
 )
+from .ingestion_file_cursors_v1 import (
+    MIGRATION_ID as INGESTION_FILE_CURSORS_V1_ID,
+    apply_ingestion_file_cursors_v1_up,
+)
 
 ApplyFn = Callable[[sqlite3.Connection], object]
 
@@ -455,6 +459,12 @@ MIGRATIONS: List[MigrationSpec] = [
     # Off-limits table, PRAGMA-guarded; no row is read or changed.
     _spec(81, OFF_LIMITS_CARRIED_WAITING_V1_ID, apply_off_limits_carried_waiting_v1_up, always_run=True),
     _spec(82, HOME_CHAT_MEMORIES_V1_ID, apply_home_chat_memories_v1_up),
+    # 84 lands at a release cut like 63, 69, 75 and 76: registering it stamps the schema
+    # version past any engine that predates it. One small table (per-file read cursors for
+    # the AI coding-tool transcript readers, CONTRACTS §2.6); no row is read or changed.
+    # 83 is taken by the AI-titles and L5 lanes; the runner applies by id, so either may
+    # land first.
+    _spec(84, INGESTION_FILE_CURSORS_V1_ID, apply_ingestion_file_cursors_v1_up),
 ]
 
 
@@ -526,4 +536,5 @@ __all__ = [
     "ENTITY_REVIEW_CANDIDATE_BAR_V1_ID",
     "JOURNAL_ORIGIN_DIMENSION_V1_ID",
     "RETIRE_URL_CLASSIFICATION_V1_ID",
+    "INGESTION_FILE_CURSORS_V1_ID",
 ]
