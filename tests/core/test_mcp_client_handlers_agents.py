@@ -108,10 +108,8 @@ async def test_revoke_agent_id_runs_the_disconnect(conn, registry, home):
     assert out["payload"]["revoked"] is True
     assert registry["revoke_agent"] == ["claude-code"]
     assert registry["revoke_client"] == []
-    paused = sorted((c["source_id"], c["action"]) for c in node.calls if c["route"] == "door")
-    assert paused == [
-        ("claude_code_sessions", "pause"), ("codex_sessions", "pause"), ("cursor_sessions", "pause"),
-    ]
+    paused = [(c["source_id"], c["action"]) for c in node.calls if c["route"] == "door"]
+    assert paused == [("claude_code_sessions", "pause")], "only that tool's own source"
     assert not (home / ".topos" / "agents" / "claude-code.token").exists()
 
 

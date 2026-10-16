@@ -229,22 +229,48 @@ def test_list_empty(home, registry):
 
 
 # ----------------------------------------------------------------- disconnect
-def test_disconnect_revokes_pauses_every_transcript_source_and_removes_the_file(home, registry, monkeypatch, caplog):
+def test_disconnect_revokes_pauses_only_that_tools_source_and_removes_the_file(home, registry, monkeypatch, caplog):
+    """Claude Code and Cursor both connected; disconnecting Cursor pauses
+    cursor_sessions and leaves claude_code_sessions and codex_sessions untouched."""
     monkeypatch.setattr(agents_cmd, "_can_prompt", lambda: True)
     assert _run(["add", "claude-code"], input_text="y\n").exit_code == 0
-    token = home / ".topos" / "agents" / "claude-code.token"
-    assert token.exists()
+    assert _run(["add", "cursor"], input_text="y\n").exit_code == 0
+    cursor_token = home / ".topos" / "agents" / "cursor.token"
+    claude_token = home / ".topos" / "agents" / "claude-code.token"
     node = FakeNode()
     with serve_fake_node(node, _socket_path()):
-        result = _run(["disconnect", "claude-code"])
+        result = _run(["disconnect", "cursor"])
     assert result.exit_code == 0, result.stdout + result.stderr
-    assert registry.revoked == ["claude-code"]
-    paused = sorted((c["source_id"], c["action"]) for c in node.calls if c["route"] == "door")
-    assert paused == [
-        ("claude_code_sessions", "pause"), ("codex_sessions", "pause"), ("cursor_sessions", "pause"),
-    ]
-    assert not token.exists()
+    assert registry.revoked == ["cursor"]
+    doors = [(c["source_id"], c["action"]) for c in node.calls if c["route"] == "door"]
+    assert doors == [("cursor_sessions", "pause")]
+    assert ("claude_code_sessions", "pause") not in doors and ("codex_sessions", "pause") not in doors
+    assert not cursor_token.exists()
+    assert claude_token.exists(), "the other agent stays connected"
+    assert json.loads(_run(["disconnect", "claude-code", "--json"]).stdout)["sources_paused"] == []  # node gone: no door
     _assert_no_secret(result, caplog)
+
+
+def test_disconnect_claude_code_pauses_claude_code_sessions_only(home, registry, monkeypatch):
+    monkeypatch.setattr(agents_cmd, "_can_prompt", lambda: True)
+    assert _run(["add", "claude-code"], input_text="y\n").exit_code == 0
+    node = FakeNode()
+    with serve_fake_node(node, _socket_path()):
+        result = _run(["disconnect", "claude-code", "--json"])
+    assert result.exit_code == 0
+    assert [(c["source_id"], c["action"]) for c in node.calls if c["route"] == "door"] == [("claude_code_sessions", "pause")]
+    assert json.loads(result.stdout)["sources_paused"] == ["claude_code_sessions"]
+
+
+def test_disconnect_gemini_pauses_nothing(home, registry, monkeypatch):
+    monkeypatch.setattr(agents_cmd, "_can_prompt", lambda: True)
+    assert _run(["add", "gemini"], input_text="y\n").exit_code == 0
+    node = FakeNode()
+    with serve_fake_node(node, _socket_path()):
+        result = _run(["disconnect", "gemini", "--json"])
+    assert result.exit_code == 0
+    assert [c for c in node.calls if c["route"] == "door"] == []
+    assert registry.revoked == ["gemini"]
 
 
 def test_disconnect_with_node_down_still_revokes_and_removes_but_exits_2(home, registry, monkeypatch):

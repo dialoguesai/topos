@@ -6,8 +6,10 @@ must do the same three things (CONTRACTS §4, rev-1 security finding 12):
 
 1. tombstone the enrolment row (``revoke_agent``; checked on every request,
    nothing cached, so the next call from that agent is refused);
-2. pause every bundled transcript source through the §2.8 owner door, so the
-   hourly schedule and the plugin's hooks stop ingesting;
+2. pause THAT tool's own transcript source through the §2.8 owner door, so the
+   hourly schedule and the plugin's hooks stop ingesting it — and only it: an
+   owner with Claude Code and Cursor both connected who disconnects Cursor
+   keeps Claude Code syncing (Gemini has no bundled source);
 3. remove the label file, so the stdio server says "set up Topos" from now on.
 
 The pause goes over the owner socket in both callers: from the CLI that is the
@@ -25,6 +27,20 @@ from typing import Optional
 from .mcp_server import TRANSCRIPT_SOURCE_IDS, NodeDown, NodeRefused, NodeSocket, label_path
 
 PAUSE_TIMEOUT_S = 30.0
+
+#: Each client's own transcript source (CONTRACTS §2.1); Gemini has none in v1.
+TRANSCRIPT_SOURCE_BY_CLIENT: dict[str, Optional[str]] = {
+    "claude-code": "claude_code_sessions",
+    "codex": "codex_sessions",
+    "cursor": "cursor_sessions",
+    "gemini": None,
+}
+
+
+def transcript_sources_for(client: str) -> tuple[str, ...]:
+    """The source ids a disconnect of ``client`` pauses: its own, or none."""
+    source_id = TRANSCRIPT_SOURCE_BY_CLIENT.get(client)
+    return (source_id,) if source_id else ()
 
 
 @dataclass
@@ -62,7 +78,7 @@ def pause_transcript_sources(
             paused.append(source_id)
         except NodeDown:
             problems.append(
-                "Topos isn't running, so its transcript sources were not paused. Start Topos, then run "
+                "Topos isn't running, so its transcript source was not paused. Start Topos, then run "
                 "`topos-node sources pause " + " / ".join(source_ids) + "`."
             )
             break
@@ -95,5 +111,9 @@ def disconnect_agent(
     result = DisconnectResult(client=client, revoked=revoked, label_file_removed=had_file)
     if not result.was_connected:
         return result
-    result.sources_paused, result.sources_skipped, result.problems = pause_transcript_sources(sock)
+    own = transcript_sources_for(client)
+    if own:
+        result.sources_paused, result.sources_skipped, result.problems = pause_transcript_sources(
+            sock, source_ids=own
+        )
     return result
