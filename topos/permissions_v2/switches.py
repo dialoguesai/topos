@@ -300,13 +300,15 @@ ANSWER_DENSE_ON_QUESTION = _switch(
 # for grants, the looser method that gives the most facts, never anything the grant does not permit.
 ANSWER_NAME_ONE_ITEM = _switch(
     "ANSWER_NAME_ONE_ITEM", "bool", False, False,
-    "GD-L. A capitalised name in the question that is no known person's word on this node (person entities, other "
-    "contacts' display names, Off-limits names) and no word of the owner's (their own names, the account's words) "
-    "has to be in at least one item a sentence cites, not in every one. A known person's name still has to be in "
-    "every cited item; the owner-word rule (a sentence never cites both items that name a shared owner word and "
-    "items that do not), the Off-limits refusal and body check, retrieval and the grant boundary are unchanged. "
-    "Nothing loosens when the node's people or the owner's names cannot be read. Off: every name in every cited "
-    "item, as in 1.5.9.")
+    "GD-L. A capitalised name in the question that nothing on this node is named by (any entity's name or alias, "
+    "of any type; any contact's name or handle; any Off-limits entry), that is no word of the owner's (their own "
+    "names, the account's words) and whose name has no such word beside it (\"Lena Ortiz\" binds whole when Lena is "
+    "known) has to be in one item a sentence cites, not in every one; two or more such names in the same item. A "
+    "known person's name still has to be in every cited item, and so does every name of a sentence that cites an "
+    "item lacking the loosened name and naming a known person. Acts only while ANSWER_SUPPORT_JUDGE is on. The "
+    "owner-word rule, the Off-limits refusal and body check, retrieval and the grant boundary are unchanged. Nothing "
+    "loosens when the node's people, its names or the owner's names cannot be read or are empty. Off: every name in "
+    "every cited item, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,

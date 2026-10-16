@@ -22,7 +22,8 @@ from topos.storage.db.write_gate import with_db_write
 
 from . import answer_gate, answer_time, owner_account_words as account_words_grammar, switches
 from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, account_words_as_asked, build_prompt, close_answer,
-    judge_sentences, owner_name_words, owner_party_words, people_words, question_lacks_permitted_anchor, sieve_answer)
+    judge_sentences, node_name_words, owner_name_words, owner_party_words, people_words,
+    question_lacks_permitted_anchor, sieve_answer)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, K_ANSWER_LEGACY, LEGACY_ACCEPTED_VERSION, MAX_ANSWER_CHARS,
     VERSION, AnswerPending, AskIntent, FetchIntent, NoAnswer, WRITER_KEYS, answer_bytes_cap, answer_chars_cap,
     answer_within_caps, effective_disclosure, effective_mode, parse_answer_output, records_cap, same_answer_authority)
@@ -497,9 +498,13 @@ class AnswerService:
                 owner_words = (owner_party_words(conn, boundary, account_words=account_words)
                                if account_words else owner_party_words(conn, boundary))
                 people = people_words(conn)
-                # GD-L: the owner's own name words, read only while ANSWER_NAME_ONE_ITEM is on; with the account's
-                # words they never take the one-item rule. Off: no read, and the prompt of before.
-                own = owner_name_words(conn) if switches.on(switches.ANSWER_NAME_ONE_ITEM) else None
+                # GD-L: the owner's own name words, read only while ANSWER_NAME_ONE_ITEM and the support judge are on
+                # (security review, M4); with the account's words they never take the one-item rule. None when they
+                # cannot be read or are empty (finding 5). Then every name any entity, contact or Off-limits entry on
+                # this node carries (M3). Off: no read, and the prompt of before.
+                own = (owner_name_words(conn) if switches.on(switches.ANSWER_NAME_ONE_ITEM)
+                       and switches.on(switches.ANSWER_SUPPORT_JUDGE) else None)
+                named = node_name_words(conn) if own is not None else None
             domains: dict = {}
             # TR162 A: the question's time scope, read by retrieval at the grant's precision and the read's clock;
             # it hands back what it used (the scope, whether it widened, its clock). Off: the call of before.
@@ -527,7 +532,8 @@ class AnswerService:
                                   item_domains=[domains.get(record.record_id, ()) for record in records], people=people,
                                   now=today, time_scope=job.time_scope, time_widened=job.time_widened,
                                   **({"shared_owner_words": shared} if shared else {}),
-                                  **({"owner_names": own | job.account_words} if own is not None else {}),
+                                  **({"owner_names": own | job.account_words, "node_names": named}
+                                     if own is not None and named is not None else {}),
                                   records_cap=job.records_cap)
             job.template = prompt.template
             if question_lacks_permitted_anchor(prompt):

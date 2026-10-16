@@ -196,15 +196,19 @@ class Prompt:
     # ANSWER_DENSE_ON_QUESTION is on as well, GD-A′). A dense template's answer (v9, v10) keeps the writer's
     # paragraph breaks (`close_answer`); v8's is one kept sentence per line, as in 1.5.9.
     template: str = TEMPLATE_VERSION
-    # GD-L: the name terms that are no known person's word on this node (`people_words`) and no word of the owner's
-    # (their own names, the account's words, the owner words). While ANSWER_NAME_ONE_ITEM is on each of these has to
-    # be in at least one cited item, not every one (`_cites_question_subject`). Empty while the switch is off, and
-    # when the people or the owner's names could not be read: every name then binds in every cited item, as in 1.5.9.
+    # GD-L: the name terms that no entity, contact or Off-limits entry on this node carries (`node_name_words`), that
+    # are no word of the owner's (their own names, the account's words, the owner words) and that stand in no name
+    # with such a word (`_name_runs`). While ANSWER_NAME_ONE_ITEM and the support judge are on, one cited item has to
+    # carry all of them, not every one (`_cites_question_subject`). Empty while either switch is off, and when the
+    # people, the node's names or the owner's names could not be read: every name then binds in every cited item.
     one_item_names: frozenset[str] = frozenset()
     # Answer protocol 4: the cited records the job's asker parses, as `build_prompt` was given it (None: a caller from
     # before 4). It chose the template (v11 or v12 above sixteen) and sets the writer's context window
     # (`answer_release.answer_num_ctx`). Never in the prompt's text beyond the cite sentence.
     records_cap: int | None = None
+    # GD-L security review, M2: the known people's words (`people_words`), carried only beside `one_item_names`. A
+    # sentence citing an item that lacks a loosened name and names one of them, capitalised, keeps the every-item rule.
+    one_item_people: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -396,12 +400,43 @@ def people_words(conn) -> frozenset[str]:
 def owner_name_words(conn) -> frozenset[str] | None:
     """GD-L: the owner's own name words (`_parties`' first set: the self entity the owner attested and the card it
     links), exact and case-folded, whether or not another party also carries them. A name of the owner's never takes
-    the one-item rule (`Prompt.one_item_names`). None when the store cannot be read: then no name takes it."""
+    the one-item rule (`Prompt.one_item_names`). None when the store cannot be read: then no name takes it.
+
+    Security review, finding 5: a failed identity read (`attested_subjects` refusing) leaves `_parties` no self row,
+    so the owner's names came back empty, not unreadable, and the loosening stayed on. Empty is None here: a node
+    that cannot say who its owner is loosens nothing."""
     try:
         own, _others, _people = _parties(conn)
     except sqlite3.Error:
         return None
-    return frozenset(own)
+    return frozenset(own) or None
+
+
+def node_name_words(conn) -> frozenset[str] | None:
+    """GD-L security review, M3: every word anything on this node is named by, exact and case-folded. Every entity's
+    name and aliases of any type (person, organisation, project, topic, place, claim), self row or not, attested or
+    not; every contact's display name and handles, an importer's self card included; every Off-limits entry. A name
+    loosens (`Prompt.one_item_names`) only when it is none of these. An address is read whole, its words included
+    (`_name_words` drops it). None when the store cannot be read: then no name loosens."""
+    def words(value) -> set[str]:
+        return ({word for word in _tokens(value) if len(word) >= 2 and not word.isdigit()}
+                if isinstance(value, str) else set())
+    try:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        found: set[str] = set()
+        if "entities" in tables:
+            for name, aliases in conn.execute("SELECT canonical_name, aliases_json FROM entities"):
+                found.update(*(words(value) for value in (name, *_json_strings(aliases))))
+        if "contacts" in tables:
+            for name, handles in conn.execute("SELECT display_name, known_usernames_json FROM contacts"):
+                found.update(*(words(value) for value in (name, *_json_strings(handles))))
+        if "entity_blackholes" in tables:
+            for name, normalized, aliases in conn.execute(
+                    "SELECT canonical_name, normalized_name, aliases_json FROM entity_blackholes"):
+                found.update(*(words(value) for value in (name, normalized, *_json_strings(aliases))))
+    except sqlite3.Error:
+        return None
+    return frozenset(found)
 
 
 # Round 3, M1, and round 4, U1: the words that start a clause without being a name. Where a clause starts, a capitalised
@@ -564,6 +599,42 @@ def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[st
                 continue
             found.add(folded)
     return frozenset(found)
+
+
+# GD-L security review, M1: what may stand between two words of one name. Spaces, a hyphen or dash, an apostrophe
+# ("O'Rourke"), a full stop ("Lena B. Ortiz"), a comma ("Ortiz, Lena") or an underscore. A run that joins two names
+# only binds more words, never fewer.
+_NAME_JOIN = re.compile(r"[\s\-\u2010-\u2015'\u2018\u2019.,_]*")
+
+
+def _name_runs(question: str, members: frozenset[str]) -> tuple[frozenset[str], ...]:
+    """GD-L security review, M1 (a name is a unit): the question's names, each as the set of its words, exact and
+    case-folded. A run is adjacent words with only `_NAME_JOIN` between them, each either a word of `members` (the
+    question's name terms and the owner's words, in either case) or a capitalised word that does not open a clause
+    as a common opener (`SENTENCE_STARTERS`). "What has Lena Ortiz done?" carries one name, {lena, ortiz}; "Pella
+    and Orrin" two. The caller binds every word of a run in every cited item when any word of it is known."""
+    text = unicodedata.normalize("NFKC", question)
+    runs: list[frozenset[str]] = []
+    current: set[str] = set()
+    end = 0
+    for match in _TOKEN.finditer(text):
+        word = match.group(0)
+        folded = word.casefold()
+        before = text[:match.start()].rstrip()
+        starts = not before or before[-1] in ".!?:;\"“”'‘’("
+        if not (folded in members or (word[0].isupper() and not (starts and folded in SENTENCE_STARTERS))):
+            if current:
+                runs.append(frozenset(current))
+            current = set()
+            continue
+        if current and not _NAME_JOIN.fullmatch(text[end:match.start()]):
+            runs.append(frozenset(current))
+            current = set()
+        current.add(folded)
+        end = match.end()
+    if current:
+        runs.append(frozenset(current))
+    return tuple(runs)
 
 
 def _clause_openers(question: str, people: frozenset[str] = frozenset()) -> frozenset[str]:
@@ -732,7 +803,8 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
                  item_domains=None, people: frozenset[str] = frozenset(), labels: frozenset[str] = frozenset(),
                  shared_owner_words: frozenset[str] = frozenset(), now: int | None = None, time_scope=None,
                  time_widened: bool = False, owner_names: frozenset[str] | None = None,
-                 records_cap: int | None = None) -> Prompt:
+                 records_cap: int | None = None,
+                 node_names: frozenset[str] | None = None) -> Prompt:
     """Quote only the share's released records, clipped to the fixed prompt budget.
 
     `labels` (round 5): more words that name the share's parts (its policy's result kinds), beside the prompt's own
@@ -744,8 +816,12 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
     guard (`sieve_answer`) whatever that switch says.
 
     `owner_names` (GD-L): the owner's own name words and the account's words, read while ANSWER_NAME_ONE_ITEM is on
-    (`owner_name_words`). With the switch on, a name term outside `people`, the owner words, the shared owner words
-    and these goes into `Prompt.one_item_names`. None (not read, or unreadable) or no people puts nothing there.
+    (`owner_name_words`). `node_names` (GD-L security review, M3): every word an entity of any type, a contact or an
+    Off-limits entry on this node carries (`node_name_words`). With ANSWER_NAME_ONE_ITEM and ANSWER_SUPPORT_JUDGE on
+    (M4), a name term goes into `Prompt.one_item_names` when it is none of `people`, the owner words, the shared
+    owner words, `owner_names` and `node_names`, and no word of its name (`_name_runs`) is one of them (M1). Either
+    set None or empty (not read, unreadable, or a node that cannot say who its owner is: finding 5), or no people,
+    puts nothing there.
 
     `records_cap` (answer protocol 4): the cited records the job's asker parses (`answer_protocol.records_cap`). Above
     sixteen the dense templates are written as v11 or v12, whose cite sentence names it (`writer_template`); None or
@@ -794,10 +870,18 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
         record_texts.append(evidence)
     template = writer_template(records_cap)
     names = _name_terms(question, owner_words, people, frozenset(labels))
-    # GD-L: a name nobody on this node is known by and that is none of the owner's needs only one cited item. It is
-    # read here once per job; an empty people set (a store that could not be read gives none) loosens nothing.
-    one_item = (names - people - owner_words - frozenset(shared_owner_words) - owner_names
-                if owner_names is not None and people and switches.on(switches.ANSWER_NAME_ONE_ITEM) else frozenset())
+    # GD-L: a name nothing on this node is named by and that is none of the owner's needs only one cited item. It is
+    # read here once per job; an empty people set (a store that could not be read gives none), no owner's names or
+    # no node names loosen nothing, and neither does a judge that is off (security review, M4 and finding 5).
+    one_item: frozenset[str] = frozenset()
+    if (owner_names and node_names and people and switches.on(switches.ANSWER_NAME_ONE_ITEM)
+            and switches.on(switches.ANSWER_SUPPORT_JUDGE)):
+        known = people | owner_words | frozenset(shared_owner_words) | owner_names | node_names
+        # M1: a name is a unit. Any word of it known (Lena of "Lena Ortiz", the owner's Dana of "Dana Whitfield")
+        # binds all of it in every cited item.
+        members = names | owner_words | frozenset(shared_owner_words) | owner_names
+        bound = frozenset().union(*(run for run in _name_runs(question, members) if run & known))
+        one_item = names - known - bound
     return Prompt(system_prompt(template, records_cap), "\n\n".join(lines), tuple(raw_texts),
                   _as_owner(question, owner_words),
                   tuple(record_texts), tuple(text for text in domains if text),
@@ -809,7 +893,8 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
                                    for record in records),
                   time_scope=time_scope if precision != "none" else None, time_widened=bool(time_widened),
                   time_line=time_line, template=template, one_item_names=frozenset(one_item),
-                  records_cap=records_cap)
+                  records_cap=records_cap,
+                  one_item_people=frozenset(people) if one_item else frozenset())
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
@@ -899,16 +984,22 @@ def _cites_question_subject(sentence: str, prompt: Prompt) -> bool:
     evidence = " ".join(prompt.record_texts[number - 1] for number in numbers)
     # A name the question carries binds as a name in EVERY cited item, capitalised: "I will finish" never stands in
     # for "Will" (round 3, M1), and an item that names Ivo never lends him the facts of the others (round 4, N1).
-    # GD-L: with ANSWER_NAME_ONE_ITEM on, a name no known person and not the owner carries (`Prompt.one_item_names`)
-    # binds in at least ONE cited item, capitalised; a known person's name still binds in every one. Off, or with no
-    # such name, `one_item` is empty and this is the rule of 1.5.9.
+    # GD-L: with ANSWER_NAME_ONE_ITEM and the support judge on (security review, M4), the names nothing on this node
+    # is named by (`Prompt.one_item_names`) bind in at least ONE cited item, capitalised, and all of them in the same
+    # one (M5: two people the node does not know are never put together by the writer); every other name still binds
+    # in every one. M2: a cited item that lacks one of them and names a known person, capitalised, could lend that
+    # person's facts, so the sentence keeps the every-item rule. Off, or with no such name, `one_item` is empty and
+    # this is the rule of 1.5.9.
     one_item = (prompt.one_item_names if prompt.one_item_names and switches.on(switches.ANSWER_NAME_ONE_ITEM)
-                else frozenset())
+                and switches.on(switches.ANSWER_SUPPORT_JUDGE) else frozenset())
+    if one_item:
+        carried = [_names_in_items(prompt.record_texts[number - 1]) for number in numbers]
+        if any(not one_item <= names and names & prompt.one_item_people for names in carried):
+            one_item = frozenset()
+        elif not any(one_item <= names for names in carried):
+            return False
     every = prompt.name_terms - one_item
     if every and not all(every <= _names_in_items(prompt.record_texts[number - 1]) for number in numbers):
-        return False
-    if one_item and not all(any(name in _names_in_items(prompt.record_texts[number - 1]) for number in numbers)
-                            for name in one_item):
         return False
     if PER_ITEM_CARRIAGE and carriers and not all(
             carriers & {_stem(word) for word in _tokens(prompt.record_texts[number - 1])} for number in numbers):
