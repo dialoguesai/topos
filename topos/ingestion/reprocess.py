@@ -444,6 +444,12 @@ async def reprocess_source(
 
     from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
 
+    # A row the owner keeps from every share is never re-derived (CONTRACTS §2.6; security review F5): the
+    # remap path hands back every row it wrote, flagged ones included.
+    from ..storage.share_excluded import record_share_excluded
+
+    canonical_records = [rec for rec in canonical_records if not record_share_excluded(rec)]
+
     signal_status = "skipped"
     signal_records_out = 0
     if (

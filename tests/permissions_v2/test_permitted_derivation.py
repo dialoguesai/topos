@@ -8,6 +8,7 @@ import json
 import sqlite3
 
 import pytest
+from tests.owner_socket_client import OwnerConfirmedClient  # the owner's own process confirms its changes (P0.11b)
 
 from tests.permissions_v2.test_ingest_provenance import ingest_fixture, owner  # noqa: F401 -- fixture
 from tests.permissions_v2.test_knowledge_search import node_for
@@ -504,7 +505,7 @@ def test_the_route_is_off_unless_its_flag_is_on(lane_route, monkeypatch):
     from topos.uds import UDSChannelApp
     app, _node, binding, spy, _seen = lane_route
     monkeypatch.delenv(pd.FLAG, raising=False)
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         assert client.post(ROUTE, json={"binding": binding, "operation": "run"}).status_code == 404
     assert spy.seen == []
 
@@ -514,7 +515,7 @@ def test_the_owner_runs_the_lane_and_gets_counts_only(lane_route, legacy, monkey
     from topos.uds import UDSChannelApp
     app, _node, binding, spy, seen = lane_route
     monkeypatch.setenv(pd.FLAG, "true")
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         response = client.post(ROUTE, json={"binding": binding, "operation": "run"})
     assert response.status_code == 200 and response.headers["cache-control"] == "no-store"
     body = response.json()
@@ -543,7 +544,7 @@ def test_a_malformed_or_widened_request_is_refused_before_anything_runs(lane_rou
     app, _node, binding, spy, _seen = lane_route
     monkeypatch.setenv(pd.FLAG, "true")
     payload = {**body, "binding": binding} if body != {"operation": "run"} else {"operation": "run"}
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         assert client.post(ROUTE, json=payload).status_code == 400
     assert spy.seen == []
 
@@ -569,7 +570,7 @@ def test_a_foreign_binding_is_refused(lane_route, legacy, monkeypatch):
     app, _node, binding, spy, _seen = lane_route
     monkeypatch.setenv(pd.FLAG, "true")
     other = {**binding, "owner_id": "owner-2"}
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         assert client.post(ROUTE, json={"binding": other, "operation": "run"}).status_code in (400, 403)
     assert spy.seen == []
 

@@ -750,3 +750,9 @@ async def test_http_ingest_in_legacy_mode_keeps_todays_behaviour(conn, http_app,
     row = _row(conn, "m-legacy-http")
     assert row["writer_class"] == "local_legacy"
     assert owner_authored(row, table="ai_chat_messages")
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

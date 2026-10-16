@@ -1,4 +1,4 @@
-"""The node's own schedule for iMessage syncs: since-last, at a time the owner picks.
+"""The node's own schedule for local syncs (iMessage, the AI coding tools): since-last, at a time the owner picks.
 
 The owner turns it on in the app (a daily time, optionally every N hours from
 it); the node keeps the setting in ``local_sync_schedules`` and a background
@@ -48,12 +48,15 @@ from datetime import date, datetime, timedelta, timezone, tzinfo
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..storage.db.write_gate import commit_connection, with_db_write
+from .local_sync_jobs import runner_for, schedulable_source_ids
 
 logger = logging.getLogger("topos.ingestion.local_sync_schedule")
 
 TABLE = "local_sync_schedules"
-#: Sources the node schedules. Signal needs a key the node may not hold.
-SUPPORTED_SCHEDULE_SOURCES = ("imessage",)
+#: Sources the node schedules: the runner table's `schedulable` entries (CONTRACTS.md §2.8). Signal
+#: needs a key the node may not hold. Call sites read `schedulable_source_ids()`; this name is kept
+#: for readers of the old tuple.
+SUPPORTED_SCHEDULE_SOURCES = schedulable_source_ids()
 DEFAULT_DAILY_TIME = "03:00"
 #: Scheduled runs: small batches, a pause between them. A manual sync keeps the
 #: large default batch, because someone is watching it.
@@ -302,7 +305,8 @@ def put_schedule(
     Turning the schedule on, or moving its time, marks the slot just passed as
     done, so the first run is the next slot rather than one right now.
     """
-    if source_id not in SUPPORTED_SCHEDULE_SOURCES:
+    runner = runner_for(source_id)
+    if runner is None or not runner.schedulable:
         raise ValueError(f"automatic sync is not available for {source_id}")
     if not isinstance(changes, dict):
         raise ValueError("sync_schedule must be an object")
@@ -324,10 +328,10 @@ def put_schedule(
     )
     tz_name = validate_timezone(changes["timezone"]) if "timezone" in changes else current["timezone"]
 
-    if enabled and source_id == "imessage":
-        from .local_sync import enrolled_dataset_refusal
-
-        refusal = enrolled_dataset_refusal(conn, dataset_id, None)
+    if enabled and runner.pre_enqueue_refusal is not None:
+        # The same question the button asks before a job exists (iMessage: the enrolled dataset;
+        # the AI tools: enabled in the active profile and not paused).
+        refusal = runner.pre_enqueue_refusal(conn, dataset_id, None)
         if refusal is not None:
             raise ValueError(refusal["error"])
 
@@ -452,8 +456,9 @@ def _settle_running(conn: Any, schedule: Dict[str, Any], now: datetime) -> Dict[
         return schedule
     status, error, result = settled
     _record_run(conn, schedule, status=status, now=now, error=error, result=result)
-    if schedule.get("source_id") == "imessage":
-        _prove_after_sync(str(schedule.get("dataset_id") or ""), status)
+    runner = runner_for(str(schedule.get("source_id") or ""))
+    if runner is not None and runner.after_settle is not None:
+        runner.after_settle(str(schedule.get("dataset_id") or ""), status)
     return {**schedule, "last_status": status, "last_error": error, "last_result": result}
 
 
@@ -498,7 +503,7 @@ def describe_schedule(
     how it ended even before the loop's next tick records it.
     """
     now = now or _utcnow()
-    supported = source_id in SUPPORTED_SCHEDULE_SOURCES
+    supported = source_id in schedulable_source_ids()
     stored = get_schedule(conn, dataset_id, source_id) if supported else None
     schedule = stored or {
         "enabled": False,
@@ -554,14 +559,13 @@ def describe_sync_settings(
     Read-only, no chat.db: the checkpoint (where the next since-last sync
     starts) and the schedule with its last run.
     """
-    if source_id not in SUPPORTED_SCHEDULE_SOURCES or conn is None or not dataset_id:
+    runner = runner_for(source_id)
+    if runner is None or not runner.schedulable or conn is None or not dataset_id:
         return {}
-    from .local_sync import describe_imessage_checkpoint
-
     try:
         return {
             "sync_modes": list(SYNC_MODES),
-            "sync_checkpoint": describe_imessage_checkpoint(conn, dataset_id),
+            "sync_checkpoint": runner.describe_checkpoint(conn, dataset_id) if runner.describe_checkpoint else {},
             "sync_schedule": describe_schedule(conn, dataset_id, source_id, now=now),
         }
     except Exception as exc:  # noqa: BLE001 — extras never fail the settings read they ride on
@@ -697,6 +701,7 @@ __all__ = [
     "put_schedule",
     "run_schedule_tick",
     "run_scheduler_loop",
+    "schedulable_source_ids",
     "scheduled_sync_options",
     "scheduler_enabled",
     "settle_job",

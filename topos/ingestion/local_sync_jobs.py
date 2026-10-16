@@ -1,4 +1,4 @@
-"""Enqueue a local sync (iMessage, Signal) as a durable background job.
+"""Enqueue a local sync (iMessage, Signal, the AI coding tools) as a durable background job.
 
 One helper, three doors. The websocket handler (``source_sync``) and the node's
 own HTTP route serve the SAME url and the same user-visible button — the app
@@ -11,20 +11,178 @@ on one path and miss the others.
 
 The work itself runs in ``job_runner._execute_local_sync``, on the worker lane
 reserved for long jobs.
+
+``LOCAL_SYNC_RUNNERS`` (CONTRACTS.md §2.8) is the one table every door reads:
+the job executor's guard and branch, this enqueue door, the relay guard in
+``core/handlers/sources.py`` and the scheduler's eligibility in
+``local_sync_schedule``. A source that is not in it cannot be synced by any
+door. iMessage and Signal are registered with exactly their former behaviour;
+the three AI-coding-tool sources (``ingestion/ai_tool_sync.py``) join them.
+Every entry resolves its callables lazily so a test that patches
+``topos.ingestion.local_sync.run_imessage_sync`` still sees its patch.
 """
 
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
 import uuid
-from typing import Any, Callable, Dict, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, FrozenSet, Optional, Tuple
 
 logger = logging.getLogger("topos.ingestion.local_sync_jobs")
 
+
+def _lazy(module: str, name: str) -> Callable[..., Any]:
+    """A callable that resolves ``module.name`` at call time (so a monkeypatched attribute is honoured)."""
+
+    def call(*args: Any, **kwargs: Any) -> Any:
+        return getattr(importlib.import_module(module), name)(*args, **kwargs)
+
+    call.__name__ = name
+    call.__qualname__ = f"{module}.{name}"
+    return call
+
+
+@dataclass(frozen=True)
+class LocalSyncRunner:
+    """One local-sync source as the doors see it.
+
+    ``run(dataset_id, *, sync_options, progress_cb, batch_size, **kw) -> dict`` — the sync itself,
+    the ``run_imessage_sync`` result shape.
+    ``describe_checkpoint(conn, dataset_id) -> dict`` — the settings screen's "where the next
+    since-last sync starts"; None when the source shows none.
+    ``post_sync(conn, dataset_id, result, sync_options) -> dict`` — after the receipt, on the
+    executor's thread: decorate the result (the ``sync`` summary) and run any follow-up (the
+    messenger analytics refresh). A failure here never fails a landed sync.
+    ``default_options(sync_options) -> sync_options`` — what a door fills in when the caller sent
+    none (iMessage: the 3-month window).
+    ``pre_enqueue_refusal(conn, dataset_id, sync_options) -> refusal | None`` — asked before a job
+    exists and before a schedule is enabled, so the button and the settings screen say why at once.
+    ``schedulable`` — whether the node's scheduler may run it.
+    ``after_settle(dataset_id, outcome)`` — the scheduler's hand-off once a scheduled run settled
+    (iMessage: the owner's standing attestation). Beyond the six contract fields, optional.
+    """
+
+    source_id: str
+    run: Callable[..., Dict[str, Any]]
+    schedulable: bool
+    describe_checkpoint: Optional[Callable[[Any, str], Dict[str, Any]]] = None
+    post_sync: Optional[Callable[..., Dict[str, Any]]] = None
+    default_options: Optional[Callable[[Optional[Dict[str, Any]]], Optional[Dict[str, Any]]]] = None
+    pre_enqueue_refusal: Optional[Callable[[Any, str, Optional[Dict[str, Any]]], Optional[Dict[str, Any]]]] = None
+    after_settle: Optional[Callable[[str, str], None]] = None
+
+
+# --- iMessage and Signal, exactly as before --------------------------------------
+
+
+def _messenger_analytics_refresh(conn: Any, dataset_id: str, result: Dict[str, Any], source_id: str) -> None:
+    """The refresh both messenger doors get after a sync that moved rows (the executor is the single door)."""
+    if str(result.get("status") or "") != "ok" or int(result.get("records_processed") or 0) <= 0:
+        return
+    try:
+        from ..analytics.messenger_communities import compute_and_persist_messenger_analytics
+
+        compute_and_persist_messenger_analytics(
+            dataset_id=dataset_id, conn=conn, source_ids=[source_id], period_granularity="month",
+        )
+    except Exception as exc:  # noqa: BLE001 — never fail a good sync on analytics
+        logger.warning("messenger analytics refresh failed after sync: %s", exc)
+
+
+def _imessage_post_sync(conn: Any, dataset_id: str, result: Dict[str, Any], sync_options: Any) -> Dict[str, Any]:
+    from ..pipeline.job_runner import _sync_summary
+
+    decorated = {**result, "sync": _sync_summary(result, sync_options)}
+    _messenger_analytics_refresh(conn, dataset_id, decorated, "imessage")
+    return decorated
+
+
+def _signal_post_sync(conn: Any, dataset_id: str, result: Dict[str, Any], sync_options: Any) -> Dict[str, Any]:
+    _messenger_analytics_refresh(conn, dataset_id, result, "signal")
+    return result
+
+
+def _imessage_default_options(sync_options: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    return sync_options if sync_options else {"mode": "3m"}
+
+
+def _imessage_after_settle(dataset_id: str, outcome: str) -> None:
+    from .local_sync_schedule import _prove_after_sync
+
+    _prove_after_sync(dataset_id, outcome)
+
+
+# --- the AI coding tools ---------------------------------------------------------
+
+
+def _ai_tool_runner(source_id: str, run_name: str) -> LocalSyncRunner:
+    module = "topos.ingestion.ai_tool_sync"
+    describe = _lazy(module, "describe_ai_tool_checkpoint")
+    refusal = _lazy(module, "sync_refusal")
+    return LocalSyncRunner(
+        source_id=source_id,
+        run=_lazy(module, run_name),
+        schedulable=True,
+        describe_checkpoint=lambda conn, dataset_id: describe(conn, dataset_id, source_id),
+        post_sync=_lazy(module, "ai_tool_post_sync"),
+        default_options=lambda options: options if options else {"mode": "since_last"},
+        pre_enqueue_refusal=lambda conn, dataset_id, options: refusal(conn, source_id, options),
+    )
+
+
+LOCAL_SYNC_RUNNERS: Dict[str, LocalSyncRunner] = {
+    "imessage": LocalSyncRunner(
+        source_id="imessage",
+        run=_lazy("topos.ingestion.local_sync", "run_imessage_sync"),
+        schedulable=True,
+        describe_checkpoint=_lazy("topos.ingestion.local_sync", "describe_imessage_checkpoint"),
+        post_sync=_imessage_post_sync,
+        default_options=_imessage_default_options,
+        pre_enqueue_refusal=_lazy("topos.ingestion.local_sync", "enrolled_dataset_refusal"),
+        after_settle=_imessage_after_settle,
+    ),
+    # Signal needs a key the node may not hold, so the node never schedules it; no checkpoint on the
+    # settings screen, no enrollment guard, no default window.
+    "signal": LocalSyncRunner(
+        source_id="signal",
+        run=_lazy("topos.ingestion.local_sync", "run_signal_sync"),
+        schedulable=False,
+        post_sync=_signal_post_sync,
+    ),
+    "claude_code_sessions": _ai_tool_runner("claude_code_sessions", "run_claude_code_sync"),
+    "codex_sessions": _ai_tool_runner("codex_sessions", "run_codex_sync"),
+    "cursor_sessions": _ai_tool_runner("cursor_sessions", "run_cursor_sync"),
+}
+
 #: Sources this helper knows how to run. Anything else is a caller error rather
-#: than a job that would be claimed and then fail as unrunnable.
-SUPPORTED_SYNC_SOURCE_IDS = ("imessage", "signal")
+#: than a job that would be claimed and then fail as unrunnable. Kept as a name for
+#: readers of the old tuple; the table is the truth.
+SUPPORTED_SYNC_SOURCE_IDS: Tuple[str, ...] = tuple(LOCAL_SYNC_RUNNERS)
+
+
+def runner_for(source_id: str) -> Optional[LocalSyncRunner]:
+    return LOCAL_SYNC_RUNNERS.get(str(source_id or "").strip())
+
+
+def schedulable_source_ids() -> Tuple[str, ...]:
+    return tuple(source_id for source_id, runner in LOCAL_SYNC_RUNNERS.items() if runner.schedulable)
+
+
+def no_receipt_codes() -> FrozenSet[str]:
+    """Result codes after which the executor writes no ``user_ingestion_sources`` receipt.
+
+    A plan waiting for the owner or a preview must not move ``last_sync_at``; a run refused because
+    another holds the dataset leaves the receipt to that run; a dataset refused as not enrolled, a
+    source that is not enabled, paused, or on an unpaired node must not get a source row at all —
+    its INSERT alone moves the enrollment's clock, and the row defaults to enabled=1.
+    """
+    from .ai_tool_sync import NO_RECEIPT_CODES
+    from .local_sync import DATASET_NOT_ENROLLED, SYNC_IN_PROGRESS
+
+    return frozenset({SYNC_IN_PROGRESS, DATASET_NOT_ENROLLED, *NO_RECEIPT_CODES})
 
 
 def enqueue_local_sync_blocking(
@@ -53,17 +211,18 @@ def enqueue_local_sync_blocking(
     dataset_id = (dataset_id or "").strip()
     if not source_id or not dataset_id:
         return {"status": "error", "error": "source_id and dataset_id required"}
-    if source_id not in SUPPORTED_SYNC_SOURCE_IDS:
+    runner = runner_for(source_id)
+    if runner is None:
         return {"status": "error", "error": f"sync not implemented for source_id={source_id}"}
     if conn is None:
         return {"status": "error", "error": "Database connection not available"}
 
-    if source_id == "imessage":
+    if runner.default_options is not None:
+        sync_options = runner.default_options(sync_options)
+    if runner.pre_enqueue_refusal is not None:
         # Refused here, before a job exists, so the button says why at once. The
         # sync repeats the check when it runs, for the paths that skip this one.
-        from .local_sync import enrolled_dataset_refusal
-
-        refusal = enrolled_dataset_refusal(conn, dataset_id, sync_options)
+        refusal = runner.pre_enqueue_refusal(conn, dataset_id, sync_options)
         if refusal is not None:
             return {"status": "error", "error": refusal["error"], "code": refusal.get("code")}
 
@@ -152,7 +311,7 @@ async def enqueue_local_sync(
     dataset_id = (dataset_id or "").strip()
     if not source_id or not dataset_id:
         return {"status": "error", "error": "source_id and dataset_id required"}
-    if source_id not in SUPPORTED_SYNC_SOURCE_IDS:
+    if runner_for(source_id) is None:
         return {"status": "error", "error": f"sync not implemented for source_id={source_id}"}
 
     def _enqueue() -> Dict[str, Any]:
@@ -173,3 +332,15 @@ async def enqueue_local_sync(
             outcome.get("job_id"),
         )
     return outcome
+
+
+__all__ = [
+    "LOCAL_SYNC_RUNNERS",
+    "LocalSyncRunner",
+    "SUPPORTED_SYNC_SOURCE_IDS",
+    "enqueue_local_sync",
+    "enqueue_local_sync_blocking",
+    "no_receipt_codes",
+    "runner_for",
+    "schedulable_source_ids",
+]

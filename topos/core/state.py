@@ -154,6 +154,27 @@ def derive_mcp_access_context(resource_owner_user_id: Optional[str], requester_i
     return "other"
 
 
+#: The owner's approved coding agent (topos/principal.py OWNER_AGENT, row id ``agent-<client>``).
+_OWNER_AGENT_CLASS = "owner_agent"
+_AGENT_CLIENT_ID_PREFIX = "agent-"
+
+
+def agent_client_from_id(client_id: Optional[str]) -> Optional[str]:
+    """``"claude-code"`` for ``"agent-claude-code"``; None for anything else."""
+    cid = str(client_id or "")
+    if not cid.startswith(_AGENT_CLIENT_ID_PREFIX):
+        return None
+    return cid[len(_AGENT_CLIENT_ID_PREFIX):] or None
+
+
+def mcp_source_for_principal(principal: Any) -> Optional[str]:
+    """The request-log ``source`` an ``owner_agent`` principal names: its client. None for every
+    other class — those keep the caller's own claim (CONTRACTS §1.5)."""
+    if getattr(principal, "cls", None) != _OWNER_AGENT_CLASS:
+        return None
+    return agent_client_from_id(getattr(principal, "client_id", ""))
+
+
 from ..analytics.duckdb_adapter import DuckDBAdapter
 from ..config.settings import settings
 from ..control_plane_client import ControlPlaneClient
@@ -816,21 +837,22 @@ def record_mcp_request(
     resource_owner_user_id: Optional[str] = None,
     *,
     uma_resource_id: Optional[str] = None,
+    verified_cls: Optional[str] = None,
+    verified_client_id: Optional[str] = None,
 ) -> None:
     """
     Record one MCP tool invocation in the engine's DB.
     source: e.g. "claude_desktop", "chatgpt", "routine_executor". requester_id: identity of requester.
     resource_owner_user_id: engine-linked owner; used to set access_context (owner_self vs other).
     When source is routine_executor, also writes a UMA access row tagged as Topos Routine.
+    verified_cls / verified_client_id: the channel-verified principal, when the caller is off the
+    request context; otherwise read from it.
     """
     if not conn or not tool_name:
         return
     try:
         _ensure_mcp_request_log_table(conn)
         requested_at = datetime.now(timezone.utc).isoformat()
-        access_ctx = derive_mcp_access_context(resource_owner_user_id, requester_id)
-        if is_routine_mcp_source(source):
-            access_ctx = ROUTINE_ACCESS_CONTEXT
         # Principal fabric P2: record the CHANNEL-verified principal next to the
         # claimed source/requester strings. `source` and `requester_id` are
         # payload-supplied (audit of claims); these two columns are what the
@@ -841,8 +863,28 @@ def record_mcp_request(
         from ..principal import current_principal
 
         _p = current_principal()
-        verified_cls = str(getattr(_p, "cls", "") or "") or None
-        verified_client_id = str(getattr(_p, "client_id", "") or "") or None
+        verified_cls = str(verified_cls or getattr(_p, "cls", "") or "") or None
+        verified_client_id = str(verified_client_id or getattr(_p, "client_id", "") or "") or None
+        if verified_cls == _OWNER_AGENT_CLASS:
+            # The owner's approved coding agent (CONTRACTS §1.5): its row names
+            # its client as the source and the node's owner as the requester, so
+            # the owner's accounting reads the agent's reads as his own
+            # (owner_self), named — never the "unknown" bucket (DIGEST C5).
+            # get_user_id pins the connection's row_factory to sqlite3.Row; an
+            # audit write must not change the caller's connection, so put it back.
+            owner = (resource_owner_user_id or "").strip()
+            if not owner:
+                row_factory = conn.row_factory
+                try:
+                    owner = (get_user_id(conn) or "").strip()
+                finally:
+                    conn.row_factory = row_factory
+            source = source or agent_client_from_id(verified_client_id)
+            requester_id = owner or requester_id
+            resource_owner_user_id = owner or resource_owner_user_id
+        access_ctx = derive_mcp_access_context(resource_owner_user_id, requester_id)
+        if is_routine_mcp_source(source):
+            access_ctx = ROUTINE_ACCESS_CONTEXT
         with with_db_write():
             conn.execute(
                 f"INSERT INTO {MCP_REQUEST_LOG_TABLE} (tool_name, requested_at, source, requester_id, access_context, verified_cls, verified_client_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1155,6 +1197,7 @@ def get_mcp_request_counts(
         "by_source": [],
         "by_tool": [],
         "by_access_context": [],
+        "by_client": [],
         "total": 0,
         "total_all_time": 0,
         "total_24h": 0,
@@ -1209,6 +1252,23 @@ def get_mcp_request_counts(
             by_tool[t] = by_tool.get(t, 0) + 1
         out["by_tool"] = [{"tool_name": t, "count": c} for t, c in sorted(by_tool.items(), key=lambda x: -x[1])]
         out["total"] = sum(by_tool.values())
+
+        # By the CHANNEL-verified client (CONTRACTS §1.5): "Claude Code · 14 reads"
+        # comes from the row's verified id, not from what the caller claimed.
+        client_sql = (
+            f"SELECT verified_client_id, COALESCE(verified_cls, ''), COUNT(*) AS cnt FROM {MCP_REQUEST_LOG_TABLE}"
+            f" WHERE verified_client_id IS NOT NULL AND verified_client_id != ''"
+        )
+        if since_ts:
+            cursor = conn.execute(
+                f"{client_sql} AND requested_at >= ? GROUP BY verified_client_id, verified_cls ORDER BY cnt DESC",
+                (since_ts,),
+            )
+        else:
+            cursor = conn.execute(f"{client_sql} GROUP BY verified_client_id, verified_cls ORDER BY cnt DESC")
+        out["by_client"] = [
+            {"client_id": r[0], "principal_cls": r[1] or None, "count": int(r[2] or 0)} for r in cursor.fetchall()
+        ]
 
         cursor = conn.execute(f"SELECT COUNT(*) FROM {MCP_REQUEST_LOG_TABLE}")
         row = cursor.fetchone()

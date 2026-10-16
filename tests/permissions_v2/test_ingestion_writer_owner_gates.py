@@ -482,3 +482,9 @@ def test_every_ingestion_writer_type_is_declared_owner_only():
     writers = {"source_sync", "signal_upload", "ingestion_reprocess", "pooled_scope_backfill_apply",
                "pooled_scope_backfill_dry_run", "pooled_scope_backfill_rollback"}
     assert writers <= OWNER_ONLY_MESSAGE_TYPES
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

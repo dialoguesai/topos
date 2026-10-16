@@ -1,6 +1,7 @@
 """Parser registry."""
 
 from .base import Parser
+from .ai_coding_tool import ClaudeCodeTranscriptParser, CodexTranscriptParser, CursorTranscriptParser
 from .browser_parser import BrowserParser, BrowserEventsParser
 from .calendar_parser import CalendarParser
 from .chatgpt_parser import ChatGPTParser
@@ -49,6 +50,10 @@ PARSER_REGISTRY = {
     "notion.page.v1": NotionPageParser,  # Remote connectors: Notion saved pages -> documents
     "gdrive.file.v1": GDriveFileParser,  # Remote connectors: Drive saved files -> documents
     "gcal.events.v1": GoogleCalendarParser,  # Remote connectors: Google Calendar events -> schedule
+    # AI coding tools (CONTRACTS §2.1): node-read transcripts, one id per tool
+    "claude_code.transcript.v1": ClaudeCodeTranscriptParser,
+    "codex.transcript.v1": CodexTranscriptParser,
+    "cursor.transcript.v1": CursorTranscriptParser,
 }
 
 # Engine-shipped parser classes, taken before any runtime install adds to the
@@ -65,6 +70,9 @@ __all__ = [
     "GoogleCalendarParser",
     "GrokParser",
     "CalendarParser",
+    "ClaudeCodeTranscriptParser",
+    "CodexTranscriptParser",
+    "CursorTranscriptParser",
     "ImessageParser",
     "NotionPageParser",
     "SignalParser",

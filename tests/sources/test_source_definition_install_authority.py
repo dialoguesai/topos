@@ -78,6 +78,13 @@ def conn(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _split_on(monkeypatch):
+    """These doors are decided by the socket's dangerous-door split (CONTRACTS §1.6): on here, as in the product
+    (the suite's root conftest turns it off for door tests that are not about the split)."""
+    monkeypatch.setenv("TOPOS_OWNER_DOOR_SPLIT", "1")
+
+
+@pytest.fixture(autouse=True)
 def _registry_restored(monkeypatch):
     """Every install under test mutates process-wide registries; put them back."""
     from topos.canonicalization.mappers import MAPPER_REGISTRY
@@ -316,13 +323,15 @@ async def test_owner_stamped_post_and_patch_source_install_still_work(conn):
 
 
 @pytest.mark.asyncio
-async def test_an_install_dispatched_with_no_channel_keeps_todays_behaviour(conn):
-    """No principal is the legacy answer (topos/principal.py); the relay always supplies one."""
+async def test_an_install_dispatched_with_no_channel_is_refused(conn):
+    """No principal used to be the legacy answer (topos/principal.py) and passed; since 15 Oct 2026 (AI-tool
+    on-ramp, spike P0.11 item 4) it does not: a definition outlives the request, and the relay always supplies a
+    principal. The owner socket's wrapper now sets one for every socket request too."""
     from topos.core.handlers import handle_control_plane_request
 
     result = await handle_control_plane_request(_install_message("req-internal", _runtime_definition()))
-    assert result["status"] == "ok", result
-    assert RUNTIME in REGISTRY
+    assert result == {"id": "req-internal", "status": "error", "code": 403, "error": "owner_mode_required"}, result
+    assert RUNTIME not in REGISTRY
 
 
 @pytest.mark.asyncio
@@ -358,13 +367,17 @@ def http_app(conn, monkeypatch):
 
 
 async def _http(app, method: str, body: Dict[str, Any], *, socket: bool = False, key: str = "shared-key",
-                path: str = "/v1/source-install"):
+                path: str = "/v1/source-install", confirmed: bool = False):
+    """``confirmed``: the socket caller presents the owner-confirmation token a TTY path wrote (the dangerous-door
+    split, CONTRACTS §1.6 / P0.11b: installing, uninstalling or scrubbing on the socket needs one)."""
     import httpx
 
-    from topos.uds import UDSChannelApp
+    from topos.uds import UDSChannelApp, write_owner_confirmation
 
     transport = httpx.ASGITransport(app=UDSChannelApp(app) if socket else app)
     headers = {} if socket else {"Authorization": f"Bearer {key}"}
+    if confirmed:
+        headers["X-Topos-Owner-Confirm"] = write_owner_confirmation()
     async with httpx.AsyncClient(transport=transport, base_url="http://node") as client:
         return await client.request(method, path, json=body, headers=headers)
 
@@ -385,11 +398,22 @@ async def test_http_install_with_a_bearer_is_refused_once_an_owner_key_exists(co
 
 
 @pytest.mark.asyncio
-async def test_http_install_over_the_owner_socket_installs(conn, http_app):
+async def test_http_install_over_the_owner_socket_installs_with_the_owners_confirmation(conn, http_app):
     response = await _http(http_app, "POST", {"source_definition_json": _runtime_definition(), **_SCOPE},
-                           socket=True)
+                           socket=True, confirmed=True)
     assert response.status_code == 200, response.text
     assert REGISTRY[RUNTIME].canonical_group_id == "journal"
+
+
+@pytest.mark.asyncio
+async def test_http_install_over_the_owner_socket_without_a_confirmation_is_refused(conn, http_app):
+    """P0.11b: any same-uid process can open the socket; a definition install needs the app, the dev proxy on a
+    node that allows it, or the TTY confirmation. Refused before the route runs."""
+    response = await _http(http_app, "POST", {"source_definition_json": _runtime_definition(), **_SCOPE},
+                           socket=True)
+    assert response.status_code == 403, response.text
+    assert response.json() == {"error": "owner_confirmation_required", "message": "This change needs the Topos app."}
+    assert RUNTIME not in REGISTRY
 
 
 @pytest.mark.asyncio
@@ -522,14 +546,16 @@ async def test_owner_stamped_uninstall_with_delete_source_tables_purges(owner_so
 
 
 @pytest.mark.asyncio
-async def test_uninstall_and_scrub_dispatched_with_no_channel_keep_todays_behaviour(owner_source):
+async def test_uninstall_and_scrub_dispatched_with_no_channel_are_refused(owner_source):
+    """The legacy no-principal pass is closed for removal too (P0.11 item 4): nothing is uninstalled or scrubbed."""
     from topos.core.handlers import handle_control_plane_request
 
+    before = _rows(owner_source)
     result = await handle_control_plane_request(_uninstall_message("req-internal-uninstall"))
-    assert result["payload"]["uninstalled"] is True, result
+    assert result == {"id": "req-internal-uninstall", "status": "error", "code": 403, "error": "owner_mode_required"}
     result = await handle_control_plane_request(_scrub_message("req-internal-scrub"))
-    assert result["payload"]["scrub_status"] == "completed", result
-    assert _rows(owner_source) == 0
+    assert result == {"id": "req-internal-scrub", "status": "error", "code": 403, "error": "owner_mode_required"}
+    assert RUNTIME in REGISTRY and _rows(owner_source) == before
 
 
 _HTTP_REMOVALS = [
@@ -555,7 +581,11 @@ async def test_http_uninstall_and_scrub_with_a_bearer_are_refused_once_an_owner_
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method,path,body", _HTTP_REMOVALS[:2], ids=["uninstall", "scrub"])
 async def test_http_uninstall_and_scrub_over_the_owner_socket(owner_source, http_app, method, path, body):
-    response = await _http(http_app, method, body, socket=True, path=path)
+    before = _rows(owner_source)
+    refused = await _http(http_app, method, body, socket=True, path=path)        # P0.11b: no confirmation, no change
+    assert refused.status_code == 403 and refused.json()["error"] == "owner_confirmation_required", refused.text
+    assert RUNTIME in REGISTRY and _rows(owner_source) == before
+    response = await _http(http_app, method, body, socket=True, path=path, confirmed=True)
     assert response.status_code == 200, response.text
     assert RUNTIME not in REGISTRY
     assert _rows(owner_source) == 0

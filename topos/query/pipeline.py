@@ -341,14 +341,16 @@ class QueryPipelineOrchestrator:
             return {"turn_outcome": TurnOutcome.DENIED.value, "public_result": None,
                     "deny_reason": "retired_grantee_query", "session_id": session_id,
                     "query_session_id": session_id, "audit": {"deny_reason": "retired_grantee_query"}}
-        from ..principal import OWNER_APP, current_principal
+        from ..principal import OWNER_AGENT, OWNER_APP, current_principal
         from ..uma_filters import query_filter_restriction_reason
 
         # Inference scope is a product contract, not a prompt instruction. Only
         # availability currently has a closed non-owner output schema. In
         # particular a forged tier/owner ID cannot enable the unrestricted
-        # facts shortcuts or model lane below.
-        trusted_owner = getattr(current_principal(), "cls", None) == OWNER_APP
+        # facts shortcuts or model lane below. The owner's approved coding
+        # agent (owner_agent, ruling D1 (b)) reaches the lane too: what the
+        # packet carries for it is packet_resolution's decision per scope.
+        trusted_owner = getattr(current_principal(), "cls", None) in (OWNER_APP, OWNER_AGENT)
         restriction = query_filter_restriction_reason(filter_manifest, access_mode, scope_id, field_transforms)
         if access_mode == "inference" and not trusted_owner and scope_id != "availability:read":
             restriction = "inference_view_unsupported"
@@ -480,6 +482,7 @@ class QueryPipelineOrchestrator:
             explicit_tier=explicit_disclosure_tier,  # type: ignore[arg-type]
             disclosure_ceiling=disclosure_ceiling,
             principal=_principal,
+            scope_id=str(scope_id or ""),  # owner_agent: special-class scopes stay at default_disclosure
         )
 
         from ..core.state import get_db_connection
@@ -902,6 +905,10 @@ class QueryPipelineOrchestrator:
         )
         audit["disclosure_tier"] = disclosure_tier
         audit["disclosure_decision_record"] = ddr
+        # Who asked, as the channel verified it (CONTRACTS §1.5): a class word and
+        # a client slug, never content; an approved agent's id names it here.
+        audit["principal_cls"] = str(getattr(_principal, "cls", "") or "")
+        audit["client_id"] = str(getattr(_principal, "client_id", "") or "")
         if ledger is not None and ledger:
             # Counts and enums only — the audit trail leaves the node.
             audit["narrowing"] = ledger.as_telemetry()
