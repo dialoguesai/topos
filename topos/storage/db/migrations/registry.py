@@ -28,6 +28,10 @@ from .off_limits_carried_waiting_v1 import (
     MIGRATION_ID as OFF_LIMITS_CARRIED_WAITING_V1_ID,
     apply_off_limits_carried_waiting_v1_up,
 )
+from .ai_chat_latest_title_v1 import (
+    MIGRATION_ID as AI_CHAT_LATEST_TITLE_V1_ID,
+    apply_ai_chat_latest_title_v1_up,
+)
 from .permissions_read_path_indexes_v1 import (
     MIGRATION_ID as PERMISSIONS_READ_PATH_INDEXES_V1_ID,
     apply_permissions_read_path_indexes_v1_up,
@@ -455,6 +459,10 @@ MIGRATIONS: List[MigrationSpec] = [
     # Off-limits table, PRAGMA-guarded; no row is read or changed.
     _spec(81, OFF_LIMITS_CARRIED_WAITING_V1_ID, apply_off_limits_carried_waiting_v1_up, always_run=True),
     _spec(82, HOME_CHAT_MEMORIES_V1_ID, apply_home_chat_memories_v1_up),
+    # 83 lands at the 1.5.10 release cut like 81: registering it stamps the schema version past any engine that
+    # predates it. One nullable column on ai_chat_conversations, PRAGMA-guarded; no row is read or changed. A chat's
+    # later titles go there, outside every review and context revision, so a title never withholds a message.
+    _spec(83, AI_CHAT_LATEST_TITLE_V1_ID, apply_ai_chat_latest_title_v1_up, always_run=True),
 ]
 
 

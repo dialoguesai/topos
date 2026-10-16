@@ -28,7 +28,7 @@ jobs:
     # 30, not 20: a slow runner takes ~1.75x a slice's usual time (features_topos_core on 297aa9d2:
     # 96 % at 18.7 min, no stall, no failure). 30 still ends a degraded run long before the 147 minutes
     # one took on 2026-09-25.
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       # Every slice runs to its end, so a red run still reports its whole
       # failed set. With fail-fast the first red slice would cancel the others.

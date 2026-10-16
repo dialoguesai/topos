@@ -291,8 +291,13 @@ class IndexRebuilds:
         """One grant: the protection sync recipient admission makes, then a re-stamp when the change was only of the
         fields no build reads, else the owner hooks' own rebuild, as the node's own process for its owner. A failed
         build leaves no index for that grant, as ``rebuild_all`` did."""
+        from . import answer_gate
         from .refresh_loop import node_principal
         from .search_index import BUILD_SLOT, purge
+        # NR179 G1 (`ANSWER_HOLDS_BACKGROUND`, off by default): while a share's answer job runs, the build waits for
+        # it (at most 110 s) before it takes the slot, so the restore is not held behind a waiting build. A share
+        # that ended is removed at once: its build only forgets the index.
+        answer_gate.hold_background_start(only_if=lambda: self._still_shared(grant_id))
         started = time.monotonic()
         state, count = "failed", 0
         with BUILD_SLOT:
@@ -319,6 +324,15 @@ class IndexRebuilds:
                 except Exception:  # noqa: BLE001
                     pass
         return state, count, time.monotonic() - started
+
+    def _still_shared(self, grant_id: str) -> bool:
+        """NR179 G1: whether the ledger still holds this share, so its build would build (not only forget)."""
+        try:
+            with self.ledger._transaction() as db:
+                self.ledger._authority(db, grant_id, int(self.clock()))
+            return True
+        except PolicyError:
+            return False
 
     @staticmethod
     def _restamp(service, grant_id: str, now: int):

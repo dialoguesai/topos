@@ -56,7 +56,10 @@ REVIEW_SURFACE_EXCLUSIONS = {
         "content_disclosure", "content_disclosure_hash", "content_disclosure_model"}),
     "ai_chat_messages": frozenset({"ingested_at", "sync_batch_id", "content_hash", "content_disclosure",
         "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", "content_disclosure_model"}),
-    "ai_chat_conversations": frozenset({"ingested_at", "sync_batch_id", "created_at", "updated_at"}),
+    # latest_title (migration 83): the title a later batch brings. Only a share that opted into chat titles releases
+    # it, and the Off-limits veto reads it as it reads every column, but no review pins it, so a chat named or renamed
+    # after its messages were reviewed withholds none of them. `title`, set by the record that made the chat, stays.
+    "ai_chat_conversations": frozenset({"ingested_at", "sync_batch_id", "created_at", "updated_at", "latest_title"}),
     "journal_entries": frozenset({"ingested_at", "sync_batch_id", "content_disclosure", "content_disclosure_hash",
         "content_disclosure_model"}),
     "signal_objects": frozenset({"created_at", "updated_at", "created_by", "updated_by", "confidence"}),

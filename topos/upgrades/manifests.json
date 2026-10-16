@@ -1051,7 +1051,9 @@
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "Additive ai_chat_latest_title_v1 migration, order 83, adds one nullable column (ai_chat_conversations.latest_title); no row is read or changed. A chat's later titles go there, outside every review and Off-limits context revision, so the upgrade stales no review and no search index. Migration ledger enables pre-upgrade backup and downgrade protection."
+      ]
     }
   ]
 }

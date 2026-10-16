@@ -99,11 +99,35 @@ V172 = {**V167, P + "ANSWER_TIME_FILL": True}
 #: Lane CT176 (14 Oct 2026): the citation rule reads a range, a padded or a full-width bracket where it stands (on,
 #: bound and unbound alike; off reads only 1.5.9's forms). 40 + 1 = 41.
 V176 = {**V172, P + "ANSWER_CITATION_FORMS": True}
+#: Lane GD-B (15 Oct 2026, grantee density): the name rule's closed non-person classes (weekday and month names, codes
+#: in capitals, a function word after a comma) bind nobody; on, bound and unbound alike; off is 1.5.9's rule. 41 + 1 = 42.
+VGDB = {**V176, P + "ANSWER_NAME_CLASSES": True}
+#: Lane GD-A (15 Oct 2026, grantee density): the dense writer template v9 (7-12 sentences, 2-3 paragraphs, 2,048
+#: tokens, paragraphs delivered); off, bound and unbound alike, until the density run clears it. 42 + 1 = 43.
+VGDA = {**VGDB, P + "ANSWER_DENSE": False}
+#: Lane GD-R (15 Oct 2026, grantee density round 2): answers mode's vector floor, in hundredths of cosine; 25 (1.5.9's
+#: `search_lanes.VECTOR_FLOOR`), bound and unbound alike, until the density run clears a lower one. 43 + 1 = 44.
+VGDR = {**VGDA, P + "ANSWER_VECTOR_FLOOR": 25}
+#: Lane GD-A′ (15 Oct 2026, grantee density round 2): with ANSWER_DENSE on, template v10 (only sentences that answer
+#: the question, up to twelve, 1-3 paragraphs); off, bound and unbound alike, and inert with ANSWER_DENSE off. 44 + 1 = 45.
+VGDAP = {**VGDR, P + "ANSWER_DENSE_ON_QUESTION": False}
+#: Lane GD-L (15 Oct 2026, grantee density round 3): a name no known person and not the owner carries has to be in one
+#: cited item, not every one; off, bound and unbound alike; off is 1.5.9's rule. 45 + 1 = 46.
+VGDL = {**VGDAP, P + "ANSWER_NAME_ONE_ITEM": False}
+#: 1.5.10 (the owner's decision of 16 Oct 2026, after the grantee density runs): "30 records, name-rule fix, 'only
+#: what's supported' wording and the 0.15 cut-off on; looser name rule off". GD-A and GD-A′ on (template v10), the
+#: answers-mode vector floor 15 hundredths, the items 30; bound and unbound alike, no switch added (46). GD-B stays on
+#: and GD-L off. Each of the four is 1.5.9's value again with one environment line (VGDL's off, off and 25, V167's 8).
+V1510 = {**VGDL, P + "ANSWER_DENSE": True, P + "ANSWER_DENSE_ON_QUESTION": True, P + "ANSWER_VECTOR_FLOOR": 15,
+         P + "ANSWER_ITEMS": 30}
+#: Lane NR179 (15 Oct 2026; owner decisions D2, 15 Oct, and D1, 16 Oct: "8 seconds"): background builds hold for a
+#: share's answer job, and the support judge keeps an 8 s reserve; on, bound and unbound alike. 46 + 2 = 48.
+V179 = {**V1510, P + "ANSWER_HOLDS_BACKGROUND": True, P + "ANSWER_JUDGE_RESERVE_SECONDS": 8}
 #: Lane NR186 (16 Oct 2026): an automatic-review pass keeps one Off-limits boundary for its rows, proven current at
-#: each row; off bound and unbound, until an independent security review
-#: (`tests/permissions_v2/test_nr186_review_pass_boundary.py`). 41 + 1 = 42, and its age cap:
-V186 = {**V176, P + "REVIEW_PASS_BOUNDARY": False,
-        # WS0's review of NR186: the kept boundary's age cap, in seconds (60 to 3600), inert while it is off. 43.
+#: each row; off bound and unbound, until the owner turns it on (`tests/permissions_v2/test_nr186_review_pass_boundary.py`).
+#: 48 + 1 = 49, and its age cap:
+V186 = {**V179, P + "REVIEW_PASS_BOUNDARY": False,
+        # WS0's review of NR186: the kept boundary's age cap, in seconds (60 to 3600), inert while it is off. 50.
         P + "REVIEW_PASS_BOUNDARY_MAX_AGE_SECONDS": 600}
 TABLE = {**V166, **V186}
 
@@ -243,8 +267,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 43
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 42
+    assert len(switches.SWITCHES) == len(TABLE) == 50
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 49
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -260,14 +284,17 @@ def test_answer_switch_is_closed_unbound_and_on_when_bound(state, monkeypatch):
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
 @pytest.mark.parametrize("name", ANSWER_QUALITY)
-def test_each_answer_quality_switch_takes_amendment_11s_default_bound_or_not(name, bound, state):
-    """DF160: the table's own values, written out by hand above, and what `value` reads with nothing set. LA164 moved
-    the items to 16 (V164) and the integration kept them at 8 (V167), so the items are again the one that did not move."""
+def test_each_answer_quality_switch_takes_its_1_5_10_default_bound_or_not(name, bound, state):
+    """DF160: the table's own values, written out by hand above, and what `value` reads with nothing set. Amendment
+    11's for every switch but two: TR162 moved the judge template on to v4, and 1.5.10 (the owner's decision of 16 Oct
+    2026) the items to 30. Amendment 11 kept the items at 8, LA164 moved them to 16 (V164) and the integration back to
+    8 (V167), so the items are the one switch amendment 11 did not move."""
     state(bound)
     item = switches.lookup(name)
-    assert item.unbound == item.bound == V167[name], name                # TR162 moved the template on to v4
-    assert switches.value(name) == V167[name], name
-    assert V158[name] != V160[name] or name == P + "ANSWER_ITEMS"       # every switch but the items moved
+    assert item.unbound == item.bound == V1510[name], name
+    assert switches.value(name) == V1510[name], name
+    assert V158[name] != V160[name] or name == P + "ANSWER_ITEMS"       # amendment 11 moved every switch but the items
+    assert V1510[name] == V167[name] or name == P + "ANSWER_ITEMS"      # and of these 1.5.10 moved only the items
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
@@ -283,15 +310,145 @@ def test_the_ct176_citation_forms_are_on_bound_or_not_and_off_is_one_environment
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
-def test_the_items_take_la164s_sixteen_from_the_environment_and_eight_without(bound, state, monkeypatch):
-    """IN167: 8 with nothing set, bound or not; LA164's 16 is one environment line, and removing it is 8 again."""
+def test_the_gdb_name_classes_are_on_bound_or_not_and_off_is_one_environment_line(bound, state, monkeypatch):
+    """GD-B: on with nothing set, read without an `is_bound()` stat; off (1.5.9's name rule) is one environment line."""
+    state(bound)
+    name = P + "ANSWER_NAME_CLASSES"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == VGDB[name] is True
+    assert switches.value(name) is True
+    monkeypatch.setenv(name, "false")
+    assert switches.value(name) is False
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_gda_dense_template_is_on_bound_or_not_and_off_is_one_environment_line(bound, state, monkeypatch):
+    """GD-A: on with nothing set since 1.5.10, read without an `is_bound()` stat; off (1.5.9's template v8) is one
+    environment line, and removing it is on again."""
+    state(bound)
+    name = P + "ANSWER_DENSE"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V1510[name] is True
+    assert VGDA[name] is False                                            # the lane's default, 1.5.9's template
+    assert switches.value(name) is True
+    monkeypatch.setenv(name, "false")
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+    monkeypatch.delenv(name)
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_gdr_answer_vector_floor_is_1_5_10s_15_bound_or_not_and_1_5_9s_25_is_one_environment_line(bound, state,
+                                                                                                       monkeypatch):
+    """GD-R: 15 hundredths with nothing set since 1.5.10, read without an `is_bound()` stat; 1.5.9's 25 is one line,
+    and removing it is 15 again."""
+    state(bound)
+    name = P + "ANSWER_VECTOR_FLOOR"
+    item = switches.lookup(name)
+    assert item.kind == "int" and item.floor == 0
+    assert item.unbound == item.bound == V1510[name] == 15
+    assert VGDR[name] == 25                                               # the lane's default, 1.5.9's floor
+    assert switches.value(name) == 15
+    monkeypatch.setenv(name, "25")
+    assert switches.value(name) == 25
+    monkeypatch.setenv(name, "10")
+    assert switches.value(name) == 10
+    monkeypatch.delenv(name)
+    assert switches.value(name) == 15
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_gda_prime_on_question_template_is_on_bound_or_not_and_off_is_one_environment_line(bound, state,
+                                                                                                monkeypatch):
+    """GD-A′: on with nothing set since 1.5.10 (v10 under ANSWER_DENSE, v8 without), read without an `is_bound()`
+    stat; off (v9 under ANSWER_DENSE) is one environment line, and removing it is on again."""
+    state(bound)
+    name = P + "ANSWER_DENSE_ON_QUESTION"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V1510[name] is True
+    assert VGDAP[name] is False                                           # the lane's default
+    assert switches.value(name) is True
+    monkeypatch.setenv(name, "false")
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+    monkeypatch.delenv(name)
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_gdl_name_in_one_item_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """GD-L: off with nothing set (every name in every cited item, 1.5.9's rule), read without an `is_bound()` stat;
+    on is one environment line."""
+    state(bound)
+    name = P + "ANSWER_NAME_ONE_ITEM"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == VGDL[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_items_take_thirty_without_and_la164s_sixteen_or_1_5_9s_eight_from_the_environment(bound, state,
+                                                                                                monkeypatch):
+    """1.5.10: 30 with nothing set, bound or not; LA164's 16 and IN167's (1.5.9's) 8 are each one environment line,
+    and removing it is 30 again."""
     state(bound)
     name = P + "ANSWER_ITEMS"
-    assert switches.value(name) == V167[name] == 8
+    assert switches.value(name) == V1510[name] == 30
     monkeypatch.setenv(name, str(V164[name]))
     assert switches.value(name) == V164[name] == 16
+    monkeypatch.setenv(name, str(V167[name]))
+    assert switches.value(name) == V167[name] == 8
     monkeypatch.delenv(name)
-    assert switches.value(name) == 8
+    assert switches.value(name) == 30
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_items_reach_answer_protocol_4s_thirty_and_no_further(bound, state, monkeypatch):
+    """Answer protocol 4: the items run 1 to 30 (a v4 asker's cap of cited records); 30 is the default since 1.5.10
+    (8 before), and a setting above 30 is read as 30 by the answer path (`answer_generation.k_answer`)."""
+    from topos.permissions_v2.answer_generation import K_ANSWER_CEILING, k_answer
+    state(bound)
+    name = P + "ANSWER_ITEMS"
+    item = switches.lookup(name)
+    assert "1 to 30" in item.purpose and "1 to 24" not in item.purpose
+    assert switches.value(name) == item.unbound == item.bound == 30 and k_answer() == K_ANSWER_CEILING == 30
+    monkeypatch.setenv(name, "8")
+    assert switches.value(name) == 8 and k_answer() == 8
+    monkeypatch.setenv(name, "30")
+    assert switches.value(name) == 30 and k_answer() == K_ANSWER_CEILING == 30
+    monkeypatch.setenv(name, "31")
+    assert switches.value(name) == 31 and k_answer() == 30
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_1_5_10_grantee_answer_defaults_are_the_owners_decision_of_16_oct_2026(bound, state, monkeypatch):
+    """The owner's decision of 16 Oct 2026 for 1.5.10, as written in chat: "30 records, name-rule fix, 'only what's
+    supported' wording and the 0.15 cut-off on; looser name rule off". The four values that moved, together, written
+    out here by hand: the dense template and its on-question wording on (v10; v12 for an asker that accepts answer
+    protocol 4), the answers-mode vector floor 15 hundredths, the items 30. The name-rule fix (GD-B) stays on and the
+    looser name rule (GD-L) off. Bound and unbound alike; setting the four back is 1.5.9 (v8, 0.25, 8 items)."""
+    from topos.permissions_v2.answer_generation import k_answer, writer_template
+    from topos.permissions_v2.search_release import answer_vector_floor
+    state(bound)
+    decided = {P + "ANSWER_DENSE": True, P + "ANSWER_DENSE_ON_QUESTION": True, P + "ANSWER_VECTOR_FLOOR": 15,
+               P + "ANSWER_ITEMS": 30, P + "ANSWER_NAME_CLASSES": True, P + "ANSWER_NAME_ONE_ITEM": False}
+    for name, value in decided.items():
+        item = switches.lookup(name)
+        assert item.unbound == item.bound == switches.value(name) == value, name
+    # What the answer path reads with nothing set.
+    assert writer_template() == "topos-answer-template/v10" and writer_template(30) == "topos-answer-template/v12"
+    assert answer_vector_floor() == 0.15 and k_answer() == 30
+    # 1.5.9's settings, one environment line each.
+    for name, old in ((P + "ANSWER_DENSE", "false"), (P + "ANSWER_DENSE_ON_QUESTION", "false"),
+                      (P + "ANSWER_VECTOR_FLOOR", "25"), (P + "ANSWER_ITEMS", "8")):
+        monkeypatch.setenv(name, old)
+    assert writer_template() == writer_template(30) == "topos-answer-template/v8"
+    assert answer_vector_floor() == 0.25 and k_answer() == 8
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
@@ -685,3 +842,34 @@ async def test_a_bound_node_with_an_empty_environment_answers_a_signed_search_at
 from tests.permissions_v2.test_entity_boundary_search import node  # noqa: E402,F401 -- the door test's node
 from tests.permissions_v2.test_node_protocol import protocol  # noqa: E402,F401
 from tests.permissions_v2.test_protocol_runtime import configured  # noqa: E402,F401
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr179_background_hold_is_on_bound_or_not_and_off_is_one_environment_line(bound, state, monkeypatch):
+    """NR179 G1: on with nothing set (owner decision D2), read without an `is_bound()` stat; 1.5.9's behaviour is one
+    environment line."""
+    state(bound)
+    name = P + "ANSWER_HOLDS_BACKGROUND"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V179[name] is True
+    assert switches.value(name) is True
+    monkeypatch.setenv(name, "false")
+    assert switches.value(name) is False
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr179_judge_reserve_is_eight_bound_or_not_and_a_number_is_one_environment_line(bound, state, monkeypatch):
+    """NR179 G2: 8 s with nothing set (owner decision D1), read without an `is_bound()` stat; other seconds, or 0 for
+    1.5.9's no reserve, when set."""
+    state(bound)
+    name = P + "ANSWER_JUDGE_RESERVE_SECONDS"
+    item = switches.lookup(name)
+    assert item.kind == "int" and item.floor == 0
+    assert item.unbound == item.bound == V179[name] == 8
+    assert switches.number(name) == 8
+    monkeypatch.setenv(name, "20")
+    assert switches.number(name) == 20
+    monkeypatch.setenv(name, "0")
+    assert switches.number(name) == 0                                    # 1.5.9: no reserve
+    monkeypatch.setenv(name, "twenty")
+    assert switches.number(name) == 8                                    # unreadable: the default

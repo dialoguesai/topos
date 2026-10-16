@@ -207,3 +207,37 @@ def test_date_window_is_applied_at_parse_time(conn):
 def test_window_default_is_open_when_no_options_are_passed(conn):
     _canonicalize(conn, export_fixture(), None)
     assert conn.execute("SELECT COUNT(*) FROM ai_chat_conversations").fetchone()[0] == 2
+
+
+def _canonicalize_ui(conn: sqlite3.Connection, title: str | None, message_id: str):
+    """One extension (v1 UI stream) turn, through the same parser and canonicalizer."""
+    from topos.ingestion.ingest_helpers import chat_ui_raw_payload
+
+    payload = {"id": message_id, "thread_id": "conv-ui", "role": "user", "content": f"turn {message_id}", "created_at": JULY}
+    if title is not None:
+        payload["_metadata"] = {"conversation_title": title}
+    raw = RawRecord(record_id=message_id, payload=chat_ui_raw_payload(payload, job_id="j", dataset_id=DATASET_ID))
+    parser = ChatGPTParser(dataset_id=DATASET_ID)
+    assert parser.validate(raw).is_valid
+    normalized = parser.parse(raw).payload
+    normalized["source_id"] = "chatgpt_ui_conversation"
+    Canonicalizer(CanonicalTablesManager(conn)).canonicalize_staging_batch(
+        [normalized], source="chatgpt", sync_batch_id=f"batch-{message_id}", mapping_source_id="chatgpt_ui_conversation"
+    )
+    return [tuple(row) for row in conn.execute("SELECT title, latest_title FROM ai_chat_conversations")]
+
+
+def test_a_later_title_fills_or_renames_the_latest_title_and_no_write_erases_one(conn):
+    """The conversation upsert kept the first row's title forever: an extension thread
+    written before its title was sent stayed untitled, and a rename never landed. A later
+    title now lands in `latest_title`; `title` keeps the first record's, because the
+    owner's reviews pin it (migration 83)."""
+    assert _canonicalize_ui(conn, None, "m1") == [(None, None)]
+    assert _canonicalize_ui(conn, "Retention charts", "m2") == [(None, "Retention charts")]
+    assert _canonicalize_ui(conn, "Retention rate charts", "m3") == [(None, "Retention rate charts")]
+    assert _canonicalize_ui(conn, None, "m4") == [(None, "Retention rate charts")]
+
+
+def test_a_chat_titled_by_its_first_record_keeps_that_title_and_tracks_renames(conn):
+    assert _canonicalize_ui(conn, "Retention charts", "m1") == [("Retention charts", "Retention charts")]
+    assert _canonicalize_ui(conn, "Retention rate charts", "m2") == [("Retention charts", "Retention rate charts")]

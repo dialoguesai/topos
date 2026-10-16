@@ -659,10 +659,11 @@ class SQLiteCanonicalStore(CanonicalStore):
         self._conn.execute(
             """
             INSERT INTO ai_chat_conversations (
-                conversation_id, owner_user_id, title, source_id, created_at, updated_at,
+                conversation_id, owner_user_id, title, latest_title, source_id, created_at, updated_at,
                 source_record_id, ingested_at, sync_batch_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(conversation_id) DO UPDATE SET
+                latest_title=COALESCE(excluded.latest_title, ai_chat_conversations.latest_title),
                 updated_at=excluded.updated_at,
                 sync_batch_id=excluded.sync_batch_id,
                 ingested_at=excluded.ingested_at
@@ -670,6 +671,9 @@ class SQLiteCanonicalStore(CanonicalStore):
             (
                 conversation_id,
                 record.get("owner_user_id"),
+                # `title` is the first record's and never moves: the owner's reviews pin it. A later title is
+                # kept in `latest_title`, which no review pins (migration 83), and no write erases one.
+                record.get("title"),
                 record.get("title"),
                 record.get("source_id") or record.get("source"),
                 record.get("created_at"),

@@ -43,7 +43,7 @@ from .search_contract import (CAPABILITY_SEARCH, MAX_RECORD_CHARS, MAX_SEARCH_BY
     MessageSearchResult, SearchIntent, SearchMemberBinding, SearchSetDecision, signed_payload,
     CAPABILITY_MESSAGE_SEARCH, RELEASABLE_SEARCH_CAPABILITIES, DirectSearchMemberBinding, search_decision_class, search_evaluator)
 from .search_contract import CAPABILITY_KNOWLEDGE_SEARCH, DIRECT_SEARCH_CAPABILITIES
-from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding
+from .knowledge_contract import KnowledgeSearchResult, KnowledgeMemberBinding, MAX_CONVERSATION_TITLE_CHARS
 from .answer_protocol import effective_mode
 from .search_index import SearchVerification, _file_state, index_path, purge, unseal
 from .search_lanes import rank
@@ -76,6 +76,43 @@ def _share_seen(release, grant_id, policy) -> None:
     except Exception:  # noqa: BLE001
         pass
 
+
+
+def _releases_titles(policy) -> bool:
+    """The owner opted this knowledge share into naming each AI-chat message's chat."""
+    return getattr(policy.search, "release_conversation_title", None) is True
+
+
+def _conversation_title(conn, identity, row: dict) -> str | None:
+    """An AI-chat message's chat title, as a share that opted in releases it: the chat's latest title, else the one
+    its first record set.
+
+    A title is preferred, never required: the latest one (`latest_title`, migration 83) is outside every review and
+    context revision, so a chat named or renamed after its messages were reviewed still releases them, now with the
+    new name. The parent is the row this read loaded (evidence._load binds its revision onto the message row). The
+    Off-limits veto has already read every column of it, titles included, before a message gets here. No review
+    reads a title as text, so it is scrubbed of addresses and numbers like an answer, dropped when it trips the NSFW
+    screen, and cut to the cap.
+    """
+    if identity.table != "ai_chat_messages":
+        return None
+    from .answer_checks import _redact_pii, _sanitize_nsfw
+    from .evidence import _row_revision
+    parents = conn.execute("SELECT * FROM ai_chat_conversations WHERE conversation_id=? AND source_id=?",
+                           (row.get("conversation_id"), identity.source_id)).fetchmany(2)
+    if len(parents) != 1:
+        return None
+    parent = dict(parents[0])
+    if _row_revision(parent, table="ai_chat_conversations") != row.get("_p2b_parent_revision"):
+        return None
+    title = next((value for value in (parent.get("latest_title"), parent.get("title"))
+                  if isinstance(value, str) and value.strip()), None)
+    if title is None:
+        return None
+    scrubbed = _sanitize_nsfw(_redact_pii(title.strip()))
+    if scrubbed == "[SANITIZED]":
+        return None
+    return scrubbed[:MAX_CONVERSATION_TITLE_CHARS].strip() or None
 
 class _Decision:
     """One release decision's hold on the write gate (NR166 R1, `switches.DECIDE_OUTSIDE_GATE`).
@@ -297,6 +334,14 @@ def candidate_limits(policy, k: int) -> tuple[int, int]:
     return window, (OFF_ONTOLOGY_PASSES if selective else 0)
 
 
+def answer_vector_floor(env=None) -> float:
+    """The vector lane's cosine floor for answers mode (lane GD-R): `ANSWER_VECTOR_FLOOR` hundredths, clamped to 0..100.
+    The default, 25, is `search_lanes.VECTOR_FLOOR` exactly. Only `retrieve_for_answer` reads it: named search, batch
+    and dispatch rank with `VECTOR_FLOOR`. It moves which permitted members are ranked into the answer's candidates;
+    each one still passes the same `_walk`, so it never moves what a grant permits."""
+    return max(0, min(100, switches.number(switches.ANSWER_VECTOR_FLOOR, env))) / 100
+
+
 def _fact_of_ontology_switched_off(conn, key, opaque, member, enabled) -> bool:
     """Whether a refused candidate is a fact whose ontology is not in `enabled` (the owner's switches on this read).
     Reads only the candidate's own row; anything it cannot read or name is not one, so it counts as any refusal."""
@@ -416,7 +461,7 @@ class MessageSearchRelease:
 
     def retrieve_for_answer(self, *, grant_id: str, question: str, admitted_authority, domains: dict | None = None,
                             record_ids: tuple[str, ...] | None = None, records_cap: int | None = None,
-                            time_scope: dict | None = None):
+                            time_scope: dict | None = None, records_bytes: int | None = None):
         """Re-decide this grant's permitted set without releasing it to the relay.
 
         Answer generation calls this once before the model and again before a
@@ -438,6 +483,12 @@ class MessageSearchRelease:
         ask frame. It bounds `k` beside the grant's `max_k` and the items switch, so an asker from before the wider
         cap is served exactly as before (eight items retrieved, at most eight cited) and never a body it refuses.
         None (a caller written before it) bounds nothing beyond the switch.
+
+        `records_bytes` (answer protocol 4): the most canonical bytes the released records may take, the walk's own
+        wrapper included (`_walk_candidates`). A with-sources answer passes its body's byte cap less the room kept for
+        its answer text (`answer_release.records_bytes`), so the records and the longest text its asker parses fit
+        the body together; a re-check passes the same, so it walks the written items under the same bound. None (an
+        answers-only job, a caller written before it): MAX_SEARCH_BYTES, as before.
 
         `time_scope` (TR162, A2A-4 amendment 12), when given and not a re-check: the question's time scope is read at
         this grant's precision and this read's clock (`answer_time.question_scope`; none under "none") and handed
@@ -499,6 +550,8 @@ class MessageSearchRelease:
                         query_vector = None
                 orders, matched = [], []
                 fill = answer_time.fill_on()
+                # GD-R: answers mode's own vector floor, read once per retrieval (25, the default, is 1.5.9's).
+                vector_floor = answer_vector_floor()
                 for step in steps:
                     low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
                     if low > high:
@@ -506,13 +559,14 @@ class MessageSearchRelease:
                         matched.append(frozenset())
                         continue
                     scored = rank(loaded, question, query_vector, limit=counted_window, spare=spare,
-                                  lower_us=low, upper_us=high, precision=policy.search.release_event_time)
+                                  lower_us=low, upper_us=high, precision=policy.search.release_event_time,
+                                  vector_floor=vector_floor)
                     # Lane 172: the window's other items follow the matched ones (`rank`'s `fill`), but only the
                     # matched ones count toward a step being enough, so a question with a subject still climbs the
                     # ladder or widens to where its subject is (review of topos#113, finding 1).
                     orders.append(rank(loaded, question, query_vector, limit=counted_window, spare=spare,
                                        lower_us=low, upper_us=high, precision=policy.search.release_event_time,
-                                       fill=True) if fill and step is not None else scored)
+                                       fill=True, vector_floor=vector_floor) if fill and step is not None else scored)
                     matched.append(frozenset(scored))
             deciding = _Decision(self, grant_id, verified, loaded_state)
             with with_db_write() if deciding.gated else deciding:
@@ -556,7 +610,8 @@ class MessageSearchRelease:
                             walks.append(self._walk(conn, floor, review_db, key, grant_id, order, by_id, policy,
                                                     SUBJECT_CONTRACT_BY_CAPABILITY[current.capability_version],
                                                     set(policy.search.tables), decided, low, high, intent.k, current,
-                                                    window=counted_window))
+                                                    window=counted_window,
+                                                    records_bytes=MAX_SEARCH_BYTES if records_bytes is None else records_bytes))
                             if step is None or _matched_count(walks[-1][0], matched[len(walks) - 1]) >= step.enough:
                                 used = len(walks) - 1          # the first window that fills
                                 break
@@ -911,7 +966,7 @@ class MessageSearchRelease:
         return current, output, started
 
     def _walk(self, conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
-              lower_us, upper_us, k, current, window=None):
+              lower_us, upper_us, k, current, window=None, records_bytes=MAX_SEARCH_BYTES):
         """One query's candidate walk and set decision on the gated read: `_accept` until k, under the byte cap.
 
         `decided` caches a witness's decision by fact id (or the direct message's opaque id). That
@@ -930,10 +985,13 @@ class MessageSearchRelease:
         `window` (`candidate_limits`): how many of `order` the walk may count; all of it when not given. A candidate
         refused because the owner has switched its ontology off is not counted (FT168-D3): `order` then carries
         the spare candidates, and the walk still ends at `window` counted ones.
+
+        `records_bytes`: the byte cap the released records stop under (`_walk_candidates`); a search's is
+        MAX_SEARCH_BYTES.
         """
         from .reconciliation_provenance import ExistingProvenancePass
         arguments = (conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
-                     lower_us, upper_us, k, current, window)
+                     lower_us, upper_us, k, current, window, records_bytes)
         provenance = ExistingProvenancePass(conn, canonical_database=self.resolver.path, binding=self.resolver.binding)
         known = set(decided)
         try:
@@ -950,10 +1008,15 @@ class MessageSearchRelease:
             provenance.close()
 
     def _walk_candidates(self, conn, floor, review_db, key, grant_id, order, by_id, policy, contract, tables, decided,
-                         lower_us, upper_us, k, current, window=None):
+                         lower_us, upper_us, k, current, window=None, records_bytes=MAX_SEARCH_BYTES):
         """`_walk`'s candidates and set decision. A recovered row is proven by the pass `_walk` registered for
         this read, or, when there is none, by its own check. `window` is `_walk`'s (FT168-D3): how many candidates
-        are counted, a fact refused because its ontology is switched off not among them."""
+        are counted, a fact refused because its ontology is switched off not among them.
+
+        The walk stops before the released records' canonical bytes pass `records_bytes`: MAX_SEARCH_BYTES for a
+        search. An answer's records travel in a body beside its answer text, written after this walk; answer
+        protocol 4 has the answer pass a cap that keeps room for that text (`retrieve_for_answer`), where the walk
+        used to fill the whole cap and a body over long items could then fail whole."""
         view_id = policy.search.view_id
         records, bindings, revisions = [], [], []
         selective = window is not None and getattr(policy.search, "selective_facts", None) is not None
@@ -977,7 +1040,7 @@ class MessageSearchRelease:
             record, binding, revision = accepted
             trial = records + [record]
             if len(canonical_bytes({"family": "canonical_record", "operation": "search",
-                                    "view_id": view_id, "records": trial})) > MAX_SEARCH_BYTES:
+                                    "view_id": view_id, "records": trial})) > records_bytes:
                 break
             records, bindings, revisions = trial, bindings + [binding], revisions + [revision]
         output_model = KnowledgeSearchResult if policy.versions.capability == CAPABILITY_KNOWLEDGE_SEARCH else MessageSearchResult
@@ -1170,6 +1233,9 @@ class MessageSearchRelease:
                 record = dict(kind='message',record_id=opaque,content=content,source_ids=[identity.source_id],
                     citations=[dict(record_id=opaque,source_id=identity.source_id,content=content)],
                     event_at=record.get('event_at'))
+                title = _conversation_title(conn, identity, row) if _releases_titles(policy) else None
+                if title:
+                    record['conversation_title'] = title
                 revision = digest({"snapshot":qualified.snapshot.model_dump(),"review":qualified.review_revision})
                 binding = KnowledgeMemberBinding(kind='message',record_id=opaque,source_ids=[identity.source_id],
                     evidence_tables=[identity.table],evidence_revision=revision,projection_revision=digest(record),
