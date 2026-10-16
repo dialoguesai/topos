@@ -474,6 +474,12 @@ def _phones_in(body: str) -> Dict[str, int]:
 
 def _find(haystack: str, needle: str) -> int:
     """1-indexed line of the first hit, or 0."""
+    # Not anywhere in the text means not on any line, so the answer is the same;
+    # it only skips splitting the file once per protected name. That split, run
+    # for each of 6,166 names, was 36s of a 42-file commit (the CHANGELOG alone
+    # took 8.8s), and reading lock files made it worse.
+    if needle not in haystack:
+        return 0
     for i, line in enumerate(haystack.splitlines()):
         if needle in line:
             return i + 1
