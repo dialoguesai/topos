@@ -283,6 +283,9 @@ SENTENCE_KEYS = {"generated", "kept", "dropped_citation", "dropped_copy", "dropp
 def test_the_service_delivers_paragraphs_and_its_receipt_keeps_1_5_9s_keys(legacy, tmp_path, monkeypatch, on):
     monkeypatch.setenv(DENSE, "true" if on else "false")
     monkeypatch.setenv(ON_QUESTION, "false")                 # on is GD-A's v9 (v10 is `test_answer_round2_r_aprime`'s)
+    # GD-A's own receipt: NR179's judge reserve (8 s by default since 1.5.10) adds its `dropped_unjudged` counter, so
+    # it is set to 1.5.9's none here.
+    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_ANSWER_JUDGE_RESERVE_SECONDS", "0")
     reply = "The owner is working on a synthetic task [1].\n\nThe synthetic task is still under way [1]."
     body, receipt, seen = _service_answer(legacy, tmp_path, monkeypatch, reply)
     template = TEMPLATE_VERSION_DENSE if on else TEMPLATE_VERSION
