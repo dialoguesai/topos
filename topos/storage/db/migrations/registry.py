@@ -28,6 +28,10 @@ from .off_limits_carried_waiting_v1 import (
     MIGRATION_ID as OFF_LIMITS_CARRIED_WAITING_V1_ID,
     apply_off_limits_carried_waiting_v1_up,
 )
+from .ai_chat_latest_title_v1 import (
+    MIGRATION_ID as AI_CHAT_LATEST_TITLE_V1_ID,
+    apply_ai_chat_latest_title_v1_up,
+)
 from .permissions_read_path_indexes_v1 import (
     MIGRATION_ID as PERMISSIONS_READ_PATH_INDEXES_V1_ID,
     apply_permissions_read_path_indexes_v1_up,
@@ -463,11 +467,14 @@ MIGRATIONS: List[MigrationSpec] = [
     # Off-limits table, PRAGMA-guarded; no row is read or changed.
     _spec(81, OFF_LIMITS_CARRIED_WAITING_V1_ID, apply_off_limits_carried_waiting_v1_up, always_run=True),
     _spec(82, HOME_CHAT_MEMORIES_V1_ID, apply_home_chat_memories_v1_up),
+    # 83 lands at the 1.5.10 release cut like 81: registering it stamps the schema version past any engine that
+    # predates it. One nullable column on ai_chat_conversations, PRAGMA-guarded; no row is read or changed. A chat's
+    # later titles go there, outside every review and context revision, so a title never withholds a message.
+    _spec(83, AI_CHAT_LATEST_TITLE_V1_ID, apply_ai_chat_latest_title_v1_up, always_run=True),
     # 84 lands at a release cut like 63, 69, 75 and 76: registering it stamps the schema
     # version past any engine that predates it. One small table (per-file read cursors for
     # the AI coding-tool transcript readers, CONTRACTS §2.6); no row is read or changed.
-    # 83 is taken by the AI-titles and L5 lanes; the runner applies by id, so either may
-    # land first.
+    # 83 is the AI-chat titles step above; the runner applies by id.
     _spec(84, INGESTION_FILE_CURSORS_V1_ID, apply_ingestion_file_cursors_v1_up),
     # 85 lands at the AI-tool on-ramp release cut (CONTRACTS.md §2.6; 83 is the AI-chat titles step, 84 is
     # L4's file cursors): `ai_chat_messages.share_excluded` (INTEGER NOT NULL DEFAULT 0, additive) and the

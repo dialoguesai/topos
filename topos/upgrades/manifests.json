@@ -1064,7 +1064,8 @@
         }
       ],
       "notes": [
-        "topos-node pair / start --headless / service install|uninstall|status (AI-tool on-ramp, lane L7). The node persists the control plane's topos_id in engine_config once, like user_id. TOPOS_KEY in ~/.topos/.env now wins over a TOPOS_KEY exported in the shell (ignored with a warning); --set-topos-key and --topos-key need a terminal."
+        "topos-node pair / start --headless / service install|uninstall|status (AI-tool on-ramp, lane L7). The node persists the control plane's topos_id in engine_config once, like user_id. TOPOS_KEY in ~/.topos/.env now wins over a TOPOS_KEY exported in the shell (ignored with a warning); --set-topos-key and --topos-key need a terminal.",
+        "Additive ai_chat_latest_title_v1 migration, order 83, adds one nullable column (ai_chat_conversations.latest_title); no row is read or changed. A chat's later titles go there, outside every review and Off-limits context revision, so the upgrade stales no review and no search index. Migration ledger enables pre-upgrade backup and downgrade protection."
       ]
     }
   ]

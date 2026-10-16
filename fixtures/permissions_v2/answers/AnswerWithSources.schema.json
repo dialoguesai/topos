@@ -465,6 +465,20 @@
           "title": "Content",
           "type": "string"
         },
+        "conversation_title": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Conversation Title"
+        },
         "event_at": {
           "anyOf": [
             {

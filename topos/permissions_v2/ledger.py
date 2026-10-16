@@ -656,6 +656,10 @@ class PolicyLedger:
                     or not set(member.evidence_tables) <= {t for form in rule.release.forms for t in form.tables}
                     or member.projection_revision != digest(record.model_dump())):
                     raise PolicyError("rule_binding")
+                # A chat's title leaves only under the owner's opt-in, and only beside an AI-chat message.
+                if getattr(record, "conversation_title", None) is not None and (
+                        not policy.search.release_conversation_title or member.evidence_tables != ["ai_chat_messages"]):
+                    raise PolicyError("rule_binding")
             return
         from .search_contract import (SearchMemberBinding, SearchPolicy, VIEW_SEARCH, DirectSearchMemberBinding, CAPABILITY_MESSAGE_SEARCH)
         if not isinstance(policy, SearchPolicy) or decision.required_projection_id != VIEW_SEARCH:

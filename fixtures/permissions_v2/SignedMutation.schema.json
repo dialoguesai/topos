@@ -1851,6 +1851,19 @@
           "title": "Max Permitted Records",
           "type": "integer"
         },
+        "release_conversation_title": {
+          "anyOf": [
+            {
+              "const": true,
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Release Conversation Title"
+        },
         "release_event_time": {
           "default": "none",
           "enum": [
