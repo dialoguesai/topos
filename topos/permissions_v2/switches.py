@@ -170,6 +170,12 @@ DECIDE_OUTSIDE_GATE = _switch(
     "NR166 R1. A release is decided on a read snapshot with the write gate NOT held, then confirmed under it: every "
     "store the decision read must be unchanged since before the snapshot, or the decision runs once more and then "
     "refuses. Off (the default): decided under the gate, as always. Off until an independent security review.")
+SWEEP_INTEREST_VERDICT = _switch(
+    "SWEEP_INTEREST_VERDICT", "bool", False, False,
+    "NR187. The daemon index sweep reuses a share index's last True browsing-interest verdict while the index file, "
+    "its record-id key, the canonical database, the Off-limits closure and the interest switches are all unchanged "
+    "(it keeps a boolean and change tokens, nothing derived from a name). Off (the default): every sweep rebuilds "
+    "each index's interest members, as always.")
 SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
@@ -265,7 +271,7 @@ SWITCHES = (
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
-    DECIDE_OUTSIDE_GATE,
+    DECIDE_OUTSIDE_GATE, SWEEP_INTEREST_VERDICT,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,

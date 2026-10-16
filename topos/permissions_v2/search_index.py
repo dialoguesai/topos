@@ -514,6 +514,34 @@ def _reuse(path: str, hit: bool, kept=None, now=None, **how) -> None:
     search_timing.reuse(path, hit, kept, now, **how)
 
 
+#: NR187: the most index files whose sweep interest verdict is kept at once. The sweep also drops the entry of every
+#: index file that is gone or went stale (`_sweep`), so there are never more entries than index files.
+INTEREST_KEPT_MAX = 64
+#: NR187: `_current`'s default: no kept interest verdict is read or written (every caller but the daemon sweep).
+_NO_INTEREST_MEMO = object()
+#: NR187: the parts of a kept interest verdict's state, in order, as an attribution line names a part that moved.
+_INTEREST_STATE_PARTS = ("file", "key", "canonical", "boundary", "inputs")
+
+
+def _sweep_interest_verdict() -> bool:
+    """NR187 (off by default): whether the daemon sweep may reuse an index's last True interest verdict."""
+    from . import switches
+    return switches.on(switches.SWEEP_INTEREST_VERDICT)
+
+
+def _interest_inputs() -> tuple | None:
+    """NR187: what an index's interest verdict reads besides the canonical database, the index file and its key: the
+    interest family's switch, the second-label switch (`interest_family.build` reads a stored second label only while
+    it is on), the label rubric revision (`interest_review.current` compares every assessment with it; the pinned
+    rubric file, hash-checked) and the pinned model revision. None when one cannot be read: None never matches."""
+    try:
+        from . import interest_index, interest_relabel, interest_review
+        return (interest_index.enabled(), interest_relabel.enabled(), interest_review.rubric_revision(),
+                interest_review._model_revision())
+    except Exception:  # noqa: BLE001 -- unreadable: never matches, the verdict is computed in full
+        return None
+
+
 @contextmanager
 def _gated(holds: list | None):
     """The write gate for one brief step of the sweep; appends (acquired at, held, waited) in seconds to `holds`."""
@@ -726,6 +754,10 @@ class SearchIndexService:
         self._guard_kept: dict[str, tuple] = {}
         self._guard_lock = threading.Lock()
         self._guard_probe: SearchVerification | None = None
+        # NR187: the daemon sweep's last True interest verdict per index file (`_interests_current_kept`), behind
+        # SWEEP_INTEREST_VERDICT: index file name -> the state it was proven under (change tokens only; an entry exists
+        # only for True). Guarded by `_guard_lock`; read through the same probe.
+        self._interest_kept: dict[str, tuple] = {}
 
     def take_published(self) -> set[str]:
         """The index files this service published since the last call, whether or not they still exist.
@@ -1393,13 +1425,22 @@ class SearchIndexService:
         try:
             files = sorted(self.root.glob("grant-*.db"))
         except OSError:
-            return 0
+            files = None
+        # NR187: with the switch on, the kept interest verdicts of index files that are gone (of every file, when they
+        # cannot be listed) are dropped; with it off, every one is.
+        keep_interests = files is not None and _sweep_interest_verdict()
+        if keep_interests:
+            self._forget_interest_verdicts(keep={path.name for path in files})
+        elif self._interest_kept:
+            self._forget_interest_verdicts()
         if not files:
             return 0
         try:
             with _gated(holds):
                 authorities = self._authorities(now)
             stale = []
+            # NR187: the canonical token, read BEFORE the snapshot below is established (`_interests_current_kept`).
+            memo = self._canonical_token() if keep_interests else _NO_INTEREST_MEMO
             conn = sqlite3.connect(self.resolver.path.as_uri() + "?mode=ro", uri=True)
             try:
                 conn.execute("BEGIN")
@@ -1413,11 +1454,13 @@ class SearchIndexService:
                             review_digest = self.reviews.current_authority_digest()
                     checked = _file_state(path)  # the file this check reads; None when it is already gone
                     if checked is not None and not self._current(path, grant_id, authority, clock, conn,
-                                                                 review_digest=review_digest, refresh=True):
+                                                                 review_digest=review_digest, refresh=True,
+                                                                 interest_before=memo):
                         stale.append((path, grant_id, checked))
             finally:
                 conn.close()
             for path, grant_id, checked in stale:
+                self._forget_interest_verdict(path.name)   # NR187: a stale index keeps no verdict, removed or not
                 with _gated(holds):
                     if _file_state(path) != checked:
                         continue  # replaced by a publish, or removed, since the check read it
@@ -1440,6 +1483,7 @@ class SearchIndexService:
             # Owner-local operations diagnosis only. Never log an exception message,
             # query, grant identifier, key, record, or evidence contents.
             _log.warning("message search index sweep unavailable (%s)", type(exc).__name__)
+            self._forget_interest_verdicts()   # NR187: a sweep that could not run keeps no verdict
             if on_error == "raise":
                 raise PolicyError("search_index_sweep_unavailable") from None
             with _gated(holds):
@@ -1475,7 +1519,8 @@ class SearchIndexService:
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None,
                  verified: SearchVerification | None = None, before=None, laps: dict | None = None,
                  provenance_point: str | None = None, members: bool = True, review_digest: str | None = None,
-                 only: frozenset[str] | None = None, refresh: bool = False, review_guard: bool = True) -> bool:
+                 only: frozenset[str] | None = None, refresh: bool = False, review_guard: bool = True,
+                 interest_before=_NO_INTEREST_MEMO) -> bool:
         """Whether the grant's index still describes R(g) on `conn`'s snapshot.
 
         With `verified` (a search's own stages), the boundary's closure and the review digest come
@@ -1502,6 +1547,11 @@ class SearchIndexService:
         recheck, as N5 left it the member loop: the bindings are sealed per member, and the recheck proves them on the
         state that decides before anything is decided. A guard verdict proven for this exact file and key is reused
         while the review store has not moved at all (`_reviews_current_kept`).
+
+        NR187: `interest_before` (the daemon sweep only, with SWEEP_INTEREST_VERDICT on) is the canonical token the sweep
+        read before `conn`'s snapshot was established (None when unreadable). The interest step then reuses this very
+        file's last True interest verdict while nothing it reads has changed (`_interests_current_kept`). Every other
+        caller, and the sweep with the switch off, decides the interests in full as before.
         """
         def stale(stage):
             _log.warning("message search index stale (%s)", stage)
@@ -1587,7 +1637,9 @@ class SearchIndexService:
             # inside one pass each row is matched once (EntityBoundary.one_pass), and the memory ends with the loop.
             with boundary.one_pass():
                 current = self._members_current(index, key, conn, boundary, authority, deep, stale,
-                                                 provenance=provenance, laps=laps, only=only)
+                                                 provenance=provenance, laps=laps, only=only,
+                                                 interest_memo=None if interest_before is _NO_INTEREST_MEMO
+                                                 else (path, opened_state, interest_before))
             if current and review_moved and refresh:
                 with self._published_lock:
                     self._refresh_needed[path.name] = (index_state, expected["message_review_revision"])
@@ -1600,14 +1652,110 @@ class SearchIndexService:
                 if provenance is not None:
                     laps.update({f"provenance_{part}": seconds for part, seconds in provenance.seconds.items()})
 
-    def _guard_token(self) -> tuple | None:
-        """The review store's token (`SearchVerification.review_token`: data_version, file states, rollback floor,
-        clock, incarnation) read through this service's own probe, so two reads compare across searches."""
+    def _probe(self) -> SearchVerification:
+        """This service's own long-lived probe: its connections' data_version compares across searches and sweeps."""
         with self._guard_lock:
             if self._guard_probe is None:
                 self._guard_probe = SearchVerification(self.resolver, self.reviews)
-            probe = self._guard_probe
-        return probe.review_token()
+            return self._guard_probe
+
+    def _guard_token(self) -> tuple | None:
+        """The review store's token (`SearchVerification.review_token`: data_version, file states, rollback floor,
+        clock, incarnation) read through this service's own probe, so two reads compare across searches."""
+        return self._probe().review_token()
+
+    def _canonical_token(self) -> tuple | None:
+        """NR187: the canonical database's token (`SearchVerification.canonical_token`: data_version, the main, -wal
+        and -journal file states, the incarnation) read through this service's own probe, so two reads compare across
+        sweeps. None when unreadable: None never matches."""
+        return self._probe().canonical_token()
+
+    def _interests_current_kept(self, conn, interests, boundary, key, path, opened_state, before) -> bool:
+        """NR187: `_interests_current` for the daemon sweep, or its last True verdict for this very index file while
+        nothing that verdict reads has changed.
+
+        R12 (16 Oct 2026): the sweep runs, waits 10 s and runs again, and for every index holding interest members it
+        rebuilt those members' clusters (`interest_family.build`, about 4.6 s of CPU on the owner's node) every time:
+        with two shares about 35% of a core, in the process (and under the GIL) that serves the owner's own chat.
+
+        What the verdict reads, from `interest_index.indexed_current` down as the sweep calls it (no policy, no
+        opt-outs; the basis checked before this step pins both), and the part of the state that covers it:
+        - `file`, `key`: the sealed interest members, i.e. the index file and the grant's record-id key. The file's stat
+          identity taken before `_open` read it and again here, equal (so the members are the ones that file holds;
+          BL-171, R-N154 M1), and the key's sha256;
+        - `canonical`: every row the build and the assessment check read (visits, clusters and their members, mentions,
+          entities, exclusions, receipts and installs, embeddings, label assessments, second labels), all on the
+          sweep's one read snapshot. The canonical token read before that snapshot was established (`before`) must
+          equal the one read here: then no commit landed in between, and the snapshot holds the rows the token names;
+        - `boundary`: the Off-limits closure, built on that same snapshot, by its revision;
+        - `inputs`: the switches and pinned revisions the build reads (`_interest_inputs`);
+        - the clock: nothing. Each member is decided at its own sealed `built_at` (`indexed_current`): a visit's time,
+          the open month's end and every assessment are compared with that instant, never the wall clock, and no query
+          reads the time. The grant's window and rules are decided again by a recipient's release at its own clock.
+        The verdict is reused only when all of these equal the state it was proven under and `before` equals the token
+        read here. A part that cannot be read is None and never matches, and any error recomputes. A False verdict is
+        never kept (the index is stale and goes), and the sweep drops the entry of an index that went stale or whose
+        file is gone, so there are never more entries than index files, and never more than INTEREST_KEPT_MAX.
+
+        The owner's rule (contracts/DISCLOSURE_RULES.md DR-19) is that nothing derived from the Off-limits list or from
+        excluded entities outlives the request or pass that read it. An entry is one boolean (it exists only for True)
+        and change tokens: stat integers, a key digest, a data_version integer and file states, the closure's revision
+        digest (which every index basis already holds on disk), two switch booleans and two digests of pinned code.
+        A boolean and those tokens derive nothing from those entities. No name, name key, label, pattern, member,
+        `Build`, `Snapshot` or boundary is kept: they die with the build, as NR178 requires."""
+        from . import search_timing
+        if opened_state is None or _file_state(path) != opened_state:
+            search_timing.fast_path("nr187_interest", "miss", "file_replaced")  # attribution only, as below
+            self._forget_interest_verdict(path.name)
+            return self._interests_current(conn, interests, None, boundary)
+        try:
+            state = (opened_state, hashlib.sha256(key).hexdigest(), self._canonical_token(), boundary.revision,
+                     _interest_inputs())
+        except Exception:  # noqa: BLE001 -- unreadable: computed in full and not kept
+            state = None
+        # Only on a snapshot still open (a read transaction that has not ended, so every read of the check is of it).
+        provable = (state is not None and None not in state and before is not None and state[2] == before
+                    and getattr(conn, "in_transaction", False) is True)
+        with self._guard_lock:
+            kept = self._interest_kept.get(path.name)
+        if provable and kept == state:
+            _reuse("nr187_interest", True)
+            return True
+        if kept is None:
+            search_timing.fast_path("nr187_interest", "first")
+        elif state is None:
+            search_timing.fast_path("nr187_interest", "miss", "unreadable")
+        else:
+            moved = [name for name, old, new in zip(_INTEREST_STATE_PARTS, kept, state) if old != new]
+            search_timing.fast_path("nr187_interest", "miss",
+                                    ":".join(moved + ([] if provable else ["before"])) or "unreadable")
+        verdict = self._interests_current(conn, interests, None, boundary)
+        if verdict is True and provable:
+            self._keep_interest_verdict(path.name, state)
+        else:
+            self._forget_interest_verdict(path.name)
+        return verdict
+
+    def _keep_interest_verdict(self, name: str, state: tuple) -> None:
+        """NR187: keep one index file's proven state, never more than INTEREST_KEPT_MAX entries (oldest first out)."""
+        with self._guard_lock:
+            self._interest_kept.pop(name, None)
+            while len(self._interest_kept) >= INTEREST_KEPT_MAX:
+                self._interest_kept.pop(next(iter(self._interest_kept)))
+            self._interest_kept[name] = state
+
+    def _forget_interest_verdict(self, name: str) -> None:
+        with self._guard_lock:
+            self._interest_kept.pop(name, None)
+
+    def _forget_interest_verdicts(self, *, keep=None) -> None:
+        """NR187: drop every kept interest verdict, or every one but those of the index files named in `keep`."""
+        with self._guard_lock:
+            if keep is None:
+                self._interest_kept.clear()
+            else:
+                for name in [name for name in self._interest_kept if name not in keep]:
+                    del self._interest_kept[name]
 
     def _reviews_current_kept(self, path, opened_state, index, key) -> bool:
         """BL-171: `_reviews_current`, or its last True verdict for this very file and key while nothing in the review
@@ -1659,11 +1807,13 @@ class SearchIndexService:
             return False
 
     def _members_current(self, index, key, conn, boundary, authority, deep, stale, provenance=None, laps=None,
-                         only: frozenset[str] | None = None) -> bool:
+                         only: frozenset[str] | None = None, interest_memo: tuple | None = None) -> bool:
         """`_current`'s per-member half: every sealed member re-checked against `conn`'s snapshot.
 
         With `provenance`, the pass's store check and snapshot re-hash run once, after the last member. With `only`,
-        exactly those members (each must be present), for the re-check of a written answer (BL-159).
+        exactly those members (each must be present), for the re-check of a written answer (BL-159). `interest_memo`
+        (NR187, the daemon sweep with its switch on): (index path, its stat identity before it was opened, the canonical
+        token read before the snapshot), for `_interests_current_kept`; None decides the interests in full.
         """
         checked = {}
         interests = []
@@ -1750,7 +1900,9 @@ class SearchIndexService:
         # (`interest_index.release_object`), so a member that changed since the build never releases, and the drift
         # is dropped within one sweep (test_interest_door pins both).
         try:
-            if deep and interests and not self._interests_current(conn, interests, None, boundary):
+            if deep and interests and not (self._interests_current(conn, interests, None, boundary)
+                                           if interest_memo is None else
+                                           self._interests_current_kept(conn, interests, boundary, key, *interest_memo)):
                 return stale("interest")
         except (PolicyError, sqlite3.Error, KeyError):
             return stale("member_unavailable")
