@@ -529,6 +529,33 @@ def _sweep_interest_verdict() -> bool:
     return switches.on(switches.SWEEP_INTEREST_VERDICT)
 
 
+#: NR187 (WS0 review, Q3): the most sweeps in a row an index's interests may go without a full decision.
+INTEREST_FULL_EVERY_CEILING = 360
+
+
+def _interest_full_every() -> int:
+    """NR187 (WS0 review, Q3): every this-many-th sweep of an index decides its interests in full whatever the tokens
+    say (SWEEP_INTEREST_VERDICT_FULL_EVERY: 30 by default, at least 1, at most INTEREST_FULL_EVERY_CEILING). A bound
+    on how long a verdict can be reused, should some input ever move outside every token. Unreadable: 1."""
+    try:
+        from . import switches
+        return max(1, min(INTEREST_FULL_EVERY_CEILING, switches.number(switches.SWEEP_INTEREST_VERDICT_FULL_EVERY)))
+    except Exception:  # noqa: BLE001 -- unreadable: every sweep decides in full
+        return 1
+
+
+def _interest_inputs_held(inputs: tuple, reads: list) -> bool:
+    """NR187 (WS0 review, finding 1): whether the inputs a decision is kept under are the ones it read. They are read
+    before the decision; the build reads the two switches again while it runs, so a switch flipped (and even flipped
+    back) during the decision could leave a True kept under values it was not decided with. Kept only when every switch
+    read during the decision (`switches.observed`) is one of the two inputs, with the value the state holds, and the
+    inputs read again now are the state's. Any other switch read means an input the state does not cover: not kept."""
+    from . import switches
+    expected = {switches.INTEREST_SOURCES.name: inputs[0], switches.INTEREST_RELABEL.name: inputs[1]}
+    return (all(name in expected and bool(value) is expected[name] for name, value in reads)
+            and _interest_inputs() == inputs)
+
+
 def _interest_inputs() -> tuple | None:
     """NR187: what an index's interest verdict reads besides the canonical database, the index file and its key: the
     interest family's switch, the second-label switch (`interest_family.build` reads a stored second label only while
@@ -758,6 +785,8 @@ class SearchIndexService:
         # SWEEP_INTEREST_VERDICT: index file name -> the state it was proven under (change tokens only; an entry exists
         # only for True). Guarded by `_guard_lock`; read through the same probe.
         self._interest_kept: dict[str, tuple] = {}
+        # NR187 (WS0 review, Q3): how many sweeps in a row each kept verdict has been reused (`_interest_full_every`).
+        self._interest_reuses: dict[str, int] = {}
 
     def take_published(self) -> set[str]:
         """The index files this service published since the last call, whether or not they still exist.
@@ -1688,12 +1717,19 @@ class SearchIndexService:
           sweep's one read snapshot. The canonical token read before that snapshot was established (`before`) must
           equal the one read here: then no commit landed in between, and the snapshot holds the rows the token names;
         - `boundary`: the Off-limits closure, built on that same snapshot, by its revision;
-        - `inputs`: the switches and pinned revisions the build reads (`_interest_inputs`);
+        - `inputs`: the switches and pinned revisions the build reads (`_interest_inputs`). The build reads the two
+          switches again while it runs, so a verdict is kept only when every switch read during the decision is one of
+          the two, with the value the state holds, and the inputs read again after it are the state's (WS0 review,
+          finding 1: a switch flipped and flipped back during the build);
         - the clock: nothing. Each member is decided at its own sealed `built_at` (`indexed_current`): a visit's time,
           the open month's end and every assessment are compared with that instant, never the wall clock, and no query
           reads the time. The grant's window and rules are decided again by a recipient's release at its own clock.
         The verdict is reused only when all of these equal the state it was proven under and `before` equals the token
-        read here. A part that cannot be read is None and never matches, and any error recomputes. A False verdict is
+        read here (a token unreadable here is None: never the one read before). It is reused at most N-1 sweeps in a row:
+        every Nth decides in full whatever the tokens say (`_interest_full_every`, 30 by default; WS0 review, Q3). A
+        read error inside a decision does not invalidate a kept verdict: with every token unchanged it cannot be a
+        committed change, so it is met at the next full decision (WS0's ruling). A part that cannot be read is None and
+        never matches, and any error recomputes. A False verdict is
         never kept (the index is stale and goes), and the sweep drops the entry of an index that went stale or whose
         file is gone, so there are never more entries than index files, and never more than INTEREST_KEPT_MAX.
 
@@ -1718,44 +1754,61 @@ class SearchIndexService:
                     and getattr(conn, "in_transaction", False) is True)
         with self._guard_lock:
             kept = self._interest_kept.get(path.name)
-        if provable and kept == state:
+            reuses = self._interest_reuses.get(path.name, 0)
+        due = reuses + 1 >= _interest_full_every()   # WS0 review Q3: every Nth sweep decides in full regardless
+        if provable and kept == state and not due:
+            with self._guard_lock:
+                if self._interest_kept.get(path.name) == state:
+                    self._interest_reuses[path.name] = reuses + 1
             _reuse("nr187_interest", True)
             return True
         if kept is None:
             search_timing.fast_path("nr187_interest", "first")
         elif state is None:
             search_timing.fast_path("nr187_interest", "miss", "unreadable")
+        elif provable and kept == state:
+            search_timing.fast_path("nr187_interest", "miss", "full_every")
         else:
             moved = [name for name, old, new in zip(_INTEREST_STATE_PARTS, kept, state) if old != new]
             search_timing.fast_path("nr187_interest", "miss",
                                     ":".join(moved + ([] if provable else ["before"])) or "unreadable")
-        verdict = self._interests_current(conn, interests, None, boundary)
-        if verdict is True and provable:
+        from . import switches
+        with switches.observed() as reads:
+            verdict = self._interests_current(conn, interests, None, boundary)
+        if verdict is True and provable and _interest_inputs_held(state[4], reads):
             self._keep_interest_verdict(path.name, state)
         else:
             self._forget_interest_verdict(path.name)
         return verdict
 
     def _keep_interest_verdict(self, name: str, state: tuple) -> None:
-        """NR187: keep one index file's proven state, never more than INTEREST_KEPT_MAX entries (oldest first out)."""
+        """NR187: keep one index file's proven state, never more than INTEREST_KEPT_MAX entries (oldest first out). A
+        new proof starts its run of reuses at none."""
         with self._guard_lock:
             self._interest_kept.pop(name, None)
             while len(self._interest_kept) >= INTEREST_KEPT_MAX:
                 self._interest_kept.pop(next(iter(self._interest_kept)))
             self._interest_kept[name] = state
+            self._interest_reuses = {other: count for other, count in self._interest_reuses.items()
+                                     if other in self._interest_kept and other != name}
+            self._interest_reuses[name] = 0
 
     def _forget_interest_verdict(self, name: str) -> None:
         with self._guard_lock:
             self._interest_kept.pop(name, None)
+            self._interest_reuses.pop(name, None)
 
     def _forget_interest_verdicts(self, *, keep=None) -> None:
         """NR187: drop every kept interest verdict, or every one but those of the index files named in `keep`."""
         with self._guard_lock:
             if keep is None:
                 self._interest_kept.clear()
+                self._interest_reuses.clear()
             else:
                 for name in [name for name in self._interest_kept if name not in keep]:
                     del self._interest_kept[name]
+                for name in [name for name in self._interest_reuses if name not in self._interest_kept]:
+                    del self._interest_reuses[name]
 
     def _reviews_current_kept(self, path, opened_state, index, key) -> bool:
         """BL-171: `_reviews_current`, or its last True verdict for this very file and key while nothing in the review

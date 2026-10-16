@@ -3,7 +3,8 @@ memo maintenance in `_sweep`, and the switch). Every mutant weakens one decision
 kept under (the index file's identity and its re-stat after the read, the key, the canonical token read at the check
 and its agreement with the one read before the snapshot, the Off-limits closure, the switches and revisions), a False
 verdict kept, the memo unbounded or keeping a stale index's entry, the switch on by default or ignored, or the memo
-(or the module, or the service) holding the build it decided. Each must be killed by at least one test.
+(or the module, or the service) holding the build it decided. Since WS0's review: the switches as the decision read
+them, the cap on reuses in a row, and the reviewer's eight (W1-W8). Each must be killed by at least one test.
 
 As `n3c_mutants.py`: a scratch copy of the engine, one mutant at a time, the worktree never modified. A mutant is one
 or more exact edits; one whose text does not match exactly once counts as a failure, not a pass. A run that hangs past
@@ -30,7 +31,13 @@ TESTS = ["tests/permissions_v2/test_nr187_sweep_interest_verdict.py", "tests/per
 STATE = "            state = (opened_state, hashlib.sha256(key).hexdigest(), self._canonical_token(), boundary.revision,\n"
 PROVABLE = "        provable = (state is not None and None not in state and before is not None and state[2] == before\n"
 KEEP = "            self._keep_interest_verdict(path.name, state)\n"
-HIT = "        if provable and kept == state:\n"
+HIT = "        if provable and kept == state and not due:\n"
+TOKEN = "        return self._probe().canonical_token()\n\n    def _interests_current_kept"
+RESTAT = ('        if opened_state is None or _file_state(path) != opened_state:\n'
+          '            search_timing.fast_path("nr187_interest", "miss", "file_replaced")')
+DECIDE = ("        with switches.observed() as reads:\n"
+          "            verdict = self._interests_current(conn, interests, None, boundary)\n")
+HELD = "    return (all(name in expected and bool(value) is expected[name] for name, value in reads)\n"
 BUILD = ("__import__('topos.permissions_v2.interest_family', fromlist=['build']).build(conn, "
          "owner_id=self.resolver.binding.owner_id, now_us=int(time.time()) * 1_000_000, boundary=boundary)")
 
@@ -47,7 +54,7 @@ MUTANTS = [
     ("key_dropped", [
         (INDEX, STATE, STATE.replace("hashlib.sha256(key).hexdigest()", '"key"'))]),
     ("key_not_compared", [
-        (INDEX, HIT, "        if provable and kept is not None and kept[:1] + kept[2:] == state[:1] + state[2:]:\n")]),
+        (INDEX, HIT, "        if provable and kept is not None and kept[:1] + kept[2:] == state[:1] + state[2:] and not due:\n")]),
     # The canonical token: read at the check, and equal to the one read before the snapshot.
     ("canonical_token_not_read_at_the_check", [
         (INDEX, STATE, STATE.replace("self._canonical_token()", "before"))]),
@@ -78,7 +85,8 @@ MUTANTS = [
                 "        return (interest_index.enabled(), interest_relabel.enabled(), 'rubric',")]),
     # A False verdict, an error, a stale index: nothing kept.
     ("false_kept", [
-        (INDEX, "        if verdict is True and provable:\n", "        if provable:\n")]),
+        (INDEX, "        if verdict is True and provable and _interest_inputs_held(state[4], reads):\n",
+                "        if provable and _interest_inputs_held(state[4], reads):\n")]),
     ("old_entry_kept_on_a_miss", [
         (INDEX, "            self._keep_interest_verdict(path.name, state)\n        else:\n"
                 "            self._forget_interest_verdict(path.name)\n        return verdict\n",
@@ -105,10 +113,51 @@ MUTANTS = [
     ("switch_off_keeps_the_memo", [
         (INDEX, "        elif self._interest_kept:\n            self._forget_interest_verdicts()\n        if not files:\n",
                 "        if not files:\n")]),
+    # WS0's review (16 Oct 2026): the inputs as the decision read them, and how often a verdict may be reused.
+    ("switch_reads_during_the_decision_not_checked", [
+        (INDEX, HELD, "    return (True\n")]),
+    ("another_switch_read_allowed", [
+        (INDEX, HELD, "    return (all(bool(value) is expected.get(name, bool(value)) for name, value in reads)\n")]),
+    ("full_every_ignored", [
+        (INDEX, "        due = reuses + 1 >= _interest_full_every()", "        due = False")]),
+    ("reuses_not_counted", [
+        (INDEX, "                    self._interest_reuses[path.name] = reuses + 1\n", "                    pass\n")]),
+    ("full_every_not_clamped", [
+        (INDEX, "        return max(1, min(INTEREST_FULL_EVERY_CEILING, switches.number(switches.SWEEP_INTEREST_VERDICT_FULL_EVERY)))",
+                "        return max(1, switches.number(switches.SWEEP_INTEREST_VERDICT_FULL_EVERY))")]),
+    ("full_every_default_moved", [
+        (SWITCHES, '    "SWEEP_INTEREST_VERDICT_FULL_EVERY", "int", 30, 30,\n',
+                   '    "SWEEP_INTEREST_VERDICT_FULL_EVERY", "int", 300, 300,\n')]),
+    # The reviewer's eight (review_mutants.py), W3b and W4 adapted to the code as it now reads.
+    ("W1_token_file_states_omitted", [(INDEX, TOKEN, TOKEN.replace(
+        "        return self._probe().canonical_token()\n",
+        "        token = self._probe().canonical_token()\n        return None if token is None else token[:2]\n"))]),
+    ("W2_token_data_version_omitted", [(INDEX, TOKEN, TOKEN.replace(
+        "        return self._probe().canonical_token()\n",
+        "        token = self._probe().canonical_token()\n        return None if token is None else (token[0], token[2])\n"))]),
+    ("W3_unreadable_token_at_check_falls_back_to_before", [(INDEX, STATE, STATE.replace(
+        "self._canonical_token()", "(self._canonical_token() or before)"))]),
+    ("W3b_decision_error_returns_kept_true", [(INDEX, DECIDE, DECIDE.replace(
+        "            verdict = self._interests_current(conn, interests, None, boundary)\n",
+        "            try:\n                verdict = self._interests_current(conn, interests, None, boundary)\n"
+        "            except (PolicyError, sqlite3.Error, KeyError):\n                if kept is not None:\n"
+        "                    return True\n                raise\n"))]),
+    ("W4_stat_taken_only_once_at_the_check", [
+        (INDEX, RESTAT, RESTAT.replace(" or _file_state(path) != opened_state", "")),
+        (INDEX, STATE, STATE.replace("state = (opened_state,", "state = (_file_state(path),"))]),
+    ("W5_memo_survives_a_sweep_that_could_not_run", [
+        (INDEX, "            self._forget_interest_verdicts()   # NR187: a sweep that could not run keeps no verdict\n", "")]),
+    ("W6_memo_survives_every_index_removal", [
+        (INDEX, "            self._forget_interest_verdicts()   # NR187: a sweep that could not run keeps no verdict\n", ""),
+        (INDEX, "                self._forget_interest_verdict(path.name)   # NR187: a stale index keeps no verdict, removed or not\n", ""),
+        (INDEX, "            self._forget_interest_verdicts(keep={path.name for path in files})\n", "            pass\n")]),
+    ("W8_probe_reopened_per_read", [(INDEX, TOKEN, TOKEN.replace(
+        "        return self._probe().canonical_token()\n",
+        "        return SearchVerification(self.resolver, self.reviews).canonical_token()\n"))]),
     # What the memo holds: never the build, wherever it is put.
     ("memo_holds_the_build", [
         (INDEX, KEEP, f"            self._keep_interest_verdict(path.name, state + ({BUILD},))\n"),
-        (INDEX, HIT, "        if provable and kept is not None and kept[:5] == state:\n")]),
+        (INDEX, HIT, "        if provable and kept is not None and kept[:5] == state and not due:\n")]),
     ("module_keeps_the_build", [
         (INDEX, "INTEREST_KEPT_MAX = 64\n", "INTEREST_KEPT_MAX = 64\n_KEPT_BUILDS: dict = {}\n"),
         (INDEX, KEEP, f"            _KEPT_BUILDS[path.name] = {BUILD}\n" + KEEP)]),

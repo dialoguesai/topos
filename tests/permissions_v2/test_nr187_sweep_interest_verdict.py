@@ -39,6 +39,7 @@ from tests.permissions_v2.test_interest_door import (  # noqa: F401 -- `flag` is
 )
 from tests.permissions_v2.interest_fixtures import at, cluster, install, visit
 from topos.permissions_v2 import interest_family as fam
+from topos.permissions_v2 import interest_index
 from topos.permissions_v2 import interest_relabel as rl
 from topos.permissions_v2 import search_index as si
 from topos.permissions_v2 import switches
@@ -628,7 +629,9 @@ def test_the_memo_holds_a_boolean_and_change_tokens_only(flag, tmp_path, monkeyp
     assert memo and _tokens_only(memo) == []
     assert all(len(state) == len(si._INTEREST_STATE_PARTS) for state in memo.values())
     nr187_state = {name: value for name, value in vars(arm.node.index).items() if name.startswith("_interest")}
-    assert list(nr187_state) == ["_interest_kept"]
+    assert sorted(nr187_state) == ["_interest_kept", "_interest_reuses"]
+    reuses = nr187_state["_interest_reuses"]
+    assert set(reuses) <= set(memo) and all(type(count) is int for count in reuses.values())
     for word in WORDS:
         assert not _walk_holds(memo, word), word
         assert not _module_holds(si, word), word
@@ -702,3 +705,236 @@ def test_the_sweeps_decide_alike_with_the_switch_on_and_off_over_a_scripted_sequ
     assert sum(entry[1] for entry in sweeps) >= 2 and sum(entry[2] for entry in sweeps) >= 10
     assert any(entry[0] == "rebuild" and entry[1]["member_count"] == 2 for entry in decided[False])
     assert decided[False, "computed"] >= 10 and decided[False, "computed"] - decided[True, "computed"] >= 5
+
+
+# --- WS0's security review (16 Oct 2026): the inputs, both halves of the token, the cap -------------------------------
+
+def test_a_switch_flipped_and_flipped_back_during_the_decision_is_not_kept(flag, tmp_path, monkeypatch, computed):
+    """Review finding 1 (the reviewer's mid-build flip). The inputs are read before the decision, and the build reads
+    the second-label switch again while it runs. Off when the inputs are read, on while the build runs, off again after
+    it: equal before and after, yet the True was decided with the switch on. It must not be reused while it is off."""
+    decided = {}
+    for on in (True, False):
+        arm = Arm(tmp_path / str(on), monkeypatch, on=on, build=site, members=1)
+        assert (arm.sweep(), arm.sweep()) == (0, 0)
+        monkeypatch.setenv(rl.FLAG, "off")
+        real = interest_index.indexed_current
+
+        def flipping(*args, **kwargs):
+            monkeypatch.delenv(rl.FLAG)                      # on (its default) while the build runs
+            try:
+                return real(*args, **kwargs)
+            finally:
+                monkeypatch.setenv(rl.FLAG, "off")
+        monkeypatch.setattr(interest_index, "indexed_current", flipping)
+        first = arm.sweep()                                  # decided with the switch on: True
+        if on:
+            assert arm.kept == {}
+        monkeypatch.setattr(interest_index, "indexed_current", real)
+        with stale_stages() as stages:
+            decided[on] = (first, arm.sweep(), arm.file.exists(), tuple(stages))
+        monkeypatch.delenv(rl.FLAG, raising=False)
+    assert decided[False] == (0, 1, False, ("interest",))
+    assert decided[True] == decided[False]
+
+
+def test_the_decision_reads_exactly_the_two_interest_switches(flag, tmp_path, monkeypatch, computed):
+    """What `_interest_inputs_held` relies on, read from a real decision: every switch the interest step reads is the
+    family's or the second-label switch, so a kept verdict is not refused for a switch the state does not hold."""
+    arm = Arm(tmp_path, monkeypatch, on=True)
+    seen = []
+    real = SearchIndexService._interests_current
+
+    def watched(self, *args, **kwargs):
+        with switches.observed() as reads:
+            verdict = real(self, *args, **kwargs)
+        seen.append({name for name, _value in reads})
+        return verdict
+    monkeypatch.setattr(SearchIndexService, "_interests_current", watched)
+    assert arm.sweep() == 0 and list(arm.kept) == [arm.file.name]
+    assert seen and set().union(*seen) == {switches.INTEREST_SOURCES.name, switches.INTEREST_RELABEL.name}
+
+
+def test_a_switch_the_state_does_not_hold_read_during_the_decision_is_not_kept(flag, tmp_path, monkeypatch, computed):
+    """Should the build ever read another switch, the state does not cover it: the verdict is returned, not kept."""
+    arm = Arm(tmp_path, monkeypatch, on=True)
+    real = interest_index.indexed_current
+
+    def reading_another(*args, **kwargs):
+        switches.on(switches.JOURNAL_SOURCES)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(interest_index, "indexed_current", reading_another)
+    for count in (1, 2):
+        assert arm.sweep() == 0 and computed(arm) == count and arm.kept == {}
+
+
+def _checkpoint(path):
+    conn = sqlite3.connect(str(path), isolation_level=None)
+    try:
+        busy, log, done = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        assert busy == 0 and log == done
+    finally:
+        conn.close()
+
+
+def _relabelled_copy(path, folder):
+    """The canonical file's bytes with one label changed, made without touching the canonical file."""
+    folder.mkdir(parents=True, exist_ok=True)
+    copy = folder / "restore.db"
+    shutil.copyfile(path, copy)
+    with _db(copy) as conn:
+        cluster(conn, "tc_hobby", "sourdough / bread")
+    _checkpoint(copy)
+    for extra in ("-wal", "-shm"):
+        if os.path.exists(str(copy) + extra):
+            os.remove(str(copy) + extra)
+    return copy
+
+
+def test_an_in_place_restore_that_no_probe_sees_is_caught_by_the_file_states(flag, tmp_path, monkeypatch, computed):
+    """Review W1. An older copy written over the canonical file in place (same inode): no commit, so the probe's
+    data_version does not move, but a fresh connection reads the restored rows. Only the token's file states see it,
+    and the sweep decides as with the switch off (the relabelled cluster drops the index)."""
+    decided = {}
+    for on in (True, False):
+        arm = Arm(tmp_path / str(on), monkeypatch, on=on)
+        assert (arm.sweep(), arm.sweep()) == (0, 0)
+        _checkpoint(arm.path)
+        assert (arm.sweep(), arm.sweep()) == (0, 0)          # warm again under the token after the checkpoint
+        restore = _relabelled_copy(arm.path, tmp_path / f"restore-{on}")
+        inode = os.stat(arm.path).st_ino
+        before = arm.node.index._canonical_token()
+        shutil.copyfile(restore, arm.path)
+        assert os.stat(arm.path).st_ino == inode
+        after = arm.node.index._canonical_token()
+        assert before[1] == after[1] and before[2] != after[2]   # data_version still; the file states moved
+        with stale_stages() as stages:
+            decided[on] = (arm.sweep(), arm.file.exists(), tuple(stages))
+    assert decided[True] == decided[False] == (1, False, ("interest",))
+
+
+def test_with_the_file_states_held_still_the_probes_data_version_catches_a_commit(flag, tmp_path, monkeypatch,
+                                                                                 computed):
+    """Review W2 and W8. On a file system whose timestamps are coarser than two commits, data_version alone must
+    catch a commit, and it does only on the service's one long-lived probe."""
+    arm = Arm(tmp_path, monkeypatch, on=True)
+    _warm(arm, computed)
+    monkeypatch.setattr(si.SearchVerification, "_files", staticmethod(lambda path: ("still",)))
+    assert (arm.sweep(), arm.sweep()) == (0, 0) and computed(arm) == 2      # proven again under the new shape
+    with _db(arm.path) as conn:
+        cluster(conn, "tc_hobby", "sourdough / bread")
+    with stale_stages() as stages:
+        assert arm.sweep() == 1
+    assert stages == ["interest"] and computed(arm) == 3 and arm.kept == {}
+
+
+def test_a_fresh_connection_starts_at_the_same_data_version_so_the_probe_is_kept(flag, tmp_path, monkeypatch):
+    """Why the token reads one long-lived probe: `PRAGMA data_version` compares only on one connection. A connection
+    opened after a commit reads the same number a connection opened before it did, so a probe opened per read would
+    never see a commit; the service's probe does, and it is the same probe from one read to the next."""
+    arm = Arm(tmp_path, monkeypatch, on=True)
+
+    def fresh():
+        conn = sqlite3.connect(arm.path.as_uri() + "?mode=ro", uri=True, isolation_level=None)
+        try:
+            return conn.execute("PRAGMA data_version").fetchone()[0]
+        finally:
+            conn.close()
+    service = arm.node.index
+    before, fresh_before = service._canonical_token(), fresh()
+    probe = service._probe()
+    with _db(arm.path) as conn:
+        conn.execute("INSERT OR REPLACE INTO engine_config (key, value) VALUES ('nr187-review', 'x')")
+    after = service._canonical_token()
+    assert fresh() == fresh_before                           # a fresh connection cannot tell
+    assert after[1] != before[1]                             # the kept probe can
+    assert service._probe() is probe
+
+
+def test_a_token_unreadable_at_the_check_never_falls_back_to_the_one_read_before(flag, tmp_path, monkeypatch, computed):
+    """Review W3. A commit lands after the sweep's token read and before its snapshot, and the token cannot be read at
+    the check: the kept True must not be reused on the strength of the read before the snapshot."""
+    decided = {}
+    for on in (True, False):
+        arm = Arm(tmp_path / str(on), monkeypatch, on=on)
+        assert (arm.sweep(), arm.sweep()) == (0, 0)
+        real_token, real_clock = SearchIndexService._canonical_token, si.clock_state
+        calls = []
+
+        def token(self):
+            calls.append(1)
+            return real_token(self) if len(calls) == 1 else None   # read before the snapshot; unreadable after
+
+        def clocking(conn, arm=arm):
+            with _db(arm.path) as writer:                    # before the snapshot's first read
+                cluster(writer, "tc_hobby", "sourdough / bread")
+            return real_clock(conn)
+        monkeypatch.setattr(SearchIndexService, "_canonical_token", token)
+        monkeypatch.setattr(si, "clock_state", clocking)
+        with stale_stages() as stages:
+            decided[on] = (arm.sweep(), arm.file.exists(), tuple(stages))
+        monkeypatch.setattr(SearchIndexService, "_canonical_token", real_token)
+        monkeypatch.setattr(si, "clock_state", real_clock)
+    assert decided[True] == decided[False] == (1, False, ("interest",))
+
+
+def test_a_sweep_that_could_not_run_keeps_no_verdict(flag, tmp_path, monkeypatch, computed):
+    """Review W5. The files stay (the purge is held off), so the next listing would keep their names."""
+    arm = Arm(tmp_path, monkeypatch, on=True)
+    _warm(arm, computed)
+    monkeypatch.setattr(si, "purge_all", lambda root: 0)
+
+    def broken(self, now):
+        raise sqlite3.OperationalError("disk I/O error")
+    monkeypatch.setattr(SearchIndexService, "_authorities", broken)
+    assert arm.sweep() == 0
+    assert arm.kept == {} and arm.node.index._interest_reuses == {}
+
+
+@pytest.mark.parametrize("setting, every", [(None, 30), ("3", 3), ("1", 1), ("0", 1), ("100000", 360),
+                                            ("thirty", 30)])
+def test_every_nth_sweep_decides_in_full(flag, tmp_path, monkeypatch, computed, setting, every):
+    """Review Q3: a verdict is reused at most every-1 sweeps in a row; the every-th decides in full whatever the tokens
+    say (default 30; at least 1; at most 360; unreadable is the default)."""
+    if setting is None:
+        monkeypatch.delenv(switches.SWEEP_INTEREST_VERDICT_FULL_EVERY.name, raising=False)
+    else:
+        monkeypatch.setenv(switches.SWEEP_INTEREST_VERDICT_FULL_EVERY.name, setting)
+    assert si._interest_full_every() == every
+    if every > 3:
+        return
+    arm = Arm(tmp_path, monkeypatch, on=True)
+    full = []
+    for sweep in range(1, 10):
+        before = computed(arm)
+        assert arm.sweep() == 0
+        if computed(arm) > before:
+            full.append(sweep)
+    assert full == list(range(1, 10, every))
+    assert list(arm.kept) == [arm.file.name]
+
+
+def test_a_read_error_a_warm_verdict_skips_waits_at_most_until_the_next_full_decision(flag, tmp_path, monkeypatch,
+                                                                                    computed):
+    """Review Q3, as ruled: a read error inside the interest decision does not invalidate a kept verdict (with every
+    token unchanged it cannot be a committed change), so a sweep that reuses it keeps the index where main drops it
+    (`member_unavailable`); the next full decision, at most every-1 sweeps later, meets the error and drops it."""
+    monkeypatch.setenv(switches.SWEEP_INTEREST_VERDICT_FULL_EVERY.name, "3")
+    decided = {}
+    for on in (True, False):
+        arm = Arm(tmp_path / str(on), monkeypatch, on=on)
+        assert (arm.sweep(), arm.sweep()) == (0, 0)          # on: a full decision, then a reuse
+        real = interest_index.indexed_current
+
+        def failing(*args, **kwargs):
+            raise sqlite3.OperationalError("disk I/O error")
+        monkeypatch.setattr(interest_index, "indexed_current", failing)
+        monkeypatch.setattr(si, "_shred", lambda path: None)
+        outcome = []
+        for _ in range(2):
+            with stale_stages() as stages:
+                outcome.append((arm.sweep(), tuple(stages)))
+        decided[on] = outcome
+        monkeypatch.setattr(interest_index, "indexed_current", real)
+    assert decided[False] == [(1, ("member_unavailable",)), (1, ("member_unavailable",))]
+    assert decided[True] == [(0, ()), (1, ("member_unavailable",))]

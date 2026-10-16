@@ -100,8 +100,8 @@ V172 = {**V167, P + "ANSWER_TIME_FILL": True}
 #: bound and unbound alike; off reads only 1.5.9's forms). 40 + 1 = 41.
 V176 = {**V172, P + "ANSWER_CITATION_FORMS": True}
 #: Lane NR187 (16 Oct 2026): the daemon sweep reuses an index's last True interest verdict while nothing it reads moved;
-#: off bound and unbound alike, until an independent security review. 41 + 1 = 42.
-V187 = {**V176, P + "SWEEP_INTEREST_VERDICT": False}
+#: off bound and unbound alike. WS0's review (Q3) added how often it decides in full anyway: every 30th sweep. 41 + 2 = 43.
+V187 = {**V176, P + "SWEEP_INTEREST_VERDICT": False, P + "SWEEP_INTEREST_VERDICT_FULL_EVERY": 30}
 TABLE = {**V166, **V187}
 
 
@@ -240,8 +240,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 42
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 41
+    assert len(switches.SWITCHES) == len(TABLE) == 43
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 42
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -289,6 +289,9 @@ def test_the_nr187_sweep_interest_verdict_is_off_bound_or_not_and_on_is_one_envi
     assert switches.on(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.on(name) is True
+    every = P + "SWEEP_INTEREST_VERDICT_FULL_EVERY"
+    assert switches.lookup(every).unbound == switches.lookup(every).bound == V187[every] == 30
+    assert switches.number(every) == 30
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
