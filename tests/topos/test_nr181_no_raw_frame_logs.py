@@ -3,12 +3,15 @@
 A frame from the control plane can carry a recipient's question, an answer or shared records, and the owner's own
 messages travel the same way. Pinned here, with an invented marker string inside each frame or text:
 
-- an invalid frame is logged by its length and the first twelve hex characters of its SHA-256, never quoted;
+- an invalid frame is logged by its length and twelve hex characters of a per-process keyed HMAC-SHA256, never
+  quoted (keyed, so a reader of the log cannot confirm a short guess by hashing it);
 - a handler that raises is logged by the request's type and id, the error's class and the code locations it passed
   through, never the error's text (a validation error repeats its input);
 - ingestion's content preview (`field_preview`, which a relayed `store_message` reaches at INFO) is the same length
   and digest;
-- no logging call on the relay's own paths passes a whole frame, body, payload, question or answer.
+- no logging call on the relay's own paths passes a whole frame, body, payload, question or answer;
+- WS0's review: no piece of eight characters or more of the marker reaches any record, rendered plainly or by the
+  node's JSON formatter with its extras (a slice of a frame, an error text's prefix, a frame in `extra`).
 
 No network, no model, no database of the owner's.
 """
@@ -17,6 +20,8 @@ from __future__ import annotations
 import ast
 import asyncio
 import hashlib
+import hmac
+import importlib
 import json
 import logging
 from pathlib import Path
@@ -25,11 +30,13 @@ import pytest
 
 import topos.control_plane_client as control_plane_client
 from topos.control_plane_client import ControlPlaneClient
+from topos.core import log_fingerprint
 from topos.core.log_fingerprint import DIGEST_HEX, fingerprint
+from topos.core.logging import JsonFormatter
 
 pytestmark = pytest.mark.public
 
-MARKER = "zq-invented-marker-7f3k"
+MARKER = "Kq7Xw2Vp9Lm4Rz8Tn3Jy"   # invented; no run of 8 of it occurs in any other line here (nor in hex)
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -68,15 +75,30 @@ class FakeConnect:
 
 
 def _digest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()[:DIGEST_HEX]
+    """The keyed digest a line carries, for this process's key (read here only to check the line)."""
+    return hmac.new(log_fingerprint._KEY, data, hashlib.sha256).hexdigest()[:DIGEST_HEX]
+
+
+def _pieces(marker: str, size: int = 8):
+    return {marker[i:i + size] for i in range(len(marker) - size + 1)}
+
+
+def assert_no_piece_of(marker: str, rendered: str, size: int = 8):
+    """Not the marker, and not any run of `size` of its characters: a slice of a frame or of an error text is a
+    leak too, and a slice never holds the whole marker."""
+    found = sorted(piece for piece in _pieces(marker, size) if piece in rendered)
+    assert found == [], f"{len(found)} pieces of the marker reached the log"
 
 
 def _everything_logged(records) -> str:
     """Each record's rendered line, its raw arguments and any exception text it would print."""
     parts = []
+    formatter = JsonFormatter()
     for record in records:
         parts.append(record.getMessage())
         parts.append(repr(record.args))
+        parts.append(formatter.format(record))                      # the node's JSON lines, extras included
+        parts.append(repr({key: value for key, value in vars(record).items() if key not in ("exc_info",)}))
         if record.exc_info:
             parts.append(logging.Formatter().formatException(record.exc_info))
         if record.exc_text:
@@ -112,7 +134,7 @@ async def _run_client(monkeypatch, frames, handler):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("as_bytes", [False, True], ids=["text", "bytes"])
 async def test_an_invalid_frame_is_logged_by_length_and_digest_never_quoted(as_bytes, monkeypatch, caplog):
-    invalid = '{"id": "req-invented", "type": "permissions_v2_answer_submit", "payload": {"question": "' + MARKER
+    invalid = MARKER + '{"id": "req-invented", "type": "permissions_v2_answer_submit", "payload": {"q": "' + MARKER
     frame = invalid.encode("utf-8") if as_bytes else invalid
     after = json.dumps({"id": "req-after", "type": "healthcheck", "payload": {}})
     seen = []
@@ -129,25 +151,57 @@ async def test_an_invalid_frame_is_logged_by_length_and_digest_never_quoted(as_b
     assert len(lines) == 1
     encoded = invalid.encode("utf-8")
     assert lines[0].getMessage() == (
-        f"Relay message is not valid JSON: length={len(encoded)} sha256={_digest(encoded)}")
-    assert MARKER not in _everything_logged(caplog.records)
+        f"Relay message is not valid JSON: length={len(encoded)} hmac={_digest(encoded)}")
+    assert_no_piece_of(MARKER, _everything_logged(caplog.records))
 
 
 def test_the_fingerprint_is_length_and_a_short_digest_of_any_value():
-    assert fingerprint("a frame") == f"length=7 sha256={_digest(b'a frame')}"
+    assert fingerprint("a frame") == f"length=7 hmac={_digest(b'a frame')}"
     assert fingerprint(b"a frame") == fingerprint("a frame") == fingerprint(bytearray(b"a frame"))
-    assert fingerprint("é") == f"length=2 sha256={_digest('é'.encode())}"             # bytes as they travel
-    assert fingerprint(None) == f"length=0 sha256={_digest(b'')}"
+    assert fingerprint("é") == f"length=2 hmac={_digest('é'.encode())}"               # bytes as they travel
+    assert fingerprint(None) == f"length=0 hmac={_digest(b'')}"
     assert fingerprint("\ud800" + MARKER).startswith("length=")                          # a lone surrogate
     for value in ({"q": MARKER}, [MARKER], 12345, object()):
         line = fingerprint(value)
-        assert MARKER not in line and line.startswith("length=") and len(line.split("sha256=")[1]) == DIGEST_HEX
+        assert MARKER not in line and line.startswith("length=") and len(line.split("hmac=")[1]) == DIGEST_HEX
 
     class Unreadable:
         def __repr__(self):
             raise RuntimeError(MARKER)
 
     assert fingerprint(Unreadable()) == "length=? type=Unreadable"
+
+
+def test_the_digest_is_keyed_so_a_short_guess_cannot_be_confirmed_from_the_log():
+    """WS0 review: with a plain SHA-256, hashing "ok" or a six-digit code and comparing would confirm it."""
+    for guess in ("ok", "123456", "yes"):
+        line = fingerprint(guess)
+        plain = hashlib.sha256(guess.encode()).hexdigest()
+        assert plain[:DIGEST_HEX] not in line and plain not in line
+        assert line == fingerprint(guess)                     # the same text, the same digest, within one run
+    assert log_fingerprint._KEY.hex() not in fingerprint(log_fingerprint._KEY)
+    assert len(log_fingerprint._KEY) == 32
+
+
+def test_each_process_makes_its_own_key(monkeypatch):
+    """The key is made at import (`secrets`), not fixed in the source: a fresh import has another one."""
+    kept = log_fingerprint._KEY
+    before = fingerprint("123456")
+    importlib.reload(log_fingerprint)
+    try:
+        assert log_fingerprint._KEY != kept and fingerprint("123456") != before
+    finally:
+        monkeypatch.setattr(log_fingerprint, "_KEY", kept)
+    assert fingerprint("123456") == before
+
+
+def test_the_piece_check_finds_a_slice_and_the_formatter_shows_extras():
+    """Positive controls for the two WS0 shapes: a slice of the marker, and a frame carried in `extra`."""
+    with pytest.raises(AssertionError):
+        assert_no_piece_of(MARKER, "head=" + MARKER[:9])
+    record = logging.LogRecord("x", logging.WARNING, __file__, 1, "line", (), None)
+    record.extra = {"frame": MARKER}
+    assert MARKER in _everything_logged([record])
 
 
 # -- a handler's error (control_plane_client.py:782 before NR181) -----------------------------------------------------
@@ -172,7 +226,7 @@ async def test_a_handlers_error_is_logged_by_class_and_location_never_its_text(c
     assert text.startswith("Handler raised exception: type=query id=req-invented error=ValueError\n")
     assert "_raise_with_the_frame_in_its_text" in text and "test_nr181_no_raw_frame_logs.py" in text
     assert line.exc_info is None
-    assert MARKER not in _everything_logged(caplog.records)
+    assert_no_piece_of(MARKER, _everything_logged(caplog.records))
     # What goes back to the control plane is not a log line and is unchanged here (NR181 report, backlog).
     assert json.loads(ws.sent[0])["status"] == "error"
 
@@ -198,8 +252,8 @@ async def test_a_relayed_store_message_never_logs_its_content(monkeypatch, caplo
         response = await messages.handle_store_message(message)
     assert response["status"] == "ok"
     rendered = _everything_logged(caplog.records)
-    assert MARKER not in rendered
-    assert f"length={len(content.encode())} sha256={_digest(content.encode())}" in rendered
+    assert_no_piece_of(MARKER, rendered)
+    assert f"length={len(content.encode())} hmac={_digest(content.encode())}" in rendered
 
 
 # -- no whole frame reaches a logging call on the relay's paths -------------------------------------------------------

@@ -8,7 +8,8 @@ from ..core.log_fingerprint import fingerprint
 
 
 def field_preview(value: Any, max_len: int = 100) -> str:
-    """`length=<bytes> sha256=<12 hex>` of the content, for any field type; never raises.
+    """`length=<bytes> hmac=<12 hex>` of the content (keyed per process, `core.log_fingerprint`), for any field type;
+    never raises.
 
     NR181: this was the content's first `max_len` characters. A message the owner's app sends through the relay
     (`store_message`) reaches `ingest_ui_payload`, which logs it at INFO, so a hundred characters of every captured
