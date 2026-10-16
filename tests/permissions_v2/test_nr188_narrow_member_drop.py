@@ -744,3 +744,83 @@ def test_the_sub_reason_reaches_the_timing_line(node, caplog, monkeypatch):
     lines = [record.getMessage() for record in caplog.records
              if record.name == LOGGER and " stage=index_stale " in record.getMessage()]
     assert len(lines) == 1 and " class=dependencies sub=conversation_context" in lines[0]
+
+
+# --- the live shape: an AI-chat share (an imported ChatGPT export) under an active Off-limits boundary ---------------
+
+from tests.ingestion.test_ai_chat_writer_class import captured_jobs  # noqa: E402,F401 (fixture)
+from tests.permissions_v2.test_fresh_node_message_tables import (  # noqa: E402,F401 (fixture)
+    EXPORT, NOW as AI_NOW, OWNER as AI_OWNER, _bound, _own_pass, _share_policy, ai_chat_only)
+
+
+@pytest.fixture
+def ai_share(ai_chat_only):
+    """One assessed owner line in one imported chat, shared, with an Off-limits entry no row mentions (so the member
+    carries its row as a dependency, as on the owner's node)."""
+    from tests.permissions_v2.message_search_harness import Node
+    from tests.permissions_v2.test_ingest_provenance import owner as owner_as
+    from types import SimpleNamespace
+    db = ai_chat_only.db
+    db.execute("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name) "
+               "VALUES('protected-entity','person','Mara Example','mara example')")
+    db.execute("INSERT INTO entity_blackholes(blackhole_id,entity_id,canonical_name,normalized_name,rebuild_state) "
+               "VALUES('bh','protected-entity','Mara Example','mara example','complete')")
+    db.commit()
+    resolver, reviews = _bound(ai_chat_only)
+    assert _own_pass(resolver, reviews)["assessed"] == 1
+    share = Node(SimpleNamespace(resolver=resolver, reviews=reviews, path=resolver.path), ai_chat_only.root / "share",
+                 model=None, search_raw=_share_policy(), now=AI_NOW)
+    with owner_as(actor=AI_OWNER):
+        assert share.index.rebuild("grant-search", now=AI_NOW) == {"state": "ready", "member_count": 1}
+    share.db = db
+    return share
+
+
+def _ai(share, sql, args=()):
+    share.db.execute(sql, args)
+    share.db.commit()
+
+
+NEW_TURN = ("INSERT INTO ai_chat_messages(message_id, conversation_id, sender_type, sender_id, event_at, content, "
+            "sequence, source_id) VALUES ('m-later','chatgpt:thread-file','human',NULL,'2026-09-01T10:00:09Z',"
+            "'and one more invented question',2,?)")
+
+
+def test_ai_chat_a_new_owner_turn_is_attributed_and_main_drops_the_index(ai_share, caplog):
+    _ai(ai_share, NEW_TURN, (EXPORT,))
+    assert _sweep(ai_share, caplog) == ["message search index stale (classification_context)",
+                                        "message search index member drift (classification_context: neighbour_inserted)"]
+    assert not _path(ai_share).exists()
+
+
+def test_ai_chat_a_new_owner_turn_withholds_the_line_next_to_it(ai_share, caplog, narrow):
+    _ai(ai_share, NEW_TURN, (EXPORT,))
+    assert _sweep(ai_share, caplog) == ["message search index member drift (classification_context: neighbour_inserted)",
+                                        "message search index narrowed (1 withheld)"]
+    assert _path(ai_share).exists() and _members(ai_share) == set()
+    output, refused = ai_share.search_request("tide pools talk", k=10)
+    assert refused is None and output["records"] == []          # served, holding nothing it may not
+
+
+def test_ai_chat_a_rewritten_stored_row_still_drops_the_whole_index(ai_share, caplog, narrow):
+    """A re-sent row whose stored columns moved (here its metadata) is a change to indexed evidence: its dependency
+    moved, and so did its own fingerprint, which no narrowing forgives."""
+    _ai(ai_share, "UPDATE ai_chat_messages SET metadata_json='{\"captured\": 2}' WHERE message_id='m-line'")
+    assert _sweep(ai_share, caplog) == ["message search index member drift (dependencies: row_revision)",
+                                        "message search index stale (fingerprint)"]
+    assert not _path(ai_share).exists()
+
+
+def test_ai_chat_a_chat_row_change_is_the_rows_binding(ai_share, caplog):
+    _ai(ai_share, "UPDATE ai_chat_conversations SET title='an invented other title'")
+    assert _sweep(ai_share, caplog) == ["message search index stale (dependencies)",
+                                        "message search index member drift (dependencies: row_binding)"]
+
+
+def test_ai_chat_a_chat_row_change_withholds_its_lines(ai_share, caplog, narrow):
+    """The chat's own row is bound onto each line at load and is its conversation context: both moved alike, so the
+    line is withheld (its own drop), the rest of the share would keep serving."""
+    _ai(ai_share, "UPDATE ai_chat_conversations SET title='an invented other title'")
+    assert _sweep(ai_share, caplog) == ["message search index member drift (dependencies: row_binding)",
+                                        "message search index narrowed (1 withheld)"]
+    assert _members(ai_share) == set()
