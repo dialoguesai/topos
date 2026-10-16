@@ -40,6 +40,12 @@ own. So the home chat series is a *sample* of recent turns bucketed by the sessi
 ``updated_at_ms``, not a census, and this script says so in its output rather than
 letting a p95 imply otherwise.
 
+A FOURTH SERIES, ``home_chat_turns`` (HT lane, 15 Oct 2026): the per-turn rows the app sends after each owner
+home-chat turn, in the node table ``home_chat_turn_timings``. Unlike the ``[latency]`` sample above, it is a census
+with a TTFT, a model and a route per turn, so it is grouped per UTC day x model x route with nearest-rank p50 and
+p90. The node's summary handler (``topos/home_chat/turn_timings.py``) computes the same groups, and
+``tests/topos/test_home_chat_turn_timings.py`` holds the two readers to the same numbers.
+
 READ ONLY. Opened ``mode=ro`` with ``PRAGMA query_only = ON``. It never writes to a node
 database, and it exits 0 with an empty report rather than failing when a table is absent.
 """
@@ -350,8 +356,50 @@ def engine_query_durations(
 # --- report ---------------------------------------------------------------------------
 
 
-def build_report(conn: sqlite3.Connection, *, days: int, stale_minutes: int) -> Dict[str, Any]:
-    now = datetime.now(timezone.utc)
+#: The outcomes a turn row can carry (topos/home_chat/turn_timings.py ``OUTCOMES``).
+TURN_OUTCOMES = ("ok", "fallback", "timeout", "abort", "error")
+
+
+def _turn_group(rows: Sequence[Tuple[Any, ...]]) -> Dict[str, Any]:
+    ttft = [r[1] for r in rows if r[1] is not None]
+    total = [r[2] for r in rows]
+    n = len(rows)
+    outcomes = {name: sum(1 for r in rows if r[3] == name) for name in TURN_OUTCOMES}
+    return {
+        "n": n,
+        "ttft_n": len(ttft),
+        "ttft_p50_ms": percentile(ttft, 0.50),
+        "ttft_p90_ms": percentile(ttft, 0.90),
+        "total_p50_ms": percentile(total, 0.50),
+        "total_p90_ms": percentile(total, 0.90),
+        "outcomes": outcomes,
+        "timeout_rate": round(outcomes["timeout"] / n, 3) if n else 0.0,
+    }
+
+
+def home_chat_turn_timings(conn: sqlite3.Connection, since_ms: int, until_ms: int) -> Dict[str, Any]:
+    """One row per owner home-chat turn: p50/p90 per UTC day x model x route, and over the whole window."""
+    source = "home_chat_turn_timings (one content-free row per owner home-chat turn)"
+    if not _table_exists(conn, "home_chat_turn_timings"):
+        return {"samples": 0, "groups": [], "overall": _turn_group([]), "source": source}
+    rows = conn.execute(
+        "SELECT submitted_at, ttft_ms, total_ms, outcome, model, route FROM home_chat_turn_timings"
+        " WHERE submitted_at >= ? AND submitted_at <= ?",
+        (since_ms, until_ms + 86_400_000),
+    ).fetchall()
+    by_group: Dict[Tuple[str, str, str], List[Tuple[Any, ...]]] = {}
+    for row in rows:
+        day = datetime.fromtimestamp(row[0] / 1000, timezone.utc).strftime("%Y-%m-%d")
+        by_group.setdefault((day, row[4] or "unknown", row[5] or "unknown"), []).append(row)
+    groups = [{"day": d, "model": m, "route": rt, **_turn_group(g)} for (d, m, rt), g in sorted(by_group.items())]
+    groups.sort(key=lambda g: g["day"], reverse=True)
+    return {"samples": len(rows), "groups": groups, "overall": _turn_group(rows), "source": source}
+
+
+def build_report(
+    conn: sqlite3.Connection, *, days: int, stale_minutes: int, now_ms: Optional[int] = None
+) -> Dict[str, Any]:
+    now = datetime.now(timezone.utc) if now_ms is None else datetime.fromtimestamp(now_ms / 1000, timezone.utc)
     since = now - timedelta(days=days)
     since_ms = int(since.timestamp() * 1000)
 
@@ -382,6 +430,7 @@ def build_report(conn: sqlite3.Connection, *, days: int, stale_minutes: int) -> 
             leg: summarize(values) for leg, values in sorted(legs.items()) if leg != "turn"
         },
         "synthesis_budget_vs_cost": home_chat_synthesis_budgets(conn, since_ms),
+        "home_chat_turns": home_chat_turn_timings(conn, since_ms, int(now.timestamp() * 1000)),
         "engine_per_scope_query": {
             **summarize(artifacts),
             "unmeasured_rows": unmeasured,
@@ -432,6 +481,18 @@ def print_report(report: Dict[str, Any]) -> None:
             print(
                 f"    {row['leg']:<16} max_tokens={row['max_tokens']:<5} "
                 f"parts={row['parts']:<3} elapsed={row['elapsed_ms']} ms"
+            )
+
+    turns = report["home_chat_turns"]
+    print()
+    print(f"  home chat turns (one row per turn)  samples={turns['samples']}")
+    if turns["groups"]:
+        print("    day         model                          route    n   ttft p50/p90        total p50/p90     timeouts")
+        for g in turns["groups"][:40]:
+            print(
+                f"    {g['day']}  {g['model'][:30]:<30} {g['route']:<7} {g['n']:>3}  "
+                f"{_fmt(g['ttft_p50_ms']):>8}/{_fmt(g['ttft_p90_ms']):<9} "
+                f"{_fmt(g['total_p50_ms']):>8}/{_fmt(g['total_p90_ms']):<9} {g['timeout_rate']:.3f}"
             )
 
     engine = report["engine_per_scope_query"]
