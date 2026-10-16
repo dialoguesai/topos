@@ -13,26 +13,30 @@ import sqlite3
 import unicodedata
 from dataclasses import dataclass
 
-from .answer_checks import (_CITATION, _SCAFFOLD_FOLDS, _TOKEN, FORM_WORDS, INSTRUCTION_WORDS, TEMPLATE_VERSION,
+from .answer_checks import (_CITATION, _SCAFFOLD_FOLDS, _TOKEN, DENSE_TEMPLATES, FORM_WORDS, INSTRUCTION_WORDS,
+    TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE, TEMPLATE_VERSION_DENSE_CITE_CAP, TEMPLATE_VERSION_DENSE_ON_QUESTION,
+    TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP,
     _forms_within_one_suffix, _within_one_suffix, citation_numbers, copied_sentence, echoes_protected_word,
     echoes_question_only_word, normalize_citations, post_check_citations, protected_question_words, question_anchors,
     question_only_anchors, scrub_sentences, split_sentences, _stem, _tokens)
-from .answer_protocol import AnswerOnly, AnswerWithSources, NoAnswer, VERSION
+from .answer_protocol import K_ANSWER, K_ANSWER_V4, AnswerOnly, AnswerWithSources, NoAnswer, VERSION
 from .canonical import PolicyError
 from . import switches
 
 # AQ158 V3: the most released items the model may see, whatever the switch says. The grant's max_k (the owner's
 # "Items per answer", MK165) bounds retrieval below this when it is smaller; the with-sources body's `records` cap
-# (answer_protocol.K_ANSWER, 16 from A2A-4 amendment 13; 8 for an asker that accepts only the older protocol, which
-# retrieval honours through `records_cap`) is the wire's: an answer citing more distinct items than that is
-# `body_invalid`, counted and never sent.
-K_ANSWER_CEILING = 24
+# (answer_protocol.records_cap of the version the asker accepts: 30 for answer protocol 4, `K_ANSWER_V4`; 16 for 3,
+# from A2A-4 amendment 13; 8 for an asker that says nothing) is the wire's, and retrieval honours it through
+# `records_cap`, so no body past it is written. 30 from answer protocol 4 (24 before), so that the switch can reach
+# a v4 asker's cap.
+K_ANSWER_CEILING = 30
 
 
 def k_answer(env=None) -> int:
-    """Released items the answer model sees: `ANSWER_ITEMS`, clamped to the ceiling. The default is 8
-    (`answer_protocol.K_ANSWER_LEGACY`); 16 (`answer_protocol.K_ANSWER`, the wire's cap of cited records) is a
-    setting until its battery clears it (IN167, 13 Oct 2026)."""
+    """Released items the answer model sees: `ANSWER_ITEMS`, clamped to the ceiling (30). The default is 8
+    (`answer_protocol.K_ANSWER_LEGACY`); 16 (`answer_protocol.K_ANSWER`, a v3 asker's cap of cited records) is a
+    setting until its battery clears it (IN167, 13 Oct 2026), and so is 30 (`answer_protocol.K_ANSWER_V4`, a v4
+    asker's)."""
     return max(1, min(K_ANSWER_CEILING, switches.number(switches.ANSWER_ITEMS, env)))
 
 SYSTEM_PROMPT = (
@@ -50,6 +54,106 @@ SYSTEM_PROMPT = (
     "A citation alone is not an answer. "
     "Do not invent a citation. If the items do not establish an answer, write nothing. Do not add a source list."
 )
+# Lane GD-A (15 Oct 2026, grantee density): template v9 (`TEMPLATE_VERSION_DENSE`), written while ANSWER_DENSE is on.
+# The owner asked for multi-paragraph answers of seven or more sentences, dense with what the items say; 1.5.9's
+# median was four kept sentences over six cited items. Only the length sentence changes; every other instruction
+# (first person, intentions are not deeds, a question item is only asked, paraphrase, no source list) is v8's, word
+# for word. Sixteen is the wire's cap on cited records (`answer_protocol.K_ANSWER`): past it the body is `body_invalid`.
+LENGTH_SENTENCE = ("If the items establish an answer, write up to eight short sentences in one or two short paragraphs, "
+                   "in your own words; each sentence states one supported fact and ends with the numbers of the items "
+                   "that support it, such as [1] or [1, 2]. ")
+LENGTH_SENTENCE_DENSE = (
+    "If the items establish an answer, write seven to twelve sentences in two or three paragraphs of prose, with a "
+    "blank line between paragraphs and no headings or lists, in your own words; each sentence states one supported "
+    "fact, from different items where you can, and ends with the numbers of the items that support it, such as [1] or "
+    "[1, 2]. Cite at most sixteen different items. When the items support fewer facts, write fewer sentences: never "
+    "repeat a fact or add one the items do not state. ")
+SYSTEM_PROMPT_DENSE = SYSTEM_PROMPT.replace(LENGTH_SENTENCE, LENGTH_SENTENCE_DENSE)
+if SYSTEM_PROMPT_DENSE == SYSTEM_PROMPT or SYSTEM_PROMPT.count(LENGTH_SENTENCE) != 1:
+    raise RuntimeError("the v9 template must replace exactly v8's length sentence")
+# Lane GD-A′ (15 Oct 2026, grantee density round 2): template v10 (`TEMPLATE_VERSION_DENSE_ON_QUESTION`), written
+# while ANSWER_DENSE and ANSWER_DENSE_ON_QUESTION are both on. On the density fixture (synthetic owner), when the
+# items did not answer the question, v9's "seven to twelve sentences" made the 9B writer pad with unrelated items
+# presented as the answer: a health question was answered with a newsletter and a workshop, an expired-audit
+# question with seed-library notes. Only v9's length sentence changes: sentences that answer the question, as many
+# as the items support, up to twelve, in one to three paragraphs. Every other instruction is v9's (so v8's), word
+# for word, and so are the budget, the paragraphs and the receipt's keys (`DENSE_TEMPLATES`).
+LENGTH_SENTENCE_DENSE_ON_QUESTION = (
+    "Write only sentences that answer the question; leave out items that are about something else. If the items "
+    "establish an answer, write as many sentences as they support, up to twelve, in one to three paragraphs of "
+    "prose, with a blank line between paragraphs and no headings or lists, in your own words; each sentence states "
+    "one supported fact, from different items where you can, and ends with the numbers of the items that support "
+    "it, such as [1] or [1, 2]. Cite at most sixteen different items. Fewer sentences are correct when few items "
+    "answer the question: never repeat a fact, add one the items do not state, or present an item that does not "
+    "answer the question as if it did. ")
+SYSTEM_PROMPT_DENSE_ON_QUESTION = SYSTEM_PROMPT_DENSE.replace(LENGTH_SENTENCE_DENSE, LENGTH_SENTENCE_DENSE_ON_QUESTION)
+if SYSTEM_PROMPT_DENSE_ON_QUESTION == SYSTEM_PROMPT_DENSE or SYSTEM_PROMPT_DENSE.count(LENGTH_SENTENCE_DENSE) != 1:
+    raise RuntimeError("the v10 template must replace exactly v9's length sentence")
+# Answer protocol 4 (15 Oct 2026): templates v11 (`TEMPLATE_VERSION_DENSE_CITE_CAP`) and v12
+# (`TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP`) are v9 and v10 with the cite sentence naming the job's own cap of
+# cited records (`answer_protocol.records_cap` of the version its asker accepts: thirty for 4) in place of sixteen.
+# Only that sentence changes; every other word is v9's or v10's. Only a job whose asker parses more than sixteen is
+# written with them (`writer_template`), so the prompt of a v3 or older job (v8, v9 or v10) is byte for byte as before.
+CITE_SENTENCE = "Cite at most sixteen different items."
+_NUMBER_WORDS = {K_ANSWER: "sixteen", K_ANSWER_V4: "thirty"}
+
+
+def cite_sentence(records_cap: int) -> str:
+    """The dense templates' cite sentence for a job whose asker parses `records_cap` cited records: v9's and v10's
+    at sixteen, "Cite at most thirty different items." at thirty (answer protocol 4)."""
+    return f"Cite at most {_NUMBER_WORDS.get(records_cap, str(records_cap))} different items."
+
+
+SYSTEM_PROMPT_DENSE_CITE_CAP = SYSTEM_PROMPT_DENSE.replace(CITE_SENTENCE, cite_sentence(K_ANSWER_V4))
+if (cite_sentence(K_ANSWER) != CITE_SENTENCE or SYSTEM_PROMPT_DENSE_CITE_CAP == SYSTEM_PROMPT_DENSE
+        or SYSTEM_PROMPT_DENSE.count(CITE_SENTENCE) != 1 or LENGTH_SENTENCE_DENSE.count(CITE_SENTENCE) != 1):
+    raise RuntimeError("the v11 template must replace exactly v9's cite sentence")
+SYSTEM_PROMPT_DENSE_ON_QUESTION_CITE_CAP = SYSTEM_PROMPT_DENSE_ON_QUESTION.replace(CITE_SENTENCE,
+                                                                                   cite_sentence(K_ANSWER_V4))
+if (SYSTEM_PROMPT_DENSE_ON_QUESTION_CITE_CAP == SYSTEM_PROMPT_DENSE_ON_QUESTION
+        or SYSTEM_PROMPT_DENSE_ON_QUESTION.count(CITE_SENTENCE) != 1
+        or LENGTH_SENTENCE_DENSE_ON_QUESTION.count(CITE_SENTENCE) != 1):
+    raise RuntimeError("the v12 template must replace exactly v10's cite sentence")
+# Each writer template's system prompt, by the version the prompt, the writer and the receipt say; v11 and v12 at a
+# v4 asker's cap (`system_prompt` writes them at any other).
+SYSTEM_PROMPTS = {TEMPLATE_VERSION: SYSTEM_PROMPT, TEMPLATE_VERSION_DENSE: SYSTEM_PROMPT_DENSE,
+                  TEMPLATE_VERSION_DENSE_ON_QUESTION: SYSTEM_PROMPT_DENSE_ON_QUESTION,
+                  TEMPLATE_VERSION_DENSE_CITE_CAP: SYSTEM_PROMPT_DENSE_CITE_CAP,
+                  TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP: SYSTEM_PROMPT_DENSE_ON_QUESTION_CITE_CAP}
+#: The templates whose cite sentence names the job's cap, by the template each is v9's or v10's word for word.
+CITE_CAP_TEMPLATES = {TEMPLATE_VERSION_DENSE_CITE_CAP: TEMPLATE_VERSION_DENSE,
+                      TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP: TEMPLATE_VERSION_DENSE_ON_QUESTION}
+
+
+def dense_template() -> bool:
+    """GD-A: whether a new prompt is written with template v9 (ANSWER_DENSE). Read once per job, at `build_prompt`:
+    the prompt then carries its own template, and the output budget, the layout and the receipt follow the prompt."""
+    return switches.on(switches.ANSWER_DENSE)
+
+
+def writer_template(records_cap: int | None = None) -> str:
+    """The writer template a new prompt is written with, read once per job at `build_prompt`: v8 as in 1.5.9, v9
+    while ANSWER_DENSE is on (GD-A), v10 while ANSWER_DENSE_ON_QUESTION is on as well (GD-A′).
+    ANSWER_DENSE_ON_QUESTION alone changes nothing.
+
+    `records_cap` (answer protocol 4): the cited records the job's asker parses. Above sixteen (a v4 asker), v11 in
+    place of v9 and v12 in place of v10; sixteen or fewer, or None (a caller from before 4), v9 and v10 as before.
+    v8 has no cite sentence and is v8 for every asker."""
+    if not dense_template():
+        return TEMPLATE_VERSION
+    wide = records_cap is not None and records_cap > K_ANSWER
+    if switches.on(switches.ANSWER_DENSE_ON_QUESTION):
+        return TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP if wide else TEMPLATE_VERSION_DENSE_ON_QUESTION
+    return TEMPLATE_VERSION_DENSE_CITE_CAP if wide else TEMPLATE_VERSION_DENSE
+
+
+def system_prompt(template: str, records_cap: int | None = None) -> str:
+    """The writer's system text for `template`: v11 and v12 name `records_cap` in their cite sentence (a v4 asker's
+    thirty when it is None); every other template's text is fixed."""
+    base = CITE_CAP_TEMPLATES.get(template)
+    if base is None or records_cap is None:
+        return SYSTEM_PROMPTS[template]
+    return SYSTEM_PROMPTS[base].replace(CITE_SENTENCE, cite_sentence(records_cap))
 
 
 @dataclass(frozen=True)
@@ -88,6 +192,23 @@ class Prompt:
     time_scope: object | None = None
     time_widened: bool = False
     time_line: str = ""
+    # GD-A: the writer template this prompt was written with (v8, or v9 while ANSWER_DENSE is on, or v10 while
+    # ANSWER_DENSE_ON_QUESTION is on as well, GD-A′). A dense template's answer (v9, v10) keeps the writer's
+    # paragraph breaks (`close_answer`); v8's is one kept sentence per line, as in 1.5.9.
+    template: str = TEMPLATE_VERSION
+    # GD-L: the name terms that no entity, contact or Off-limits entry on this node carries (`node_name_words`), that
+    # are no word of the owner's (their own names, the account's words, the owner words) and that stand in no name
+    # with such a word (`_name_runs`). While ANSWER_NAME_ONE_ITEM and the support judge are on, one cited item has to
+    # carry all of them, not every one (`_cites_question_subject`). Empty while either switch is off, and when the
+    # people, the node's names or the owner's names could not be read: every name then binds in every cited item.
+    one_item_names: frozenset[str] = frozenset()
+    # Answer protocol 4: the cited records the job's asker parses, as `build_prompt` was given it (None: a caller from
+    # before 4). It chose the template (v11 or v12 above sixteen) and sets the writer's context window
+    # (`answer_release.answer_num_ctx`). Never in the prompt's text beyond the cite sentence.
+    records_cap: int | None = None
+    # GD-L security review, M2: the known people's words (`people_words`), carried only beside `one_item_names`. A
+    # sentence citing an item that lacks a loosened name and names one of them, capitalised, keeps the every-item rule.
+    one_item_people: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -113,6 +234,8 @@ class CheckedAnswer:
     dropped_out_of_scope: int = 0
     # NR179 G2: sentences dropped unjudged because the judge's time reserve ran out (`JudgeOutOfTime`).
     dropped_unjudged: int = 0
+    # Answer protocol 4: kept sentences dropped from the end so the body fits its asker's caps (`close_answer`'s `fits`).
+    dropped_to_fit: int = 0
 
 
 def _clip(content: str, limit: int = 420) -> str:
@@ -276,6 +399,48 @@ def people_words(conn) -> frozenset[str]:
     return frozenset(people)
 
 
+def owner_name_words(conn) -> frozenset[str] | None:
+    """GD-L: the owner's own name words (`_parties`' first set: the self entity the owner attested and the card it
+    links), exact and case-folded, whether or not another party also carries them. A name of the owner's never takes
+    the one-item rule (`Prompt.one_item_names`). None when the store cannot be read: then no name takes it.
+
+    Security review, finding 5: a failed identity read (`attested_subjects` refusing) leaves `_parties` no self row,
+    so the owner's names came back empty, not unreadable, and the loosening stayed on. Empty is None here: a node
+    that cannot say who its owner is loosens nothing."""
+    try:
+        own, _others, _people = _parties(conn)
+    except sqlite3.Error:
+        return None
+    return frozenset(own) or None
+
+
+def node_name_words(conn) -> frozenset[str] | None:
+    """GD-L security review, M3: every word anything on this node is named by, exact and case-folded. Every entity's
+    name and aliases of any type (person, organisation, project, topic, place, claim), self row or not, attested or
+    not; every contact's display name and handles, an importer's self card included; every Off-limits entry. A name
+    loosens (`Prompt.one_item_names`) only when it is none of these. An address is read whole, its words included
+    (`_name_words` drops it). None when the store cannot be read: then no name loosens."""
+    def words(value) -> set[str]:
+        return ({word for word in _tokens(value) if len(word) >= 2 and not word.isdigit()}
+                if isinstance(value, str) else set())
+    try:
+        tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        found: set[str] = set()
+        if "entities" in tables:
+            for name, aliases in conn.execute("SELECT canonical_name, aliases_json FROM entities"):
+                found.update(*(words(value) for value in (name, *_json_strings(aliases))))
+        if "contacts" in tables:
+            for name, handles in conn.execute("SELECT display_name, known_usernames_json FROM contacts"):
+                found.update(*(words(value) for value in (name, *_json_strings(handles))))
+        if "entity_blackholes" in tables:
+            for name, normalized, aliases in conn.execute(
+                    "SELECT canonical_name, normalized_name, aliases_json FROM entity_blackholes"):
+                found.update(*(words(value) for value in (name, normalized, *_json_strings(aliases))))
+    except sqlite3.Error:
+        return None
+    return frozenset(found)
+
+
 # Round 3, M1, and round 4, U1: the words that start a clause without being a name. Where a clause starts, a capitalised
 # word binds as a name only when it is a known person's word or is not on this list. Question words and auxiliaries,
 # verbs that open a request, interjections and greetings, pronouns and possessives, time and sequence words. Closed and
@@ -357,6 +522,43 @@ def _positional_capital(folded: str) -> bool:
 GIVEN_NAME_FUNCTION_WORDS = frozenset({"an", "can", "do", "my", "so"})
 
 
+# Lane GD-B (15 Oct 2026, grantee density): closed classes of capitalised words that name nobody. On the synthetic
+# grantee fixture the name rule bound "October", "Monday", "AI", "Q4" and a clause word after a comma ("As"), and then
+# required each in every item a sentence cited, so supported sentences dropped as off-subject. Switch
+# ANSWER_NAME_CLASSES (on); off reads every word as 1.5.9 did. A known person's word always binds, whatever its class.
+WEEKDAYS = frozenset({"monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"})
+# A month that is also a common given name names a month only where a time word or a day number says so.
+MONTHS = frozenset({"january", "february", "march", "july", "september", "october", "november", "december"})
+GIVEN_NAME_MONTHS = frozenset({"april", "may", "june", "august"})
+_MONTH_LEAD_WORDS = frozenset({"in", "on", "by", "since", "until", "till", "during", "before", "after", "this",
+                               "last", "next", "of", "early", "late", "mid", "from", "through", "every", "each"})
+
+
+def _names_nobody(word: str, folded: str, text: str, start: int, end: int, before: str, people: frozenset[str]) -> bool:
+    """A capitalised question word of a closed non-person class (lane GD-B), unless a known person carries it.
+
+    Weekday names; month names (April, May, June and August only after a time word, "in June", or before a day
+    number, "June 3": otherwise "What has June been doing?" still binds); a code in capitals with a digit ("Q4") or
+    of two letters ("AI", "UX"); and, right after a comma, a closed function word ("..., as ...", "..., but ...")
+    exactly as where a clause starts. A name after a comma ("Tell me, Ivo, ...") still binds: it is no function
+    word. Any other capitalised word binds as before, an unknown name included."""
+    if folded in people or not switches.on(switches.ANSWER_NAME_CLASSES):
+        return False
+    if folded in WEEKDAYS or folded in MONTHS:
+        return True
+    if folded in GIVEN_NAME_MONTHS:
+        previous = re.findall(r"[^\W_]+", before)
+        after = text[end:].lstrip()
+        return bool((previous and previous[-1].casefold() in _MONTH_LEAD_WORDS) or (after[:1].isdigit()))
+    # A code: letters in capitals with a digit ("Q4", "H1", "2FA"), or a two-letter acronym ("AI", "UX"). A longer
+    # word in capitals still binds: "TOPOS" or "IVO" may be a product or a person the items never mention, and the
+    # must-abstain cases (AR152, R-RULES M1) rest on it.
+    if word.isupper() and ((any(ch.isdigit() for ch in word) and any(ch.isalpha() for ch in word)) or
+                           (len(word) == 2 and word.isalpha())):
+        return True
+    return bool(before) and before[-1] == "," and folded in FUNCTION_WORDS and folded not in GIVEN_NAME_FUNCTION_WORDS
+
+
 def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[str] = frozenset(),
                 labels: frozenset[str] = frozenset()) -> frozenset[str]:
     """Another person's name binds at any length (BL-146 round 2; round 3, M1).
@@ -383,6 +585,8 @@ def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[st
         if word[0].isupper():
             if starts and _positional_capital(folded):
                 continue
+            if _names_nobody(word, folded, text, match.start(), match.end(), before, people):
+                continue
             # Where a clause starts, a capitalised word is a name only when it is a known person's word or is not a
             # common opener ("Ivo: ..." binds, "Hey, ..." does not; round 4, U1). Elsewhere it always is: "What has
             # Will done?". Names are exact words, never the fold (round 4, N2).
@@ -397,6 +601,42 @@ def _name_terms(question: str, owner_words: frozenset[str], people: frozenset[st
                 continue
             found.add(folded)
     return frozenset(found)
+
+
+# GD-L security review, M1: what may stand between two words of one name. Spaces, a hyphen or dash, an apostrophe
+# ("O'Rourke"), a full stop ("Lena B. Ortiz"), a comma ("Ortiz, Lena") or an underscore. A run that joins two names
+# only binds more words, never fewer.
+_NAME_JOIN = re.compile(r"[\s\-\u2010-\u2015'\u2018\u2019.,_]*")
+
+
+def _name_runs(question: str, members: frozenset[str]) -> tuple[frozenset[str], ...]:
+    """GD-L security review, M1 (a name is a unit): the question's names, each as the set of its words, exact and
+    case-folded. A run is adjacent words with only `_NAME_JOIN` between them, each either a word of `members` (the
+    question's name terms and the owner's words, in either case) or a capitalised word that does not open a clause
+    as a common opener (`SENTENCE_STARTERS`). "What has Lena Ortiz done?" carries one name, {lena, ortiz}; "Pella
+    and Orrin" two. The caller binds every word of a run in every cited item when any word of it is known."""
+    text = unicodedata.normalize("NFKC", question)
+    runs: list[frozenset[str]] = []
+    current: set[str] = set()
+    end = 0
+    for match in _TOKEN.finditer(text):
+        word = match.group(0)
+        folded = word.casefold()
+        before = text[:match.start()].rstrip()
+        starts = not before or before[-1] in ".!?:;\"“”'‘’("
+        if not (folded in members or (word[0].isupper() and not (starts and folded in SENTENCE_STARTERS))):
+            if current:
+                runs.append(frozenset(current))
+            current = set()
+            continue
+        if current and not _NAME_JOIN.fullmatch(text[end:match.start()]):
+            runs.append(frozenset(current))
+            current = set()
+        current.add(folded)
+        end = match.end()
+    if current:
+        runs.append(frozenset(current))
+    return tuple(runs)
 
 
 def _clause_openers(question: str, people: frozenset[str] = frozenset()) -> frozenset[str]:
@@ -564,7 +804,9 @@ def _domain_evidence(domains) -> str:
 def build_prompt(question: str, records: list, *, precision: str, owner_words: frozenset[str] = frozenset(),
                  item_domains=None, people: frozenset[str] = frozenset(), labels: frozenset[str] = frozenset(),
                  shared_owner_words: frozenset[str] = frozenset(), now: int | None = None, time_scope=None,
-                 time_widened: bool = False) -> Prompt:
+                 time_widened: bool = False, owner_names: frozenset[str] | None = None,
+                 records_cap: int | None = None,
+                 node_names: frozenset[str] | None = None) -> Prompt:
     """Quote only the share's released records, clipped to the fixed prompt budget.
 
     `labels` (round 5): more words that name the share's parts (its policy's result kinds), beside the prompt's own
@@ -573,7 +815,19 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
     `now`, `time_scope`, `time_widened` (TR162): the job's clock, the question's scope as retrieval read it, and
     whether retrieval widened it. With `ANSWER_TIME_PROMPT` on, the prompt says today's date and the scope at the
     grant's precision (`answer_time.time_lines`; nothing under "none"). The scope and the items' times feed the
-    guard (`sieve_answer`) whatever that switch says."""
+    guard (`sieve_answer`) whatever that switch says.
+
+    `owner_names` (GD-L): the owner's own name words and the account's words, read while ANSWER_NAME_ONE_ITEM is on
+    (`owner_name_words`). `node_names` (GD-L security review, M3): every word an entity of any type, a contact or an
+    Off-limits entry on this node carries (`node_name_words`). With ANSWER_NAME_ONE_ITEM and ANSWER_SUPPORT_JUDGE on
+    (M4), a name term goes into `Prompt.one_item_names` when it is none of `people`, the owner words, the shared
+    owner words, `owner_names` and `node_names`, and no word of its name (`_name_runs`) is one of them (M1). Either
+    set None or empty (not read, unreadable, or a node that cannot say who its owner is: finding 5), or no people,
+    puts nothing there.
+
+    `records_cap` (answer protocol 4): the cited records the job's asker parses (`answer_protocol.records_cap`). Above
+    sixteen the dense templates are written as v11 or v12, whose cite sentence names it (`writer_template`); None or
+    sixteen or fewer is the prompt of before, byte for byte."""
     if precision not in ("none", "day", "second") or not 1 <= len(records) <= k_answer():
         raise PolicyError("answer_prompt_invalid")
     lines, raw_texts, record_texts = ["Question (quoted data):", question, "", "Permitted items:"], [], []
@@ -616,16 +870,33 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
         # The block exactly as the prompt shows it: the prompt joins its lines with a blank line (R-158 F6).
         item_lines.append("\n\n".join(lines[first:]))
         record_texts.append(evidence)
-    return Prompt(SYSTEM_PROMPT, "\n\n".join(lines), tuple(raw_texts), _as_owner(question, owner_words),
+    template = writer_template(records_cap)
+    names = _name_terms(question, owner_words, people, frozenset(labels))
+    # GD-L: a name nothing on this node is named by and that is none of the owner's needs only one cited item. It is
+    # read here once per job; an empty people set (a store that could not be read gives none), no owner's names or
+    # no node names loosen nothing, and neither does a judge that is off (security review, M4 and finding 5).
+    one_item: frozenset[str] = frozenset()
+    if (owner_names and node_names and people and switches.on(switches.ANSWER_NAME_ONE_ITEM)
+            and switches.on(switches.ANSWER_SUPPORT_JUDGE)):
+        known = people | owner_words | frozenset(shared_owner_words) | owner_names | node_names
+        # M1: a name is a unit. Any word of it known (Lena of "Lena Ortiz", the owner's Dana of "Dana Whitfield")
+        # binds all of it in every cited item.
+        members = names | owner_words | frozenset(shared_owner_words) | owner_names
+        bound = frozenset().union(*(run for run in _name_runs(question, members) if run & known))
+        one_item = names - known - bound
+    return Prompt(system_prompt(template, records_cap), "\n\n".join(lines), tuple(raw_texts),
+                  _as_owner(question, owner_words),
                   tuple(record_texts), tuple(text for text in domains if text),
-                  _name_terms(question, owner_words, people, frozenset(labels)), question,
+                  names, question,
                   _clause_openers(question, people), _coordination_groups(question, owner_words),
                   tuple(text for text in sources if text), shared_owner_words=frozenset(shared_owner_words),
                   item_lines=tuple(item_lines),
                   item_times=tuple(getattr(record, "event_at", None) if precision != "none" else None
                                    for record in records),
                   time_scope=time_scope if precision != "none" else None, time_widened=bool(time_widened),
-                  time_line=time_line)
+                  time_line=time_line, template=template, one_item_names=frozenset(one_item),
+                  records_cap=records_cap,
+                  one_item_people=frozenset(people) if one_item else frozenset())
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
@@ -715,8 +986,22 @@ def _cites_question_subject(sentence: str, prompt: Prompt) -> bool:
     evidence = " ".join(prompt.record_texts[number - 1] for number in numbers)
     # A name the question carries binds as a name in EVERY cited item, capitalised: "I will finish" never stands in
     # for "Will" (round 3, M1), and an item that names Ivo never lends him the facts of the others (round 4, N1).
-    if prompt.name_terms and not all(prompt.name_terms <= _names_in_items(prompt.record_texts[number - 1])
-                                     for number in numbers):
+    # GD-L: with ANSWER_NAME_ONE_ITEM and the support judge on (security review, M4), the names nothing on this node
+    # is named by (`Prompt.one_item_names`) bind in at least ONE cited item, capitalised, and all of them in the same
+    # one (M5: two people the node does not know are never put together by the writer); every other name still binds
+    # in every one. M2: a cited item that lacks one of them and names a known person, capitalised, could lend that
+    # person's facts, so the sentence keeps the every-item rule. Off, or with no such name, `one_item` is empty and
+    # this is the rule of 1.5.9.
+    one_item = (prompt.one_item_names if prompt.one_item_names and switches.on(switches.ANSWER_NAME_ONE_ITEM)
+                and switches.on(switches.ANSWER_SUPPORT_JUDGE) else frozenset())
+    if one_item:
+        carried = [_names_in_items(prompt.record_texts[number - 1]) for number in numbers]
+        if any(not one_item <= names and names & prompt.one_item_people for names in carried):
+            one_item = frozenset()
+        elif not any(one_item <= names for names in carried):
+            return False
+    every = prompt.name_terms - one_item
+    if every and not all(every <= _names_in_items(prompt.record_texts[number - 1]) for number in numbers):
         return False
     if PER_ITEM_CARRIAGE and carriers and not all(
             carriers & {_stem(word) for word in _tokens(prompt.record_texts[number - 1])} for number in numbers):
@@ -766,6 +1051,34 @@ class Sieved:
     dropped_out_of_scope: int = 0
     # NR179 G2: sentences the judge had no time left for (`judge_sentences`); set only by the judge's phase.
     dropped_unjudged: int = 0
+    # GD-A: the writer's paragraph of each kept sentence (`CheckedCitations.paragraphs`), aligned with `sentences`;
+    # empty reads as one paragraph. Every phase drops a sentence and its paragraph number together. Layout only.
+    paragraphs: tuple[int, ...] = ()
+
+
+def _paragraph_numbers(sieved: Sieved) -> tuple[int, ...]:
+    if len(sieved.paragraphs) == len(sieved.sentences):
+        return sieved.paragraphs
+    return (0,) * len(sieved.sentences)
+
+
+def answer_layout(lines: list[str], paragraphs: list[int], prompt: Prompt) -> str:
+    """The delivered answer text: one kept sentence per line, as in 1.5.9. Under v9 or v10 (GD-A, A′) a blank line also
+    separates two kept sentences the writer put in different paragraphs; a paragraph whose sentences were all dropped
+    leaves no trace. The recipient app reads a single line break as a space and a blank line as a paragraph
+    (`answerParagraphs`, topos-react-app); both control planes' grammars allow a line break and no other control
+    character. Nothing is added, cut or reordered."""
+    if prompt.template not in DENSE_TEMPLATES:
+        return "\n".join(lines)
+    # An answers-only line that was a bare citation is empty once the citation comes off; under v9/v10 it would read as
+    # a paragraph break, so it is left out of the layout (1.5.9 leaves the same empty line, which reads as nothing).
+    placed = [(line, paragraph) for line, paragraph in zip(lines, paragraphs) if line.strip()]
+    out: list[str] = []
+    for index, (line, paragraph) in enumerate(placed):
+        if index:
+            out.append("\n\n" if paragraph != placed[index - 1][1] else "\n")
+        out.append(line)
+    return "".join(out)
 
 
 def out_of_scope(sentence: str, prompt: Prompt) -> bool:
@@ -911,59 +1224,61 @@ def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundar
         text = normalize_citations(text, len(records))
     generated = sum(len(split_sentences(line)) for line in text.split("\n") if line.strip())
     checked = post_check_citations(text, len(records))
-    sentences = list(checked.sentences)
+    # GD-A: each sentence travels with its paragraph number; every check below reads the sentence alone.
+    pairs = list(zip(checked.sentences, checked.paragraphs))
     copy_drops = 0
     if mode == "only":
         kept = []
-        for sentence in sentences:
+        for sentence, paragraph in pairs:
             if copied_sentence(sentence, prompt.raw_texts):
                 copy_drops += 1
             else:
-                kept.append(sentence)
-        sentences = kept
+                kept.append((sentence, paragraph))
+        pairs = kept
     echoes = question_only_anchors(prompt.question, prompt.raw_texts + prompt.domain_texts) - prompt.openers
-    protected = protected_question_words(prompt.asked or prompt.question, prompt.raw_texts, boundary) if sentences else frozenset()
+    protected = protected_question_words(prompt.asked or prompt.question, prompt.raw_texts, boundary) if pairs else frozenset()
     echo_drops = 0
     if echoes or protected:
         kept = []
-        for sentence in sentences:
+        for sentence, paragraph in pairs:
             if echoes_question_only_word(sentence, echoes) or echoes_protected_word(sentence, protected):
                 echo_drops += 1
             else:
-                kept.append(sentence)
-        sentences = kept
+                kept.append((sentence, paragraph))
+        pairs = kept
     relevance_drops = 0
-    if sentences:
+    if pairs:
         kept = []
-        for sentence in sentences:
+        for sentence, paragraph in pairs:
             if _cites_question_subject(sentence, prompt):
-                kept.append(sentence)
+                kept.append((sentence, paragraph))
             else:
                 relevance_drops += 1
-        sentences = kept
+        pairs = kept
     non_answer_drops = question_item_drops = 0
-    if sentences and not switches.on(switches.ANSWER_SUBJECT_WORDS):
+    if pairs and not switches.on(switches.ANSWER_SUBJECT_WORDS):
         kept = []
-        for sentence in sentences:
+        for sentence, paragraph in pairs:
             if non_answer(sentence, prompt, records):
                 non_answer_drops += 1
             elif says_more_than_asked(sentence, prompt, records):
                 question_item_drops += 1
             else:
-                kept.append(sentence)
-        sentences = kept
+                kept.append((sentence, paragraph))
+        pairs = kept
     scope_drops = 0
     from . import answer_time
-    if sentences and prompt.time_scope is not None and answer_time.guard_on():
+    if pairs and prompt.time_scope is not None and answer_time.guard_on():
         kept = []
-        for sentence in sentences:
+        for sentence, paragraph in pairs:
             if out_of_scope(sentence, prompt):
                 scope_drops += 1
             else:
-                kept.append(sentence)
-        sentences = kept
-    return Sieved(generated, tuple(sentences), checked.dropped, copy_drops, echo_drops, relevance_drops, non_answer_drops,
-                  question_item_drops, scope_drops)
+                kept.append((sentence, paragraph))
+        pairs = kept
+    return Sieved(generated, tuple(sentence for sentence, _ in pairs), checked.dropped, copy_drops, echo_drops,
+                  relevance_drops, non_answer_drops, question_item_drops, scope_drops,
+                  paragraphs=tuple(paragraph for _, paragraph in pairs))
 
 
 JUDGE_UNAVAILABLE = "judge_unavailable"
@@ -985,13 +1300,13 @@ def judge_sentences(sieved: Sieved, prompt: Prompt, support) -> tuple[Sieved, in
     never repairs, reorders or adds."""
     if support is None or not sieved.sentences:
         return sieved, 0
-    kept, drops = [], 0
+    kept, kept_paragraphs, drops = [], [], 0
     question = prompt.asked or prompt.question
     # TR162: the node's lines about time ride to the judge only when the prompt carried them (v4 reads them), so a
     # callable written for v3 is called exactly as before.
     context = {"context": prompt.time_line} if prompt.time_line else {}
     unjudged = 0
-    for position, sentence in enumerate(sieved.sentences):
+    for position, (sentence, paragraph) in enumerate(zip(sieved.sentences, _paragraph_numbers(sieved))):
         try:
             verdict = support(sentence, cited_item_lines(sentence, prompt), question, **context)
         except JudgeOutOfTime:
@@ -1006,15 +1321,25 @@ def judge_sentences(sieved: Sieved, prompt: Prompt, support) -> tuple[Sieved, in
             verdict = False
         if verdict is True:
             kept.append(sentence)
+            kept_paragraphs.append(paragraph)
         else:
             drops += 1
-    return dataclasses.replace(sieved, sentences=tuple(kept), dropped_unjudged=unjudged), drops
+    return dataclasses.replace(sieved, sentences=tuple(kept), paragraphs=tuple(kept_paragraphs),
+                               dropped_unjudged=unjudged), drops
 
 
 def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, boundary,
-                 dropped_support: int = 0) -> CheckedAnswer:
-    """Off-limits on the body, the scrub, the closed body (under the gate)."""
+                 dropped_support: int = 0, fits=None) -> CheckedAnswer:
+    """Off-limits on the body, the scrub, the closed body (under the gate).
+
+    `fits` (answer protocol 4): whether an assembled body (the dict the closed body parses from) is within the caps of
+    the job's asker, writer and all (`answer_release.body_fits`). While it says no, the last kept sentence is dropped
+    and the body assembled again (`dropped_to_fit`), so an answer longer than its asker parses is delivered shorter
+    instead of failing whole as `body_invalid`; records that only the dropped sentences cited leave with them. Only
+    whole kept sentences go, from the end: nothing is cut inside one, reordered or added. A single sentence that does
+    not fit is the refusal of before. None (tests, batteries): no trim, as before."""
     sentences = list(sieved.sentences)
+    paragraphs = list(_paragraph_numbers(sieved))
     counts = (sieved.generated, 0, sieved.dropped_citation, sieved.dropped_copy, sieved.dropped_question_echo,
               sieved.dropped_relevance)
     extra = {"dropped_support": dropped_support, "dropped_non_answer": sieved.dropped_non_answer,
@@ -1023,23 +1348,44 @@ def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, bo
     before_scrub = "\n".join(sentences)
     if before_scrub and boundary.mentions_protected(before_scrub):
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, 0, 0, "answer_protected", **extra)
-    sentences, scrub_drops = scrub_sentences(sentences)
+    # The scrub one sentence at a time (it reads each alone), so each kept sentence keeps its paragraph (GD-A).
+    scrubbed, scrubbed_paragraphs, scrub_drops = [], [], 0
+    for sentence, paragraph in zip(sentences, paragraphs):
+        kept_one, dropped = scrub_sentences([sentence])
+        scrub_drops += dropped
+        scrubbed.extend(kept_one)
+        scrubbed_paragraphs.extend([paragraph] * len(kept_one))
+    sentences, paragraphs = scrubbed, scrubbed_paragraphs
     if not sentences:
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, scrub_drops, 0,
                              "all_sentences_dropped", **extra)
-    if mode == "only":
-        answer = "\n".join(_CITATION.sub("", sentence).strip() for sentence in sentences)
-        body = AnswerOnly.parse({"version": VERSION, "outcome": "answered", "answer": answer})
-        cited = len({number for sentence in sentences for number in citation_numbers(sentence)})
-    else:
-        ordered = list(dict.fromkeys(number for sentence in sentences for number in citation_numbers(sentence)))
-        mapping = {number: index for index, number in enumerate(ordered, 1)}
-        body = AnswerWithSources.parse({"version": VERSION, "outcome": "answered",
-            "answer": "\n".join(_renumber(sentence, mapping) for sentence in sentences),
-            "records": [records[number - 1].model_dump() for number in ordered]})
-        cited = len(ordered)
+    fit_drops = 0
+    while True:
+        value, cited = _assembled(sentences, paragraphs, records, prompt, mode)
+        if fits is None or fits(value):
+            break
+        if len(sentences) == 1:
+            raise PolicyError("answer_output_invalid")
+        sentences, paragraphs = sentences[:-1], paragraphs[:-1]
+        fit_drops += 1
+    body = (AnswerOnly if mode == "only" else AnswerWithSources).parse(value)
     return CheckedAnswer(body, sieved.generated, len(sentences), sieved.dropped_citation, sieved.dropped_copy,
-                         sieved.dropped_question_echo, sieved.dropped_relevance, scrub_drops, cited, "answered", **extra)
+                         sieved.dropped_question_echo, sieved.dropped_relevance, scrub_drops, cited, "answered",
+                         dropped_to_fit=fit_drops, **extra)
+
+
+def _assembled(sentences: list[str], paragraphs: list[int], records: list, prompt: Prompt, mode: str):
+    """The body's dict from the kept sentences, as the closed body parses it, and the count of items it cites:
+    answers only, the citations struck off; with sources, the cited records in first-cited order, renumbered."""
+    if mode == "only":
+        answer = answer_layout([_CITATION.sub("", sentence).strip() for sentence in sentences], paragraphs, prompt)
+        cited = len({number for sentence in sentences for number in citation_numbers(sentence)})
+        return {"version": VERSION, "outcome": "answered", "answer": answer}, cited
+    ordered = list(dict.fromkeys(number for sentence in sentences for number in citation_numbers(sentence)))
+    mapping = {number: index for index, number in enumerate(ordered, 1)}
+    return {"version": VERSION, "outcome": "answered",
+            "answer": answer_layout([_renumber(sentence, mapping) for sentence in sentences], paragraphs, prompt),
+            "records": [records[number - 1].model_dump() for number in ordered]}, len(ordered)
 
 
 def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundary, support=None) -> CheckedAnswer:

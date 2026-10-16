@@ -25,6 +25,8 @@ producers regenerate clean versions on their next run.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import functools
 import html
 import json
@@ -38,6 +40,7 @@ from ...home_chat.store import HISTORY_VERSION, empty_history
 from ...storage.db.write_gate import batched_writes
 from .blackhole import OWNER, BlackholeStore, normalize_entity_name
 from .derived_scrub import _table_exists
+from .uncached_patterns import compile_uncached
 
 logger = logging.getLogger("topos.features.lifecycle.blackhole_rebuild")
 
@@ -196,7 +199,6 @@ def searchable(terms) -> tuple:
     return usable, len(wanted) - usable
 
 
-@functools.lru_cache(maxsize=256)
 def _term_pattern(terms: frozenset) -> Optional["re.Pattern[str]"]:
     """One pattern for these terms over normalised text (`normalize_entity_name`), or None when none is usable.
 
@@ -205,7 +207,9 @@ def _term_pattern(terms: frozenset) -> Optional["re.Pattern[str]"]:
     "same" or "samples"; a handle, a username or an id matches only as itself ("work" never in "network"; an
     address never by the words of its domain). Until 1.5.0 this was a plain substring test with no floor: on four
     invented homes one excluded contact with the username "al" took out 28% of the retrieval index and blanked 37% of
-    the owner's own home-chat turns (review R1 node, R-B1)."""
+    the owner's own home-chat turns (review R1 node, R-B1).
+
+    NR178: compiled in no cache (the pattern holds the terms); `_mentions` keeps it for one pass (`term_patterns`)."""
     usable = sorted((term for term in terms if _usable(term)), key=lambda term: (-len(term), term))
     if not usable:
         return None
@@ -214,17 +218,64 @@ def _term_pattern(terms: frozenset) -> Optional["re.Pattern[str]"]:
     anywhere = "|".join(r"\s*".join(re.escape(word) for word in term.split())
                         for term in usable if _unspaced(term))
     if not anywhere:
-        return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])")
+        return compile_uncached(rf"(?<![^\W_])(?:{body})(?![^\W_])")
     if not spaced:
-        return re.compile(rf"(?:{anywhere})")
-    return re.compile(rf"(?<![^\W_])(?:{body})(?![^\W_])|(?:{anywhere})")
+        return compile_uncached(rf"(?:{anywhere})")
+    return compile_uncached(rf"(?<![^\W_])(?:{body})(?![^\W_])|(?:{anywhere})")
+
+
+#: NR178: the compiled patterns of one clean-up or preview pass (`term_patterns`), a dict, or None outside one. Until
+#: NR178 `_term_pattern` was a module-level lru_cache, and `re.compile` kept the pattern text too: the Off-limits
+#: terms stayed in the process after the clean-up (owner rule: nothing derived from the Off-limits list outlives a
+#: request). Now a pass keeps them, and nothing does after it.
+_PASS_PATTERNS: contextvars.ContextVar = contextvars.ContextVar("blackhole_rebuild_term_patterns", default=None)
+#: The mark a pass leaves in its dict when it ends: a context copied inside it (a task it started) finds the dict
+#: emptied and marked, and compiles afresh, keeping nothing.
+_ENDED = object()
+
+
+@contextlib.contextmanager
+def term_patterns():
+    """NR178: inside, `_mentions` compiles each term set's pattern once and keeps it for the length of the block; the
+    dict is emptied and marked ended on the way out, on every path. Inside an outer block, that one is used."""
+    if _PASS_PATTERNS.get() is not None:
+        yield
+        return
+    memory: dict = {}
+    token = _PASS_PATTERNS.set(memory)
+    try:
+        yield
+    finally:
+        _PASS_PATTERNS.reset(token)
+        memory.clear()
+        memory[_ENDED] = True
+
+
+def _one_pass_of_patterns(function):
+    """NR178: `function` (one entry's clean-up or preview) runs inside one `term_patterns` block."""
+    @functools.wraps(function)
+    def within(*args, **kwargs):
+        with term_patterns():
+            return function(*args, **kwargs)
+    return within
+
+
+def _pattern_for(terms: Set[str]) -> Optional["re.Pattern[str]"]:
+    """`_term_pattern` of these terms, kept for the current `term_patterns` block; compiled afresh outside one."""
+    key = frozenset(terms)
+    memory = _PASS_PATTERNS.get()
+    if memory is None or _ENDED in memory:
+        return _term_pattern(key)
+    if key not in memory:
+        memory[key] = _term_pattern(key)
+    return memory[key]
 
 
 def _mentions(text: Optional[str], terms: Set[str]) -> bool:
     """Whether stored text names one of these terms, as whole words (`_term_pattern`)."""
     if not text:
         return False
-    pattern = _term_pattern(frozenset(terms))
+    pattern = _pattern_for(terms)
     if pattern is None:
         return False
     for variant in _decoded_variants(str(text)):
@@ -746,6 +797,7 @@ def _withdraw_cluster_member_previews(conn: sqlite3.Connection, terms: Set[str],
     return blanked
 
 
+@_one_pass_of_patterns
 def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str, *, home_chat: bool = True) -> RebuildReport:
     """Withdraw every prose artifact naming this entity, then mark the flag ready.
 
@@ -860,6 +912,7 @@ def rerun_all_rebuilds(conn: sqlite3.Connection, *, home_chat: bool = True) -> L
             for r in store.list(view=OWNER)]
 
 
+@_one_pass_of_patterns
 def preview_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> Dict[str, Any]:
     """What the clean-up of this entry would withdraw if the owner started it now, counted and NOT written (review
     R2-L3). A name that is also an ordinary word takes the owner's own chat turns and summaries that hold the word,

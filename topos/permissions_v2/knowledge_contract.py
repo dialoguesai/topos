@@ -34,7 +34,10 @@ AnswerMode = Literal["only", "with_sources", "records"]
 # encoding and a policy signed before this field keeps its bytes.
 WriterDisclosure = Literal["origin", "provider", "model", "build"]
 # The declared-or-absent fields of the declaration (the serializer leaves an absent one out of the dump).
-DECLARED_OR_ABSENT = ("answers", "writer_disclosure", "selective_facts")
+DECLARED_OR_ABSENT = ("answers", "writer_disclosure", "selective_facts", "release_conversation_title")
+# A released AI chat's title (release_conversation_title): scrubbed and cut to this before it leaves the node.
+MAX_CONVERSATION_TITLE_CHARS = 200
+ConversationTitle = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=MAX_CONVERSATION_TITLE_CHARS)]
 
 
 class KnowledgeBinding(StrictModel):
@@ -78,6 +81,9 @@ class KnowledgeDeclaration(SearchDeclaration):
     answers: AnswerMode | None = None
     writer_disclosure: WriterDisclosure | None = None
     selective_facts: SelectiveFacts | None = None
+    # The owner's consent to name the AI chat a released message came from. Absent is off; on is the literal true,
+    # so a policy signed before this field keeps its bytes and off has one encoding.
+    release_conversation_title: Literal[True] | None = None
 
     @model_validator(mode="after")
     def selection_needs_facts(self):
@@ -92,6 +98,9 @@ class KnowledgeDeclaration(SearchDeclaration):
             for key in DECLARED_OR_ABSENT:
                 if key in value and value[key] is None:
                     raise ValueError(f"{key} present but undeclared")
+            # Lax validation would take 1 for true; on has exactly one encoding.
+            if "release_conversation_title" in value and value["release_conversation_title"] is not True:
+                raise ValueError("release_conversation_title is true or absent")
         return value
 
     @model_serializer(mode="wrap")
@@ -157,6 +166,16 @@ class KnowledgeRecord(StrictModel):
 
 class MessageResult(KnowledgeRecord):
     kind: Literal["message"]
+    # Only under release_conversation_title, only for an AI-chat message whose chat has a title; absent otherwise,
+    # so every result released before the field keeps its bytes.
+    conversation_title: ConversationTitle | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_untitled(self, handler):
+        encoded = handler(self)
+        if encoded.get("conversation_title") is None:
+            encoded.pop("conversation_title", None)
+        return encoded
 
 
 class FactResult(KnowledgeRecord):
