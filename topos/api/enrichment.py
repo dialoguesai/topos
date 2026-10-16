@@ -846,6 +846,7 @@ async def _find_unprocessed_messages(
         db_conn, source_def, dataset_id=dataset_id
     )
     if generic_messages:
+        from ..enrichment.authored_only import rows_for_job
         from ..enrichment.catalog import catalog_spec_version
 
         enriched: Optional[set[str]] = None
@@ -858,6 +859,14 @@ async def _find_unprocessed_messages(
                     db_conn,
                     min_spec_version=catalog_spec_version(job_name),
                 )
+                # A row this job may not read (an AI reply, for a job kept to what the owner typed) never gets
+                # its output, and is not owed it: counted done here, or every catch-up re-reads it.
+                readable = {id(msg) for msg in rows_for_job(job_name, generic_messages, source_id=source_id)}
+                job_ids = job_ids | {
+                    _record_identifier(msg) or msg.get("message_id")
+                    for msg in generic_messages
+                    if id(msg) not in readable
+                }
                 enriched = job_ids if enriched is None else (enriched & job_ids)
             else:
                 logger.warning("Unknown enrichment job: %s (skipping check)", job_name)

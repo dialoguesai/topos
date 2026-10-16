@@ -355,8 +355,10 @@ SIGNAL = _source(
 # ids so the `(dataset_id, schema_id)` checkpoints never collide. Their own scope,
 # `ai_coding_sessions:read` — NOT ai_conversations:read or work_context:read, whose
 # default_source_ids are the authorization list of every grant the owner already made (security
-# finding 7). The enrichment set is the full declared one: the text volume is tiny (spike P0.1,
-# ≈25 MB all-time).
+# finding 7). Only the owner's typed messages feed entity, topic and goal extraction (owner ruling,
+# 16 Oct 2026): about nine in ten coding-session messages are the AI's replies about code, which
+# filled the graph and goals with function names, file paths and suggested goals and cost hours of
+# local-model time on a backfill. The replies still land, get embeddings and stay searchable.
 def _ai_coding_tool_source(*, source_id: str, display_name: str, schema_id: str) -> DataSourceDefinition:
     return _source(
         source_id=source_id,
@@ -371,6 +373,7 @@ def _ai_coding_tool_source(*, source_id: str, display_name: str, schema_id: str)
         raw_enrichment_jobs=[],
         canonical_enrichment_jobs=["entities", "topics", "embeddings"],
         signal_derivation_jobs=["topics", "goal_extraction"],
+        authored_only_jobs=["entities", "topics", "goal_extraction"],
         analytics_profile_id="chatgpt_dev",
         enrichment_trigger="automatic",
         ingestion_trigger="automatic",  # the hourly schedule, the hook, or "Sync now"
