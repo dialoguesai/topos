@@ -55,8 +55,13 @@ EVIDENCE_LEAF_TABLES = (*LEAF_TABLES, JOURNAL_TABLE)
 REVIEW_SURFACE_EXCLUSIONS = {
     "conversation_messages": frozenset({"ingested_at", "sync_batch_id", "created_at", "content_hash",
         "content_disclosure", "content_disclosure_hash", "content_disclosure_model"}),
+    # share_excluded (migration 85, NOT NULL DEFAULT 0): the column appearing with 0 on every stored row would move
+    # every AI-chat review and context revision. It is a restriction, not reviewed content: a row set to 1 is refused
+    # at the evidence load and dropped by the member re-check whatever its revision (NR189, DR-31), so it is left out
+    # of the surface only together with those two filters, never alone (WS0 ruling, 16 Oct 2026).
     "ai_chat_messages": frozenset({"ingested_at", "sync_batch_id", "content_hash", "content_disclosure",
-        "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", "content_disclosure_model"}),
+        "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", "content_disclosure_model",
+        "share_excluded"}),
     # latest_title (migration 83): the title a later batch brings. Only a share that opted into chat titles releases
     # it, and the Off-limits veto reads it as it reads every column, but no review pins it, so a chat named or renamed
     # after its messages were reviewed withholds none of them. `title`, set by the record that made the chat, stays.

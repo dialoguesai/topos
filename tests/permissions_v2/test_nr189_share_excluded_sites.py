@@ -15,8 +15,14 @@ filter itself works. The review pass is also tested with the assistant turn flag
 DR-31 (restrictions apply at once): a row flagged after its share's index was built is never served again. The request
 path's member re-check reads no row for it (`_live_rows`), so the index is dropped, and the release re-check refuses it
 (`_load`). This holds whether or not `share_excluded` is part of the reviewed surface (`REVIEW_SURFACE_EXCLUSIONS`).
-Today it is part of it, so the flag also moves the row's revision; the tests also run with it left out, to show the
-filter alone is enough.
+
+The upgrade (WS0 ruling, 16 Oct 2026): migration 85 adds the column as NOT NULL DEFAULT 0, so on a node that already
+holds AI-chat rows every row gains a value. Inside the reviewed surface that moved every AI-chat row's revision and
+context revision: every review went stale and every AI-chat share index dropped. The column is now left out of the
+surface, and so out of the context revision, which reads the same list (`entity_boundary.context_bookkeeping`). With it
+out, a later 0 -> 1 flip no longer moves a revision either: the two filters above are what make the flip apply at
+once, so the exclusion ships only with them. The DR-31 tests run with the column out of the surface (today) and in it
+(before the ruling).
 
 Every person, word and id here is invented.
 """
@@ -246,14 +252,17 @@ def test_the_snapshot_fact_extraction_reads_no_flagged_row(tmp_path, monkeypatch
 
 # --- 8. DR-31: a row flagged after the build is never served again, at once ---------------------------------------
 
-@pytest.fixture(params=["surface_as_is", "column_outside_surface"])
+@pytest.fixture(params=["column_outside_surface", "column_inside_surface"])
 def surface(request, monkeypatch):
-    """`share_excluded` in the reviewed surface (today), or left out of it, as a possible ruling would leave it."""
+    """`share_excluded` left out of the reviewed surface (today, WS0 ruling), or in it (before the ruling): the flag
+    is refused at once either way, so the filters, not the revision, are what make it apply."""
+    from topos.permissions_v2 import evidence
+    exclusions = dict(evidence.REVIEW_SURFACE_EXCLUSIONS)
     if request.param == "column_outside_surface":
-        from topos.permissions_v2 import evidence
-        exclusions = dict(evidence.REVIEW_SURFACE_EXCLUSIONS)
         exclusions[AI_CHAT] = exclusions[AI_CHAT] | {"share_excluded"}
-        monkeypatch.setattr(evidence, "REVIEW_SURFACE_EXCLUSIONS", exclusions)
+    else:
+        exclusions[AI_CHAT] = exclusions[AI_CHAT] - {"share_excluded"}
+    monkeypatch.setattr(evidence, "REVIEW_SURFACE_EXCLUSIONS", exclusions)
     return request.param
 
 
@@ -296,7 +305,86 @@ def test_a_rebuild_after_the_flag_never_brings_the_member_back(ai_chat_only, sur
     assert _served(node) == []
 
 
-# --- 9. cost: a per-member read never probes the schema -------------------------------------------------------------
+# --- 9. the upgrade: the column appearing with 0 moves nothing -----------------------------------------------------
+
+OFF_LIMITS = "Quillmarsh"   # an invented Off-limits entry the line does not name: it makes the boundary active, so the
+                            # index seals each member's entity dependencies and context revision
+
+
+def _pass(resolver, reviews) -> dict:
+    """The node's own assessment pass, as `_own_pass`, with the count of reviews it found still current."""
+    import asyncio
+    from tests.permissions_v2.test_automatic_message_review import answer
+    from topos.permissions_v2.automatic_review_worker import AutomaticReviewWorker
+    from topos.permissions_v2.message_review_contract import AutomaticReviewRequest
+
+    async def classify(prepared):
+        return answer(prepared)
+    worker = AutomaticReviewWorker(resolver, reviews, classifier=classify)
+    with owner(actor=OWNER):
+        asyncio.run(worker._process(AutomaticReviewRequest(after=NOW - DAY, before=NOW)))
+        status = worker.status()
+    return {name: getattr(status, name) for name in ("scanned", "assessed", "current", "withheld")}
+
+
+def _revisions(resolver, reviews) -> dict:
+    """What a review and an index pin for the line: its row revision, its Off-limits context revision, its
+    classification context revision, and the revision the stored machine review holds."""
+    from topos.permissions_v2.automatic_message_review import context_for, machine_key
+    from topos.permissions_v2.evidence import _row_revision
+    identity = _line(resolver, LINE_ID)
+    with resolver._read(gated=False) as (conn, _floor):
+        row = resolver._load(conn, identity)
+        boundary = resolver.entity_boundary(conn)
+        assert boundary.active
+        found = {"row": _row_revision(row, table=AI_CHAT),
+                 "context": boundary.check(table=AI_CHAT, record_id=LINE_ID, source_id=EXPORT, dataset_id=None, row=row),
+                 "classification_context": context_for(conn, identity, row, boundary=boundary)[0]}
+    with owner(actor=OWNER), reviews._db() as db:
+        found["machine_review"] = reviews._current_in(db, machine_key(identity)).snapshot.message.revision
+    return found
+
+
+def test_the_column_appearing_with_0_moves_no_revision_and_keeps_the_index(ai_chat_only):
+    """Migration 85 on a node that already holds a reviewed, shared AI-chat line: nothing it pinned moves."""
+    _drop_column(ai_chat_only)                     # the node before the upgrade
+    ai_chat_only.db.execute("INSERT INTO entity_blackholes(blackhole_id,entity_id,canonical_name,normalized_name,"
+                            "rebuild_state) VALUES('bh-nr189','',?,?,'complete')", (OFF_LIMITS, OFF_LIMITS.lower()))
+    ai_chat_only.db.commit()
+    resolver, reviews = _bound(ai_chat_only)
+    assert _pass(resolver, reviews) == {"scanned": 2, "assessed": 1, "current": 0, "withheld": 1}
+    node = _share(ai_chat_only, resolver, reviews)
+    with owner(actor=OWNER):
+        assert node.index.rebuild("grant-search", now=NOW) == {"state": "ready", "member_count": 1}
+    assert _served(node) == [LINE]
+    before = _revisions(resolver, reviews)
+    assert before["row"] == before["machine_review"]
+
+    _add_column(ai_chat_only)                      # the upgrade: every stored row now reads share_excluded = 0
+    assert {row[0] for row in ai_chat_only.db.execute("SELECT share_excluded FROM ai_chat_messages")} == {0}
+    assert _revisions(resolver, reviews) == before
+    assert _served(node) == [LINE]                 # the index built before the column still answers
+    with owner(actor=OWNER):
+        assert node.index.sweep(now=NOW) == 0      # and the deep sweep keeps it
+    assert _served(node) == [LINE]
+    # The node's next pass finds the line's review current: nothing to assess again.
+    assert _pass(resolver, reviews) == {"scanned": 2, "assessed": 0, "current": 1, "withheld": 1}
+
+
+def test_the_column_is_outside_the_reviewed_surface_and_the_context_revision():
+    """A pin, with the reason: out of both lists, a flip moves no revision, so only the load and the member re-check
+    (the tests above) make it apply at once. Neither list may drop the column without those two filters."""
+    from topos.permissions_v2 import entity_boundary, evidence
+    assert "share_excluded" in evidence.REVIEW_SURFACE_EXCLUSIONS[AI_CHAT]
+    assert "share_excluded" in entity_boundary.context_bookkeeping(AI_CHAT)
+    row = {"message_id": LINE_ID, "conversation_id": "c-1", "sender_type": "user", "event_at": "2026-09-01T10:00:00Z",
+           "content": LINE, "source_id": EXPORT}
+    revisions = {evidence._row_revision({**row, **extra}, table=AI_CHAT)
+                 for extra in ({}, {"share_excluded": 0}, {"share_excluded": 1})}
+    assert len(revisions) == 1
+
+
+# --- 10. cost: a per-member read never probes the schema -------------------------------------------------------------
 
 def test_the_per_member_reads_run_no_schema_probe(ai_chat_only):
     """`_load` and `_live_rows` run once per member (builds, re-checks, sweeps): they read the flag off the row they
@@ -315,7 +403,7 @@ def test_the_per_member_reads_run_no_schema_probe(ai_chat_only):
     assert statements and not [s for s in statements if "table_info(ai_chat_messages)" in s.replace(" ", "")]
 
 
-# --- 10. the helpers --------------------------------------------------------------------------------------------------
+# --- 11. the helpers --------------------------------------------------------------------------------------------------
 
 def test_the_clause_takes_a_probe_already_made():
     from topos.storage.share_excluded import row_share_excluded, share_excluded_clause, share_excluded_predicate

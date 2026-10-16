@@ -3,8 +3,9 @@
 Each mutant drops, or weakens, the filter at one site, or one decision of the two helpers it uses
 (`topos.storage.share_excluded`): the evidence load, the member re-check, the owner's review queue, the automatic
 review pass's page, the share page's counts, the share editor's catalog, the owner-attested snapshot's fact
-selection; the row check's reading of the column, a row without the column, and a probe the caller already made.
-Each must be killed by at least one test.
+selection; the row check's reading of the column, a row without the column, and a probe the caller already made;
+and the column's place outside the reviewed surface (WS0 ruling, 16 Oct 2026). Each must be killed by at least one
+test.
 
 The n3c runner (`n3c_mutants.py`): a scratch copy of the engine, one mutant at a time, the worktree never modified.
 A mutant is one or more exact edits; one whose text does not match exactly once counts as a failure, not a pass. A
@@ -66,6 +67,12 @@ MUTANTS = [
     ("snapshot_facts_read_a_flagged_row", [
         (SNAPSHOT, "               f\"{share_excluded_clause(conn, alias='m')} ORDER BY m.event_at, m.message_id\")",
                    "               \" ORDER BY m.event_at, m.message_id\")")]),
+    # The review surface (WS0 ruling): the column back in it moves every AI-chat revision at the upgrade.
+    ("share_excluded_back_in_the_reviewed_surface", [
+        (EVIDENCE, '        "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", '
+                   '"content_disclosure_model",\n        "share_excluded"}),\n',
+                   '        "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", '
+                   '"content_disclosure_model"}),\n')]),
     # The helpers.
     ("row_check_reads_only_a_true_bool", [
         (HELPERS, "    return value not in (None, 0)\n",
