@@ -459,6 +459,38 @@ def test_the_census_runs_on_a_node_that_never_made_the_messages_table(ai_chat_on
     assert gc.mirrored_sources() == gc.PINNED
 
 
+# --- 10b. permitted derivation: the write-time re-read (NR189 review) ------------------------------------------------
+
+@pytest.mark.parametrize("flagged", [True, False], ids=["flagged", "plain"])
+def test_permitted_derivation_writes_nothing_from_a_row_flagged_since_its_selection(ai_chat_only, monkeypatch, flagged):
+    """The lane selects through the evidence load (filtered), then re-reads each row under the gate before it writes.
+    A row flagged in between is refused there (`refused:share_excluded`), not derived from."""
+    from topos.permissions_v2 import identity as identity_module, permitted_derivation as pd
+    _add_column(ai_chat_only)
+    resolver, _reviews = _bound(ai_chat_only)
+    line = _line(resolver, LINE_ID)
+    with resolver._read(gated=False) as (conn, _floor):
+        row = dict(resolver._load(conn, line))
+
+    class Pass(pd.PermittedDerivationPass):
+        def _selected(self, now):
+            if flagged:
+                _flag(ai_chat_only, LINE_ID)   # after the selection, before the write
+            return {"line": (line, row)}
+
+    monkeypatch.setattr(identity_module, "attested_self", lambda _conn: "owner-entity")
+    monkeypatch.setattr("topos.features.entities.graph_refresh.schedule_graph_refresh", lambda: None)
+    service = SimpleNamespace(resolver=resolver, _require_owner=lambda _binding: None, rebuild_all=lambda now: [])
+    spec = pd.Spec("fact", "work.project", "tide pools talk", 0.7, {"kind": "test"})
+    counts = Pass(service, extractor=lambda _row, _table: [spec]).run(now=NOW)
+    written = ai_chat_only.db.execute("SELECT COUNT(*) FROM signal_objects WHERE extractor_version=?",
+                                      (pd.LANE,)).fetchone()[0]
+    if flagged:
+        assert counts.get("refused:share_excluded") == 1 and "fact:written" not in counts and written == 0
+    else:
+        assert counts.get("fact:written") == 1 and written == 1
+
+
 # --- 11. cost: a per-member read never probes the schema -------------------------------------------------------------
 
 def test_the_per_member_reads_run_no_schema_probe(ai_chat_only):

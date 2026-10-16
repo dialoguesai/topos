@@ -33,6 +33,7 @@ WORKER = "topos/permissions_v2/automatic_review_worker.py"
 COUNTS = "topos/permissions_v2/share_counts.py"
 CATALOG = "topos/permissions_v2/share_catalog.py"
 SNAPSHOT = "topos/permissions_v2/ingest_snapshot_facts.py"
+DERIVATION = "topos/permissions_v2/permitted_derivation.py"
 TESTS = ["tests/permissions_v2/test_nr189_share_excluded_sites.py", "tests/ingestion/test_share_excluded_selection.py"]
 
 MUTANTS = [
@@ -67,6 +68,9 @@ MUTANTS = [
     ("snapshot_facts_read_a_flagged_row", [
         (SNAPSHOT, "               f\"{share_excluded_clause(conn, alias='m')} ORDER BY m.event_at, m.message_id\")",
                    "               \" ORDER BY m.event_at, m.message_id\")")]),
+    ("derivation_writes_from_a_row_flagged_since_selection", [
+        (DERIVATION, '                    if identity.table == "ai_chat_messages" and row_share_excluded(rows[0]):\n',
+                     '                    if False:\n')]),
     # The review surface (WS0 ruling): the column back in it moves every AI-chat revision at the upgrade.
     ("share_excluded_back_in_the_reviewed_surface", [
         (EVIDENCE, '        "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", '
