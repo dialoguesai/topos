@@ -28,6 +28,7 @@ The machine-readable twin of each release is
 
 ### Fixed
 - **Query: a comparison between two windows that nest or overlap now searches both and labels both sides** `[O]` "What changed between yesterday and this week?" (and "this month vs this week", "past 7 days vs this week") planned a search span from the earlier-starting window's start to the later-starting window's end, so when the windows nested the span stopped at the end of yesterday and today was never retrieved; and every item was labelled `baseline` because the wider window was tested first, so `current` was never assigned. The span is now the earliest start to the latest end, compared as instants across UTC offsets, and an item in the shared span takes the narrower window's label, so the wider label means the wider window outside the narrower one. Window order and the closed `baseline` / `current` labels are unchanged; disjoint pairs ("last week vs this week") plan and label exactly as before. Nothing new is shared and nothing is rebuilt.
+- **Answers: a rubric mismatch while an answer is written or fetched ends in the uniform no-answer, and the node records it truthfully** (lane NR185). `[P]` When the labeller's rubric no longer matched mid-answer, the job's receipt said `model_error` although the model was never asked, and at fetch the written body was kept in memory while every fetch was refused. Now a mismatch is final where it happens: the job records the refusal's own reason, and the fetch drops the body through the existing final-refusal path. The recipient sees the same no-answer as before; any other error keeps its old path.
 - **The owner-data scanner reads every file that is text, whatever it is called, and refuses a
   path it was handed but cannot read.** `[O]` `scripts/scan_repo_for_owner_data.py` kept only
   files whose names ended in one of 18 suffixes (19 once `.sh` joined on 4 Oct) and skipped
@@ -104,6 +105,8 @@ The machine-readable twin of each release is
   `tests/features/test_owner_data_scan_withholds_terms.py` (10 tests) are new; 17 mutants of
   the scanner (the suffix filter back, binaries skipped silently, the floor removed, nothing read
   treated as clean, a term printed, the allow-file ignored) are each killed.
+- **Logs: the node's log never holds a relayed frame, a handler's error text or a record's content preview** (lane NR181, DR-27). `[P]` A relay frame can carry a recipient's question, an answer or shared records, and three log lines put that text in the node's own log: an invalid frame logged whole, a failing handler's error text and traceback, and ingestion's 100-character content preview. Each now logs the value's size and a keyed digest (`length=… hmac=…`, a random key per process, never logged or saved), so a log line cannot confirm a guessed short value. The handler line keeps the request type and id, the error class and code locations.
+
 
 ## [1.5.9] — 2026-10-15
 
