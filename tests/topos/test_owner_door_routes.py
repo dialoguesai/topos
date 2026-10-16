@@ -288,9 +288,37 @@ async def test_the_transcript_source_doors_pass(socket_dir, source_id: str) -> N
                          ("POST", f"/api/local/owner/sources/{source_id}/preview"),
                          ("POST", f"/sources/{source_id}/sync")):
         _served(await _call(method, path, body=b'{"skip": []}'))
-    # the same doors by body: install / patch of a transcript source definition
-    for method in ("POST", "PATCH"):
-        _served(await _call(method, "/v1/source-install", body=json.dumps({"source_id": source_id}).encode()))
+    # the same door by body: the install of the bundled transcript definition itself, which is what the
+    # route installs (api/source_install._install_source_core reads source_definition_json.source_id)
+    from topos.sources.registry import BUNDLED_REGISTRY
+
+    bundled = json.loads(json.dumps(BUNDLED_REGISTRY[source_id].to_dict()))
+    _served(await _call("POST", "/v1/source-install",
+                        body=json.dumps({"source_id": source_id, "source_definition_json": bundled}).encode()))
+    _served(await _call("POST", "/v1/source-install", body=json.dumps({"source_definition_json": bundled}).encode()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_id", TRANSCRIPTS)
+async def test_a_transcript_id_in_the_body_does_not_pass_a_foreign_install(socket_dir, source_id: str) -> None:
+    """The body rule must read the field the route installs from, or ``{"source_id": "<transcript>",
+    "source_definition_json": {"source_id": "imessage", ...}}`` replaces the iMessage definition past the gate."""
+    from topos.sources.registry import BUNDLED_REGISTRY
+
+    def _as_json(sid: str) -> Dict[str, Any]:
+        return json.loads(json.dumps(BUNDLED_REGISTRY[sid].to_dict()))
+
+    foreign = {"source_id": source_id, "source_definition_json": _as_json("imessage")}
+    _refused(await _call("POST", "/v1/source-install", body=json.dumps(foreign).encode()))
+    edited = {"source_id": source_id,
+              "source_definition_json": {**_as_json(source_id), "allowed_scope_ids": ["ai_conversations:read"]}}
+    _refused(await _call("POST", "/v1/source-install", body=json.dumps(edited).encode()))
+    version_row = {"source_id": source_id, "source_version_row_json": {"source_id": source_id}}
+    _refused(await _call("POST", "/v1/source-install", body=json.dumps(version_row).encode()))
+    _refused(await _call("POST", "/v1/source-install", body=json.dumps({"source_id": source_id}).encode()))
+    # a patch of a transcript definition is a change to it: dangerous like every other patch
+    patch = {"source_id": source_id, "source_definition_json": {"allowed_scope_ids": ["ai_conversations:read"]}}
+    _refused(await _call("PATCH", "/v1/source-install", body=json.dumps(patch).encode()))
 
 
 @pytest.mark.asyncio

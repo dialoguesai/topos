@@ -22,6 +22,7 @@ socket, behind ``TOPOS_OWNER_DOOR_SPLIT`` (on by default), with the same legs as
 """
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -52,8 +53,33 @@ def _settings_keys_open(body: Any) -> bool:
     return isinstance(body, dict) and set(body) <= SOURCE_SETTINGS_OPEN_KEYS
 
 
-def _transcript_source(body: Any) -> bool:
-    return isinstance(body, dict) and str(body.get("source_id") or "").strip() in TRANSCRIPT_SOURCE_IDS
+def transcript_install_body(body: Any) -> bool:
+    """An install of a bundled transcript definition, and nothing else, passes ``POST /v1/source-install`` and the
+    dispatcher's ``post_source_install`` (CONTRACTS §1.6).
+
+    The id the install USES is ``source_definition_json.source_id`` (``api/source_install._install_source_core``
+    never reads the top-level ``source_id``), so that is the field read here. The definition must be the bundled
+    one byte for byte: its scope lists are the authorization list of every grant the owner already made, so an
+    edited copy is a change to what the owner shares. A version row is never the bundled definition, and a
+    top-level id that names another source is a lie about the body."""
+    if not isinstance(body, dict) or body.get("source_version_row_json") is not None:
+        return False
+    definition = body.get("source_definition_json")
+    if not isinstance(definition, dict):
+        return False
+    sid = str(definition.get("source_id") or "").strip()
+    if sid not in TRANSCRIPT_SOURCE_IDS:
+        return False
+    top = str(body.get("source_id") or "").strip()
+    if top and top != sid:
+        return False
+    from .sources.registry import BUNDLED_REGISTRY
+
+    bundled = BUNDLED_REGISTRY.get(sid)
+    if bundled is None:
+        return False
+    # Through JSON on both sides: a caller's copy has lists where the definition has tuples.
+    return definition == json.loads(json.dumps(bundled.to_dict()))
 
 
 def _entailment_list(body: Any) -> bool:
@@ -277,8 +303,11 @@ CENSUS: Tuple[RouteRule, ...] = (
     _d("POST", "/v1/signal/objects/{object_id}/owner_override", "signal_owner_override_object"),
     # source_install.py / source_scrub.py / source_retention.py
     _d("DELETE", "/v1/source-install", "delete_source_install (uninstall)"),
-    _d("PATCH", "/v1/source-install", "patch_source_install; a bundled transcript source passes", _transcript_source),
-    _d("POST", "/v1/source-install", "post_source_install; a bundled transcript source passes", _transcript_source),
+    _d("PATCH", "/v1/source-install", "patch_source_install: a change to a definition, the bundled transcript ones "
+                                      "included (their scope lists live there)"),
+    _d("POST", "/v1/source-install", "post_source_install; the bundled transcript definition itself passes "
+                                     "(transcript_install_body reads the definition the route installs)",
+       transcript_install_body),
     _d("POST", "/v1/source-scrub", "post_source_scrub"),
     _o("POST", "/v1/source-test-enrichment", "a dry run over existing rows"),
     _o("POST", "/v1/source-test-enrichment-trigger", "a dry run over existing rows"),

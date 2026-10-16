@@ -172,6 +172,37 @@ def test_flagged_records_land_with_share_excluded_1_and_the_rest_with_0(node, mo
     assert result["records_share_excluded"] == 1
 
 
+def test_a_flagged_row_is_excluded_the_moment_it_is_written(node, monkeypatch) -> None:
+    """The flag must travel WITH the canonical write (CONTRACTS §2.6), never arrive by a later UPDATE: a sync
+    that dies between the two writes (here: the post-write mark raises) must still leave the tainted row
+    withheld, with no timeline projection of it, and a later run must not treat the row as an already-stored
+    duplicate it may leave shareable."""
+    import topos.ingestion.ai_tool_sync as lane
+
+    # The same batch twice: the second run re-reads rows the first one already stored.
+    arm(monkeypatch, node, reader=FakeReader(_batch(), _batch()))
+    enable(node, SOURCE)
+
+    def _killed(*_a, **_k):
+        raise RuntimeError("killed between the canonical write and the post-write mark")
+
+    monkeypatch.setattr(lane, "_mark_share_excluded", _killed)
+    result = _run()
+    assert result["status"] == "error", result
+    flags = {r["message_id"]: r["share_excluded"] for r in chat_rows(node)}
+    assert flags["claude_code:u4"] == 1, flags
+    assert flags["claude_code:u1"] == 0 and flags["claude_code:u2"] == 0 and flags["claude_code:u3"] == 0
+    assert node.execute("SELECT count(*) FROM timeline WHERE record_id = 'claude_code:u4'").fetchone()[0] == 0
+    assert node.execute("SELECT count(*) FROM timeline WHERE record_id = 'claude_code:u2'").fetchone()[0] == 1
+
+    # The rows exist now (first writer wins); the next run re-reads the same batch and must leave u4 withheld.
+    monkeypatch.setattr(lane, "_mark_share_excluded", lambda *_a, **_k: 0)
+    again = _run()
+    assert again["status"] == "ok", again
+    flags = {r["message_id"]: r["share_excluded"] for r in chat_rows(node)}
+    assert flags["claude_code:u4"] == 1, flags
+
+
 def test_nothing_derived_references_a_share_excluded_row(node, monkeypatch) -> None:
     """The jobs run on this database through the real post-canonical pipeline, with the model work faked
     into rows: whatever the orchestrators are handed gets an entity, a topic, an embedding and a fact."""

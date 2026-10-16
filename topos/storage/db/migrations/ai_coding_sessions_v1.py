@@ -35,8 +35,47 @@ def _columns(conn: sqlite3.Connection, table: str) -> set:
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
+TRIGGER_ON_INSERT = f"{MESSAGES_TABLE}_{COLUMN}_on_insert"
+TRIGGER_ON_METADATA = f"{MESSAGES_TABLE}_{COLUMN}_on_metadata"
+#: The flag travels WITH the write (CONTRACTS §2.6): a reader marks a record ``_metadata.share_excluded``, the
+#: mapper carries that into ``metadata_json``, and the two triggers set the column inside the same statement as
+#: the INSERT (or a later rewrite of the metadata), so no window and no later UPDATE separates a stored tainted
+#: row from its flag. The column only ever goes 0 → 1 here; nothing clears it. JSON1 is part of every SQLite the
+#: node ships with (``json_extract`` is already read by signal_features).
+_TRIGGER_WHEN = (
+    "NEW.metadata_json IS NOT NULL AND json_valid(NEW.metadata_json) "
+    "AND json_extract(NEW.metadata_json, '$.share_excluded') IN (1, 'true')"
+)
+
+
+def ensure_share_excluded_triggers(conn: sqlite3.Connection) -> bool:
+    """Create the two triggers when the table and the column exist. True when they are in place."""
+    if not _table_exists(conn, MESSAGES_TABLE) or COLUMN not in _columns(conn, MESSAGES_TABLE):
+        return False
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS {TRIGGER_ON_INSERT} AFTER INSERT ON {MESSAGES_TABLE}
+        WHEN {_TRIGGER_WHEN}
+        BEGIN
+            UPDATE {MESSAGES_TABLE} SET {COLUMN} = 1 WHERE message_id = NEW.message_id AND {COLUMN} = 0;
+        END
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS {TRIGGER_ON_METADATA} AFTER UPDATE OF metadata_json ON {MESSAGES_TABLE}
+        WHEN {_TRIGGER_WHEN}
+        BEGIN
+            UPDATE {MESSAGES_TABLE} SET {COLUMN} = 1 WHERE message_id = NEW.message_id AND {COLUMN} = 0;
+        END
+        """
+    )
+    return True
+
+
 def ensure_share_excluded_column(conn: sqlite3.Connection) -> bool:
-    """Add the column to ``ai_chat_messages`` if the table exists and lacks it. True when the column is there."""
+    """Add the column to ``ai_chat_messages`` if the table exists and lacks it, with its index and the two
+    triggers that set it at write time. True when the column is there."""
     if not _table_exists(conn, MESSAGES_TABLE):
         return False
     if COLUMN not in _columns(conn, MESSAGES_TABLE):
@@ -44,6 +83,7 @@ def ensure_share_excluded_column(conn: sqlite3.Connection) -> bool:
     conn.execute(
         f"CREATE INDEX IF NOT EXISTS idx_{MESSAGES_TABLE}_{COLUMN} ON {MESSAGES_TABLE}({COLUMN}) WHERE {COLUMN} = 1"
     )
+    ensure_share_excluded_triggers(conn)
     return True
 
 

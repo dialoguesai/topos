@@ -9,6 +9,7 @@ is read as before: no column, no filter, never an error.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
@@ -32,4 +33,21 @@ def share_excluded_clause(conn: Any, *, alias: str = "", table: str = TABLE) -> 
     return f" AND {prefix}{COLUMN} = 0"
 
 
-__all__ = ["COLUMN", "TABLE", "share_excluded_clause", "share_excluded_present"]
+def record_share_excluded(record: Any) -> bool:
+    """Whether one canonical record is a row the owner keeps from every share: its ``share_excluded`` value, else
+    the ``share_excluded`` the reader put in its ``metadata_json`` (a dict, or the JSON text the row stores). The
+    same fact migration 85's triggers read at write time, for the paths that see the record before the row."""
+    if not isinstance(record, dict):
+        return False
+    if record.get(COLUMN) in (1, True, "1"):
+        return True
+    meta = record.get("metadata_json")
+    if isinstance(meta, str):
+        try:
+            meta = json.loads(meta)
+        except ValueError:
+            return False
+    return isinstance(meta, dict) and meta.get(COLUMN) is True
+
+
+__all__ = ["COLUMN", "TABLE", "record_share_excluded", "share_excluded_clause", "share_excluded_present"]

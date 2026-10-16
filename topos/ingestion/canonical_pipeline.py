@@ -386,9 +386,14 @@ def canonicalize_normalized_batch(
                 rec["writer_class"] = writer_class
         if result.canonical_records:
             from ..features.timeline_projection import project_timeline_rows
+            from ..storage.share_excluded import record_share_excluded
 
-            projection = project_timeline_rows(db_conn, result.canonical_records)
-            result.timeline_rows_written = projection.written
+            # A row the owner keeps from every share (CONTRACTS §2.6) gets no timeline projection: the flag
+            # travels in the record's own metadata, read here before anything downstream sees the row.
+            projectable = [rec for rec in result.canonical_records if not record_share_excluded(rec)]
+            if projectable:
+                projection = project_timeline_rows(db_conn, projectable)
+                result.timeline_rows_written = projection.written
         _bump_generation_after_canonicalize(db_conn, source_id, result)
         return result
 

@@ -396,13 +396,17 @@ def _owner_agent_refusal(message: Dict[str, Any], msg_type: str) -> Optional[Dic
 # ``scripts/permissions_v2/owner_entailment_review.py``, each with its leg above).
 #: One flag and one message for both halves of the split: this one and the socket-layer gate for the HTTP routes
 #: that never reach the dispatcher (``uds.owner_door_gate``, census in ``owner_door_routes``; spike P0.11b).
-from ...owner_door_routes import TRANSCRIPT_SOURCE_IDS  # noqa: E402,F401
+from ...owner_door_routes import TRANSCRIPT_SOURCE_IDS, transcript_install_body  # noqa: E402,F401
 from ...uds import OWNER_CONFIRMATION_MESSAGE, OWNER_DOOR_SPLIT_ENV, owner_door_split_enabled  # noqa: E402,F401
 
 #: Types the split never asks about, whatever the set says. Empty: the exemptions P0.11 found are legs, not types.
 OWNER_DOOR_SPLIT_EXEMPT: frozenset = frozenset()
-#: The doors the transcript carve-out applies to, each read by the payload's ``source_id``.
-TRANSCRIPT_SOURCE_DOORS = frozenset({"source_sync", "post_source_install", "patch_source_install"})
+#: The doors the transcript carve-out applies to: ``source_sync`` by the payload's ``source_id``;
+#: ``post_source_install`` by the definition it installs (``owner_door_routes.transcript_install_body``: the bundled
+#: definition byte for byte, never a version row, never an edited copy — the install reads
+#: ``source_definition_json.source_id``, not the top-level id). A patch of a transcript definition is a change to
+#: it (its scope lists live there) and stays dangerous.
+TRANSCRIPT_SOURCE_DOORS = frozenset({"source_sync", "post_source_install"})
 
 #: Reads inside the owner_only, signal_* and permissions_v2_* families, each one named so it stays open on the
 #: socket. A type that reads AND writes by an ``operation`` field (ownership, checking_model, entailment_review,
@@ -460,10 +464,12 @@ DANGEROUS_TYPES = _dangerous_types()
 def _door_exempt(message: Dict[str, Any], msg_type: str) -> bool:
     if msg_type in OWNER_DOOR_SPLIT_EXEMPT:
         return True
-    if msg_type in TRANSCRIPT_SOURCE_DOORS:
-        payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
-        return str(payload.get("source_id") or "").strip() in TRANSCRIPT_SOURCE_IDS
-    return False
+    if msg_type not in TRANSCRIPT_SOURCE_DOORS:
+        return False
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+    if msg_type == "post_source_install":
+        return transcript_install_body(payload)
+    return str(payload.get("source_id") or "").strip() in TRANSCRIPT_SOURCE_IDS
 
 
 def _dangerous_door_allowed(principal: "Optional[object]", msg_type: str) -> bool:

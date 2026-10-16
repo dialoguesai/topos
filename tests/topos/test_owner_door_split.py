@@ -389,15 +389,58 @@ async def test_reads_are_untouched_on_the_socket(split_on, socket_dir, probe, ms
     assert seen == [msg_type], out
 
 
+def _bundled(source_id: str) -> Dict[str, Any]:
+    """The bundled definition as a caller would send it: through JSON, so tuples are lists."""
+    from topos.sources.registry import BUNDLED_REGISTRY
+
+    return json.loads(json.dumps(BUNDLED_REGISTRY[source_id].to_dict()))
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("source_id", TRANSCRIPT_SOURCES)
 async def test_a_bundled_transcript_source_syncs_and_installs_with_the_flag_on(split_on, socket_dir, probe, source_id):
-    """The hooks and the CLI sync the owner's own transcripts into his own node: not a dangerous change."""
-    for msg_type in ("source_sync", "post_source_install", "patch_source_install"):
-        seen = probe(msg_type)
-        seen.clear()
-        out = await _on_socket(msg_type, UNATTESTED, source_id=source_id)
-        assert seen == [msg_type], out
+    """The hooks and the CLI sync the owner's own transcripts into his own node: not a dangerous change. The
+    install passes only for the bundled definition itself: the id the install USES is the definition's."""
+    seen = probe("source_sync")
+    seen.clear()
+    out = await _on_socket("source_sync", UNATTESTED, source_id=source_id)
+    assert seen == ["source_sync"], out
+    seen = probe("post_source_install")
+    seen.clear()
+    out = await _on_socket("post_source_install", UNATTESTED, source_id=source_id,
+                           source_definition_json=_bundled(source_id))
+    assert seen == ["post_source_install"], out
+    # the top-level id is optional: the definition names the source
+    out = await _on_socket("post_source_install", UNATTESTED, source_id="", source_definition_json=_bundled(source_id))
+    assert seen == ["post_source_install", "post_source_install"], out
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_id", TRANSCRIPT_SOURCES)
+async def test_a_transcript_id_cannot_smuggle_another_definition_through_the_install_door(split_on, socket_dir, probe,
+                                                                                            source_id):
+    """The install door reads ``source_definition_json.source_id`` (api/source_install._install_source_core); the
+    carve-out must read the same field, or a socket process names a transcript id and installs anything."""
+    seen = probe("post_source_install")
+    # a foreign definition under a transcript id
+    _refused(await _on_socket("post_source_install", UNATTESTED, source_id=source_id,
+                              source_definition_json=_bundled("imessage")), "post_source_install")
+    # an EDITED bundled definition: the scope lists are the authorization list of every grant (finding 7)
+    edited = {**_bundled(source_id), "allowed_scope_ids": ["ai_conversations:read"]}
+    _refused(await _on_socket("post_source_install", UNATTESTED, source_id=source_id,
+                              source_definition_json=edited), "post_source_install")
+    # a version row is never the bundled definition
+    _refused(await _on_socket("post_source_install", UNATTESTED, source_id=source_id,
+                              source_version_row_json={"source_id": source_id}), "post_source_install")
+    # a bare id with no definition is not an install of the bundled source either
+    _refused(await _on_socket("post_source_install", UNATTESTED, source_id=source_id), "post_source_install")
+    assert seen == []
+    # a patch of a transcript definition is a change to it (the scope lists live there): dangerous
+    seen = probe("patch_source_install")
+    _refused(await _on_socket("patch_source_install", UNATTESTED, source_id=source_id,
+                              source_definition_json={"allowed_scope_ids": ["ai_conversations:read"]}),
+             "patch_source_install")
+    assert seen == []
 
 
 @pytest.mark.asyncio

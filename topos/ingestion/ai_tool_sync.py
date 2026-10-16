@@ -1003,15 +1003,16 @@ def _run_locked(
                 continue
             normalized.append(parser.parse(raw))
 
+        written: set = set()
         if normalized:
             # First writer wins (§2.1): a fork or resume copy of a uuid already stored is a no-op, and its
-            # text never rewrites the row (the owner door would otherwise be allowed to).
+            # text never rewrites the row (the owner door would otherwise be allowed to). Its flag is NOT
+            # dropped with it: a tainted id is re-applied below whether or not this run wrote the row.
             already = _already_stored(db_conn, [str(rec.record_id) for rec in normalized])
             if already:
                 normalized = [rec for rec in normalized if str(rec.record_id) not in already]
                 totals["duplicates"] += len(already)
                 ledger = _merge_ledgers(ledger, {"dropped": {"fork_duplicate": len(already)}, "dropped_total": len(already)})
-                excluded = [i for i in excluded if i not in already]
         if normalized:
             sync_batch_id = f"{source_id}:{uuid.uuid4().hex[:12]}"
             result = canonicalize_normalized_batch(
@@ -1025,8 +1026,6 @@ def _run_locked(
                 return {"status": "error", "error": str(message or "canonical write failed"),
                         "records_processed": totals["processed"], "records_skipped": totals["skipped"], "ledger": ledger}
             written = {str(rec.get("message_id") or "") for rec in result.canonical_records if isinstance(rec, dict)}
-            excluded_ids = [i for i in excluded if i in written] or [i for i in excluded]
-            totals["excluded"] += _mark_share_excluded(db_conn, excluded_ids)
             totals["facets"] += _write_facets(db_conn, spec.tool, {k: v for k, v in facets.items() if k in written})
             excluded_set = set(excluded)
             shareable = [rec for rec in result.canonical_records
@@ -1039,6 +1038,13 @@ def _run_locked(
             _request_disclosure()
             totals["processed"] += len(normalized)
             totals["created"] += int(result.messages_created or 0)
+        if excluded:
+            # The flag travelled WITH the write: migration 85's triggers read ``share_excluded`` out of the row's
+            # own metadata_json inside the INSERT, so a run that dies here leaves nothing shareable. This pass
+            # re-applies it for every tainted id the batch named — the rows another run stored included — and
+            # takes their timeline rows out. The count is the rows THIS run wrote.
+            _mark_share_excluded(db_conn, excluded)
+            totals["excluded"] += len([i for i in excluded if i in written])
 
         newest = str(getattr(batch, "newest_created_at", None) or "")
         if newest and newest > final_last_record_id:
