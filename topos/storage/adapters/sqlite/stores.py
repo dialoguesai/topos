@@ -502,6 +502,7 @@ class SQLiteCanonicalStore:
 
         if disclosure_tier != "owner_raw" or getattr(current_principal(), "cls", None) != OWNER_APP:
             from ....features.lifecycle.record_protection import RecordProtectionStore
+            from ...share_excluded import share_excluded_present
 
             blocked = sorted(RecordProtectionStore(self._conn).blocked_ids(table))
             if blocked:
@@ -509,6 +510,11 @@ class SQLiteCanonicalStore:
                 # pagination nor remove an otherwise visible positive control.
                 clauses.append("record_id NOT IN (" + ",".join("?" for _ in blocked) + ")")
                 params.extend(blocked)
+            if table == "ai_chat_messages" and share_excluded_present(self._conn, table):
+                # A row the owner keeps from every share (CONTRACTS.md §2.6): never below the owner's
+                # own tier, in any mode, and never counted. The scope→table selection for a grantee
+                # is this list, so the withhold sits here, like the NSFW one below.
+                clauses.append("record_id NOT IN (SELECT message_id FROM ai_chat_messages WHERE share_excluded = 1)")
         if disclosure_tier != "owner_raw" and table in _NSFW_TAGGED_TABLES:
             # Below the owner's tier a flagged row is withheld. No list spec carries `content_nsfw`, so the
             # grantee filters downstream (`exclude_nsfw_rows_for_grantee`, the summary scrub) read no flag and
@@ -1152,17 +1158,49 @@ class SQLiteGraphEdgeStore:
 class SQLiteAuditLogStore:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
+        self._client_id_column: Optional[bool] = None
+
+    def _has_client_id_column(self) -> bool:
+        """``query_audit_events.client_id`` (AI-tool on-ramp, CONTRACTS §1.5): who asked, as the channel
+        verified it. Added lazily, like the engine-owned ``mcp_request_log`` columns, not as a numbered
+        migration: an ALTER the running build does not know is inert to it, where a stray migration stamp has
+        fenced the live database before. Without the table (a store on an older schema) nothing is altered."""
+        if self._client_id_column is None:
+            cols = {r[1] for r in self._conn.execute("PRAGMA table_info(query_audit_events)").fetchall()}
+            if cols and "client_id" not in cols:
+                with with_db_write():
+                    self._conn.execute("ALTER TABLE query_audit_events ADD COLUMN client_id TEXT")
+                    commit_connection(self._conn)
+                cols.add("client_id")
+            self._client_id_column = "client_id" in cols
+        return self._client_id_column
 
     def append(self, event: Dict[str, Any]) -> str:
+        from ....principal import current_principal
+
         event_id = str(event.get("event_id") or uuid.uuid4())
+        client_id = str(event.get("client_id") or getattr(current_principal(), "client_id", "") or "")
+        record = {**event, "event_id": event_id}
+        if client_id:
+            record["client_id"] = client_id
+        with_column = self._has_client_id_column()
         with with_db_write():
-            self._conn.execute(
-                """
-                INSERT INTO query_audit_events (event_id, session_id, event_type, payload_json)
-                VALUES (?, ?, ?, ?)
-                """,
-                (event_id, event.get("session_id"), event.get("event_type"), json.dumps({**event, "event_id": event_id})),
-            )
+            if with_column:
+                self._conn.execute(
+                    """
+                    INSERT INTO query_audit_events (event_id, session_id, event_type, client_id, payload_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (event_id, event.get("session_id"), event.get("event_type"), client_id or None, json.dumps(record)),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    INSERT INTO query_audit_events (event_id, session_id, event_type, payload_json)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (event_id, event.get("session_id"), event.get("event_type"), json.dumps(record)),
+                )
             commit_connection(self._conn)
         return event_id
 

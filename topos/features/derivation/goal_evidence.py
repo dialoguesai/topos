@@ -16,9 +16,13 @@ def goal_sources(conn, *, goal_ids=None):
     Each source is independent so a missing optional table does not erase other sources.
     Unknown authorship stays unknown. An assistant's suggestion is not an owner goal.
     """
+    # A row the owner keeps from every share (ai_chat_messages.share_excluded) is never cited as a
+    # goal's evidence; an older database without the column is read as before.
+    from ...storage.share_excluded import share_excluded_clause
+
     paths = (
         ("journal_entries", "j.entry_id = g.record_id OR j.source_record_id = g.record_id", "j.entry_at", "j.content", "1"),
-        ("ai_chat_messages", "j.message_id = g.record_id", "j.event_at", "j.content", "j.sender_type IN ('human','user','owner','self')"),
+        ("ai_chat_messages", "j.message_id = g.record_id" + share_excluded_clause(conn, alias="j"), "j.event_at", "j.content", "j.sender_type IN ('human','user','owner','self')"),
         ("conversation_messages", "j.message_id = g.record_id", "j.event_at", "j.content", "j.is_from_self = 1"),
     )
     if goal_ids is not None and not goal_ids:

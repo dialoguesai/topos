@@ -488,3 +488,9 @@ def test_install_retires_the_legacy_scope_row_it_supersedes_instead_of_refusing(
     status, reason = install_db.execute("SELECT status, failure_reason FROM source_runtime_installs "
                                         "WHERE install_id=?", (legacy.install_id,)).fetchone()
     assert status == "superseded" and "legacy dataset scope superseded" in reason
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

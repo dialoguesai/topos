@@ -279,3 +279,9 @@ async def test_allowlist_governs_the_local_door_only(conn, monkeypatch):
     relayed = Principal(cls=THIRD_PARTY, channel="cp_relay", client_id="truth-mirror")
     out = await handle_control_plane_request(_message("verify_claim"), principal=relayed)
     assert _handler_verdict(out, conn) == (*HANDLER_REFUSAL, [])
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

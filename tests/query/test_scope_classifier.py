@@ -46,7 +46,8 @@ def _embed_as(vector: list[float]):
 def test_prototypes_come_from_the_live_registry_only() -> None:
     texts = prototype_texts()
     assert set(texts) == set(live_scope_ids())
-    assert len(texts) == 18  # +transcripts:read (overheard captions; isolated from messages)
+    assert len(texts) == 19  # +transcripts:read (overheard captions; isolated from messages)
+    # +ai_coding_sessions:read (2026-10-15, CONTRACTS.md §2.5: the coding tools' own area, no existing grant widens)
     for scope, entries in texts.items():
         assert entries, f"{scope} has no prototype text"
         assert all(isinstance(t, str) and t.strip() for t in entries)

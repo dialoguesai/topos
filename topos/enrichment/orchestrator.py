@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..permissions_v2 import answer_gate
 from ..utils.base_object import BaseObject
+from .authored_only import rows_for_job
 from .derivation_recovery import clear_derivation_retry, record_failed_derivation
 from .derived_tables import DerivedTablesManager
 from .jobs import CANONICAL_JOBS, RAW_JOBS
@@ -158,7 +159,12 @@ class EnrichmentOrchestrator(BaseObject):
         messages_processed_so_far = 0
         
         for job_idx, job in enumerate(jobs_to_run, 1):
-            if not job.should_run(canonical_messages):
+            # A job the source keeps to what the owner typed reads only those rows (enrichment/authored_only.py).
+            job_messages = rows_for_job(job.get_job_name(), canonical_messages)
+            if not job.should_run(job_messages):
+                if canonical_messages and not job_messages:
+                    # Nothing here is the job's to read: the batch is still done for it, so no catch-up re-reads it.
+                    await asyncio.to_thread(self._mark_processed, job.get_job_name(), canonical_messages)
                 logger.debug("[PIPELINE:ENRICHMENT] %s: Skipping job %s (should_run=False)", self, job.get_job_name())
                 continue
             try:
@@ -199,9 +205,10 @@ class EnrichmentOrchestrator(BaseObject):
                     jobs_percent = ((job_idx - 1) / total_jobs * 100) if total_jobs > 0 else 0
                     progress_callback(0, total_messages, job_name, jobs_percent, 0.0)
                 
-                records = await job.enrich(canonical_messages, progress_callback=job_progress_callback)
+                records = await job.enrich(job_messages, progress_callback=job_progress_callback)
 
                 # Mark the INPUT records as processed by this job — not the output.
+                # The whole batch: a row the job may not read is done for it too.
                 # A record that ran and legitimately produced nothing still ran,
                 # and that is the whole distinction this table carries: coverage
                 # witnesses output, this witnesses the run.
@@ -227,7 +234,7 @@ class EnrichmentOrchestrator(BaseObject):
                         _records: List[Dict[str, Any]] = records,
                         _table: str = derived_table,
                         _job: Any = job,
-                        _messages: List[Dict[str, Any]] = canonical_messages,
+                        _messages: List[Dict[str, Any]] = job_messages,
                     ) -> int:
                         # write_enrichment_batch holds the write gate for every
                         # batch it writes — a blocking OS lock — so taken here
@@ -522,9 +529,11 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
             len(canonical_messages),
         )
         for job_idx, job in enumerate(jobs_to_run, 1):
-            if not job.should_run(canonical_messages):
-                continue
             job_name = job.get_job_name()
+            # As in the canonical lane: a job kept to what the owner typed reads only those rows.
+            job_messages = rows_for_job(job_name, canonical_messages, source_id=source_id)
+            if not job.should_run(job_messages):
+                continue
             try:
                 # Report like the canonical lane: a start post, a per-record
                 # callback, and a completion post. This lane used to make ONE
@@ -544,7 +553,7 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
 
                 if progress_callback:
                     progress_callback(0, _total_msgs, job_name, _jobs_pct_before, 0.0)
-                records = await job.enrich(canonical_messages, progress_callback=_signal_job_progress)
+                records = await job.enrich(job_messages, progress_callback=_signal_job_progress)
                 if records and records[0].get("_deferred"):
                     deferral_error = str(records[0].get("error"))
                     results["deferred_jobs"].append(job_name)
@@ -578,7 +587,7 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                         provenance["model"] = model
                     prov_full = {**provenance, "sync_batch_id": sync_batch_id, "source_id": source_id}
 
-                    def _persist_records(conn_w: Any, adapters_w: Any, *, _job: str = job_name, _records: List[Dict[str, Any]] = records, _prov: Dict[str, Any] = prov_full, _job_obj: Any = job, _messages: List[Dict[str, Any]] = canonical_messages) -> int:
+                    def _persist_records(conn_w: Any, adapters_w: Any, *, _job: str = job_name, _records: List[Dict[str, Any]] = records, _prov: Dict[str, Any] = prov_full, _job_obj: Any = job, _messages: List[Dict[str, Any]] = job_messages) -> int:
                         tables = self.tables_manager
                         if runtime_bound and conn_w is not None:
                             # The orchestrator's manager is bound to the loop

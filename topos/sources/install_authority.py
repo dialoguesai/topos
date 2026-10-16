@@ -24,8 +24,11 @@ Two rules:
   is the owner's (its writer class is an owner class).
 - **Installing or replacing a definition takes the owner:** the 0600 socket, or
   a relay message carrying a verified ``owner_app`` stamp. No principal at all
-  (local HTTP on a node with no owner key, or an in-process caller) is the
-  install-flow legacy of ``topos/principal.py`` and passes.
+  (local HTTP on a node with no owner key, or an in-process caller with none
+  set) used to pass as the install-flow legacy of ``topos/principal.py``; since
+  15 Oct 2026 (AI-tool on-ramp, spike P0.11 item 4) it does not: a definition
+  outlives the request that installed it, and the node self-mints its owner key
+  at boot, so nothing the owner runs is left in legacy mode.
 
 **Uninstalling and scrubbing take the owner by the same rule.** Uninstall
 (relay ``delete_source_install``, HTTP ``DELETE /v1/source-install``)
@@ -56,9 +59,8 @@ OWNER_MODE_REQUIRED = "owner_mode_required"
 
 
 def principal_may_install(principal: Any) -> bool:
-    """True for the owner's socket or a verified owner stamp, and for legacy (None)."""
-    if principal is None:
-        return True
+    """True for the owner's socket or a verified owner stamp. No principal (legacy TCP on a node without an owner
+    key, or an in-process caller with none set) no longer passes: a definition outlives the request."""
     from ..principal import OWNER_APP
 
     return str(getattr(principal, "cls", "") or "") == OWNER_APP

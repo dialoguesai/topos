@@ -119,3 +119,9 @@ async def test_tcp_credentials_and_forged_owner_markers_cannot_read_or_edit_fact
         response = await client.get("/v1/signal/facts", headers={"Authorization": f"Bearer {bearer}"} if bearer else {})
     assert response.status_code == status
     assert "synthetic reading topic" not in response.text
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""
