@@ -53,7 +53,7 @@ def record(
     project_key: Optional[str] = None,
     origin: str = "keyboard",
 ) -> Dict[str, Any]:
-    """One §2.2 flat record. ``project_key`` rides as a sibling ``_facets`` key, never in ``_metadata``."""
+    """One §2.2 flat record. ``project_key`` rides as a top-level sibling key (L6), never in ``_metadata``."""
     row: Dict[str, Any] = {
         "id": f"{tool}:{uuid}",
         "thread_id": session,
@@ -71,7 +71,8 @@ def record(
         },
     }
     if project_key is not None:
-        row["_facets"] = {"project_key": project_key}
+        # L6's readers: the facet rides at the TOP level of the row, outside the §2.2 record.
+        row["project_key"] = project_key
     return row
 
 
@@ -83,6 +84,9 @@ class FakeLedger:
         self.dropped: Dict[str, int] = {}
         self.scrubbed_counts: Dict[str, int] = {}
         self.tainted_turns = 0
+        # L4's shape: a per-session map of sightings, and the number of sessions with any.
+        self.secret_sightings: Dict[str, int] = {}
+        self.sessions_with_secrets = 0
 
     def drop(self, reason: str, n: int = 1) -> None:
         self.dropped[reason] = self.dropped.get(reason, 0) + n
@@ -100,15 +104,20 @@ class FakeLedger:
             "dropped_total": sum(self.dropped.values()),
             "scrubbed": dict(self.scrubbed_counts),
             "tainted_turns": self.tainted_turns,
+            "secret_sightings": dict(self.secret_sightings),
+            "sessions_with_secrets": self.sessions_with_secrets,
         }
 
 
 class FakeReader:
     """``read_<tool>_batch`` with the §2.7b signature; hands out the batches it was given, in order."""
 
-    def __init__(self, *batches: Sequence[Dict[str, Any]]) -> None:
+    def __init__(self, *batches: Sequence[Dict[str, Any]], secret_sightings: int = 0,
+                 receipt: Optional[Dict[str, Any]] = None) -> None:
         self.batches: List[List[Dict[str, Any]]] = [list(b) for b in batches]
         self.calls: List[Dict[str, Any]] = []
+        self.secret_sightings = secret_sightings
+        self.receipt = dict(receipt or {})
 
     def __call__(
         self,
@@ -120,6 +129,7 @@ class FakeReader:
         session_path: Optional[str] = None,
         skip_folders: Sequence[str] = (),
         secrets: Sequence[str] = (),
+        **extra: Any,
     ) -> Any:
         self.calls.append(
             {
@@ -130,12 +140,18 @@ class FakeReader:
                 "session_path": session_path,
                 "skip_folders": tuple(skip_folders),
                 "secrets": tuple(secrets),
+                **extra,
             }
         )
         rows = self.batches.pop(0) if self.batches else []
         ledger = FakeLedger()
         ledger.turns_emitted = len(rows)
-        ledger.drop("tool_use", 3)
+        if rows:
+            ledger.drop("tool_use", 3)
+        if rows and self.secret_sightings:
+            ledger.sessions_with_secrets = self.secret_sightings
+            ledger.secret_sightings = {f"sess-{i}": 1 for i in range(self.secret_sightings)}
+            ledger.scrubbed("topos_secret", self.secret_sightings)
         for row in rows:
             if row["_metadata"]["share_excluded"]:
                 ledger.tainted()
@@ -146,6 +162,7 @@ class FakeReader:
             scanned_files=1 if rows else 0,
             files_touched=1 if rows else 0,
             newest_created_at=newest,
+            **(dict(self.receipt) if rows else {}),
         )
 
 

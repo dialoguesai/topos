@@ -253,6 +253,7 @@ def test_the_result_carries_the_ledger_and_the_checkpoint_is_the_newest_created_
     assert result["status"] == "ok" and result["outcome"] == "imported"
     assert result["ledger"] == {
         "turns_emitted": 4, "dropped": {"tool_use": 3}, "dropped_total": 3, "scrubbed": {}, "tainted_turns": 1,
+        "secret_sightings": {}, "sessions_with_secrets": 0,
     }
     assert result["last_record_id"] == "2026-10-14T10:00:03.000Z"
     row = node.execute("SELECT last_record_id FROM ingestion_checkpoints WHERE dataset_id=? AND schema_id=?",
@@ -331,3 +332,83 @@ def test_the_full_text_lands_untruncated_in_raw_and_canonical_rows(node, monkeyp
     assert len(stored) == 9000 and stored == long_text
     raw = node.execute("SELECT payload_json FROM raw_chat_messages_claude_code WHERE source_record_id='claude_code:long1'").fetchone()[0]
     assert json.loads(raw)["content"] == long_text
+
+
+def test_secret_sightings_are_persisted_as_a_count_and_never_a_value(node, monkeypatch) -> None:
+    """L3's doctor reads ``secret_sightings`` off the source's status: session files in which the node's own
+    secret was scrubbed. The number lands; the secret itself appears nowhere on disk or in the result."""
+    import topos.ingestion.ai_tool_sync as lane
+    from topos.core.state import get_engine_config_value
+    from topos.ingestion.ai_tool_sync import describe_ai_tool_source
+
+    secret = "invented-owner-secret-value-7f3a"
+    monkeypatch.setattr(lane, "node_secret_values", lambda conn=None: (secret,))
+    reader = arm(monkeypatch, node, reader=FakeReader(_batch(), secret_sightings=2))
+    enable(node, SOURCE)
+    result = _run()
+    assert result["status"] == "ok"
+    assert reader.calls[0]["secrets"] == (secret,), "the reader is handed the exact values to scrub"
+    assert result["ledger"]["sessions_with_secrets"] == 2
+    status = describe_ai_tool_source(node, SOURCE)
+    assert status["secret_sightings"] == 2
+    assert status["last_sync_ledger"]["sessions_with_secrets"] == 2 and status["last_sync_outcome"] == "imported"
+    stored = get_engine_config_value(node, "ai_tool_sources") or ""
+    assert '"secret_sightings": 2' in stored
+    assert secret not in stored and secret not in json.dumps(result, default=str) and secret not in json.dumps(status, default=str)
+
+
+def test_a_facets_sibling_block_is_lifted_too(node, monkeypatch) -> None:
+    """The other spelling of the facet (a `_facets` block beside the record) leaves the row the same way."""
+    rows = _batch()
+    for row in rows:
+        row["_facets"] = {"project_key": row.pop("project_key")}
+    arm(monkeypatch, node, reader=FakeReader(rows))
+    enable(node, SOURCE)
+    assert _run()["status"] == "ok"
+    assert all("glowworks" not in (r["metadata_json"] or "") and "_facets" not in (r["metadata_json"] or "") for r in chat_rows(node))
+    assert node.execute("SELECT COUNT(*) FROM ai_chat_message_facets WHERE project_key='glowworks'").fetchone()[0] == 4
+
+
+def test_reader_receipt_fields_pass_through_to_the_result_and_the_job_summary(node, monkeypatch) -> None:
+    from topos.ingestion.ai_tool_sync import ai_tool_post_sync
+
+    reader = FakeReader(_batch(), receipt={"imported_sessions": 3, "composers_jsonl_preferred": 2, "composers_no_rewind": 1})
+    arm(monkeypatch, node, reader=reader)
+    enable(node, SOURCE)
+    result = _run()
+    assert result["status"] == "ok"
+    assert result["reader_receipt"] == {"imported_sessions": 3, "composers_jsonl_preferred": 2, "composers_no_rewind": 1}
+    summary = ai_tool_post_sync(node, DATASET, result, {"trigger": "hook"})["sync"]
+    assert summary["reader_receipt"] == result["reader_receipt"] and summary["trigger"] == "hook"
+
+
+def test_cursor_passes_the_composer_id_and_the_state_db_path_through(node, monkeypatch) -> None:
+    """Without transcripts, Cursor's hook has only a conversation id: it travels as session_path, untouched."""
+    from topos.ingestion.ai_tool_sync import run_cursor_sync
+
+    reader = arm(monkeypatch, node, reader=FakeReader([
+        record("cursor", "c1", "composer-0abc", "user", "ask the cursor", project_key="glowworks"),
+    ]))
+    enable(node, "cursor_sessions")
+    result = run_cursor_sync(DATASET, session_path="composer-0abc", state_db_path="/invented/state.vscdb")
+    assert result["status"] == "ok", result
+    assert reader.calls[0]["session_path"] == "composer-0abc"
+    assert reader.calls[0]["state_db_path"] == "/invented/state.vscdb"
+    # The other tools never receive a Cursor-only keyword.
+    claude = arm(monkeypatch, node, reader=FakeReader(_batch()))
+    enable(node, SOURCE)
+    assert _run(sync_options={"state_db_path": "/invented/state.vscdb"})["status"] == "ok"
+    assert "state_db_path" not in claude.calls[0]
+
+
+def test_the_loop_runs_until_the_reader_touched_no_file(node, monkeypatch) -> None:
+    """A batch short of batch_size still has files behind it (drops, a small file); only files_touched == 0 ends it."""
+    first = _batch()[:2]
+    second = [record("claude_code", "u9", "sess-0002", "user", "a second session", when="2026-10-14T11:00:00.000Z",
+                     project_key="glowworks")]
+    reader = arm(monkeypatch, node, reader=FakeReader(first, second))
+    enable(node, SOURCE)
+    result = _run()
+    assert result["status"] == "ok" and result["records_processed"] == 3
+    assert len(reader.calls) == 3, "two batches with files behind them, then the empty one that ends the run"
+    assert result["files_touched"] == 2

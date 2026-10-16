@@ -105,6 +105,9 @@ DEFAULT_BATCH_SIZE = 2000
 MAX_PAUSE_SECONDS = 30.0
 #: A reader that keeps answering "more" without ever running dry is a bug, not a corpus.
 MAX_BATCHES_PER_RUN = 100_000
+#: Receipt fields a ReadBatch may carry beyond the §2.7b five (L6): Codex's imported sessions, Cursor's
+#: composers read from the preferred JSONL and those with no rewind. Counts, summed across batches.
+RECEIPT_FIELDS = ("imported_sessions", "composers_jsonl_preferred", "composers_no_rewind")
 
 
 class AiToolSyncRefused(Exception):
@@ -270,6 +273,12 @@ def source_state(conn: Any, source_id: str, *, scope: Optional[Dict[str, str]] =
         "paused_at": flags.get("paused_at"),
         "last_sync_at": settings["last_sync_at"] if settings else None,
         "last_error": settings["last_error"] if settings else None,
+        # The reader's counts from the last run (L4's ledger): session files in which a node secret was
+        # scrubbed, drops by reason, tainted turns. Counts only; ``doctor`` reads ``secret_sightings``.
+        "secret_sightings": int(flags.get("secret_sightings") or 0),
+        "last_sync_ledger": dict(flags.get("last_sync_ledger") or {}),
+        "last_sync_outcome": flags.get("last_sync_outcome"),
+        "last_sync_finished_at": flags.get("last_sync_finished_at"),
     }
 
 
@@ -514,20 +523,21 @@ def preview_ai_tool_source(conn: Any, source_id: str, *, skip: Sequence[str] = (
         batch = reader(root_path=None, cursors=cursors, batch_size=DEFAULT_BATCH_SIZE, since_unix=None,
                        session_path=None, skip_folders=skip_folders, secrets=node_secret_values(conn))
         rows = list(getattr(batch, "rows", None) or [])
+        touched = int(getattr(batch, "files_touched", 0) or 0)
         scanned_files += int(getattr(batch, "scanned_files", 0) or 0)
         ledger = _merge_ledgers(ledger, _ledger_dict(getattr(batch, "ledger", None)))
         for row in rows:
             turns += 1
             sessions.add(str(row.get("thread_id") or ""))
             bytes_text += len(str(row.get("content") or "").encode("utf-8"))
-            facets = row.get("_facets") if isinstance(row.get("_facets"), dict) else {}
-            if facets.get("project_key"):
-                folders.add(str(facets["project_key"]))
+            project_key = _lift_facets(dict(row))
+            if project_key:
+                folders.add(project_key)
             when = str(row.get("created_at") or "")
             if when:
                 oldest = when if oldest is None or when < oldest else oldest
                 newest = when if newest is None or when > newest else newest
-        if len(rows) < DEFAULT_BATCH_SIZE:
+        if touched == 0:
             break
     return {
         "source_id": source_id,
@@ -589,7 +599,20 @@ def _post_canonical(*, source_def: Any, canonical_records: List[Dict[str, Any]],
 
 
 def node_secret_values(conn: Any = None) -> Tuple[str, ...]:
-    """The node's own secret values for the reader's exact-value scrub (§2.4). Never logged, never returned to a caller."""
+    """The node's own secret values for the reader's exact-value scrub (§2.4). Never logged, never returned to a caller.
+
+    L4's ``parsers.ai_coding_tool.common.node_secrets`` (the env file's keys and every label the node holds)
+    when the build has it; else the two keys the settings object carries.
+    """
+    try:
+        from .parsers.ai_coding_tool.common import node_secrets
+
+        found = node_secrets()
+        return tuple(str(v) for v in (found or ()) if isinstance(v, str) and v.strip())
+    except ImportError:
+        pass
+    except Exception as exc:  # noqa: BLE001 — fall back to the settings' values
+        logger.debug("ai tool sync: node_secrets failed: %s", type(exc).__name__)
     values: List[str] = []
     try:
         from ..config.settings import settings
@@ -698,6 +721,36 @@ def _mark_share_excluded(conn: Any, message_ids: Sequence[str]) -> int:
     return updated
 
 
+def secret_sightings(ledger: Dict[str, Any]) -> int:
+    """Session files in which a node secret was scrubbed: L4's ``sessions_with_secrets`` (its ``secret_sightings``
+    is a per-session map); an integer ``secret_sightings`` is accepted too. A count, never a value."""
+    for key in ("sessions_with_secrets", "secret_sightings"):
+        value = ledger.get(key) if isinstance(ledger, dict) else None
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            return max(0, value)
+        if isinstance(value, dict):
+            return len([k for k, n in value.items() if n])
+    return 0
+
+
+def _record_sync_ledger(conn: Any, source_id: str, ledger: Dict[str, Any], *, outcome: str) -> None:
+    """After every run: the reader's counts beside the source's flags, for the status door and ``doctor``.
+
+    ``secret_sightings`` is the number of session files in which the node's own secret was scrubbed; L3's
+    doctor turns it into "rotate the key". Counts and stamps only; the ledger never holds text.
+    """
+    try:
+        set_source_state(
+            conn, source_id,
+            last_sync_ledger=dict(ledger), secret_sightings=secret_sightings(ledger),
+            last_sync_outcome=outcome, last_sync_finished_at=_utcnow_iso(),
+        )
+    except Exception as exc:  # noqa: BLE001 — bookkeeping never fails a landed sync
+        logger.warning("ai tool sync: ledger bookkeeping failed: %s", type(exc).__name__)
+
+
 def _already_stored(conn: Any, message_ids: Sequence[str]) -> set:
     """Which of these message ids ``ai_chat_messages`` already holds, in any dataset."""
     found: set = set()
@@ -732,11 +785,19 @@ def _write_facets(conn: Any, tool: str, facets: Dict[str, str]) -> int:
 
 
 def _lift_facets(row: Dict[str, Any]) -> Optional[str]:
-    """Take the project facet OFF the record before anything writes it; never leave a path-shaped key behind."""
+    """Take the project facet OFF the record before anything writes it; never leave a path-shaped key behind.
+
+    L6's readers put ``project_key`` (the repo folder's basename, or None) at the TOP level of the row,
+    outside the §2.2 record; a ``_facets`` sibling block is accepted too. Either way it goes to the
+    owner-only facets table and never to the raw row, the parser or ``metadata_json``.
+    """
     project_key: Optional[str] = None
+    top = row.pop("project_key", None)
+    if isinstance(top, str) and top.strip():
+        project_key = top.strip()
     facets = row.pop("_facets", None)
     if isinstance(facets, dict) and facets.get("project_key"):
-        project_key = str(facets["project_key"]).strip() or None
+        project_key = str(facets["project_key"]).strip() or project_key
     meta = row.get("_metadata")
     if isinstance(meta, dict):
         for key in ("project_key", "cwd", "repo_path", "project_path", "file_path"):
@@ -861,7 +922,13 @@ def _run_locked(
 
     totals = {"processed": 0, "skipped": 0, "created": 0, "excluded": 0, "facets": 0, "duplicates": 0,
               "scanned_files": 0, "files_touched": 0}
+    receipt: Dict[str, Any] = {}
     ledger: Dict[str, Any] = {}
+    reader_kwargs: Dict[str, Any] = {}
+    state_db_path = str(options.get("state_db_path") or "").strip()
+    if spec.tool == "cursor" and state_db_path:
+        # Cursor's reader also takes the state database's path (env CURSOR_STATE_DB by default).
+        reader_kwargs["state_db_path"] = state_db_path
     final_last_record_id = last_record_id
     batch_num = 0
 
@@ -879,7 +946,7 @@ def _run_locked(
         try:
             batch = reader(
                 root_path=None, cursors=cursors, batch_size=batch_size, since_unix=since_unix,
-                session_path=session_path, skip_folders=skip_folders, secrets=secrets,
+                session_path=session_path, skip_folders=skip_folders, secrets=secrets, **reader_kwargs,
             )
         except (FileNotFoundError, PermissionError, OSError) as exc:
             return {"status": "error", "error": str(exc), "records_processed": totals["processed"],
@@ -889,6 +956,14 @@ def _run_locked(
         totals["scanned_files"] += int(getattr(batch, "scanned_files", 0) or 0)
         totals["files_touched"] += touched
         ledger = _merge_ledgers(ledger, _ledger_dict(getattr(batch, "ledger", None)))
+        for field in RECEIPT_FIELDS:
+            value = getattr(batch, field, None)
+            if isinstance(value, bool) or value is None:
+                continue
+            if isinstance(value, int):
+                receipt[field] = int(receipt.get(field) or 0) + value
+            else:
+                receipt[field] = value
         if not rows and not touched:
             break
 
@@ -970,14 +1045,18 @@ def _run_locked(
             progress_cb, batch_num=batch_num, records_processed=totals["processed"],
             records_skipped=totals["skipped"], last_record_id=final_last_record_id,
         )
-        if len(rows) < batch_size:
+        # The reader says when it is done: a batch can be short of batch_size (drops, a small file) and
+        # still have files behind it. ``files_touched == 0`` is the end (L4's contract).
+        if touched == 0:
             break
         if pause_seconds:
             time.sleep(pause_seconds)
 
+    outcome = "imported" if totals["processed"] else "up_to_date"
+    _record_sync_ledger(db_conn, source_id, ledger, outcome=outcome)
     return {
         "status": "ok",
-        "outcome": "imported" if totals["processed"] else "up_to_date",
+        "outcome": outcome,
         "source_id": source_id,
         "dataset_id": dataset_id,
         "records_processed": totals["processed"],
@@ -990,6 +1069,7 @@ def _run_locked(
         "files_touched": totals["files_touched"],
         "last_record_id": final_last_record_id,
         "ledger": ledger,
+        "reader_receipt": receipt,
     }
 
 
@@ -1012,9 +1092,15 @@ def run_codex_sync(dataset_id: str, *, db_conn: Optional[Any] = None, batch_size
 def run_cursor_sync(dataset_id: str, *, db_conn: Optional[Any] = None, batch_size: int = DEFAULT_BATCH_SIZE,
                     sync_options: Optional[Dict[str, Any]] = None,
                     progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
-                    session_path: Optional[str] = None) -> Dict[str, Any]:
+                    session_path: Optional[str] = None, state_db_path: Optional[str] = None) -> Dict[str, Any]:
+    """Cursor: ``session_path`` is the hook's ``transcript_path`` when transcripts are on, else the conversation id
+    (composerId), which the reader uses to restrict the state-database read; ``state_db_path`` overrides the
+    reader's ``CURSOR_STATE_DB`` default. Both pass through unchanged."""
+    options = dict(sync_options) if isinstance(sync_options, dict) else {}
+    if state_db_path:
+        options["state_db_path"] = state_db_path
     return run_ai_coding_tool_sync("cursor", dataset_id, db_conn=db_conn, batch_size=batch_size,
-                                   sync_options=sync_options, progress_cb=progress_cb, session_path=session_path)
+                                   sync_options=options, progress_cb=progress_cb, session_path=session_path)
 
 
 RUNNERS_BY_SOURCE: Dict[str, Callable[..., Dict[str, Any]]] = {
@@ -1031,7 +1117,7 @@ def ai_tool_post_sync(conn: Any, dataset_id: str, result: Dict[str, Any], sync_o
         key: result.get(key)
         for key in (
             "outcome", "records_processed", "records_skipped", "records_share_excluded", "messages_created",
-            "scanned_files", "files_touched", "last_record_id", "code", "error", "ledger",
+            "scanned_files", "files_touched", "last_record_id", "code", "error", "ledger", "reader_receipt",
         )
         if result.get(key) is not None
     }
@@ -1067,6 +1153,7 @@ __all__ = [
     "run_claude_code_sync",
     "run_codex_sync",
     "run_cursor_sync",
+    "secret_sightings",
     "set_source_state",
     "source_state",
     "sync_refusal",

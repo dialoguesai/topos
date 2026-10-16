@@ -284,6 +284,7 @@ def test_the_doors_answer_status_the_cli_can_show(node) -> None:
     assert body["source_id"] == SOURCE and body["enabled"] is True and body["paused"] is False
     assert body["schedule"]["interval_hours"] == 1
     assert "last_sync_at" in body and "last_error" in body
+    assert body["secret_sightings"] == 0 and body["last_sync_ledger"] == {}
 
 
 # --- hardening before the first sync (L7) -------------------------------------------
