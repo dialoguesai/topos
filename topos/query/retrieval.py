@@ -5398,7 +5398,7 @@ def _annotate_owner_chat_urls(items, conn, *, now=None):
     """
     from urllib.parse import urlsplit, urlunsplit
     from ..principal import current_principal
-    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation"}:
+    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation", "owner_agent"}:
         return items
     ids = list({str(i.get("record_id") or "") for i in items if i.get("record_id")})
     threads = {}
@@ -5456,7 +5456,7 @@ def _annotate_owner_ai_threads(items: List[Dict[str, Any]], conn, *, now=None) -
     additional message bodies or participates in a grantee's disclosure.
     """
     from ..principal import current_principal
-    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation"}:
+    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation", "owner_agent"}:
         return items
     ids = list({str(i.get("record_id") or "") for i in items if i.get("record_id")})
     context = {}

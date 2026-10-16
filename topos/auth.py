@@ -4,9 +4,65 @@ from typing import Optional
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from .principal import OWNER_APP, THIRD_PARTY, Principal
+from .principal import OWNER_AGENT, OWNER_APP, THIRD_PARTY, Principal
 
 bearer_scheme = HTTPBearer(auto_error=False)
+
+#: The owner's approved coding agent names itself on the socket with its
+#: enrolment label (mcp_clients.mint_agent_label). AI-tool on-ramp, CONTRACTS
+#: §1.1: on the socket a valid label mints OWNER_AGENT, an invalid or revoked
+#: one is a 401 and never falls back to owner_app; on any TCP channel the header
+#: is a 401 outright and never a third party. Both dependencies below read it,
+#: so a label can neither widen nor ride a plain-auth route.
+AGENT_HEADER = "X-Topos-Agent"
+AGENT_DISCONNECTED = {"error": "agent_disconnected", "message": "This agent was disconnected from Topos."}
+AGENT_LABEL_OVER_TCP = {
+    "error": "agent_label_over_tcp",
+    "message": "An agent label is accepted only on the local Topos socket.",
+}
+
+
+class AgentLabelRefused(HTTPException):
+    """A 401 whose body is the error object itself (``{"error", "message"}``)
+    once ``agent_label_refusal_handler`` is registered on the app; without the
+    handler FastAPI wraps the same object under ``detail``."""
+
+
+async def agent_label_refusal_handler(request: Request, exc: AgentLabelRefused):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=exc.status_code, content=exc.detail)
+
+
+def _agent_label(request: "Optional[Request]") -> str:
+    headers = getattr(request, "headers", None) if request is not None else None
+    if headers is None:
+        return ""
+    try:
+        return str(headers.get(AGENT_HEADER.lower()) or "").strip()
+    except Exception:  # noqa: BLE001 — a header store that cannot be read holds no label
+        return ""
+
+
+def _owner_agent_on_socket(label: str) -> Principal:
+    """The agent principal for a label presented on the socket, or the 401.
+
+    Verified against the registry on every call: a revoked row refuses the very
+    next request, and there is no cache anywhere for a stale admission to live in.
+    """
+    from .core.state import get_db_connection
+    from .mcp_clients import verify_agent_label
+
+    conn = get_db_connection()
+    row = verify_agent_label(conn, label) if conn else None
+    if row is None:
+        raise AgentLabelRefused(status_code=status.HTTP_401_UNAUTHORIZED, detail=dict(AGENT_DISCONNECTED))
+    return Principal(cls=OWNER_AGENT, channel="uds", client_id=str(row.get("client_id") or ""))
+
+
+def _refuse_label_over_tcp(request: "Optional[Request]") -> None:
+    if _agent_label(request):
+        raise AgentLabelRefused(status_code=status.HTTP_401_UNAUTHORIZED, detail=dict(AGENT_LABEL_OVER_TCP))
 
 #: Peers that are unambiguously this machine. The owner CLASS is confined to
 #: them: a credential that leaked into a log, a backup, or a synced dotfile
@@ -44,9 +100,15 @@ def require_api_key(
 
     if current_transport() == "uds":
         # P4: the owner socket (0600) — the kernel already established the
-        # caller is the owner's own process; no bearer exists to check.
+        # caller is the owner's own process; no bearer exists to check. An agent
+        # that names itself must still be known and unrevoked, or the label would
+        # be a way onto every plain-auth route as the owner.
+        label = _agent_label(request)
+        if label:
+            _owner_agent_on_socket(label)
         return
 
+    _refuse_label_over_tcp(request)
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authorization")
 
@@ -94,6 +156,9 @@ def resolve_request_principal(
     - TOPOS_OWNER_KEY unset -> None: legacy mode, consumers keep today's
       behavior byte-for-byte (install-flow invariant — never demote the owner's
       app before it has learned the new key).
+    - the socket + X-Topos-Agent -> owner_agent (an approved coding agent,
+      named by its enrolment row); an invalid or revoked label is a 401, never
+      owner_app; the header on any TCP channel is a 401, never third_party.
 
     Raises 401 exactly like require_api_key, so a route swapping dependencies
     keeps its auth semantics.
@@ -103,9 +168,15 @@ def resolve_request_principal(
 
     if current_transport() == "uds":
         # P4: owner by TRANSPORT — the 0600 socket is the credential, and no
-        # bearer (or lack of one) can demote or promote a connection there.
+        # bearer (or lack of one) can demote or promote a connection there. A
+        # label only NAMES the caller as one of the owner's agents, a narrower
+        # class than the socket alone would mint.
+        label = _agent_label(request)
+        if label:
+            return _owner_agent_on_socket(label)
         return Principal(cls=OWNER_APP, channel="uds")
 
+    _refuse_label_over_tcp(request)
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authorization")
 
