@@ -56,11 +56,6 @@ def _t0_per_test(monkeypatch):
     enrollment stamps -- so a T0 read at import ages with the run. F10's relink window starts 30
     minutes before its oldest message, so 30 minutes after the import it was refused as too old."""
     monkeypatch.setattr(sys.modules[__name__], "T0", int(time.time()))
-    # The owner socket's dangerous-door split (CONTRACTS §1.6, lane L2) names POST /v1/sharing/imessage/refresh a
-    # change that needs the app, a confirmation or the dev proxy; these tests are about the door's own semantics
-    # and drive it through the socket wrapper as a bare peer, so the split is off here (its own tests cover it:
-    # tests/topos/test_owner_door_routes.py, test_owner_door_split.py).
-    monkeypatch.setenv("TOPOS_OWNER_DOOR_SPLIT", "0")
 
 
 def native_ns(days_ago: float) -> int:
@@ -833,3 +828,9 @@ def test_F8_the_door_answers_only_the_paired_owner(store, tmp_path, monkeypatch)
     with TestClient(app) as client:
         response = client.post(REFRESH, json=body())
     assert response.status_code == 503 and response.json()["detail"] == "owner_binding" and synced == []
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

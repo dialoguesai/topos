@@ -787,15 +787,35 @@ def module_reload_isolation():
             setattr(parent, child, module)
 
 
-@pytest.fixture(autouse=True)
-def _owner_door_split_off_unless_asked(monkeypatch):
-    """The owner socket's dangerous-door split (CONTRACTS §1.6; ``TOPOS_OWNER_DOOR_SPLIT``, ON by default in the
-    product) is OFF for the suite: hundreds of door tests drive routes through the socket wrapper as a bare
-    peer and are about the door, not the split. The split's own tests turn it on (tests/topos/test_owner_door_*.py,
-    test_socket_principal_step.py), and one asserts the product default with the variable unset. A value exported
-    by the developer is kept."""
-    if "TOPOS_OWNER_DOOR_SPLIT" not in os.environ:
-        monkeypatch.setenv("TOPOS_OWNER_DOOR_SPLIT", "0")
+@pytest.fixture()
+def owner_app_on_the_socket(monkeypatch):
+    """The owner's own app on the socket, as the dangerous-door split sees it: an ATTESTED peer (CONTRACTS §1.6).
+
+    Starlette's TestClient presents ``("testclient", 50000)`` as the connection. This maps that connection to a
+    socket peer whose process is a signed app on the door allowlist, so a door test drives its route exactly as
+    Topos.app does — with the split in its product configuration (ON by default; nothing here touches the flag).
+    The split's own tests (tests/topos/test_owner_door_*.py, test_socket_principal_step.py,
+    tests/sources/test_source_definition_install_authority.py) build their peers explicitly and never use this.
+    A module whose doors are the app's opts in with an autouse fixture that depends on this one.
+    """
+    from topos import uds
+
+    pid = 50000
+    monkeypatch.setenv("TOPOS_OWNER_DOOR_TEAM_IDS", "TESTTEAM0")
+    proc = uds._PeerProcess(pid, "/Applications/Topos.app/Contents/MacOS/Topos")
+    proc.team, proc.team_known, proc.connections = "TESTTEAM0", True, 1
+    monkeypatch.setitem(uds._peer_processes, pid, proc)
+    original = uds.socket_peer_from_scope
+
+    def as_the_app(scope):
+        # Every connection a test harness presents (Starlette's TestClient, httpx's ASGI transport, a bare scope)
+        # is the app's; a scope that already names a socket pid built its own peer and is left alone.
+        client = scope.get("client") if isinstance(scope, dict) else None
+        if not (isinstance(client, (tuple, list)) and len(client) == 2 and client[0] == "uds"):
+            scope = {**scope, "client": ("uds", pid)}
+        return original(scope)
+
+    monkeypatch.setattr(uds, "socket_peer_from_scope", as_the_app)
 
 
 @pytest.fixture(autouse=True)
