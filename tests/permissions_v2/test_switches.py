@@ -123,7 +123,10 @@ V1510 = {**VGDL, P + "ANSWER_DENSE": True, P + "ANSWER_DENSE_ON_QUESTION": True,
 #: Fix A (16 Oct 2026): a released record whose own shown text carries an Off-limits term is withheld from the writer;
 #: off, bound and unbound alike; off is 1.5.9's prompt. 46 + 1 = 47.
 VPIF = {**V1510, P + "ANSWER_PROTECTED_ITEM_FILTER": False}
-TABLE = {**V166, **VPIF}
+#: Lever 4b / G2 (16 Oct 2026): the tense guard drops a sentence that states as done what the cited items give only as
+#: an intention; off, bound and unbound alike, until a battery measures it. 47 + 1 = 48.
+VG2 = {**VPIF, P + "ANSWER_TENSE_GUARD": False}
+TABLE = {**V166, **VG2}
 
 
 @pytest.fixture(autouse=True)
@@ -261,8 +264,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 47
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 46
+    assert len(switches.SWITCHES) == len(TABLE) == 48
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 47
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -394,6 +397,19 @@ def test_the_fix_a_protected_item_filter_is_off_bound_or_not_and_on_is_one_envir
     item = switches.lookup(name)
     assert item.kind == "bool"
     assert item.unbound == item.bound == VPIF[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_g2_tense_guard_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """G2: off with nothing set (no tense check, the receipt of before), read without an `is_bound()` stat; on is one
+    environment line."""
+    state(bound)
+    name = P + "ANSWER_TENSE_GUARD"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == VG2[name] is False
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True

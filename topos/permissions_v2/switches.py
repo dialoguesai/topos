@@ -321,6 +321,16 @@ ANSWER_PROTECTED_ITEM_FILTER = _switch(
     "released record, and the Off-limits check on the written body still runs and still refuses the whole answer. "
     "It cannot help a protected term the writer writes that no item shows. While it is on the receipt counts the "
     "withheld records (`items_withheld_protected`). Off: every released record reaches the writer, as in 1.5.9.")
+# Lever 4b / G2 (16 Oct 2026, the owner's "build the tense guard now"): a plan stated as a deed. A setting until a
+# battery at n >= 20 per arm measures it; it only drops sentences, so it releases nothing the share would not.
+ANSWER_TENSE_GUARD = _switch(
+    "ANSWER_TENSE_GUARD", "bool", False, False,
+    "G2. After the out-of-scope guard and before the judge, a kept sentence is dropped (`dropped_plan_as_deed`) "
+    "when it states as done (\"designed\", \"has built\") a verb that a cited item names only as an intention (a "
+    "closed list: will, 'll, shall, going to, plan to, want to, hope to, agreed to, need to, have to and the like) "
+    "and no cited item states as done. Never a present or progressive sentence, one that frames the act as a plan "
+    "itself (\"plans to design\"), or a verb no cited item intends; it never rewrites a sentence. Off: no check, and "
+    "the receipt of before.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -333,7 +343,7 @@ SWITCHES = (
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
     ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR, ANSWER_DENSE_ON_QUESTION,
-    ANSWER_NAME_ONE_ITEM, ANSWER_PROTECTED_ITEM_FILTER,
+    ANSWER_NAME_ONE_ITEM, ANSWER_PROTECTED_ITEM_FILTER, ANSWER_TENSE_GUARD,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

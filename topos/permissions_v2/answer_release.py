@@ -37,7 +37,7 @@ from topos.storage.db.write_gate import with_db_write
 from . import answer_gate, answer_time, owner_account_words as account_words_grammar, switches
 from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, account_words_as_asked, build_prompt, close_answer,
     judge_sentences, node_name_words, owner_name_words, owner_party_words, people_words,
-    question_lacks_permitted_anchor, sieve_answer, withhold_protected_items)
+    question_lacks_permitted_anchor, sieve_answer, tense_guard_on, withhold_protected_items)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, K_ANSWER_LEGACY, LEGACY_ACCEPTED_VERSION, MAX_ANSWER_CHARS,
     VERSION, AnswerPending, AskIntent, FetchIntent, NoAnswer, WRITER_KEYS, answer_bytes_cap, answer_chars_cap,
     answer_within_caps, effective_disclosure, effective_mode, parse_answer_output, records_cap, same_answer_authority)
@@ -671,7 +671,11 @@ class AnswerService:
                    if not switches.on(switches.ANSWER_SUBJECT_WORDS) else {}),
                 # TR162 D: the out-of-scope guard's counter, while the guard and the scope are on.
                 **({"dropped_out_of_scope": 0 if checked is None else checked.dropped_out_of_scope}
-                   if answer_time.enabled() and answer_time.guard_on() else {})},
+                   if answer_time.enabled() and answer_time.guard_on() else {}),
+                # G2 (lever 4b): the tense guard's counter, only while the guard is on, so that every receipt written
+                # with it off is byte for byte the receipt of before (FT168's byte-for-byte guard).
+                **({"dropped_plan_as_deed": 0 if checked is None else checked.dropped_plan_as_deed}
+                   if tense_guard_on() else {})},
             **({"judge_template_version": judge_template_version()} if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),
             # TR162: the scope's closed word ("none" when the question had none, or the grant withholds times),
             # whether retrieval widened it, and the ladder's rung; the prompt's time template while the prompt lines

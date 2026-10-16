@@ -21,7 +21,7 @@ from .answer_checks import (_CITATION, _SCAFFOLD_FOLDS, _TOKEN, DENSE_TEMPLATES,
     question_only_anchors, scrub_sentences, split_sentences, _stem, _tokens)
 from .answer_protocol import K_ANSWER, K_ANSWER_V4, AnswerOnly, AnswerWithSources, NoAnswer, VERSION
 from .canonical import PolicyError
-from . import switches
+from . import answer_tense, switches
 
 # AQ158 V3: the most released items the model may see, whatever the switch says. The grant's max_k (the owner's
 # "Items per answer", MK165) bounds retrieval below this when it is smaller; the with-sources body's `records` cap
@@ -234,6 +234,9 @@ class CheckedAnswer:
     dropped_out_of_scope: int = 0
     # Answer protocol 4: kept sentences dropped from the end so the body fits its asker's caps (`close_answer`'s `fits`).
     dropped_to_fit: int = 0
+    # G2 (lever 4b): sentences that state as done a verb a cited item gives only as an intention and no cited item
+    # states as done (`states_plan_as_deed`); 0 while ANSWER_TENSE_GUARD is off.
+    dropped_plan_as_deed: int = 0
 
 
 def _clip(content: str, limit: int = 420) -> str:
@@ -1096,6 +1099,8 @@ class Sieved:
     # GD-A: the writer's paragraph of each kept sentence (`CheckedCitations.paragraphs`), aligned with `sentences`;
     # empty reads as one paragraph. Every phase drops a sentence and its paragraph number together. Layout only.
     paragraphs: tuple[int, ...] = ()
+    # G2 (lever 4b): sentences the tense guard dropped (`states_plan_as_deed`); 0 while ANSWER_TENSE_GUARD is off.
+    dropped_plan_as_deed: int = 0
 
 
 def _paragraph_numbers(sieved: Sieved) -> tuple[int, ...]:
@@ -1257,8 +1262,38 @@ def non_answer(sentence: str, prompt: Prompt, records=None) -> bool:
     return False
 
 
+# --- G2 (lever 4b; the owner's "build the tense guard now", 16 Oct 2026): a plan stated as a deed -----------------
+# The dense writer restates a cited note's intention as a completed act: "I will design the shelf labels" came back as
+# "The owner designed the shelf labels [1]". The closed rule is `answer_tense.plan_stated_as_deed`, pure (no switch, no
+# environment) so that it can be replayed offline; this part only reads the cited items for it.
+
+def tense_guard_on(env=None) -> bool:
+    """G2: the deterministic tense guard (`ANSWER_TENSE_GUARD`, off by default)."""
+    return switches.on(switches.ANSWER_TENSE_GUARD, env)
+
+
+def item_text(prompt: Prompt, number: int) -> str:
+    """The item as the writer saw it, without its header line: the clipped body and, for a fact, goal or relationship,
+    its supporting text, on a line of its own. Read from `Prompt.item_lines`, numbered as the citations are and holding
+    exactly what the model was shown; `record_texts` adds the reviewed domains and the source family, which the writer
+    never saw, and `raw_texts` interleaves bodies, kinds and supporting lines with no fixed stride."""
+    block = prompt.item_lines[number - 1]
+    text = block.split("\n", 1)[1] if "\n" in block else ""
+    body, _sep, support = text.partition("\n\nSupporting text: ")
+    return body.strip() + ("\n" + support.strip() if support.strip() else "")
+
+
+def states_plan_as_deed(sentence: str, prompt: Prompt) -> bool:
+    """G2: whether the tense guard drops this sentence: `answer_tense.plan_stated_as_deed` over the text of the items
+    it cites (`item_text`). A sentence that cites no item in range is never dropped here."""
+    numbers = [number for number in dict.fromkeys(citation_numbers(sentence)) if 1 <= number <= len(prompt.item_lines)]
+    return bool(numbers) and answer_tense.plan_stated_as_deed(sentence, [item_text(prompt, number)
+                                                                         for number in numbers])
+
+
 def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundary) -> Sieved:
-    """Citations, copy, echo (question-only and protected words), the subject check, in that order; never repair."""
+    """Citations, copy, echo (question-only and protected words), the subject check, then the out-of-scope guard
+    (TR162 D) and the tense guard (G2), in that order; never repair."""
     if mode not in ("only", "with_sources") or not isinstance(text, str):
         raise PolicyError("answer_output_invalid")
     if switches.on(switches.ANSWER_CITATION_FORMS):
@@ -1318,9 +1353,19 @@ def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundar
             else:
                 kept.append((sentence, paragraph))
         pairs = kept
+    # G2: the tense guard runs last, after the out-of-scope guard and before the judge; it only drops.
+    plan_drops = 0
+    if pairs and tense_guard_on():
+        kept = []
+        for sentence, paragraph in pairs:
+            if states_plan_as_deed(sentence, prompt):
+                plan_drops += 1
+            else:
+                kept.append((sentence, paragraph))
+        pairs = kept
     return Sieved(generated, tuple(sentence for sentence, _ in pairs), checked.dropped, copy_drops, echo_drops,
                   relevance_drops, non_answer_drops, question_item_drops, scope_drops,
-                  paragraphs=tuple(paragraph for _, paragraph in pairs))
+                  paragraphs=tuple(paragraph for _, paragraph in pairs), dropped_plan_as_deed=plan_drops)
 
 
 JUDGE_UNAVAILABLE = "judge_unavailable"
@@ -1372,7 +1417,8 @@ def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, bo
     counts = (sieved.generated, 0, sieved.dropped_citation, sieved.dropped_copy, sieved.dropped_question_echo,
               sieved.dropped_relevance)
     extra = {"dropped_support": dropped_support, "dropped_non_answer": sieved.dropped_non_answer,
-             "dropped_question_item": sieved.dropped_question_item, "dropped_out_of_scope": sieved.dropped_out_of_scope}
+             "dropped_question_item": sieved.dropped_question_item, "dropped_out_of_scope": sieved.dropped_out_of_scope,
+             "dropped_plan_as_deed": sieved.dropped_plan_as_deed}
     before_scrub = "\n".join(sentences)
     if before_scrub and boundary.mentions_protected(before_scrub):
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, 0, 0, "answer_protected", **extra)
