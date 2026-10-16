@@ -295,7 +295,10 @@ async def test_the_transcript_source_doors_pass(socket_dir, source_id: str) -> N
 
 @pytest.mark.asyncio
 async def test_a_non_transcript_owner_sources_door_is_still_dangerous(socket_dir) -> None:
-    _refused(await _call("POST", "/api/local/owner/sources/imessage/sync"))
+    # Lane L5's own doors are OPEN at the socket layer (settled at integration, 16 Oct): the door
+    # serves only the three bundled transcript sources and answers 404/409 for any other id itself
+    # (tests/api/test_owner_sources_doors.py). The shared sync door and the install doors stay dangerous.
+    _served(await _call("POST", "/api/local/owner/sources/imessage/sync"))
     _refused(await _call("POST", "/sources/imessage/sync"))
     _refused(await _call("POST", "/v1/source-install", body=b'{"source_id": "imessage"}'))
     _refused(await _call("DELETE", "/v1/source-install", body=b'{"source_id": "codex_sessions"}'))

@@ -431,7 +431,7 @@ def test_make_record_builds_the_flat_record_with_millisecond_utc_stamps() -> Non
         "thread_id": "sess-1",
         "role": "user",
         "content": "hello",
-        "created_at": "2026-10-01T09:00:00.250+00:00",
+        "created_at": "2026-10-01T09:00:00.250Z",
         "_metadata": {
             "tool": "claude_code",
             "session_id": "sess-1",

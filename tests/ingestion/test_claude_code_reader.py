@@ -21,7 +21,7 @@ from topos.ingestion.sources.claude_code_reader import SOURCE_ID, TAINT_MARKER_S
 
 FIXTURES = Path(__file__).resolve().parent.parent / "fixtures" / "ai_coding_tools" / "claude_code"
 SLUG = "-Users-fake-dev-widget"
-ISO_MS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}\+00:00$")
+ISO_MS = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
 
 def uid(n: int) -> str:
@@ -81,10 +81,10 @@ def test_plain_session_emits_typed_turns_and_replies_with_exact_counts(cursors) 
     assert batch.rows[3]["content"] == "Done: three attempts.\n\nEach attempt waits with jitter."
     assert [row["_metadata"]["turn_index"] for row in batch.rows] == [0, 1, 2, 3]
     assert [row["created_at"] for row in batch.rows] == [
-        "2026-10-01T09:00:00.000+00:00",
-        "2026-10-01T09:00:00.250+00:00",
-        "2026-10-01T09:00:00.500+00:00",
-        "2026-10-01T09:00:00.750+00:00",
+        "2026-10-01T09:00:00.000Z",
+        "2026-10-01T09:00:00.250Z",
+        "2026-10-01T09:00:00.500Z",
+        "2026-10-01T09:00:00.750Z",
     ]
     assert {row["thread_id"] for row in batch.rows} == {uid(0x101)}
     assert {row["_metadata"]["conversation_title"] for row in batch.rows} == {"Add a retry to the uploader"}
@@ -99,7 +99,7 @@ def test_plain_session_emits_typed_turns_and_replies_with_exact_counts(cursors) 
     assert ledger["conversations_seen"] == 1 and ledger["conversations_kept"] == 1
     assert ledger["tainted_turns"] == 0 and ledger["scrubbed"] == {}
     assert batch.scanned_files == 1 and batch.files_touched == 1
-    assert batch.newest_created_at == "2026-10-01T09:00:00.750+00:00"
+    assert batch.newest_created_at == "2026-10-01T09:00:00.750Z"
 
 
 def test_titles_come_from_custom_title_json_then_title_records_then_the_first_prompt(cursors) -> None:

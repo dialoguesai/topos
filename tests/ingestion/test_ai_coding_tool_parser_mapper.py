@@ -45,7 +45,7 @@ def record(tool: str = "claude_code", role: str = "user", **overrides) -> dict:
         "thread_id": "sess-1",
         "role": role,
         "content": "Add a retry to the uploader",
-        "created_at": "2026-10-01T09:00:00.250+00:00",
+        "created_at": "2026-10-01T09:00:00.250Z",
         "_metadata": {
             "tool": tool,
             "session_id": "sess-1",
@@ -126,7 +126,7 @@ def test_each_parser_validates_and_parses_a_contract_record(cls, tool, schema_id
         "message_id": f"{tool}:0000000a-0000-4000-8000-00000000000a",
         "dataset_id": DATASET,
         "thread_id": "sess-1",
-        "ts": "2026-10-01T09:00:00.250+00:00",
+        "ts": "2026-10-01T09:00:00.250Z",
         "sender_type": "human",
         "content": "Add a retry to the uploader",
         "_metadata": record(tool)["_metadata"],
@@ -205,7 +205,7 @@ def test_mapper_merges_metadata_without_cwd_or_paths_and_keeps_the_title() -> No
     assert message.conversation_id == "claude_code:sess-1"
     assert message.sender_type == "human"
     assert message.source_id == "claude_code_sessions"
-    assert message.ts == "2026-10-01T09:00:00.250+00:00"
+    assert message.ts == "2026-10-01T09:00:00.250Z"
     assert message.metadata_json == {
         "thread_id": "sess-1",
         "original_source": "ai_coding_tool",
@@ -253,7 +253,7 @@ def test_canonical_pipeline_writes_coding_tool_rows_with_the_title_on_the_conver
     assert source_def.canonical_mapper_id == "ai_coding_tool"
     parser = ClaudeCodeTranscriptParser(dataset_id=DATASET)
     reply = record(role="assistant", id="claude_code:0000000b-0000-4000-8000-00000000000b",
-                   content="I'll add a retry with backoff.", created_at="2026-10-01T09:00:00.500+00:00")
+                   content="I'll add a retry with backoff.", created_at="2026-10-01T09:00:00.500Z")
     reply["_metadata"].update({"turn_index": 1, "origin": "assistant", "share_excluded": True})
     normalized = [parser.parse(RawRecord(record_id="x", payload=p)) for p in (record(), reply)]
     result = canonicalize_normalized_batch(

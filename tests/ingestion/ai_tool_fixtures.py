@@ -268,6 +268,17 @@ def arm(monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection, *, reader: Op
 
     import topos.sources.install_service as install_service
 
+    # Integration (16 Oct): L7's hardening pass and owner-key check are real in this tree.
+    # Point the node's home at a scratch folder holding an owner key, so `enable` clamps
+    # and checks THAT folder — never the person's real ~/.topos (the conftest guard refuses it).
+    import tempfile
+
+    home = Path(tempfile.mkdtemp(prefix="topos-ai-tool-home-"))
+    topos_dir = home / ".topos"
+    topos_dir.mkdir()
+    (topos_dir / ".env").write_text("TOPOS_OWNER_KEY=ok_invented_owner_key_for_these_tests_only\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("TOPOS_ENV_FILE", str(topos_dir / ".env"))
     monkeypatch.setattr(state, "get_db_connection", lambda: conn)
     monkeypatch.setattr(hub, "get_db_connection", lambda: conn)
     # install_service binds the accessor at import; the install row must land in this database.

@@ -482,11 +482,12 @@ def taints(tool_or_server_name: Optional[str], command_text: Optional[str]) -> b
 
 
 def iso_millis(stamp: datetime) -> str:
-    """ISO 8601, UTC, exactly three fractional digits: ``2026-10-01T09:00:00.250+00:00``."""
+    """ISO 8601, UTC, exactly three fractional digits, ``Z`` suffix: ``2026-10-01T09:00:00.250Z``
+    (the form the Codex and Cursor readers and CONTRACTS §2.2 use; settled at integration, 16 Oct)."""
     if stamp.tzinfo is None:
         stamp = stamp.replace(tzinfo=timezone.utc)
     stamp = stamp.astimezone(timezone.utc)
-    return stamp.strftime("%Y-%m-%dT%H:%M:%S.") + f"{stamp.microsecond // 1000:03d}+00:00"
+    return stamp.strftime("%Y-%m-%dT%H:%M:%S.") + f"{stamp.microsecond // 1000:03d}Z"
 
 
 def make_record(

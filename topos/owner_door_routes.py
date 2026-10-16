@@ -285,6 +285,13 @@ CENSUS: Tuple[RouteRule, ...] = (
     _d("POST", "/v1/source-test-ingestion", "ingests a sample payload"),
     _d("POST", "/v1/sources/retention", "retention floors (CONTRACTS §1.6)"),
     _d("POST", "/v1/sources/retention/compact", "retention: compacts rows"),
+    # owner_sources.py — lane L5's socket doors (CONTRACTS §2.8): open at the socket layer; the door itself serves
+    # only the three bundled transcript sources (404/409 for any other id), so there is nothing dangerous to gate here
+    _o("POST", "/api/local/owner/sources/{source_id}/preview", "L5 owner door: counts-only preview of a transcript source"),
+    _o("POST", "/api/local/owner/sources/{source_id}/enable", "L5 owner door: install row + schedule + backfill"),
+    _o("POST", "/api/local/owner/sources/{source_id}/pause", "L5 owner door: pause (refuses the sync door and the scheduler)"),
+    _o("POST", "/api/local/owner/sources/{source_id}/resume", "L5 owner door: resume"),
+    _o("POST", "/api/local/owner/sources/{source_id}/sync", "L5 owner door: one sync, optionally one session file"),
     # ui_config.py / user_identity.py
     _o("PUT", "/v1/ui-config", "UI preferences"),
     _d("PUT", "/v1/user-identity", "the owner's identity mapping"),

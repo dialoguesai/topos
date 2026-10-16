@@ -358,7 +358,11 @@ def _harden_topos_dir() -> Optional[Dict[str, Any]]:
         logger.warning("ai tool sync: hardening module absent; ~/.topos modes not clamped")
         return None
     try:
-        report = harden_topos_dir()
+        from ..storage.db.paths import active_base
+
+        # The served Topos folder (``~/.topos`` in production; the test fixture's
+        # base under tmp_path in tests) — never ``Path.home()`` from inside a sync.
+        report = harden_topos_dir(active_base())
     except Exception as exc:  # noqa: BLE001 — the kind only
         logger.warning("ai tool sync: hardening failed: %s", type(exc).__name__)
         return None

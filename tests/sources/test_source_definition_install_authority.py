@@ -415,8 +415,11 @@ async def test_http_install_in_legacy_mode_keeps_todays_behaviour(conn, http_app
 
     monkeypatch.setattr(runtime_settings, "topos_owner_key", None, raising=False)
     response = await _http(http_app, "POST", {"source_definition_json": _runtime_definition(), **_SCOPE})
-    assert response.status_code == 200, response.text
-    assert RUNTIME in REGISTRY
+    # Legacy mode (no owner key minted yet) no longer opens the owner-only HTTP doors to a
+    # bare TCP bearer: the same hole as install_authority's, closed 16 Oct 2026 (on-ramp).
+    assert response.status_code == 403, response.text
+    assert response.json().get("detail") == "owner_mode_required"
+    assert RUNTIME not in REGISTRY
 
 
 # ---------------------------------------------------------------------------
@@ -593,5 +596,7 @@ async def test_http_uninstall_and_scrub_in_legacy_mode_keep_todays_behaviour(
 
     monkeypatch.setattr(runtime_settings, "topos_owner_key", None, raising=False)
     response = await _http(http_app, method, body, path=path)
-    assert response.status_code == 200, response.text
-    assert _rows(owner_source) == 0
+    # Legacy mode no longer opens the owner-only HTTP doors to a bare TCP bearer (16 Oct 2026).
+    assert response.status_code == 403, response.text
+    assert response.json().get("detail") == "owner_mode_required"
+    assert _rows(owner_source) == 1
