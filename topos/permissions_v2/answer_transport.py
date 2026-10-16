@@ -40,9 +40,10 @@ def _accepted_version(message, kind) -> int:
     """The answer protocol version the asker's control plane says it accepts (A2A-4 amendment 13), from the ask frame.
 
     The field rides beside the principal stamp, outside the closed payload, and carries no authority: it can only
-    narrow what the share's own search decision already released (the cap of records a body carries), never widen it
-    past the grant's `max_k`. Absent (a control plane from before the field): `LEGACY_ACCEPTED_VERSION`, and the ask
-    is served exactly as 1.5.9 served it. Present on a fetch, or not exactly the grammar: the request is refused."""
+    narrow what the share's own search decision already released (the cap of records a body carries and, from answer
+    protocol 4, the length of its answer: 30 and 32,000 at 4, 16 and 8,000 at 3), never widen it past the grant's
+    `max_k`. Absent (a control plane from before the field): `LEGACY_ACCEPTED_VERSION`, and the ask is served exactly
+    as 1.5.9 served it. Present on a fetch, or not exactly the grammar: the request is refused."""
     if ACCEPTS_FIELD not in message:
         return LEGACY_ACCEPTED_VERSION
     if kind != SUBMIT_TYPE:

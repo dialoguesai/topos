@@ -74,8 +74,10 @@ def _search_batch_version() -> int:
 # a policy's `writer_disclosure` releases (A2A-4 amendment 9). The control plane offers the sharer that choice only
 # to a node advertising 2, because an older node refuses a policy naming the field. 3 (A2A-4 amendment 13) writes
 # up to sixteen cited records in a with-sources body for an asker whose control plane says it accepts 3 on the ask
-# frame, and eight for any other. Equals `permissions_v2.answer_protocol.ANSWER_PROTOCOL_VERSION` (pinned by test).
-ANSWER_VERSION = 3
+# frame, and eight for any other. 4 (answer protocol 4, 15 Oct 2026) writes up to thirty cited records and 32,000
+# characters for an asker that says it accepts 4, and keeps 3's sixteen and 8,000 for one that accepts 3. Equals
+# `permissions_v2.answer_protocol.ANSWER_PROTOCOL_VERSION` (pinned by test).
+ANSWER_VERSION = 4
 
 
 def _answer_version() -> int:

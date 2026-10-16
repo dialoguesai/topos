@@ -121,12 +121,14 @@ def test_an_answer_that_cites_both_lists_two_sources_for_the_one_statement(one_s
 @pytest.mark.parametrize("statements", [8, 5])
 def test_how_many_statements_the_items_of_an_answer_hold(tmp_path, monkeypatch, form, statements, capsys):
     """The writer gets `k_answer` items (8) and search returns k = 8 records. Each project is a message and a fact,
-    and the question matches all of them.
+    and the question matches all of them. The items are set to 8 here (`ANSWER_ITEMS`, 1.5.9's number; 30 by default
+    since 1.5.10), so the writer's eight items and search's eight records are measured side by side as FT168 did.
 
     Eight projects: the eight items are eight different statements, whichever of the two leads the rank (the facts
     when the message is the longer text, the messages when it is not): the doubles rank behind and displace nothing.
     Five projects: the eight items are the five statements and three of them a second time. A recipient or a
     scorecard that counts "sources" counts eight; joined by the fact's citation there are five."""
+    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_ANSWER_ITEMS", "8")
     node = paired(tmp_path / "ft168", monkeypatch, count=statements, form=form)
     try:
         assert k_answer() == 8

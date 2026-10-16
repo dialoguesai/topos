@@ -14,8 +14,9 @@ V1 `ANSWER_SUBJECT_WORDS`. Off: the topic-word requirement of amendment 3 is not
    citation, copy, echo, Off-limits and scrub are unchanged.
 V2 `ANSWER_SUPPORT_JUDGE`. On: the pinned local model is asked, per kept sentence, whether the items it cites support
    it, under a closed grammar; anything but a closed "yes" drops the sentence (`dropped_support`).
-V3 `ANSWER_ITEMS`. The released items the model sees, 1 to 24 (default 8); retrieval is still bounded by the grant's
-   max_k and the knowledge ceiling, and the with-sources body by its 8-record cap.
+V3 `ANSWER_ITEMS`. The released items the model sees, 1 to 30 (default 8 until 1.5.10, 30 since, the owner's decision
+   of 16 Oct 2026); retrieval is still bounded by the grant's max_k and the knowledge ceiling, and the with-sources
+   body by its asker's cap of cited records.
 
 Invented data only.
 """
@@ -30,7 +31,7 @@ from tests.permissions_v2.test_reconciliation_provenance import legacy  # noqa: 
 from topos.permissions_v2 import answer_release as ar, switches
 from topos.permissions_v2.answer_generation import (K_ANSWER_CEILING, build_prompt, cited_item_lines, k_answer,
     post_check_answer, question_lacks_permitted_anchor)
-from topos.permissions_v2.answer_protocol import K_ANSWER, K_ANSWER_LEGACY
+from topos.permissions_v2.answer_protocol import FETCH, K_ANSWER, K_ANSWER_LEGACY, K_ANSWER_V4, parse_answer_output
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.knowledge_contract import JournalEntryResult, MessageResult
 
@@ -84,11 +85,12 @@ def test_the_six_switches_default_to_the_candidate_from_1_5_7_on():
     # TR162 (A2A-4 amendment 12): the judge template's default moved on to v4 (v3 with the time rule); v3 is selectable.
     assert switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.unbound == "v4" and switches.ANSWER_SUPPORT_JUDGE_TEMPLATE.bound == "v4"
     # LA164 (A2A-4 amendment 13) moved the wire cap to 16 and the items default with it; the integration (IN167) kept
-    # the items default at 8 until a battery clears 16. The rest is amendment 11's.
-    assert switches.ANSWER_ITEMS.unbound == K_ANSWER_LEGACY == 8 and switches.ANSWER_ITEMS.bound == 8 and K_ANSWER == 16
+    # the items default at 8 until a battery clears 16. 1.5.10 (the owner's decision of 16 Oct 2026, after the grantee
+    # density runs) moved it to 30, answer protocol 4's cap. The rest is amendment 11's.
+    assert switches.ANSWER_ITEMS.unbound == K_ANSWER_V4 == 30 and switches.ANSWER_ITEMS.bound == 30 and K_ANSWER == 16
     assert switches.ANSWER_SHORT_WORD_NAMES.unbound is False and switches.ANSWER_SHORT_WORD_NAMES.bound is False
     assert switches.ANSWER_QUESTION_ANCHOR.unbound is False and switches.ANSWER_QUESTION_ANCHOR.bound is False
-    assert k_answer() == 8 and ar.judge_template() == "v4"
+    assert k_answer() == 30 and ar.judge_template() == "v4"
     assert ar.judge_template_version() == "topos-answer-support-judge/v4"
 
 
@@ -569,15 +571,17 @@ def _many(count):
     return [_message(digits[i], f"Note number {i}: the harbour lamp project moved a step on day {i}.") for i in range(count)]
 
 
-def test_by_default_the_prompt_takes_at_most_eight_items():
-    """IN167: eight by default, as in 1.5.9. LA164's sixteen (A2A-4 amendment 13) is the switch's setting, tested in
-    `test_v3_the_prompt_takes_up_to_the_switch` below."""
+def test_with_1_5_9s_settings_the_prompt_takes_at_most_eight_items(monkeypatch):
+    """IN167: eight, as in 1.5.9, now one environment line (the default is 30 since 1.5.10). LA164's sixteen (A2A-4
+    amendment 13) and the others are the switch's settings, tested in `test_v3_the_prompt_takes_up_to_the_switch`
+    below."""
+    monkeypatch.setenv(P + "ANSWER_ITEMS", "8")
     build_prompt("What has the owner been doing?", _many(8), precision="none")
     with pytest.raises(PolicyError):
         build_prompt("What has the owner been doing?", _many(9), precision="none")
 
 
-@pytest.mark.parametrize("items", [16, 24])
+@pytest.mark.parametrize("items", [16, 24, 30])
 def test_v3_the_prompt_takes_up_to_the_switch(items, monkeypatch):
     monkeypatch.setenv(P + "ANSWER_ITEMS", str(items))
     assert k_answer() == items
@@ -589,11 +593,13 @@ def test_v3_the_prompt_takes_up_to_the_switch(items, monkeypatch):
 
 def test_v3_is_clamped_to_the_ceiling_and_the_floor(monkeypatch):
     monkeypatch.setenv(P + "ANSWER_ITEMS", "99")
-    assert k_answer() == K_ANSWER_CEILING == 24
+    assert k_answer() == K_ANSWER_CEILING == K_ANSWER_V4 == 30          # answer protocol 4 (24 before)
     monkeypatch.setenv(P + "ANSWER_ITEMS", "0")
     assert k_answer() == 1
+    monkeypatch.setenv(P + "ANSWER_ITEMS", "8")
+    assert k_answer() == 8
     monkeypatch.setenv(P + "ANSWER_ITEMS", "sixteen")
-    assert k_answer() == 8                                    # unreadable: the default (8; IN167 kept it)
+    assert k_answer() == switches.ANSWER_ITEMS.unbound == 30  # unreadable: the default (30 since 1.5.10; 8 before)
 
 
 def test_v3_retrieval_asks_for_the_switch_bounded_by_the_grants_max_k(legacy, tmp_path, monkeypatch):
@@ -623,18 +629,22 @@ def test_v3_retrieval_asks_for_the_switch_bounded_by_the_grants_max_k(legacy, tm
 
 
 def test_the_with_sources_body_carries_at_most_sixteen_records(monkeypatch):
-    """The wire cap does not move with V3 (it moved to sixteen with A2A-4 amendment 13, LA164): an answer citing
-    more distinct items than the cap is a body the mirrored grammar refuses (`body_invalid` in the service), never a
-    wider body."""
+    """The wire cap does not move with V3 (it moved to sixteen with A2A-4 amendment 13, LA164, and to thirty for an
+    asker that accepts answer protocol 4): an answer citing more distinct items than its asker's cap is a body the
+    mirrored grammar refuses at that asker's caps (`body_invalid` in the service), never a wider body."""
     monkeypatch.setenv(P + "ANSWER_ITEMS", "24")
     records = _many(17)
     prompt = build_prompt("What has the owner been doing?", records, precision="none")
     text = "\n".join(f"Step {i} moved [{i}]." for i in range(1, 18))
+    seventeen = post_check_answer(text, records, prompt, mode="with_sources", boundary=Open())
     with pytest.raises(PolicyError):
-        post_check_answer(text, records, prompt, mode="with_sources", boundary=Open())
+        parse_answer_output(seventeen.body, request_type=FETCH, mode="with_sources", accepted_version=3)
+    assert len(parse_answer_output(seventeen.body, request_type=FETCH, mode="with_sources",
+                                   accepted_version=4).records) == 17
     sixteen = "\n".join(f"Step {i} moved [{i}]." for i in range(1, 17))
     checked = post_check_answer(sixteen, records, prompt, mode="with_sources", boundary=Open())
     assert checked.body.outcome == "answered" and len(checked.body.records) == 16
+    parse_answer_output(checked.body, request_type=FETCH, mode="with_sources", accepted_version=3)
 
 
 # --- review R-158 ---------------------------------------------------------------------------------------------------

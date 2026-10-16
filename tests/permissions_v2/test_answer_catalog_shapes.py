@@ -176,7 +176,7 @@ def test_the_answer_pass_answers_a_catalog_shaped_question(legacy, tmp_path, mon
                                             ("answer-1",)).fetchone()[0])
         assert body["outcome"] == "answered", receipt
         assert receipt["reason"] == "answered" and receipt["sentences"]["dropped_relevance"] == 0
-        assert receipt["template_version"] == "topos-answer-template/v8"
+        assert receipt["template_version"] == "topos-answer-template/v10"   # 1.5.10's defaults (v8 in 1.5.9)
     finally:
         service.close()
 
