@@ -508,3 +508,32 @@ def test_the_clause_takes_a_probe_already_made():
     assert not row_share_excluded(bare.execute("SELECT * FROM ai_chat_messages").fetchone())
     conn.close()
     bare.close()
+
+
+def test_the_helpers_fail_closed():
+    """NR189 review: the row check reads a present-but-NULL value as flagged (as the SQL `share_excluded = 0` leaves a
+    NULL out), and a row it cannot read raises; the probe raises on a database error, and only a column (or a table)
+    that is genuinely not there reads as "no filter"."""
+    from topos.storage.share_excluded import row_share_excluded, share_excluded_clause, share_excluded_present
+    assert row_share_excluded({"share_excluded": None})
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    conn.execute("CREATE TABLE ai_chat_messages (message_id TEXT, share_excluded INTEGER)")   # nullable, on purpose
+    conn.execute("INSERT INTO ai_chat_messages VALUES ('n', NULL), ('z', 0)")
+    stored = {row["message_id"]: row for row in conn.execute("SELECT * FROM ai_chat_messages")}
+    assert row_share_excluded(stored["n"]) and not row_share_excluded(stored["z"])
+    # The SQL filter agrees: a NULL is not 0, so it is left out too.
+    kept = [row[0] for row in conn.execute("SELECT message_id FROM ai_chat_messages WHERE 1" + share_excluded_clause(conn))]
+    assert kept == ["z"]
+    for unreadable in (("n", None), ["n"], "n", None, 7):
+        with pytest.raises(TypeError):
+            row_share_excluded(unreadable)
+    assert share_excluded_present(conn) is True
+    assert share_excluded_present(sqlite3.connect(":memory:")) is False          # no table: no filter
+    closed = sqlite3.connect(":memory:")
+    closed.close()
+    with pytest.raises(sqlite3.Error):
+        share_excluded_present(closed)                                           # cannot probe: never "no filter"
+    with pytest.raises(sqlite3.Error):
+        share_excluded_clause(closed)
+    conn.close()

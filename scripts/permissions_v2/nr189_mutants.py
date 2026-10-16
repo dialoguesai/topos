@@ -4,8 +4,8 @@ Each mutant drops, or weakens, the filter at one site, or one decision of the tw
 (`topos.storage.share_excluded`): the evidence load, the member re-check, the owner's review queue, the automatic
 review pass's page, the share page's counts, the share editor's catalog, the owner-attested snapshot's fact
 selection; the row check's reading of the column, a row without the column, and a probe the caller already made;
-and the column's place outside the reviewed surface (WS0 ruling, 16 Oct 2026). Each must be killed by at least one
-test.
+the helpers failing closed (a NULL, a row type they cannot read, a probe that errors: NR189 review); and the column's
+place outside the reviewed surface (WS0 ruling, 16 Oct 2026). Each must be killed by at least one test.
 
 The n3c runner (`n3c_mutants.py`): a scratch copy of the engine, one mutant at a time, the worktree never modified.
 A mutant is one or more exact edits; one whose text does not match exactly once counts as a failure, not a pass. A
@@ -75,11 +75,25 @@ MUTANTS = [
                    '"content_disclosure_model"}),\n')]),
     # The helpers.
     ("row_check_reads_only_a_true_bool", [
-        (HELPERS, "    return value not in (None, 0)\n",
+        (HELPERS, "    return value is None or value != 0\n",
                   "    return value is True\n")]),
     ("row_check_reads_a_missing_column_as_flagged", [
-        (HELPERS, "    except (KeyError, IndexError, TypeError):\n        return False\n    return value not in (None, 0)\n",
-                  "    except (KeyError, IndexError, TypeError):\n        return True\n    return value not in (None, 0)\n")]),
+        (HELPERS, "        if COLUMN not in row.keys():\n            return False\n",
+                  "        if COLUMN not in row.keys():\n            return True\n"),
+        (HELPERS, "        if COLUMN not in row:\n            return False\n",
+                  "        if COLUMN not in row:\n            return True\n")]),
+    # Fail closed (NR189 review).
+    ("row_check_reads_null_as_not_flagged", [
+        (HELPERS, "    return value is None or value != 0\n",
+                  "    return value is not None and value != 0\n")]),
+    ("row_check_reads_an_unknown_type_as_not_flagged", [
+        (HELPERS, '        raise TypeError("row_share_excluded reads a sqlite3.Row or a mapping")\n',
+                  "        return False\n")]),
+    ("probe_reads_a_database_error_as_no_column", [
+        (HELPERS, '    return COLUMN in {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}\n',
+                  "    try:\n"
+                  '        return COLUMN in {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}\n'
+                  "    except sqlite3.Error:\n        return False\n")]),
     ("clause_probes_again_whatever_the_caller_knew", [
         (HELPERS, "    if not (share_excluded_present(conn, table) if present is None else present):\n",
                   "    if not share_excluded_present(conn, table):\n")]),
