@@ -444,7 +444,9 @@ class ControlPlaneClient:
                         try:
                             data = json.loads(raw)
                         except Exception:
-                            logger.warning("Relay message is not valid JSON: %s", raw)
+                            # NR181: never the frame itself (it can carry a question, an answer or shared records).
+                            from .core.log_fingerprint import fingerprint
+                            logger.warning("Relay message is not valid JSON: %s", fingerprint(raw))
                             continue
                         await self._schedule_inbound_message(ws, data)
             except ConnectionClosed as exc:
@@ -806,7 +808,11 @@ class ControlPlaneClient:
             else:
                 resp = await self.handler(data)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Handler raised exception: %s", exc, exc_info=True)
+            # NR181: the error's class and where it was raised, never its text: a handler's error can quote the
+            # frame it was handling (a validation error repeats its input). The frames are code locations only.
+            import traceback
+            logger.error("Handler raised exception: type=%s id=%s error=%s\n%s", msg_type, data.get("id"),
+                         type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__)).rstrip())
             resp = {"id": data.get("id"), "status": "error", "error": str(exc)}
         if resp is None:
             return  # e.g. connection_info or message without id; CP has no pending request to match

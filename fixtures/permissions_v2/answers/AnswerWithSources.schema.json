@@ -617,7 +617,7 @@
   "additionalProperties": false,
   "properties": {
     "answer": {
-      "maxLength": 8000,
+      "maxLength": 32000,
       "minLength": 1,
       "title": "Answer",
       "type": "string"
@@ -661,7 +661,7 @@
           }
         ]
       },
-      "maxItems": 16,
+      "maxItems": 30,
       "minItems": 1,
       "title": "Records",
       "type": "array"

@@ -45,6 +45,8 @@ what each one switch says, never what a feature does with it.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import os
 import sys
@@ -170,6 +172,29 @@ DECIDE_OUTSIDE_GATE = _switch(
     "NR166 R1. A release is decided on a read snapshot with the write gate NOT held, then confirmed under it: every "
     "store the decision read must be unchanged since before the snapshot, or the decision runs once more and then "
     "refuses. Off (the default): decided under the gate, as always. Off until an independent security review.")
+REVIEW_PASS_BOUNDARY = _switch(
+    "REVIEW_PASS_BOUNDARY", "bool", False, False,
+    "NR186. An automatic-review pass (the owner's, or the refresh loop's catch-up) keeps one Off-limits boundary for "
+    "its rows instead of building one per row. At each row the kept one is used only when it is what a fresh one "
+    "would be (no commit since it was proven, or every read it was built from reads the same); otherwise it is built "
+    "again. It ends with the pass. Read at every row: off from that row on, every read builds its own. Off (the "
+    "default): one boundary per row, as always. Off until an independent security review.")
+REVIEW_PASS_BOUNDARY_MAX_AGE = _switch(
+    "REVIEW_PASS_BOUNDARY_MAX_AGE_SECONDS", "int", 600, 600,
+    "NR186. The longest a review pass keeps its Off-limits boundary, in seconds, read at every row and taken as 60 to "
+    "3600: an older one is built again at the next read, and one the pass has gone this long without a row for is "
+    "dropped. Inert while REVIEW_PASS_BOUNDARY is off.", floor=60)
+SWEEP_INTEREST_VERDICT = _switch(
+    "SWEEP_INTEREST_VERDICT", "bool", False, False,
+    "NR187. The daemon index sweep reuses a share index's last True browsing-interest verdict while the index file, "
+    "its record-id key, the canonical database, the Off-limits closure and the interest switches are all unchanged "
+    "(it keeps a boolean and change tokens, nothing derived from a name). Off (the default): every sweep rebuilds "
+    "each index's interest members, as always.")
+SWEEP_INTEREST_VERDICT_FULL_EVERY = _switch(
+    "SWEEP_INTEREST_VERDICT_FULL_EVERY", "int", 30, 30,
+    "NR187 (WS0 review, Q3). With the sweep's interest verdict kept, every this-many-th sweep of an index decides its "
+    "interests in full all the same (30, about 5 minutes at the daemon's pace). 1 is every sweep; the reader holds it "
+    "to at most 360.", floor=1)
 SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
@@ -235,13 +260,15 @@ ANSWER_SUPPORT_JUDGE_TEMPLATE = _switch(
     "v3 with today's date and the question's dates, and a sentence that presents an item older than the question's "
     "dates as current, or a past item as upcoming, is not supported).", choices=("v1", "v2", "v3", "v4"))
 ANSWER_ITEMS = _switch(
-    "ANSWER_ITEMS", "int", 8, 8,
-    "V3. Released items the answer model sees, 1 to 24. The default is 8, as in 1.5.9. 16 is A2A-4 amendment 13's "
-    "number (lane LA164): built, one environment line away, and not the default because the lane's battery counted "
-    "three times the false sentences at 16 (22 against 7); it becomes the default when a battery on the integrated "
-    "branch shows it is no worse than 8. The grant's own max_k (the owner's items per answer) still bounds "
-    "retrieval, the with-sources body carries at most 16 cited records, and an asker whose control plane accepts "
-    "only the older protocol is served at most 8 items and 8 records whatever this says.",
+    "ANSWER_ITEMS", "int", 30, 30,
+    "V3. Released items the answer model sees, 1 to 30. The default is 30 since 1.5.10 (owner's decision of 16 Oct "
+    "2026), answer protocol 4's cap; 1.5.9's was 8. On the grantee density fixtures (synthetic owner, blind review, "
+    "16 Oct) the 1.5.10 writer at 30 items gave 4.85 supported sentences per answer against 4.00 at 16 and 2.05 "
+    "with 1.5.9's settings, at a false-sentence rate in the same band (11 to 15%). Set 8 for 1.5.9's number. The "
+    "grant's own max_k "
+    "(the owner's items per answer) still bounds retrieval, and so does the asker's protocol: an asker whose control "
+    "plane accepts 4 is served at most 30 items and 30 cited records, one that accepts 3 at most 16 and 16, and one "
+    "that says nothing at most 8 and 8, whatever this says.",
     floor=1)
 ANSWER_QUESTION_ANCHOR = _switch(
     "ANSWER_QUESTION_ANCHOR", "bool", False, False,
@@ -292,6 +319,75 @@ ANSWER_CITATION_FORMS = _switch(
     "is \"[1]\", and full-width brackets (\"【1】\", \"［1］\") are \"[1]\". Never moves a citation to another "
     "sentence, never fills in a sentence without one; a range past the items is read as \"[0]\" and its sentence is dropped. Off: "
     "only \"[1]\", \"[1, 2]\" and \"[1; 2]\" are read, as in 1.5.9.")
+# Lane GD-B (15 Oct 2026, grantee density): the name rule's closed non-person classes.
+ANSWER_NAME_CLASSES = _switch(
+    "ANSWER_NAME_CLASSES", "bool", True, True,
+    "GD-B. A capitalised question word of a closed non-person class does not bind as a person's name: weekday and "
+    "month names (April, May, June and August only after a time word or before a day number), a code in capitals "
+    "with a digit or of two letters (\"Q4\", \"AI\"), and a closed function word right after a comma. A known "
+    "person's word still binds, and an unknown capitalised name binds as before (\"Ivo\", \"TOPOS\"). Off: every "
+    "capitalised word binds as in 1.5.9.")
+# Lane GD-A (15 Oct 2026, grantee density): the dense writer template. On by default since 1.5.10 (owner's decision of
+# 16 Oct 2026, after the grantee density runs), with GD-A′.
+ANSWER_DENSE = _switch(
+    "ANSWER_DENSE", "bool", True, True,
+    "GD-A. The writer's template v9: seven to twelve cited sentences in two or three paragraphs, citing at most "
+    "sixteen different items, with a 2,048-token output budget; the writer's paragraph breaks are carried through "
+    "the checks and delivered as a blank line. Every check and receipt counter is unchanged. Off: template v8 (up to "
+    "eight short sentences, one per line, 1,024 tokens), as in 1.5.9.")
+# Lane GD-R (15 Oct 2026, grantee density round 2): the vector lane's floor in answers mode. 15 by default since 1.5.10
+# (owner's decision of 16 Oct 2026); 1.5.9's floor was 25.
+ANSWER_VECTOR_FLOOR = _switch(
+    "ANSWER_VECTOR_FLOOR", "int", 15, 15,
+    "GD-R. The vector lane's cosine floor in answers mode, in hundredths (0 to 100; more reads as 100). With the "
+    "node's default embedding model (all-MiniLM-L6-v2) a broad question scores low against short first-person "
+    "notes: on the grantee density fixture (synthetic owner, 15 Oct) 1 of 22 supporting records cleared 0.25, 6 "
+    "cleared 0.20, 11 cleared 0.15 and 16 cleared 0.10, so the writer saw one record. It changes only which "
+    "already-permitted members are ranked into the answer's candidates, never what a grant permits: every member "
+    "still passes the same walk and checks. Named search, batch and dispatch keep 0.25 whatever this says. The "
+    "default, 15, is 1.5.10's (0.10 was measured and gained nothing at 30 items); 25 is 1.5.9's floor.")
+# Lane GD-A′ (15 Oct 2026, grantee density round 2): the dense template asks for sentences that answer the
+# question. On by default since 1.5.10 (owner's decision of 16 Oct 2026); inert while ANSWER_DENSE is off.
+ANSWER_DENSE_ON_QUESTION = _switch(
+    "ANSWER_DENSE_ON_QUESTION", "bool", True, True,
+    "GD-A′. With ANSWER_DENSE on, the writer's template is v10: v9 with only its length sentence replaced, so "
+    "the writer writes only sentences that answer the question, as many as the items support up to twelve, in one "
+    "to three paragraphs, and never presents an item about something else as the answer. On the grantee density "
+    "fixture v9's \"seven to twelve sentences\" made the 9B writer pad with unrelated items when the items did not "
+    "answer the question. The 2,048-token budget, the paragraphs, every check and every receipt counter are v9's; "
+    "the receipt and the writer say v10. With ANSWER_DENSE off it changes nothing (template v8, as in 1.5.9).")
+# Lane GD-L (15 Oct 2026, grantee density round 3): the name rule in one cited item. The owner's direction of 15 Oct:
+# for grants, the looser method that gives the most facts, never anything the grant does not permit.
+ANSWER_NAME_ONE_ITEM = _switch(
+    "ANSWER_NAME_ONE_ITEM", "bool", False, False,
+    "GD-L. A capitalised name in the question that nothing on this node is named by (any entity's name or alias, "
+    "of any type; any contact's name or handle; any Off-limits entry), that is no word of the owner's (their own "
+    "names, the account's words) and whose name has no such word beside it (\"Lena Ortiz\" binds whole when Lena is "
+    "known) has to be in one item a sentence cites, not in every one; two or more such names in the same item. A "
+    "known person's name still has to be in every cited item, and so does every name of a sentence that cites an "
+    "item lacking the loosened name and naming a known person. Acts only while ANSWER_SUPPORT_JUDGE is on. The "
+    "owner-word rule, the Off-limits refusal and body check, retrieval and the grant boundary are unchanged. Nothing "
+    "loosens when the node's people, its names or the owner's names cannot be read or are empty. Off: every name in "
+    "every cited item, as in 1.5.9.")
+# Lane NR179 (15 Oct 2026, the 1.5.10 latency plan): an answer job's time under the node's own background load. On
+# bound and unbound alike since 1.5.10 (owner decisions D1, D2); reading one costs no `is_bound()` stat.
+ANSWER_HOLDS_BACKGROUND = _switch(
+    "ANSWER_HOLDS_BACKGROUND", "bool", True, True,
+    "NR179 G1 (decision D2). While a share's answer job is queued or running, a search-index build the owner-change "
+    "queue or the refresh loop's restore would start, and an automatic or upgrade-step graph rebuild, wait until it "
+    "ends (at most 110 s, the job's own deadline, and never past the node's stop) before they start. Starts only: a "
+    "build already running is not stopped or shortened. An ended share's removal never waits, and the owner's own "
+    "rebuilds never wait. Fresh data reaches the index later. On bound and unbound alike since 1.5.10 (owner, 15 Oct: 'Yes on "
+    "the first 4 of those', D2). Off: they start at once, as in 1.5.9.")
+ANSWER_JUDGE_RESERVE_SECONDS = _switch(
+    "ANSWER_JUDGE_RESERVE_SECONDS", "int", 8, 8,
+    "NR179 G2 (decision D1). Seconds before an answer job's deadline (110 s from acceptance) under which no further "
+    "support-judge call starts: the sentences not yet judged are dropped (`dropped_unjudged`; the judge only drops) "
+    "and the job ends answered with the sentences already kept, or as all_sentences_dropped, instead of `deadline`. "
+    "Set, each judge call is also cut off 5 s before the deadline, and its sentence counts as unjudged. A set value "
+    "is read within 6 to 60. Because of that cut-off a reserve above about 10 buys little (in WS0's review grid 20 "
+    "cost 10 answers); 6 to 10 is the suggestion. 8 is the default on bound and unbound alike since 1.5.10 (owner, "
+    "16 Oct: '8 seconds (Recommended)', D1). 0: no reserve, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -299,11 +395,13 @@ SWITCHES = (
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
-    DECIDE_OUTSIDE_GATE, OWNER_LANE, OWNER_LANE_SLOTS, OWNER_LANE_SHARED_MAX, OWNER_LANE_TYPES,
+    DECIDE_OUTSIDE_GATE, OWNER_LANE, OWNER_LANE_SLOTS, OWNER_LANE_SHARED_MAX, OWNER_LANE_TYPES, REVIEW_PASS_BOUNDARY,
+    REVIEW_PASS_BOUNDARY_MAX_AGE, SWEEP_INTEREST_VERDICT, SWEEP_INTEREST_VERDICT_FULL_EVERY,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
-    ANSWER_CITATION_FORMS,
+    ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR, ANSWER_DENSE_ON_QUESTION,
+    ANSWER_NAME_ONE_ITEM, ANSWER_HOLDS_BACKGROUND, ANSWER_JUDGE_RESERVE_SECONDS,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 
@@ -382,7 +480,28 @@ def value(switch, env: Mapping | None = None):
     item = lookup(switch)
     env = os.environ if env is None else env
     found = parse(item, env.get(item.name))
-    return default(item, env) if found is None else found
+    result = default(item, env) if found is None else found
+    reads = _OBSERVED.get()
+    if reads is not None:
+        reads.append((item.name, result))
+    return result
+
+
+#: NR187 (WS0 review): the switch reads of the computation running inside `observed()` on this context, else None.
+_OBSERVED: contextvars.ContextVar = contextvars.ContextVar("topos_permissions_v2_switch_reads", default=None)
+
+
+@contextlib.contextmanager
+def observed():
+    """Every switch this context reads inside, in order, as (name, value): what a computation actually read, for a
+    caller that keeps its result only while the switches are what it read (search_index `_interests_current_kept`).
+    A context variable, so another thread's reads are never in it. Switch names and values only."""
+    reads: list = []
+    token = _OBSERVED.set(reads)
+    try:
+        yield reads
+    finally:
+        _OBSERVED.reset(token)
 
 
 def on(switch, env: Mapping | None = None) -> bool:
