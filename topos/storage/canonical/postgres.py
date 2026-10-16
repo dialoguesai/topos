@@ -118,7 +118,6 @@ class PostgresCanonicalStore:
                 source_record_id, ingested_at, sync_batch_id
             ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (conversation_id) DO UPDATE SET
-                title=COALESCE(EXCLUDED.title, ai_chat_conversations.title),
                 updated_at=EXCLUDED.updated_at,
                 sync_batch_id=EXCLUDED.sync_batch_id
             """,

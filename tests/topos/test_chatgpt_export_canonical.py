@@ -224,13 +224,20 @@ def _canonicalize_ui(conn: sqlite3.Connection, title: str | None, message_id: st
     Canonicalizer(CanonicalTablesManager(conn)).canonicalize_staging_batch(
         [normalized], source="chatgpt", sync_batch_id=f"batch-{message_id}", mapping_source_id="chatgpt_ui_conversation"
     )
-    return [row["title"] for row in conn.execute("SELECT title FROM ai_chat_conversations")]
+    return [tuple(row) for row in conn.execute("SELECT title, latest_title FROM ai_chat_conversations")]
 
 
-def test_a_later_title_fills_or_renames_a_conversation_and_no_write_erases_one(conn):
+def test_a_later_title_fills_or_renames_the_latest_title_and_no_write_erases_one(conn):
     """The conversation upsert kept the first row's title forever: an extension thread
-    written before its title was sent stayed NULL, and a rename never landed."""
-    assert _canonicalize_ui(conn, None, "m1") == [None]
-    assert _canonicalize_ui(conn, "Retention charts", "m2") == ["Retention charts"]
-    assert _canonicalize_ui(conn, "Retention rate charts", "m3") == ["Retention rate charts"]
-    assert _canonicalize_ui(conn, None, "m4") == ["Retention rate charts"]
+    written before its title was sent stayed untitled, and a rename never landed. A later
+    title now lands in `latest_title`; `title` keeps the first record's, because the
+    owner's reviews pin it (migration 83)."""
+    assert _canonicalize_ui(conn, None, "m1") == [(None, None)]
+    assert _canonicalize_ui(conn, "Retention charts", "m2") == [(None, "Retention charts")]
+    assert _canonicalize_ui(conn, "Retention rate charts", "m3") == [(None, "Retention rate charts")]
+    assert _canonicalize_ui(conn, None, "m4") == [(None, "Retention rate charts")]
+
+
+def test_a_chat_titled_by_its_first_record_keeps_that_title_and_tracks_renames(conn):
+    assert _canonicalize_ui(conn, "Retention charts", "m1") == [("Retention charts", "Retention charts")]
+    assert _canonicalize_ui(conn, "Retention rate charts", "m2") == [("Retention charts", "Retention rate charts")]

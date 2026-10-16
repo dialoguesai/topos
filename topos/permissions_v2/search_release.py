@@ -84,11 +84,15 @@ def _releases_titles(policy) -> bool:
 
 
 def _conversation_title(conn, identity, row: dict) -> str | None:
-    """An AI-chat message's chat title, as a share that opted in releases it.
+    """An AI-chat message's chat title, as a share that opted in releases it: the chat's latest title, else the one
+    its first record set.
 
-    Read from the parent row the owner's review pinned (evidence._load binds its revision onto the message row), so a
-    chat renamed since the review releases nothing here. The title was never reviewed as text of its own, so it is
-    scrubbed of addresses and numbers like an answer, dropped when it trips the NSFW screen, and cut to the cap.
+    A title is preferred, never required: the latest one (`latest_title`, migration 83) is outside every review and
+    context revision, so a chat named or renamed after its messages were reviewed still releases them, now with the
+    new name. The parent is the row this read loaded (evidence._load binds its revision onto the message row). The
+    Off-limits veto has already read every column of it, titles included, before a message gets here. No review
+    reads a title as text, so it is scrubbed of addresses and numbers like an answer, dropped when it trips the NSFW
+    screen, and cut to the cap.
     """
     if identity.table != "ai_chat_messages":
         return None
@@ -101,8 +105,9 @@ def _conversation_title(conn, identity, row: dict) -> str | None:
     parent = dict(parents[0])
     if _row_revision(parent, table="ai_chat_conversations") != row.get("_p2b_parent_revision"):
         return None
-    title = parent.get("title")
-    if not isinstance(title, str) or not title.strip():
+    title = next((value for value in (parent.get("latest_title"), parent.get("title"))
+                  if isinstance(value, str) and value.strip()), None)
+    if title is None:
         return None
     scrubbed = _sanitize_nsfw(_redact_pii(title.strip()))
     if scrubbed == "[SANITIZED]":
