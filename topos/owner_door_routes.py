@@ -290,6 +290,22 @@ CENSUS: Tuple[RouteRule, ...] = (
     _d("PUT", "/v1/user-identity", "the owner's identity mapping"),
 )
 
+#: The HTTP routes an ``owner_agent`` may call on the socket (CONTRACTS §1.2): a positive list, every other route is
+#: 403 ``{"error": "owner_agent_not_allowed"}`` at the socket layer, before the route and before any auth of its own.
+OWNER_AGENT_ROUTES: Tuple[Tuple[str, str], ...] = (
+    ("POST", "/api/local/agent/dispatch"),
+    ("GET", "/sources"),
+    ("GET", "/sources/{source_id}/settings"),
+    ("GET", "/v1/shell/status"),
+    ("GET", "/api/local/owner/scope"),
+)
+
+
+def owner_agent_route_allowed(method: str, path: str) -> bool:
+    method = str(method or "").upper()
+    return any(method == m and _compile(template).fullmatch(path) is not None for m, template in OWNER_AGENT_ROUTES)
+
+
 READ_RULE = RouteRule("*", "*", READ, "not a mutating method: untouched")
 UNKNOWN_RULE = RouteRule("*", "*", UNKNOWN, "a mutating route the census does not name: refused on the socket until it is listed")
 

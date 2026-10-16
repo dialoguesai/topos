@@ -209,8 +209,16 @@ def peer_may_change(peer: SocketPeer) -> bool:
 
 
 class UDSChannelApp:
-    """ASGI wrapper marking every request on this server as transport=uds, with its socket peer; and the
-    socket-layer dangerous-door gate for the HTTP routes that never reach the dispatcher (``owner_door_routes``)."""
+    """ASGI wrapper marking every request on this server as transport=uds, with its socket peer; the socket's
+    principal step; and the socket-layer dangerous-door gate for the HTTP routes that never reach the dispatcher
+    (``owner_door_routes``).
+
+    The principal step (L1 verifier, 15 Oct 2026): there is no principal middleware on the socket, so a labelled
+    agent hitting a ``require_api_key``-only route was verified by auth and then served with NO principal, which
+    ``install_authority`` and the tier heuristic read as the legacy owner. Every http request on the socket now
+    resolves its principal first (``auth.resolve_request_principal``: a label mints ``owner_agent`` or raises L1's
+    401; no label is ``owner_app``), sets it as the request's principal for the route, and an ``owner_agent`` reaches
+    only ``owner_door_routes.OWNER_AGENT_ROUTES`` (403 ``owner_agent_not_allowed`` elsewhere). Then the door gate."""
 
     def __init__(self, app):
         self.app = app
@@ -219,16 +227,73 @@ class UDSChannelApp:
         token = _transport.set("uds")
         peer = socket_peer_from_scope(scope) if isinstance(scope, dict) else None
         peer_token = _peer.set(peer)
+        principal_token = None
         try:
             if peer is not None and scope.get("type") == "http":
+                principal, refusal = await resolve_socket_principal(scope)
+                if refusal is not None:
+                    await _send_json(send, refusal[0], refusal[1])
+                    return
+                from .principal import set_principal
+
+                principal_token = set_principal(principal)
+                if not owner_agent_route_allowed(principal, scope):
+                    await _send_json(send, 403, {"error": "owner_agent_not_allowed"})
+                    return
                 refused, receive = await owner_door_gate(scope, receive, peer)
                 if refused:
                     await _send_owner_door_refusal(send)
                     return
             await self.app(scope, receive, send)
         finally:
+            if principal_token is not None:
+                from .principal import reset_principal
+
+                reset_principal(principal_token)
             _peer.reset(peer_token)
             _transport.reset(token)
+
+
+async def resolve_socket_principal(scope):
+    """(the request's channel-verified principal, None), or (None, (status, body)) when auth refuses it.
+
+    The same resolution a route's ``Depends(resolve_request_principal)`` does, done once for every request on the
+    socket so that no route runs with ``None`` for a labelled caller. A refusal's body is the exception's detail
+    when it is already an object (L1's ``AgentLabelRefused``: ``{"error", "message"}`` at top level), else FastAPI's
+    ``{"detail": ...}``."""
+    from fastapi import HTTPException
+    from starlette.requests import Request
+
+    from . import auth
+
+    request = Request({**scope, "headers": scope.get("headers") or []})
+    try:
+        credentials = await auth.bearer_scheme(request)
+        principal = auth.resolve_request_principal(request, credentials)
+    except HTTPException as exc:
+        detail = exc.detail
+        return None, (exc.status_code, detail if isinstance(detail, dict) else {"detail": detail})
+    return principal, None
+
+
+def owner_agent_route_allowed(principal, scope) -> bool:
+    """Every class but ``owner_agent`` passes here (their routes decide for themselves); an agent reaches only the
+    §1.2 list."""
+    from . import owner_door_routes, principal as principal_module
+
+    if getattr(principal, "cls", None) != getattr(principal_module, "OWNER_AGENT", "owner_agent"):
+        return True
+    return owner_door_routes.owner_agent_route_allowed(str(scope.get("method") or ""), str(scope.get("path") or ""))
+
+
+async def _send_json(send, status: int, body: Dict[str, Any]) -> None:
+    payload = json.dumps(body).encode("utf-8")
+    await send({"type": "http.response.start", "status": status, "headers": [
+        (b"content-type", b"application/json"),
+        (b"content-length", str(len(payload)).encode("ascii")),
+        (b"cache-control", b"no-store"),
+    ]})
+    await send({"type": "http.response.body", "body": payload})
 
 
 # ------------------------------------------------- the socket-layer gate (P0.11b)
@@ -302,13 +367,7 @@ async def owner_door_gate(scope, receive, peer: SocketPeer):
 
 
 async def _send_owner_door_refusal(send) -> None:
-    payload = json.dumps({"error": "owner_confirmation_required", "message": OWNER_CONFIRMATION_MESSAGE}).encode("utf-8")
-    await send({"type": "http.response.start", "status": 403, "headers": [
-        (b"content-type", b"application/json"),
-        (b"content-length", str(len(payload)).encode("ascii")),
-        (b"cache-control", b"no-store"),
-    ]})
-    await send({"type": "http.response.body", "body": payload})
+    await _send_json(send, 403, {"error": "owner_confirmation_required", "message": OWNER_CONFIRMATION_MESSAGE})
 
 
 # ---------------------------------------------------- the dangerous-door legs
