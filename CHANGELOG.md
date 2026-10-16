@@ -19,6 +19,82 @@ The machine-readable twin of each release is
 
 ### Fixed
 - **Query: a comparison between two windows that nest or overlap now searches both and labels both sides** `[O]` "What changed between yesterday and this week?" (and "this month vs this week", "past 7 days vs this week") planned a search span from the earlier-starting window's start to the later-starting window's end, so when the windows nested the span stopped at the end of yesterday and today was never retrieved; and every item was labelled `baseline` because the wider window was tested first, so `current` was never assigned. The span is now the earliest start to the latest end, compared as instants across UTC offsets, and an item in the shared span takes the narrower window's label, so the wider label means the wider window outside the narrower one. Window order and the closed `baseline` / `current` labels are unchanged; disjoint pairs ("last week vs this week") plan and label exactly as before. Nothing new is shared and nothing is rebuilt.
+- **The owner-data scanner reads every file that is text, whatever it is called, and refuses a
+  path it was handed but cannot read.** `[O]` `scripts/scan_repo_for_owner_data.py` kept only
+  files whose names ended in one of 18 suffixes (19 once `.sh` joined on 4 Oct) and skipped
+  the rest without a word: `.js` and `.mjs`, `.css`, `.svg`, lock files, Dockerfiles,
+  justfiles, and shell scripts until 4 Oct. The filter
+  applied to a path named on the command line too, so scanning a shell script by name checked
+  nothing and printed "clean". The control plane and the frontend run this same scanner through
+  their `guard_owner_data.sh` shims at commit and over the whole tree before every push, so all
+  three repos reported "clean" over files nothing had read. Content decides now. A file is
+  binary, and skipped, only when it is not UTF-8 and has a NUL byte in its first 8000 bytes
+  (git's own test). Everything else is read up to an 8 MiB cap, and text that is not UTF-8 is
+  read as cp1252 and named in the summary. A path given on the command line that cannot be read
+  (binary, missing, a directory, inside a skipped directory, over the cap) is refused with exit
+  2 and one line saying why, and the other files are still scanned. `--all` and a bare run
+  count what they skip, and name every skip that is not binary or a skipped directory.
+  `SKIP_DIRS` is unchanged. Two holes of the same shape are closed as well. `git ls-files`
+  quotes a path with a non-ASCII byte in its name, and a bare run saw a new directory as the
+  one entry `dir/`. Neither names a file, so both were skipped. Both now read git's `-z`
+  output, and untracked files are listed one by one. A symlink is read as the path it holds and
+  never followed. Measured with `--all` on each repo's tree at its 2026-09-24 head, against a
+  fixture database and never the owner's: the engine went from 2,061 to 2,073 files, the
+  control plane from 2,408 to 2,562 and the frontend from 2,118 to 2,184. That is 232 more
+  files, 100 of them shell scripts. No file the old reader read goes unread. On those 6,587
+  files the old and new readers return identical hits for about 460 phrases per repo, sampled
+  from the trees. The push-time cost follows the bytes read. With before and after run side by
+  side against 1,439 invented names, `--all` took 2.9% longer on the engine, 8.1% on the
+  control plane and 3.7% on the frontend. `tests/features/test_owner_data_scan_coverage.py`
+  holds 23 tests, and 22 of them fail against the old scanner. The 23rd pins the one tracked
+  file that git's binary test alone would have dropped: TypeScript with a NUL byte inside a
+  string.
+- **`tests/features/test_local_protected_terms.py` stops opening the owner's live database.**
+  `[O]` Its helper ran the owner-data scanner without `--database`, whose default is
+  `~/.topos/database.db`. The suite pins `TOPOS_DATABASE_PATH`, which the scanner
+  deliberately ignores, so on a machine with a node seven of the file's eight tests loaded
+  the owner's protected names, read-only, every time the file ran. The helper now passes
+  `--database /nonexistent.db` first, which is how CI has always run it. Shown under a
+  scratch `HOME` holding a fixture database: the old invocation loaded that database's
+  names, and the new one loads only the terms file it is given. Test-only.
+- **The owner-data scanner refuses to pass on a protected-name set too small to mean anything,
+  and the pre-push hook shows the count.** `[O]` A scan against an empty set printed "clean"
+  all the same, and pre-commit shows nothing of a passing hook but "Passed", so a push could go
+  out on a check that had nothing to check against. Two control-plane pushes on 2026-09-24 were
+  reported to have done so, against a database with no entities in it; both were re-scanned
+  afterwards and came back clean. Now, whenever a database is in play or this account has a
+  node, fewer than 100 names (`MIN_PROTECTED_NAMES`) is refused with exit 3. The refusal prints
+  the counts and the paths it read, never a name. The account is looked up in the password
+  database, not `$HOME`, because a redirected `HOME` is how a run ends up reading a scratch
+  copy. With `HOME` aimed at a scratch home and no terms file there, the old answer on the
+  owner's own machine was SKIPPED. It is now the same refusal. `--allow-fixture`, which the
+  tests pass and no hook does, scans a small set anyway. Three things are unchanged. A machine
+  with no node and no terms list still skips (CI, a fresh clone). A short hand-kept list on a
+  machine with no node is scanned. `--verify-install` checks the hooks, not the names. The
+  account's database is only checked for existence, never opened, and only when a run found no
+  database to read. The engine's pre-push hook is `verbose` now, so every push prints the
+  scan's summary: files read, names, and what was skipped.
+  `tests/features/test_owner_data_name_floor.py` holds 12 tests, and 10 of them fail against
+  the scanner without the floor.
+- **The owner-data scanner never prints the name it caught, never passes a run that read
+  nothing, and is fast enough to read lock files.** `[O]` Review fixes on top of the two entries
+  above. A hit printed the protected name itself; that output is read in terminals, CI logs and
+  the transcripts of coding agents that commit through these hooks, so a hook that fired
+  copied the name one hop further. A hit now prints its kind and `path:line` (or `(line N)` for
+  a message) and says the text is withheld; open the location to see it. Binaries skipped by
+  `--all` or a bare run are named as well as counted. A run that read no file at all exits 4
+  instead of "clean — 0 files checked"; outside a repository the failed `git ls-files` exits 2
+  instead of reading as no files; a `--message-file` that cannot be opened exits 2 instead of
+  0. `--verify-install` answers before loading any names, so the `no-owner-data-installed`
+  hook no longer opens `~/.topos/database.db` on every commit. And the line search skips the
+  per-name split of a file when the name is not in it at all: against a 6,166-name database
+  copy, the files changed by main's last 20 commits took 4.3s instead of 49.5s, and `--all`
+  over this tree 49s instead of main's 269s, with identical answers (old and new search
+  compared on all 2,502 text files, 14.2 million comparisons, 0 differences).
+  `tests/features/test_owner_data_scan_fails_closed.py` (7 tests) and
+  `tests/features/test_owner_data_scan_withholds_terms.py` (10 tests) are new; 17 mutants of
+  the scanner (the suffix filter back, binaries skipped silently, the floor removed, nothing read
+  treated as clean, a term printed, the allow-file ignored) are each killed.
 
 ## [1.5.9] — 2026-10-15
 
