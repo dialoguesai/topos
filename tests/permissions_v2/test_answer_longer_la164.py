@@ -6,6 +6,10 @@ cited records. The wire cap is a closed, mirrored grammar, so it moves by answer
 (`answer_protocol.ACCEPTS_FIELD`). A control plane that says nothing is one from before the field: its ask is served
 exactly as 1.5.9 served it (eight items retrieved, at most eight cited), so no body it cannot parse is ever written.
 Nothing else about the checks moves. Invented names and text only.
+
+Answer protocol 4 (15 Oct 2026) moves the advertised number to 4 and widens the body for an asker that accepts 4
+(thirty records, 32,000 characters; `test_answer_protocol_v4`). What this file pins for an asker that accepts 3 holds
+as it was: sixteen records and 8,000 characters, read at 3's caps.
 """
 from __future__ import annotations
 
@@ -25,7 +29,7 @@ from topos.permissions_v2 import answer_transport, switches
 from topos.permissions_v2.answer_checks import TEMPLATE_VERSION
 from topos.permissions_v2.answer_generation import SYSTEM_PROMPT, build_prompt, k_answer, post_check_answer
 from topos.permissions_v2.answer_protocol import (ACCEPTS_FIELD, ANSWER_PROTOCOL_VERSION, ASK, FETCH, K_ANSWER,
-    K_ANSWER_LEGACY, LEGACY_ACCEPTED_VERSION, MAX_ANSWER_BYTES, VERSION, AnswerOnly, AnswerWithSources,
+    K_ANSWER_LEGACY, K_ANSWER_V4, LEGACY_ACCEPTED_VERSION, MAX_ANSWER_BYTES, VERSION, AnswerOnly, AnswerWithSources,
     parse_accepted_version, parse_answer_output, records_cap)
 from topos.permissions_v2.canonical import PolicyError, canonical_bytes
 from topos.permissions_v2.search_contract import MAX_SEARCH_BYTES
@@ -54,14 +58,17 @@ def _sentences(count, records_each=1, start=1):
 # --- the mirrored grammar -------------------------------------------------------------------------------------------
 
 def test_the_wire_cap_is_sixteen_by_protocol_version_and_eight_before_it():
-    assert ANSWER_PROTOCOL_VERSION == 3 and K_ANSWER == 16 and K_ANSWER_LEGACY == 8 and LEGACY_ACCEPTED_VERSION == 2
+    """Sixteen at 3, eight before; answer protocol 4 (advertised 4) gives an asker that accepts 4 or more thirty."""
+    assert ANSWER_PROTOCOL_VERSION == 4 and K_ANSWER == 16 and K_ANSWER_LEGACY == 8 and LEGACY_ACCEPTED_VERSION == 2
     assert ACCEPTS_FIELD == "answer_version"
     assert records_cap(1) == records_cap(2) == K_ANSWER_LEGACY
-    assert records_cap(3) == records_cap(4) == records_cap(99) == K_ANSWER
+    assert records_cap(3) == K_ANSWER
+    assert records_cap(4) == records_cap(99) == K_ANSWER_V4 == 30
     assert VERSION == "topos-answer/v1"                 # the body's own version string does not move
 
 
 def test_a_with_sources_body_carries_up_to_sixteen_records_and_never_seventeen():
+    """Read as an asker that accepts 3 (the reading of a caller that names no version): sixteen, never seventeen."""
     body = {"version": VERSION, "outcome": "answered", "answer": _sentences(8, 2),
             "records": [record.model_dump() for record in _many(16)]}
     parsed = parse_answer_output(body, request_type=FETCH, mode="with_sources")
@@ -236,13 +243,21 @@ def test_eight_sentences_over_sixteen_items_close_to_a_sixteen_record_body(monke
     assert only.body.outcome == "answered" and only.kept == 8 and "[" not in only.body.answer
 
 
-def test_seventeen_distinct_citations_are_still_a_body_the_grammar_refuses(monkeypatch):
+def test_seventeen_distinct_citations_are_a_body_an_asker_that_accepts_three_refuses(monkeypatch):
+    """Answer protocol 4: the grammar admits thirty records, so seventeen close to a body; read at 3's caps it is
+    refused (`body_invalid` in the service, which never retrieves seventeen for such an asker), at 4's it is not."""
     monkeypatch.setenv(P + "ANSWER_ITEMS", "24")
     records = _many(17)
     prompt = build_prompt("What has the owner been doing?", records, precision="none")
     text = _sentences(8, 2) + "\nOne more step moved [17]."
-    with pytest.raises(PolicyError):
-        post_check_answer(text, records, prompt, mode="with_sources", boundary=Open())
+    checked = post_check_answer(text, records, prompt, mode="with_sources", boundary=Open())
+    assert checked.body.outcome == "answered" and len(checked.body.records) == 17
+    for accepted in (LEGACY_ACCEPTED_VERSION, 3):
+        with pytest.raises(PolicyError, match="answer_output_invalid"):
+            parse_answer_output(checked.body, request_type=FETCH, mode="with_sources", accepted_version=accepted)
+    with pytest.raises(PolicyError, match="answer_output_invalid"):
+        parse_answer_output(checked.body, request_type=FETCH, mode="with_sources")
+    assert len(parse_answer_output(checked.body, request_type=FETCH, mode="with_sources", accepted_version=4).records) == 17
 
 
 def test_the_prompt_asks_for_up_to_eight_sentences_and_the_template_version_moved():
@@ -252,13 +267,17 @@ def test_the_prompt_asks_for_up_to_eight_sentences_and_the_template_version_move
     assert TEMPLATE_VERSION == "topos-answer-template/v8"
 
 
-def test_the_items_switch_defaults_to_eight_takes_sixteen_by_setting_and_the_ceiling_stays(monkeypatch):
+def test_the_items_switch_defaults_to_thirty_takes_sixteen_or_eight_by_setting_and_the_ceiling_stays(monkeypatch):
     """IN167 (WS0's decision at integration): the lane built 16 as the default and counted three times the false
-    sentences there; the integrated default is 8 and 16 is the setting. The wire's cap stays 16."""
-    assert switches.ANSWER_ITEMS.unbound == switches.ANSWER_ITEMS.bound == K_ANSWER_LEGACY == 8
-    assert k_answer() == 8 and K_ANSWER == 16 and ag.K_ANSWER_CEILING == 24
+    sentences there; the integrated default was 8 and 16 the setting. 1.5.10 (the owner's decision of 16 Oct 2026,
+    after the grantee density runs) made it 30, answer protocol 4's cap; 16 and 1.5.9's 8 are settings. A v3 asker's
+    cap stays 16; the ceiling moved to 30 with answer protocol 4, a v4 asker's cap."""
+    assert switches.ANSWER_ITEMS.unbound == switches.ANSWER_ITEMS.bound == K_ANSWER_V4 == 30
+    assert k_answer() == 30 and K_ANSWER == 16 and ag.K_ANSWER_CEILING == K_ANSWER_V4 == 30
     monkeypatch.setenv(P + "ANSWER_ITEMS", "16")
     assert k_answer() == K_ANSWER == 16
+    monkeypatch.setenv(P + "ANSWER_ITEMS", "8")
+    assert k_answer() == K_ANSWER_LEGACY == 8
 
 
 def test_the_longest_answers_fit_the_byte_limits():
@@ -277,8 +296,11 @@ def test_the_longest_answers_fit_the_byte_limits():
 
 
 @pytest.mark.asyncio
-async def test_the_writer_is_given_room_for_eight_sentences(monkeypatch):
+async def test_with_1_5_9s_settings_the_writer_is_given_room_for_eight_sentences(monkeypatch):
     from topos.permissions_v2 import shadow_labeler_local as sl
+    # 1.5.9's template v8 (eight short sentences): ANSWER_DENSE is on by default since 1.5.10 (v10, 2,048 tokens).
+    monkeypatch.setenv(P + "ANSWER_DENSE", "false")
+    monkeypatch.setenv(P + "ANSWER_DENSE_ON_QUESTION", "false")
     posted = []
 
     class Response:
@@ -307,6 +329,7 @@ async def test_the_writer_is_given_room_for_eight_sentences(monkeypatch):
     monkeypatch.setattr(sl, "assessment_base_url", lambda settings=None: "http://host.invalid")
     monkeypatch.setenv(P + "ANSWER_ITEMS", "16")              # the sixteen-item prompt is the switch's setting (IN167)
     prompt = build_prompt("What has the owner been doing?", _many(16), precision="none")
+    assert prompt.template == TEMPLATE_VERSION
     assert await ar._generate_local(prompt, deadline=2_000_000_000) == "A step [1]."
     _url, _timeout, body = posted[0]
     assert ar.ANSWER_NUM_PREDICT == 1024
@@ -314,9 +337,10 @@ async def test_the_writer_is_given_room_for_eight_sentences(monkeypatch):
     assert "keep_alive" not in body and body["think"] is False
 
 
-def test_the_node_advertises_answer_protocol_three(monkeypatch):
+def test_the_node_advertises_answer_protocol_four(monkeypatch):
+    """3 from LA164; 4 from answer protocol 4, which still serves an asker that accepts 3 as 3 was served."""
     from topos.engine import registration
     monkeypatch.setattr(switches, "is_bound", lambda: True)
     monkeypatch.setattr(switches, "on", lambda _name: True)
-    assert registration.ANSWER_VERSION == ANSWER_PROTOCOL_VERSION == 3
-    assert registration._answer_version() == 3
+    assert registration.ANSWER_VERSION == ANSWER_PROTOCOL_VERSION == 4
+    assert registration._answer_version() == 4

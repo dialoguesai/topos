@@ -5,8 +5,10 @@ import json
 
 import pytest
 
-from tests.permissions_v2.answer_wire_fixtures import MODELS, ROOT, vector, vector_v2, vector_v3
-from topos.permissions_v2.answer_protocol import K_ANSWER, K_ANSWER_LEGACY, verify_node_answer
+from tests.permissions_v2.answer_wire_fixtures import MODELS, ROOT, vector, vector_v2, vector_v3, vector_v4
+from topos.permissions_v2.answer_protocol import (ANSWER_PROTOCOL_VERSION, K_ANSWER, K_ANSWER_LEGACY, K_ANSWER_V4,
+    LEGACY_ACCEPTED_VERSION, MAX_ANSWER_BYTES_V4, MAX_ANSWER_CHARS, MAX_ANSWER_CHARS_V4,
+    MAX_ANSWER_WITH_SOURCES_BYTES_V4, verify_node_answer)
 from topos.permissions_v2.canonical import PolicyError, canonical_bytes, digest
 from topos.permissions_v2.knowledge_contract import KnowledgePolicy
 from topos.permissions_v2.signing import parse_envelope
@@ -72,3 +74,46 @@ def test_answer_golden_v3_carries_sixteen_records_and_a_seventeenth_is_refused()
                                    "records": [*saved["body"]["records"], seventeenth]})
     for name in ("answer-golden-v1.json", "answer-golden-v2.json"):
         assert "sixteen" not in (ROOT / name).read_text()
+
+
+def test_answer_golden_v4_carries_thirty_records_and_a_long_answer_to_a_v4_asker_only():
+    """Answer protocol 4 (15 Oct 2026): thirty records and an answer longer than 8,000 characters verify for an asker
+    that accepts 4; the same bodies are refused to one that accepts 3, to one that says nothing, and to a caller that
+    names no version (3's reading). Past the grammar's own caps (a thirty-first record, a 32,001st character) a body
+    is refused even at 4. The v1, v2 and v3 vectors' bytes did not move."""
+    saved = json.loads((ROOT / "answer-golden-v4.json").read_text())
+    assert saved == vector_v4()
+    assert (saved["protocol_version"], saved["records_cap"], saved["records_cap_v3"], saved["records_cap_legacy"],
+            saved["chars_cap"], saved["chars_cap_v3"]) == (ANSWER_PROTOCOL_VERSION, K_ANSWER_V4, K_ANSWER,
+                                                           K_ANSWER_LEGACY, MAX_ANSWER_CHARS_V4, MAX_ANSWER_CHARS)
+    assert (saved["protocol_version"], saved["records_cap"], saved["chars_cap"]) == (4, 30, 32_000)
+    assert saved["bytes_cap"] == {"only": MAX_ANSWER_BYTES_V4, "with_sources": MAX_ANSWER_WITH_SOURCES_BYTES_V4}
+    assert len(saved["bodies"]["with_sources"]["records"]) == K_ANSWER_V4
+    keys = {"answer-node-key": bytes.fromhex(saved["public_keys_hex"]["node"])}
+    for mode in ("only", "with_sources"):
+        policy = KnowledgePolicy.parse(saved["policies"][mode]["policy"])
+        assert policy.search.answers == mode and digest(policy.model_dump()) == saved["policies"][mode]["hash"]
+        envelope = parse_envelope(saved["envelopes"][mode])
+        body, result = saved["bodies"][mode], saved["results"][mode]
+        assert MAX_ANSWER_CHARS < len(body["answer"]) <= MAX_ANSWER_CHARS_V4
+        verify_node_answer(result, trusted_keys=keys, envelope=envelope, output=body, mode=mode, now=saved["now"],
+                           accepted_version=4)
+        verify_node_answer(result, trusted_keys=keys, envelope=envelope, output=body, mode=mode, now=saved["now"],
+                           accepted_version=99)
+        for older in (3, LEGACY_ACCEPTED_VERSION, None):
+            with pytest.raises(PolicyError, match="answer_output_invalid"):
+                verify_node_answer(result, trusted_keys=keys, envelope=envelope, output=body, mode=mode,
+                                   now=saved["now"], **({"accepted_version": older} if older is not None else {}))
+        longest = {**body, "answer": body["answer"] + "x" * (MAX_ANSWER_CHARS_V4 + 1 - len(body["answer"]))}
+        with pytest.raises(PolicyError, match="answer_output_invalid"):
+            verify_node_answer(result, trusted_keys=keys, envelope=envelope, output=longest, mode=mode,
+                               now=saved["now"], accepted_version=4)
+    body = saved["bodies"]["with_sources"]
+    extra = {**body["records"][0], "record_id": "r." + "e" * 64}
+    with pytest.raises(PolicyError, match="answer_output_invalid"):
+        verify_node_answer(saved["results"]["with_sources"], trusted_keys=keys, mode="with_sources", now=saved["now"],
+                           envelope=parse_envelope(saved["envelopes"]["with_sources"]), accepted_version=4,
+                           output={**body, "answer": body["answer"] + "\nOne more step [31].",
+                                   "records": [*body["records"], extra]})
+    for name in ("answer-golden-v1.json", "answer-golden-v2.json", "answer-golden-v3.json"):
+        assert "thirty" not in (ROOT / name).read_text() and "answer-golden-v4" not in (ROOT / name).read_text()
