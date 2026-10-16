@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
-from . import answer_gate, answer_time, owner_account_words as account_words_grammar, switches
+from . import answer_domain, answer_gate, answer_time, owner_account_words as account_words_grammar, switches
 from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, account_words_as_asked, build_prompt, close_answer,
     judge_sentences, node_name_words, owner_name_words, owner_party_words, people_words,
     question_lacks_permitted_anchor, sieve_answer, tense_guard_on, withhold_protected_items)
@@ -168,6 +168,9 @@ class Job:
     # Fix A: the released records withheld from the writer because a text the prompt would show of them carries an
     # Off-limits term (`withhold_protected_items`); on the receipt only while ANSWER_PROTECTED_ITEM_FILTER is on.
     items_withheld_protected: int = 0
+    # G1: the job was refused before the model because its question asks about a domain the grant denies
+    # (`answer_domain`). The private receipt carries it only while ANSWER_DENIED_DOMAIN_REFUSAL is on.
+    refused_denied_domain: bool = False
 
 
 def answer_template() -> str:
@@ -566,6 +569,14 @@ class AnswerService:
             job.template = prompt.template
             if question_lacks_permitted_anchor(prompt):
                 return None, "question_not_supported"
+            # G1, narrow first: a question about a domain the grant denies, which no released item carries, has no
+            # answer. The anchor rule's reason, so nothing says which domain. Off: nothing of it is read.
+            if switches.on(switches.ANSWER_DENIED_DOMAIN_REFUSAL):
+                denied, permitted = answer_domain.policy_domains(policy)
+                if denied and answer_domain.asks_denied_domain(prompt.question, answer_domain.prompt_item_texts(prompt),
+                                                               denied, permitted):
+                    job.refused_denied_domain = True
+                    return None, "question_not_supported"
             try:
                 raw = asyncio.run(self.generate(prompt, deadline=job.accepted_at + MAX_END_SECONDS))
             except PolicyError as exc:
@@ -677,6 +688,10 @@ class AnswerService:
                 **({"dropped_plan_as_deed": 0 if checked is None else checked.dropped_plan_as_deed}
                    if tense_guard_on() else {})},
             **({"judge_template_version": judge_template_version()} if switches.on(switches.ANSWER_SUPPORT_JUDGE) else {}),
+            # G1: whether the denied-domain rule refused the job, only while it is on (never on the wire: the body is
+            # the uniform no_answer, the reason the anchor rule's).
+            **({"refused_denied_domain": bool(job.refused_denied_domain)}
+               if switches.on(switches.ANSWER_DENIED_DOMAIN_REFUSAL) else {}),
             # TR162: the scope's closed word ("none" when the question had none, or the grant withholds times),
             # whether retrieval widened it, and the ladder's rung; the prompt's time template while the prompt lines
             # are on. Counts and fixed words only: never the question's words or a date.

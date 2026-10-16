@@ -332,6 +332,18 @@ ANSWER_TENSE_GUARD = _switch(
     "cited item states that object done with another verb. Never a present or progressive sentence, one that "
     "frames the act as a plan itself (\"plans to design\"), or a verb no cited item intends; it never rewrites a "
     "sentence. Off: no check, and the receipt of before.")
+# Lane G1 (16 Oct 2026, grantee answer levers, narrow first; the owner's "build the denied-domain refusal too"): a
+# question about a domain the grant denies. Seen on the grantee density fixture: a health question to a share that
+# denies health was answered with the share's work notes, each sentence true of its item. Off until a measurement
+# shows the answer rate on answerable questions does not drop.
+ANSWER_DENIED_DOMAIN_REFUSAL = _switch(
+    "ANSWER_DENIED_DOMAIN_REFUSAL", "bool", False, False,
+    "G1. Before the model, a question is refused as question_not_supported (the anchor rule's reason: nothing says "
+    "which domain) when it has a word of a domain the grant's deny rules deny (the domain's name or a word of its "
+    "catalog phrase, whole words at most one suffix apart), that word is no word of a domain the grant permits, and "
+    "no released item the answer would be written from carries any such word. A question with no such word is never "
+    "refused, and retrieval and what a grant releases are unchanged. The owner's private receipt says "
+    "refused_denied_domain while it is on. Off: nothing of it is read and the receipt has no new key, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -344,7 +356,7 @@ SWITCHES = (
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
     ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR, ANSWER_DENSE_ON_QUESTION,
-    ANSWER_NAME_ONE_ITEM, ANSWER_PROTECTED_ITEM_FILTER, ANSWER_TENSE_GUARD,
+    ANSWER_NAME_ONE_ITEM, ANSWER_PROTECTED_ITEM_FILTER, ANSWER_TENSE_GUARD, ANSWER_DENIED_DOMAIN_REFUSAL,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

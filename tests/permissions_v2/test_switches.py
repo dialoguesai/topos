@@ -126,7 +126,10 @@ VPIF = {**V1510, P + "ANSWER_PROTECTED_ITEM_FILTER": False}
 #: Lever 4b / G2 (16 Oct 2026): the tense guard drops a sentence that states as done what the cited items give only as
 #: an intention; off, bound and unbound alike, until a battery measures it. 47 + 1 = 48.
 VG2 = {**VPIF, P + "ANSWER_TENSE_GUARD": False}
-TABLE = {**V166, **VG2}
+#: Lane G1 (16 Oct 2026, grantee answer levers): a question about a domain the grant denies, which no released item
+#: carries, is refused before the model; off, bound and unbound alike; off reads nothing of it. 48 + 1 = 49.
+VG1 = {**VG2, P + "ANSWER_DENIED_DOMAIN_REFUSAL": False}
+TABLE = {**V166, **VG1}
 
 
 @pytest.fixture(autouse=True)
@@ -264,8 +267,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 48
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 47
+    assert len(switches.SWITCHES) == len(TABLE) == 49
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 48
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -410,6 +413,19 @@ def test_the_g2_tense_guard_is_off_bound_or_not_and_on_is_one_environment_line(b
     name = P + "ANSWER_TENSE_GUARD"
     item = switches.lookup(name)
     assert item.unbound == item.bound == VG2[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_g1_denied_domain_refusal_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """G1: off with nothing set (no question refused for its domain, 1.5.9's answers), read without an `is_bound()`
+    stat; on is one environment line (`tests/permissions_v2/test_answer_denied_domain.py` pins what it does)."""
+    state(bound)
+    name = P + "ANSWER_DENIED_DOMAIN_REFUSAL"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == VG1[name] is False
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True
