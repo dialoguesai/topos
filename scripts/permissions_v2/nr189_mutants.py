@@ -34,7 +34,9 @@ COUNTS = "topos/permissions_v2/share_counts.py"
 CATALOG = "topos/permissions_v2/share_catalog.py"
 SNAPSHOT = "topos/permissions_v2/ingest_snapshot_facts.py"
 DERIVATION = "topos/permissions_v2/permitted_derivation.py"
-TESTS = ["tests/permissions_v2/test_nr189_share_excluded_sites.py", "tests/ingestion/test_share_excluded_selection.py"]
+CLUSTERS = "topos/features/signal/topic_clustering.py"
+TESTS = ["tests/permissions_v2/test_nr189_share_excluded_sites.py", "tests/ingestion/test_share_excluded_selection.py",
+         "tests/features/signal/test_nr189_cluster_share_excluded.py"]
 
 MUTANTS = [
     # The sites: each drops its filter.
@@ -71,6 +73,16 @@ MUTANTS = [
     ("derivation_writes_from_a_row_flagged_since_selection", [
         (DERIVATION, '                    if identity.table == "ai_chat_messages" and row_share_excluded(rows[0]):\n',
                      '                    if False:\n')]),
+    # Topic clusters (NR189 review note 1): a flagged row's words must reach no label.
+    ("cluster_recompute_reads_a_flagged_row", [
+        (CLUSTERS, '    kept = share_excluded_record_filter(conn, record_column="signal_embeddings.record_id")\n',
+                   '    kept = ""\n')]),
+    ("cluster_relabel_reads_a_flagged_member", [
+        (CLUSTERS, '    kept = share_excluded_record_filter(conn, record_column="topic_cluster_members.record_id")\n',
+                   '    kept = ""\n')]),
+    ("record_filter_reads_null_as_not_flagged", [
+        (HELPERS, '            f" AND flagged.{COLUMN} IS NOT 0)")\n',
+                  '            f" AND flagged.{COLUMN} <> 0)")\n')]),
     # The review surface (WS0 ruling): the column back in it moves every AI-chat revision at the upgrade.
     ("share_excluded_back_in_the_reviewed_surface", [
         (EVIDENCE, '        "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", '

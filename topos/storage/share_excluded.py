@@ -42,6 +42,17 @@ def share_excluded_clause(conn: Any, *, alias: str = "", table: str = TABLE, pre
     return f" AND {predicate}" if predicate else ""
 
 
+def share_excluded_record_filter(conn: Any, *, record_column: str, present: bool | None = None) -> str:
+    """`` AND NOT EXISTS (...)`` for a table keyed by a canonical record id that holds rows of every kind (an embedding,
+    a topic-cluster member): leaves out a row whose id is a flagged ``ai_chat_messages`` row (a NULL counts as flagged)
+    and keeps every row of any other kind. ``""`` when the column does not exist. ``record_column`` is the outer
+    query's record-id column, spelled by the caller (a fixed name, never input)."""
+    if not (share_excluded_present(conn) if present is None else present):
+        return ""
+    return (f" AND NOT EXISTS (SELECT 1 FROM {TABLE} flagged WHERE flagged.message_id = {record_column}"
+            f" AND flagged.{COLUMN} IS NOT 0)")
+
+
 def row_share_excluded(row: Any) -> bool:
     """Whether a row as stored (a ``SELECT *`` of the table, a ``sqlite3.Row`` or a mapping) carries the flag. For a
     read that already selects every column of one row, so it needs no probe at all: a member's re-check or an evidence
@@ -80,4 +91,4 @@ def record_share_excluded(record: Any) -> bool:
 
 
 __all__ = ["COLUMN", "TABLE", "record_share_excluded", "row_share_excluded", "share_excluded_clause",
-           "share_excluded_predicate", "share_excluded_present"]
+           "share_excluded_predicate", "share_excluded_present", "share_excluded_record_filter"]
