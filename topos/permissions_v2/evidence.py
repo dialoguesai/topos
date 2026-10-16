@@ -38,6 +38,7 @@ from .contract import Hash, Identifier, Number, StrictModel
 from .identity import (ATTESTED_CONTRACT, LEGACY_CONTRACT, SUBJECT_CONTRACTS, closure_identity,
     legacy_owner_subjects, permit_subjects, rekeyed_facts, restriction_subjects)  # noqa: F401 (legacy_owner_subjects: patched by tests)
 from .protection_clock import clock_state, closure_protection_revision, current_protection_revision
+from . import review_pass_boundary
 
 MAX_NODES = 128
 MAX_DEPTH = 16
@@ -55,7 +56,10 @@ REVIEW_SURFACE_EXCLUSIONS = {
         "content_disclosure", "content_disclosure_hash", "content_disclosure_model"}),
     "ai_chat_messages": frozenset({"ingested_at", "sync_batch_id", "content_hash", "content_disclosure",
         "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", "content_disclosure_model"}),
-    "ai_chat_conversations": frozenset({"ingested_at", "sync_batch_id", "created_at", "updated_at"}),
+    # latest_title (migration 83): the title a later batch brings. Only a share that opted into chat titles releases
+    # it, and the Off-limits veto reads it as it reads every column, but no review pins it, so a chat named or renamed
+    # after its messages were reviewed withholds none of them. `title`, set by the record that made the chat, stays.
+    "ai_chat_conversations": frozenset({"ingested_at", "sync_batch_id", "created_at", "updated_at", "latest_title"}),
     "journal_entries": frozenset({"ingested_at", "sync_batch_id", "content_disclosure", "content_disclosure_hash",
         "content_disclosure_model"}),
     "signal_objects": frozenset({"created_at", "updated_at", "created_by", "updated_by", "confidence"}),
@@ -800,6 +804,9 @@ class EvidenceResolver:
                 raise PolicyError("evidence_storage_unavailable") from None
             conn.row_factory = sqlite3.Row
             try:
+                # NR186: inside an automatic-review pass's row, the canonical token read before this read's snapshot
+                # is established (`review_pass_boundary.opened`); a no-op everywhere else.
+                review_pass_boundary.opened(self, conn)
                 self._incarnation()
                 conn.execute("BEGIN")
                 # Requires the real canonical owner and intact monotonic clock.
@@ -820,18 +827,30 @@ class EvidenceResolver:
             finally:
                 self.current_floor = None
                 self._entity_boundaries.pop(conn, None)
+                review_pass_boundary.closed(self, conn)
                 conn.close()
                 if pending:
                     self._complete_lineage_keys()
 
     def entity_boundary(self, conn):
-        """Cache only inside this SQLite read snapshot, including ungated builds."""
-        from .entity_boundary import EntityBoundary
+        """Cache only inside this SQLite read snapshot, including ungated builds.
+
+        NR186 (`REVIEW_PASS_BOUNDARY`, off by default): inside an automatic-review pass's row, the pass's boundary
+        rebound to this read when it is proven current on this read's snapshot (`review_pass_boundary`); otherwise,
+        and everywhere else, a fresh one, as always."""
         if conn not in getattr(self, "_entity_boundaries", {}):
-            return EntityBoundary(conn)
+            return self._new_entity_boundary(conn)
         if self._entity_boundaries[conn] is None:
-            self._entity_boundaries[conn] = EntityBoundary(conn)
+            kept = review_pass_boundary.for_read(self, conn)
+            self._entity_boundaries[conn] = self._new_entity_boundary(conn) if kept is None else kept
         return self._entity_boundaries[conn]
+
+    @staticmethod
+    def _new_entity_boundary(conn, *, record=False):
+        """The one construction of a read's boundary. NR186: the review pass builds its template here too (`record`
+        only adds its fingerprints), so the pass's boundary and a fresh one can never be built differently."""
+        from .entity_boundary import EntityBoundary
+        return EntityBoundary(conn, record=record)
 
     @contextmanager
     def provenance_pass(self, conn, provenance):

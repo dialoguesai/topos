@@ -85,7 +85,7 @@
   "additionalProperties": false,
   "properties": {
     "answer": {
-      "maxLength": 8000,
+      "maxLength": 32000,
       "minLength": 1,
       "title": "Answer",
       "type": "string"

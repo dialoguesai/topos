@@ -16,6 +16,9 @@ from ..storage.raw.file_store import RawFileStore
 logger = logging.getLogger("topos.ingestion.ingest_helpers")
 
 
+MAX_UI_CONVERSATION_TITLE_CHARS = 300
+
+
 def chat_ui_raw_payload(payload: dict, *, job_id: str, dataset_id: str) -> dict:
     """Map a chat UI-stream record to the v1 raw shape {id, thread_id, role, content, created_at}.
 
@@ -41,13 +44,21 @@ def chat_ui_raw_payload(payload: dict, *, job_id: str, dataset_id: str) -> dict:
             created_at = ts
         else:
             created_at = datetime.now(timezone.utc).timestamp()
-    return {
+    record = {
         "id": str(payload.get("id") or payload.get("message_id") or job_id),
         "thread_id": payload.get("thread_id") or payload.get("conversation_id") or dataset_id,
         "role": role,
         "content": payload.get("content", ""),
         "created_at": created_at,
     }
+    # The extension sends the thread's title as _metadata.conversation_title, the key
+    # canonicalizer._declared_title reads. Only that key passes: other _metadata keys
+    # steer conversation reconstruction, which a UI stream never declares.
+    metadata = payload.get("_metadata")
+    title = metadata.get("conversation_title") if isinstance(metadata, dict) else None
+    if isinstance(title, str) and title.strip():
+        record["_metadata"] = {"conversation_title": title.strip()[:MAX_UI_CONVERSATION_TITLE_CHARS]}
+    return record
 
 
 def _ui_stream_passes_payload_through(source: Any, source_id: str) -> bool:
