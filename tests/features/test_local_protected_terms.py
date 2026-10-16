@@ -30,7 +30,14 @@ SCANNER = os.path.join("scripts", "scan_repo_for_owner_data.py")
 
 
 def _run(*args):
-    return subprocess.run([sys.executable, SCANNER, *args], capture_output=True, text=True)
+    # --database always. Its default is the owner's live database, and on the
+    # owner's machine this file opened it, read-only, whenever it ran: the suite
+    # pins TOPOS_DATABASE_PATH, which the scanner deliberately ignores. A later
+    # --database in `args` still wins. --allow-fixture: a few hand-typed terms are
+    # far under the floor a real node's set clears.
+    return subprocess.run([sys.executable, SCANNER, "--database", "/nonexistent.db",
+                           "--allow-fixture", *args],
+                          capture_output=True, text=True)
 
 
 @pytest.fixture()
@@ -59,7 +66,9 @@ def probe(tmp_path):
 def test_a_local_term_is_caught(terms, probe):
     r = _run("--local-terms", terms, probe("met Quilliam Thornbury today"))
     assert r.returncode == 1
-    assert "Quilliam Thornbury" in r.stderr
+    assert "probe.py:1" in r.stderr
+    # Reported by location; the matched text itself is never printed.
+    assert "Quilliam Thornbury" not in r.stderr + r.stdout
 
 
 def test_a_short_local_term_is_honoured(terms, probe):
@@ -73,7 +82,7 @@ def test_a_short_local_term_is_honoured(terms, probe):
 def test_whitespace_and_comments_are_ignored(terms, probe):
     r = _run("--local-terms", terms, probe("enrolled at Sunnyside Primary"))
     assert r.returncode == 1
-    assert "Sunnyside Primary" in r.stderr
+    assert "probe.py:1" in r.stderr
     clean = _run("--local-terms", terms, probe("# a comment"))
     assert clean.returncode == 0, "a comment line must not become a protected term"
 
