@@ -129,7 +129,11 @@ VG2 = {**VPIF, P + "ANSWER_TENSE_GUARD": False}
 #: Lane G1 (16 Oct 2026, grantee answer levers): a question about a domain the grant denies, which no released item
 #: carries, is refused before the model; off, bound and unbound alike; off reads nothing of it. 48 + 1 = 49.
 VG1 = {**VG2, P + "ANSWER_DENIED_DOMAIN_REFUSAL": False}
-TABLE = {**V166, **VG1}
+#: Lead connective trim (16 Oct 2026, the live UI gate): when the writer's lead sentence was dropped, one closed opening
+#: connective comes off the first delivered sentence; off, bound and unbound alike; off is the answer as written.
+#: 49 + 1 = 50.
+VLCT = {**VG1, P + "ANSWER_LEAD_CONNECTIVE_TRIM": False}
+TABLE = {**V166, **VLCT}
 
 
 @pytest.fixture(autouse=True)
@@ -267,8 +271,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 49
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 48
+    assert len(switches.SWITCHES) == len(TABLE) == 50
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 49
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -426,6 +430,21 @@ def test_the_g1_denied_domain_refusal_is_off_bound_or_not_and_on_is_one_environm
     name = P + "ANSWER_DENIED_DOMAIN_REFUSAL"
     item = switches.lookup(name)
     assert item.unbound == item.bound == VG1[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_lead_connective_trim_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """Lead connective trim: off with nothing set (the answer as written, the receipt of before), read without an
+    `is_bound()` stat; on is one environment line (`tests/permissions_v2/test_answer_lead_connective_trim.py` pins
+    what it does)."""
+    state(bound)
+    name = P + "ANSWER_LEAD_CONNECTIVE_TRIM"
+    item = switches.lookup(name)
+    assert item.kind == "bool"
+    assert item.unbound == item.bound == VLCT[name] is False
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True

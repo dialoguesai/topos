@@ -237,6 +237,9 @@ class CheckedAnswer:
     # G2 (lever 4b): sentences that state as done a verb a cited item gives only as an intention and no cited item
     # states as done (`states_plan_as_deed`); 0 while ANSWER_TENSE_GUARD is off.
     dropped_plan_as_deed: int = 0
+    # Lead connective trim: the first delivered sentence lost its opening connective because the writer's lead
+    # sentence was dropped (`trim_lead_connective`); False while ANSWER_LEAD_CONNECTIVE_TRIM is off.
+    lead_connective_trimmed: bool = False
 
 
 def _clip(content: str, limit: int = 420) -> str:
@@ -1101,6 +1104,9 @@ class Sieved:
     paragraphs: tuple[int, ...] = ()
     # G2 (lever 4b): sentences the tense guard dropped (`states_plan_as_deed`); 0 while ANSWER_TENSE_GUARD is off.
     dropped_plan_as_deed: int = 0
+    # Lead connective trim: the writer's first generated sentence as the citation check splits it (`writer_lead`),
+    # whether a phase kept it or not; "" when unknown. `close_answer` reads it to tell whether the lead was dropped.
+    lead: str = ""
 
 
 def _paragraph_numbers(sieved: Sieved) -> tuple[int, ...]:
@@ -1365,7 +1371,8 @@ def sieve_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundar
         pairs = kept
     return Sieved(generated, tuple(sentence for sentence, _ in pairs), checked.dropped, copy_drops, echo_drops,
                   relevance_drops, non_answer_drops, question_item_drops, scope_drops,
-                  paragraphs=tuple(paragraph for _, paragraph in pairs), dropped_plan_as_deed=plan_drops)
+                  paragraphs=tuple(paragraph for _, paragraph in pairs), dropped_plan_as_deed=plan_drops,
+                  lead=writer_lead(text))
 
 
 JUDGE_UNAVAILABLE = "judge_unavailable"
@@ -1433,6 +1440,13 @@ def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, bo
     if not sentences:
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, scrub_drops, 0,
                              "all_sentences_dropped", **extra)
+    # Lead connective trim (`ANSWER_LEAD_CONNECTIVE_TRIM`, off): layout only, after the judge, the Off-limits check
+    # and the scrub have read every sentence as written, and before the body is assembled. First sentence only.
+    lead_trimmed = False
+    if lead_connective_trim_on() and lead_dropped(sieved):
+        trimmed = trim_lead_connective(sentences[0])
+        if trimmed != sentences[0] and not boundary.mentions_protected("\n".join([trimmed] + sentences[1:])):
+            sentences[0], lead_trimmed = trimmed, True
     fit_drops = 0
     while True:
         value, cited = _assembled(sentences, paragraphs, records, prompt, mode)
@@ -1445,7 +1459,7 @@ def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, bo
     body = (AnswerOnly if mode == "only" else AnswerWithSources).parse(value)
     return CheckedAnswer(body, sieved.generated, len(sentences), sieved.dropped_citation, sieved.dropped_copy,
                          sieved.dropped_question_echo, sieved.dropped_relevance, scrub_drops, cited, "answered",
-                         dropped_to_fit=fit_drops, **extra)
+                         dropped_to_fit=fit_drops, lead_connective_trimmed=lead_trimmed, **extra)
 
 
 def _assembled(sentences: list[str], paragraphs: list[int], records: list, prompt: Prompt, mode: str):
@@ -1460,6 +1474,77 @@ def _assembled(sentences: list[str], paragraphs: list[int], records: list, promp
     return {"version": VERSION, "outcome": "answered",
             "answer": answer_layout([_renumber(sentence, mapping) for sentence in sentences], paragraphs, prompt),
             "records": [records[number - 1].model_dump() for number in ordered]}, len(ordered)
+
+
+# --- Lead connective trim (16 Oct 2026, the live UI gate): an answer that opens with "Additionally," --------------
+# When a check or the judge drops the writer's lead sentence, the answer opens with the writer's second sentence, which
+# was written to follow it ("Additionally, the owner ...", "He also organised ..."). Layout only: `close_answer` strips
+# one closed opening connective from the first delivered sentence, after every check has read it as written.
+
+#: The sentence-initial connectives the trim strips, each with its comma, exactly as written (closed).
+LEAD_CONNECTIVES = ("Additionally,", "Also,", "In addition,", "Furthermore,", "Moreover,", "Besides,", "As well,")
+#: The subjects before " also " that the trim keeps, "also" going ("He also organised" -> "He organised") (closed).
+ALSO_SUBJECTS = ("I", "You", "He", "She", "It", "We", "They", "The owner")
+
+
+def lead_connective_trim_on(env=None) -> bool:
+    """The lead connective trim (`ANSWER_LEAD_CONNECTIVE_TRIM`, off by default)."""
+    return switches.on(switches.ANSWER_LEAD_CONNECTIVE_TRIM, env)
+
+
+def writer_lead(text: str) -> str:
+    """The writer's first generated sentence, split out of its reply exactly as the citation check splits it
+    (`post_check_citations`: its line stripped, a bullet's prefix kept), whether any check keeps it or not; "" when
+    the reply has no sentence."""
+    from .answer_checks import _BULLET
+    for raw_line in text.replace("\r", "").split("\n"):
+        line = raw_line.strip()
+        if not line:
+            continue
+        bullet = _BULLET.match(line)
+        prefix = bullet.group(0) if bullet else ""
+        parts = split_sentences(line[len(prefix):])
+        if parts:
+            return prefix + parts[0]
+    return ""
+
+
+def lead_dropped(sieved: Sieved) -> bool:
+    """Whether the first sentence the body delivers is not the writer's lead (`Sieved.lead`): a check or the judge
+    dropped the lead, or the scrub drops it (it reads each sentence alone, so it is asked again here). Compared as
+    text: a lead the writer wrote twice reads as kept, and that answer is left as written. False when the lead is
+    unknown ("": a caller that built its `Sieved` itself)."""
+    if not sieved.lead:
+        return False
+    if not sieved.sentences or sieved.sentences[0] != sieved.lead:
+        return True
+    return scrub_sentences([sieved.lead])[1] > 0
+
+
+def trim_lead_connective(sentence: str) -> str:
+    """`sentence` without its opening connective, or `sentence` itself. Pure: no switch, no environment.
+
+    Only at the very start (after a bullet's prefix, which stays): one of `LEAD_CONNECTIVES` and a space, the next
+    word capitalised; or one of `ALSO_SUBJECTS`, " also " and a letter, the "also " removed. Nothing else in the
+    sentence changes, its citations included, and nothing is added. Left as written when what would follow does not
+    open with a letter or a digit (nothing, a citation, punctuation), or when the next word opens in lower case and
+    carries a capital after it ("iOS"), which capitalising would misspell."""
+    from .answer_checks import _BULLET
+    bullet = _BULLET.match(sentence)
+    prefix = bullet.group(0) if bullet else ""
+    body = sentence[len(prefix):]
+    for connective in LEAD_CONNECTIVES:
+        if body.startswith(connective) and body[len(connective):len(connective) + 1].isspace():
+            rest = body[len(connective):].lstrip()
+            word = rest.split(None, 1)[0] if rest else ""
+            if not word or not word[0].isalnum() or (word[0].islower() and any(c.isupper() for c in word[1:])):
+                return sentence
+            return prefix + word[0].upper() + rest[1:]
+    for subject in ALSO_SUBJECTS:
+        opening = subject + " also "
+        if body.startswith(opening) and body[len(opening):len(opening) + 1].isalpha():
+            return prefix + subject + " " + body[len(opening):]
+    return sentence
 
 
 def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundary, support=None) -> CheckedAnswer:

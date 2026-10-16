@@ -345,6 +345,17 @@ ANSWER_DENIED_DOMAIN_REFUSAL = _switch(
     "question that names no denied domain is never refused, and retrieval and what a grant releases are unchanged. "
     "The owner's private receipt says refused_denied_domain while it is on. Off: nothing of it is read and the "
     "receipt has no new key, as in 1.5.9.")
+# Lead connective trim (16 Oct 2026, the live UI gate): two answers opened with a connective ("Additionally, ...")
+# because a check or the judge had dropped the writer's lead sentence. Layout only; off, bound and unbound alike.
+ANSWER_LEAD_CONNECTIVE_TRIM = _switch(
+    "ANSWER_LEAD_CONNECTIVE_TRIM", "bool", False, False,
+    "When a check or the judge dropped the writer's first sentence, the answer's first delivered sentence loses one "
+    "opening connective of a closed list (\"Additionally,\", \"Also,\", \"In addition,\", \"Furthermore,\", "
+    "\"Moreover,\", \"Besides,\", \"As well,\"; or the \"also\" of \"He also\", \"They also\", \"The owner also\" and "
+    "the like) and its next word is capitalised. After the judge and every check, before the body is assembled: no "
+    "verdict changes, no other sentence or mid-sentence word is touched, citations stay, nothing is added, dropped "
+    "or reordered. While it is on the receipt says lead_connective_trimmed. Off: the answer as written, and the "
+    "receipt of before.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -358,6 +369,7 @@ SWITCHES = (
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
     ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR, ANSWER_DENSE_ON_QUESTION,
     ANSWER_NAME_ONE_ITEM, ANSWER_PROTECTED_ITEM_FILTER, ANSWER_TENSE_GUARD, ANSWER_DENIED_DOMAIN_REFUSAL,
+    ANSWER_LEAD_CONNECTIVE_TRIM,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 

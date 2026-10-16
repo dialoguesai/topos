@@ -693,6 +693,10 @@ class AnswerService:
             # the uniform no_answer, the reason the anchor rule's).
             **({"refused_denied_domain": bool(job.refused_denied_domain)}
                if switches.on(switches.ANSWER_DENIED_DOMAIN_REFUSAL) else {}),
+            # Lead connective trim: whether the first delivered sentence lost its opening connective, only while the
+            # switch is on (off: the receipt of before, byte for byte).
+            **({"lead_connective_trimmed": checked is not None and checked.lead_connective_trimmed}
+               if switches.on(switches.ANSWER_LEAD_CONNECTIVE_TRIM) else {}),
             # TR162: the scope's closed word ("none" when the question had none, or the grant withholds times),
             # whether retrieval widened it, and the ladder's rung; the prompt's time template while the prompt lines
             # are on. Counts and fixed words only: never the question's words or a date.
