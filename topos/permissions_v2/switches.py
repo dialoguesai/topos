@@ -262,21 +262,22 @@ ANSWER_CITATION_FORMS = _switch(
 # bound and unbound alike, so each is exactly 1.5.9 until the owner decides (D1, D2); reading one costs no
 # `is_bound()` stat.
 ANSWER_HOLDS_BACKGROUND = _switch(
-    "ANSWER_HOLDS_BACKGROUND", "bool", False, False,
+    "ANSWER_HOLDS_BACKGROUND", "bool", True, True,
     "NR179 G1 (decision D2). While a share's answer job is queued or running, a search-index build the owner-change "
     "queue or the refresh loop's restore would start, and an automatic or upgrade-step graph rebuild, wait until it "
     "ends (at most 110 s, the job's own deadline, and never past the node's stop) before they start. Starts only: a "
     "build already running is not stopped or shortened. An ended share's removal never waits, and the owner's own "
-    "rebuilds never wait. Fresh data reaches the index later. Off: they start at once, as in 1.5.9.")
+    "rebuilds never wait. Fresh data reaches the index later. On bound and unbound alike since 1.5.10 (owner, 15 Oct: 'Yes on "
+    "the first 4 of those', D2). Off: they start at once, as in 1.5.9.")
 ANSWER_JUDGE_RESERVE_SECONDS = _switch(
-    "ANSWER_JUDGE_RESERVE_SECONDS", "int", 0, 0,
+    "ANSWER_JUDGE_RESERVE_SECONDS", "int", 8, 8,
     "NR179 G2 (decision D1). Seconds before an answer job's deadline (110 s from acceptance) under which no further "
     "support-judge call starts: the sentences not yet judged are dropped (`dropped_unjudged`; the judge only drops) "
     "and the job ends answered with the sentences already kept, or as all_sentences_dropped, instead of `deadline`. "
     "Set, each judge call is also cut off 5 s before the deadline, and its sentence counts as unjudged. A set value "
     "is read within 6 to 60. Because of that cut-off a reserve above about 10 buys little (in WS0's review grid 20 "
-    "cost 10 answers); 6 to 10 is the suggestion, and the owner sets it when the switch is turned on. 0 (the "
-    "default): no reserve, as in 1.5.9.")
+    "cost 10 answers); 6 to 10 is the suggestion. 8 is the default on bound and unbound alike since 1.5.10 (owner, "
+    "16 Oct: '8 seconds (Recommended)', D1). 0: no reserve, as in 1.5.9.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,

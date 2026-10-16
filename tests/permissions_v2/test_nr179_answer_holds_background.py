@@ -36,7 +36,8 @@ SWITCH = "TOPOS_PERMISSIONS_V2_ANSWER_HOLDS_BACKGROUND"
 
 @pytest.fixture(autouse=True)
 def no_answer_left_active(monkeypatch):
-    monkeypatch.delenv(SWITCH, raising=False)
+    # 1.5.10's default is on (owner decision D2); each test below says on, or runs with 1.5.9's off.
+    monkeypatch.setenv(SWITCH, "false")
     monkeypatch.setattr(answer_gate, "POLL_SECONDS", 0.01)
     assert not answer_gate.active()
     yield
@@ -70,14 +71,24 @@ class AnswerJob:
 # -- the switch -------------------------------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
-def test_the_switch_is_off_bound_and_unbound_and_on_is_one_environment_line(bound, monkeypatch):
+def test_the_switch_is_on_bound_and_unbound_and_off_is_one_environment_line(bound, monkeypatch):
+    monkeypatch.delenv(SWITCH, raising=False)
     monkeypatch.setattr(switches, "is_bound", lambda env=None: bound)
     item = switches.lookup(SWITCH)
     assert item is switches.ANSWER_HOLDS_BACKGROUND and item.kind == "bool"
-    assert item.unbound is False and item.bound is False and switches.on(item) is False
-    assert answer_gate.holds_background() is False
-    monkeypatch.setenv(SWITCH, "true")
-    assert switches.on(item) is True and answer_gate.holds_background() is True
+    assert item.unbound is True and item.bound is True and switches.on(item) is True
+    assert answer_gate.holds_background() is True
+    monkeypatch.setenv(SWITCH, "false")
+    assert switches.on(item) is False and answer_gate.holds_background() is False
+
+
+def test_with_nothing_set_it_is_on_and_a_start_waits_for_the_answer_job(monkeypatch):
+    """1.5.10's default (owner decision D2): no environment line means the hold is on."""
+    monkeypatch.delenv(SWITCH, raising=False)
+    job = AnswerJob()
+    job.end_after(0.2)
+    waited = answer_gate.hold_background_start()
+    assert 0.15 <= waited < 2.0 and not answer_gate.active()
 
 
 def test_off_nothing_waits_even_with_an_answer_job_running():

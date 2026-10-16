@@ -99,11 +99,11 @@ V172 = {**V167, P + "ANSWER_TIME_FILL": True}
 #: Lane CT176 (14 Oct 2026): the citation rule reads a range, a padded or a full-width bracket where it stands (on,
 #: bound and unbound alike; off reads only 1.5.9's forms). 40 + 1 = 41.
 V176 = {**V172, P + "ANSWER_CITATION_FORMS": True}
-#: Lane NR179 (15 Oct 2026, owner decision D2 pending): background builds hold for a share's answer job. Off bound and
-#: unbound alike, so 1.5.9's behaviour holds until the owner decides. 41 + 1 = 42.
-V179 = {**V176, P + "ANSWER_HOLDS_BACKGROUND": False,
-        # G2 (owner decision D1 pending): the support judge's time reserve, 0 = none. 42 + 1 = 43.
-        P + "ANSWER_JUDGE_RESERVE_SECONDS": 0}
+#: Lane NR179 (15 Oct 2026; owner decision D2, 15 Oct: on): background builds hold for a share's answer job. On bound
+#: and unbound alike since 1.5.10. 41 + 1 = 42.
+V179 = {**V176, P + "ANSWER_HOLDS_BACKGROUND": True,
+        # G2 (owner decision D1, 16 Oct: "8 seconds"): the support judge's time reserve, 8 s. 42 + 1 = 43.
+        P + "ANSWER_JUDGE_RESERVE_SECONDS": 8}
 TABLE = {**V166, **V179}
 
 
@@ -282,30 +282,34 @@ def test_the_ct176_citation_forms_are_on_bound_or_not_and_off_is_one_environment
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
-def test_the_nr179_background_hold_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
-    """NR179 G1: off with nothing set, read without an `is_bound()` stat; on is one environment line (decision D2)."""
+def test_the_nr179_background_hold_is_on_bound_or_not_and_off_is_one_environment_line(bound, state, monkeypatch):
+    """NR179 G1: on with nothing set (owner decision D2), read without an `is_bound()` stat; 1.5.9's behaviour is one
+    environment line."""
     state(bound)
     name = P + "ANSWER_HOLDS_BACKGROUND"
     item = switches.lookup(name)
-    assert item.unbound == item.bound == V179[name] is False
-    assert switches.value(name) is False
-    monkeypatch.setenv(name, "true")
+    assert item.unbound == item.bound == V179[name] is True
     assert switches.value(name) is True
+    monkeypatch.setenv(name, "false")
+    assert switches.value(name) is False
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
-def test_the_nr179_judge_reserve_is_zero_bound_or_not_and_a_number_is_one_environment_line(bound, state, monkeypatch):
-    """NR179 G2: 0 (no reserve) with nothing set, read without an `is_bound()` stat; seconds when set (decision D1)."""
+def test_the_nr179_judge_reserve_is_eight_bound_or_not_and_a_number_is_one_environment_line(bound, state, monkeypatch):
+    """NR179 G2: 8 s with nothing set (owner decision D1), read without an `is_bound()` stat; other seconds, or 0 for
+    1.5.9's no reserve, when set."""
     state(bound)
     name = P + "ANSWER_JUDGE_RESERVE_SECONDS"
     item = switches.lookup(name)
     assert item.kind == "int" and item.floor == 0
-    assert item.unbound == item.bound == V179[name] == 0
-    assert switches.number(name) == 0
+    assert item.unbound == item.bound == V179[name] == 8
+    assert switches.number(name) == 8
     monkeypatch.setenv(name, "20")
     assert switches.number(name) == 20
+    monkeypatch.setenv(name, "0")
+    assert switches.number(name) == 0                                    # 1.5.9: no reserve
     monkeypatch.setenv(name, "twenty")
-    assert switches.number(name) == 0                                    # unreadable: the default
+    assert switches.number(name) == 8                                    # unreadable: the default
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])

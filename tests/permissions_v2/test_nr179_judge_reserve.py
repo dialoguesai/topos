@@ -41,7 +41,8 @@ THREE = ("The owner is working on a synthetic task [1].\n"
 
 @pytest.fixture(autouse=True)
 def judge_on_and_no_reserve(monkeypatch):
-    monkeypatch.delenv(RESERVE, raising=False)
+    # 1.5.10's default is an 8 s reserve (owner decision D1); the tests below set it, or 0 for 1.5.9's no reserve.
+    monkeypatch.setenv(RESERVE, "0")
     monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "true")
 
 
@@ -90,7 +91,7 @@ def _judge(calls, *, seconds=0, verdicts=None):
     return judge
 
 
-# -- off: 1.5.9 ---------------------------------------------------------------------------------------------------------
+# -- off (0, set by the fixture): 1.5.9 ---------------------------------------------------------------------------------
 
 def test_off_a_judge_that_runs_past_the_deadline_ends_the_job_as_deadline_as_in_1_5_9(legacy, tmp_path, monkeypatch):
     calls = []
@@ -109,10 +110,12 @@ def test_off_the_receipt_of_an_answer_in_time_is_1_5_9s(legacy, tmp_path, monkey
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
-def test_the_reserve_is_zero_bound_and_unbound(bound, monkeypatch):
+def test_the_reserve_is_eight_seconds_bound_and_unbound_with_nothing_set(bound, monkeypatch):
+    """1.5.10's default (owner decision D1, 16 Oct: "8 seconds")."""
     from topos.permissions_v2 import switches
+    monkeypatch.delenv(RESERVE, raising=False)
     monkeypatch.setattr(switches, "is_bound", lambda env=None: bound)
-    assert switches.number(switches.ANSWER_JUDGE_RESERVE_SECONDS) == 0
+    assert switches.number(switches.ANSWER_JUDGE_RESERVE_SECONDS) == 8 and ar.judge_reserve() == 8
     assert ar.JUDGE_RELEASE_MARGIN_SECONDS == 5
 
 
@@ -159,8 +162,8 @@ def test_set_a_reserve_longer_than_sixty_seconds_is_read_as_sixty(legacy, tmp_pa
     assert receipt["sentences"]["kept"] == 2 and receipt["sentences"]["dropped_unjudged"] == 1
 
 
-@pytest.mark.parametrize("raw, read", [(None, 0), ("0", 0), ("1", 6), ("5", 6), ("6", 6), ("8", 8), ("10", 10),
-                                       ("60", 60), ("61", 60), ("120", 60), ("twenty", 0)])
+@pytest.mark.parametrize("raw, read", [(None, 8), ("0", 0), ("1", 6), ("5", 6), ("6", 6), ("8", 8), ("10", 10),
+                                       ("60", 60), ("61", 60), ("120", 60), ("twenty", 8)])
 def test_the_reserve_is_off_or_read_within_six_and_sixty(raw, read, monkeypatch):
     if raw is None:
         monkeypatch.delenv(RESERVE, raising=False)

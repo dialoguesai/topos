@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **Answers: background index and graph builds wait for a share's answer job, and the support judge keeps an 8-second reserve before the answer's deadline** (lane NR179, owner decisions D1 and D2). `[P]` While a recipient's answer is being written, a share-index build or graph rebuild that would start waits for it (at most 110 s, never past the node's stop), so the answer is not starved of the write gate. The support judge stops starting new checks 8 s before the deadline and drops only the sentences it could not check (`dropped_unjudged` on the owner's receipt), so a slow answer ends shorter instead of ending with no answer. On by default (`TOPOS_PERMISSIONS_V2_ANSWER_HOLDS_BACKGROUND`, `TOPOS_PERMISSIONS_V2_ANSWER_JUDGE_RESERVE_SECONDS=8`); `false` and `0` restore 1.5.9's behaviour.
+
 ### Fixed
 - **Query: a comparison between two windows that nest or overlap now searches both and labels both sides** `[O]` "What changed between yesterday and this week?" (and "this month vs this week", "past 7 days vs this week") planned a search span from the earlier-starting window's start to the later-starting window's end, so when the windows nested the span stopped at the end of yesterday and today was never retrieved; and every item was labelled `baseline` because the wider window was tested first, so `current` was never assigned. The span is now the earliest start to the latest end, compared as instants across UTC offsets, and an item in the shared span takes the narrower window's label, so the wider label means the wider window outside the narrower one. Window order and the closed `baseline` / `current` labels are unchanged; disjoint pairs ("last week vs this week") plan and label exactly as before. Nothing new is shared and nothing is rebuilt.
 
