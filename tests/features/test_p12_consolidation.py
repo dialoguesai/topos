@@ -845,3 +845,9 @@ class TestDedupMigration:
         assert conn.execute(
             "SELECT COUNT(*) FROM entity_review WHERE review_id='rev_done'"
         ).fetchone()[0] == 1, "answer lost"
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

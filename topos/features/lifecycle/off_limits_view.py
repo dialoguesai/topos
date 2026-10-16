@@ -19,7 +19,10 @@ Who is "the owner himself", for a request, is positive evidence at the node's ow
   - his own outside client under his own key: a client that authenticated at this node's own HTTP door with one of
     the node's keys, or a verified `third_party` stamp from the control plane that names THIS node's owner. The
     owner is looked up here, again, and is not taken from the dispatcher having let the frame through: a node that
-    cannot say who its owner is treats every relayed third party as someone else.
+    cannot say who its owner is treats every relayed third party as someone else. His approved coding agent
+    (`owner_agent`, named by its label on the socket and minted nowhere else) is this case too: what the upgrade
+    carried is read as his own, and an entry he made himself is still applied to it (`blackhole_guard` keeps the
+    class UNKNOWN), ruling D1 (b).
 
 Everything else keeps reading every entry: a relayed third party who is not the owner, a frame with no stamp, a
 request with no principal, and THE ROUTINE LANE (`ROUTINE_LANE`). A routine's result goes to the owner and, when the
@@ -86,11 +89,13 @@ def _relay_owner() -> Optional[str]:
 def is_owner_himself(principal: Any) -> bool:
     """Whether the node itself can tell that what it returns under this channel-verified principal goes to its
     owner (the module docstring's two cases). False for everything it cannot place."""
-    from ...principal import OWNER_APP, THIRD_PARTY
+    from ...principal import OWNER_AGENT, OWNER_APP, THIRD_PARTY
 
     cls = getattr(principal, "cls", None)
     if cls == OWNER_APP:
         return True
+    if cls == OWNER_AGENT:
+        return getattr(principal, "channel", None) == "uds"   # his agent, named at this node's own socket
     if cls != THIRD_PARTY:
         return False
     channel = getattr(principal, "channel", None)
