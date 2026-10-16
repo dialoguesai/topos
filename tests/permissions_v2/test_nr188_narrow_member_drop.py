@@ -970,3 +970,31 @@ def _sweep_at(node, caplog, now):
     with caplog.at_level(logging.WARNING):
         node.index.sweep(now=now)
     return [record.getMessage() for record in caplog.records if "message search index" in record.getMessage()]
+
+
+# --- review #5: a consent (posture) change on a source with no native proof is applied member by member ------------
+
+POSTURE_TABLE = "CREATE TABLE IF NOT EXISTS user_ingestion_sources(dataset_id TEXT, source_id TEXT, enabled INTEGER, posture TEXT)"
+
+
+@pytest.mark.parametrize("switch", ["on", "off"])
+def test_ai_chat_a_posture_change_withholds_every_line_of_its_source_at_once(ai_share, caplog, monkeypatch, switch):
+    """The owner sets the export source's posture (their consent to share it). An AI-chat line has no native snapshot
+    to break, so its dependency moves at what the node binds onto it (`row_binding`) and, switch on, each line of the
+    source is withheld at once, its own drop; the index stays and answers without it. A posture is per source (per
+    dataset at most), so every line of this one-source share goes; members of other sources would keep serving, as
+    the twin's conversations do above. Switch off: the whole index goes, as main."""
+    from tests.permissions_v2.test_fresh_node_message_tables import DATASET as AI_DATASET
+    monkeypatch.setenv(NARROW, "true" if switch == "on" else "false")
+    _ai(ai_share, POSTURE_TABLE)
+    _ai(ai_share, "INSERT INTO user_ingestion_sources VALUES (?, ?, 1, 'ambient')", (AI_DATASET, EXPORT))
+    lines = _sweep(ai_share, caplog)
+    if switch == "on":
+        assert lines == ["message search index member drift (dependencies: row_binding)",
+                         "message search index narrowed (1 withheld)"]
+        output, refused = ai_share.search_request("tide pools talk", k=10)
+        assert refused is None and output["records"] == []
+    else:
+        assert lines == ["message search index stale (dependencies)",
+                         "message search index member drift (dependencies: row_binding)"]
+        assert not _path(ai_share).exists()
