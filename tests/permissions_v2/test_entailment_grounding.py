@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from tests.owner_socket_client import OwnerConfirmedClient  # the owner's own process confirms its changes (P0.11b)
 
 from topos.permissions_v2 import entailment_grounding as eg
 from topos.permissions_v2.canonical import PolicyError
@@ -724,7 +725,7 @@ def test_owner_socket_lists_and_confirms_and_nobody_else_can(route, monkeypatch)
     from topos.principal import OWNER_APP, THIRD_PARTY, Principal
     from topos.uds import UDSChannelApp
     app, node, binding = route
-    with TestClient(UDSChannelApp(app)) as client:
+    with OwnerConfirmedClient(UDSChannelApp(app)) as client:
         assert client.post(PATH, json={"binding": binding, "operation": "list"}).status_code == 404
         monkeypatch.setenv(eg.FLAG, "true")
         listed_ = client.post(PATH, json={"binding": binding, "operation": "list"})

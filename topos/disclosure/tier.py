@@ -30,6 +30,7 @@ def resolve_disclosure_tier(
     explicit_tier: Optional[DisclosureTier] = None,
     disclosure_ceiling: Optional[str] = None,
     principal: "Optional[object]" = None,
+    scope_id: str = "",
 ) -> DisclosureTier:
     # Determine grantee status FIRST. A grantee request must never be elevated to
     # owner_raw by an explicit tier in the payload — that field is requester-influenced
@@ -44,13 +45,29 @@ def resolve_disclosure_tier(
     # classified the caller and stamps owner ids for native clients only) and
     # for legacy callers with no principal, where removing "mcp" would demote
     # the owner's own single-key surfaces before they learn the owner key.
-    from ..principal import OWNER_APP, THIRD_PARTY
+    #
+    # OWNER_AGENT (the owner's approved coding agent, ruling D1 (b)) is an
+    # explicit branch too and never reaches the heuristic: owner_raw for every
+    # scope but a special-class one, which stays at default_disclosure until
+    # the owner switches that kind on (query/packet_resolution.SPECIAL_CLASS_SCOPES).
+    from ..principal import OWNER_AGENT, OWNER_APP, THIRD_PARTY
 
     req = str(requester_id or "").strip() or "owner"
     own = str(owner_id or "").strip() or "owner"
     cls = getattr(principal, "cls", None)
     if cls == OWNER_APP and not is_grantee_request:
         is_grantee = False
+    elif cls == OWNER_AGENT:
+        if is_grantee_request or getattr(principal, "channel", None) != "uds":
+            # The grantee flag wins; and the class is minted on the socket only, so
+            # the word on any other channel is clamped like a grantee.
+            is_grantee = True
+        else:
+            from ..query.packet_resolution import is_special_class_scope
+
+            if is_special_class_scope(scope_id):
+                return "default_disclosure"
+            return "default_disclosure" if explicit_tier == "default_disclosure" else "owner_raw"
     elif cls == THIRD_PARTY:
         is_grantee = True
     else:

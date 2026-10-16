@@ -11,6 +11,10 @@ Lanes: `lexical` (Okapi BM25, statistics over P), `vector` (exact cosine over P'
 stored chunk vectors, a member scoring its best chunk, a fixed floor). Fusion is
 reciprocal-rank fusion. Ties break on event time then the opaque id, never an
 internal id. Rerank is off in v1; `rerank` is a hook that sees member texts only.
+
+The floor is `VECTOR_FLOOR` on every path but one: answers mode passes its own
+(`vector_floor`, lane GD-R, `search_release.answer_vector_floor`). A floor only
+decides which members of P the vector lane scores; it never reaches outside P.
 """
 from __future__ import annotations
 
@@ -61,7 +65,10 @@ def lexical(index: LoadedIndex, query: str) -> list[tuple[str, float]]:
     return scored
 
 
-def vector(index: LoadedIndex, query_vector: Sequence[float] | None) -> list[tuple[str, float]]:
+def vector(index: LoadedIndex, query_vector: Sequence[float] | None, *,
+           vector_floor: float = VECTOR_FLOOR) -> list[tuple[str, float]]:
+    """Members whose best chunk scores at least `vector_floor` in cosine. Lane GD-R: answers mode may pass a lower
+    floor (`search_release.answer_vector_floor`); every other caller keeps `VECTOR_FLOOR`."""
     if not query_vector or not index.vectors:
         return []
     norm = math.sqrt(sum(value * value for value in query_vector)) or 1.0
@@ -75,7 +82,7 @@ def vector(index: LoadedIndex, query_vector: Sequence[float] | None) -> list[tup
             chunk_norm = math.sqrt(sum(value * value for value in chunk)) or 1.0
             similarity = sum(a * b for a, b in zip(unit, chunk)) / chunk_norm
             best = similarity if best is None else max(best, similarity)
-        if best is not None and best >= VECTOR_FLOOR:
+        if best is not None and best >= vector_floor:
             scored.append((member.opaque_id, best))
     return scored
 
@@ -113,7 +120,7 @@ def within(index: LoadedIndex, lower_us: int, upper_us: int) -> LoadedIndex:
 def rank(index: LoadedIndex, query: str, query_vector: Sequence[float] | None, *, limit: int, lower_us: int,
          upper_us: int, precision: str = "none",
          rerank: Callable[[str, list[str]], list[str]] | None = None, spare: int = 0,
-         fill: bool = False) -> list[str]:
+         fill: bool = False, vector_floor: float = VECTOR_FLOOR) -> list[str]:
     """Opaque ids of releasable-by-time members in fused rank order, at most `limit` of them.
 
     `spare` (FT168-D6): up to that many further candidates after those, for a walk that passes some by without
@@ -126,9 +133,12 @@ def rank(index: LoadedIndex, query: str, query_vector: Sequence[float] | None, *
     for, the rest of the window's members follow, newest first (the same time key as the ties, never finer than
     released, then the id). "What did <owner> do yesterday?" carries almost no words, so the lanes could score
     nothing in a window that holds the day's items: the window itself is the question's subject there. The scored
-    members keep their order and come first; only members already inside `lower_us`..`upper_us` are added."""
+    members keep their order and come first; only members already inside `lower_us`..`upper_us` are added.
+
+    `vector_floor` (lane GD-R, answers mode only): the vector lane's cosine floor, `VECTOR_FLOOR` unless the caller
+    passes another. It moves which already-permitted members the vector lane scores, never which members are here."""
     index = within(index, lower_us, upper_us)
-    scored = [lexical(index, query), vector(index, query_vector)]
+    scored = [lexical(index, query), vector(index, query_vector, vector_floor=vector_floor)]
     order = _fused(index, [_ranked(index, lane, precision) for lane in scored], precision)
     if rerank is not None:
         known = set(order)

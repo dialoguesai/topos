@@ -123,8 +123,13 @@ def _only_the_carry_step_is_real():
             _what_a_graph_rebuild_does_to_contacts(conn)
         return {"targets": {}, "stubbed": True}
 
+    def hardened(step, conn):
+        # The on-ramp's ~/.topos mode clamp (kind local_hardening, unreleased): a chmod pass, nothing in the rows.
+        return {"changed": 0, "already_clamped": 0, "stubbed": True}
+
     return {"enrichment_reprocess": walked, "canonical_reprocess": walked, "reembed": walked,
-            "derived_rebuild": rebuilt, "engine_endpoint": endpoint, "none": DEFAULT_EXECUTORS["none"]}
+            "derived_rebuild": rebuilt, "engine_endpoint": endpoint, "local_hardening": hardened,
+            "none": DEFAULT_EXECUTORS["none"]}
 
 
 def _run(path, monkeypatch=None, *, from_floor=False):

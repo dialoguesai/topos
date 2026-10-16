@@ -5398,7 +5398,7 @@ def _annotate_owner_chat_urls(items, conn, *, now=None):
     """
     from urllib.parse import urlsplit, urlunsplit
     from ..principal import current_principal
-    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation"}:
+    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation", "owner_agent"}:
         return items
     ids = list({str(i.get("record_id") or "") for i in items if i.get("record_id")})
     threads = {}
@@ -5456,7 +5456,7 @@ def _annotate_owner_ai_threads(items: List[Dict[str, Any]], conn, *, now=None) -
     additional message bodies or participates in a grantee's disclosure.
     """
     from ..principal import current_principal
-    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation"}:
+    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation", "owner_agent"}:
         return items
     ids = list({str(i.get("record_id") or "") for i in items if i.get("record_id")})
     context = {}
@@ -6357,7 +6357,9 @@ def _build_summary_items_unfiltered(
     hit_record_ids = {str(h.get("record_id")) for h in semantic_hits if h.get("record_id")}
     prefer_goals = "user_goals" in (manifest.signal_objects or [])
     work_scope = manifest.scope_id == "work_context:read"
-    ai_scope = manifest.scope_id == "ai_conversations:read"
+    # The coding tools' scope (CONTRACTS.md §2.5) reads the same table and ranks the same way; it is a
+    # separate scope so no existing grant widens (security finding 7), not a separate retrieval.
+    ai_scope = manifest.scope_id in ("ai_conversations:read", "ai_coding_sessions:read")
     source_ids = _resolve_source_ids(manifest, installed_source_ids)
     from .overheard import (
         OVERHEARD_SOURCE_ID,

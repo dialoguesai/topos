@@ -81,6 +81,10 @@ repos:
         language: system
         pass_filenames: false
         always_run: true
+        # Show the scan's summary when it passes too: how many files, checked against
+        # how many protected names. pre-commit otherwise prints only "Passed", which
+        # reads the same whether the check had thousands of names or none.
+        verbose: true
         stages: [pre-push]
 
       - id: no-owner-data-in-message

@@ -12,9 +12,10 @@ from pathlib import Path
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tests.permissions_v2.test_knowledge_search import knowledge_policy
-from topos.permissions_v2.answer_protocol import (ANSWER_PROTOCOL_VERSION, ASK, FETCH, K_ANSWER, K_ANSWER_LEGACY,
-    WRITER_KEYS, AnswerOnly, AnswerPending, AnswerWithSources, AnswerWriter, AskIntent, FetchIntent, NoAnswer,
-    verify_node_answer)
+from topos.permissions_v2.answer_protocol import (ANSWER_PROTOCOL_VERSION, ANSWER_VERSION_V3, ASK, FETCH, K_ANSWER,
+    K_ANSWER_LEGACY, K_ANSWER_V4, MAX_ANSWER_BYTES_V4, MAX_ANSWER_CHARS, MAX_ANSWER_CHARS_V4,
+    MAX_ANSWER_WITH_SOURCES_BYTES_V4, WRITER_KEYS, AnswerOnly, AnswerPending, AnswerWithSources, AnswerWriter,
+    AskIntent, FetchIntent, NoAnswer, verify_node_answer)
 from topos.permissions_v2.canonical import canonical_bytes, digest
 from topos.permissions_v2.forwarding import ReleaseBody, sign_node_result
 from topos.permissions_v2.knowledge_contract import JournalEntryResult, KnowledgeDeclaration, KnowledgePolicy
@@ -158,12 +159,66 @@ def vector_v3():
     public = {"cp": cp_key.public_key().public_bytes_raw().hex(), "node": node_key.public_key().public_bytes_raw().hex()}
     verify_node_answer(result, trusted_keys={"answer-node-key": bytes.fromhex(public["node"])},
                        envelope=envelope, output=body, mode="with_sources", now=NOW + 2)
+    # The protocol version this vector was written for: 3, whatever this node now advertises (4 from answer protocol 4).
     return {"version": "answer-golden-v3", "now": NOW + 2, "public_keys_hex": public,
-            "records_cap": K_ANSWER, "records_cap_legacy": K_ANSWER_LEGACY, "protocol_version": ANSWER_PROTOCOL_VERSION,
+            "records_cap": K_ANSWER, "records_cap_legacy": K_ANSWER_LEGACY, "protocol_version": ANSWER_VERSION_V3,
             "policy": {"policy": policy.model_dump(), "canonical": canonical_bytes(policy.model_dump()).decode("ascii"),
                        "hash": digest(policy.model_dump())},
             "intents": {"fetch": fetch.model_dump()}, "envelope": envelope.model_dump(),
             "body": body.model_dump(), "result": result.model_dump()}
+
+
+def _v4_sentence(index: int, numbers: str) -> str:
+    """One long cited sentence of the v4 vector: ASCII, about 600 characters, so fifteen pass v3's 8,000."""
+    detail = ("the harbour boards were wired again, the enclosure moulds were poured a second time, the market stall "
+              "batch was counted and packed, the lantern frames were sanded and oiled, the workshop notes were copied "
+              "into the shared book, the spare parts were sorted into labelled tins, the volunteers were thanked by "
+              "name in the evening round-up, the delivery van was booked for the next morning, the invoices were "
+              "filed in the green folder, and the test lantern burned through the night without a single fault")
+    return f"Step {index} of the invented lantern work was taken: {detail} [{numbers}]."
+
+
+def vector_v4():
+    """Answer protocol 4 (15 Oct 2026, the owner's decision): a body at a v4 asker's caps in each mode, signed and
+    verified at 4: thirty cited records with sources, and an answer longer than v3's 8,000 characters in both. The
+    same bodies are refused to an asker that accepts 3 (`test_answer_wire_fixtures`). The v1, v2 and v3 vectors are
+    untouched."""
+    cp_key, node_key = _key("topos-answer-golden/cp/v4"), _key("topos-answer-golden/node/v4")
+    answer_id = "ans_" + "d" * 32
+    fetch = FetchIntent.parse({"answer_id": answer_id})
+    policies = {mode: KnowledgePolicy.parse(knowledge_policy(max_k=30, answers=mode)) for mode in ("only", "with_sources")}
+    envelopes = {mode: _signed(policies[mode], FETCH, fetch.model_dump(), f"answer-fetch-thirty-{mode}", cp_key)
+                 for mode in policies}
+    records = []
+    for number in range(1, K_ANSWER_V4 + 1):
+        rid = f"r.{number:064x}"
+        text = f"Invented lantern note {number}: the harbour boards were wired again."
+        records.append(JournalEntryResult.parse({"kind": "journal_entry", "record_id": rid, "content": text,
+            "source_ids": ["invented-journal"],
+            "citations": [{"record_id": rid, "source_id": "invented-journal", "content": text}]}))
+    sentences = [_v4_sentence(index, f"{2 * index - 1}, {2 * index}") for index in range(1, K_ANSWER_V4 // 2 + 1)]
+    bodies = {"only": AnswerOnly.parse({"version": "topos-answer/v1", "outcome": "answered",
+                  "answer": "\n".join(sentence.rsplit(" [", 1)[0] + "." for sentence in sentences)}),
+              "with_sources": AnswerWithSources.parse({"version": "topos-answer/v1", "outcome": "answered",
+                  "answer": "\n".join(sentences), "records": [record.model_dump() for record in records]})}
+    if any(len(body.answer) <= MAX_ANSWER_CHARS for body in bodies.values()):
+        raise AssertionError("the v4 vector's answers must be longer than a v3 asker parses")
+    results = {mode: _result(envelopes[mode], body, node_key) for mode, body in bodies.items()}
+    public = {"cp": cp_key.public_key().public_bytes_raw().hex(), "node": node_key.public_key().public_bytes_raw().hex()}
+    for mode, body in bodies.items():
+        verify_node_answer(results[mode], trusted_keys={"answer-node-key": bytes.fromhex(public["node"])},
+                           envelope=envelopes[mode], output=body, mode=mode, now=NOW + 2,
+                           accepted_version=ANSWER_PROTOCOL_VERSION)
+    return {"version": "answer-golden-v4", "now": NOW + 2, "public_keys_hex": public,
+            "protocol_version": ANSWER_PROTOCOL_VERSION, "records_cap": K_ANSWER_V4, "records_cap_v3": K_ANSWER,
+            "records_cap_legacy": K_ANSWER_LEGACY, "chars_cap": MAX_ANSWER_CHARS_V4, "chars_cap_v3": MAX_ANSWER_CHARS,
+            "bytes_cap": {"only": MAX_ANSWER_BYTES_V4, "with_sources": MAX_ANSWER_WITH_SOURCES_BYTES_V4},
+            "policies": {mode: {"policy": policy.model_dump(), "canonical": canonical_bytes(policy.model_dump()).decode("ascii"),
+                                "hash": digest(policy.model_dump())} for mode, policy in policies.items()},
+            "intents": {"fetch": fetch.model_dump()},
+            "envelopes": {mode: item.model_dump() for mode, item in envelopes.items()},
+            "bodies": {mode: body.model_dump() for mode, body in bodies.items()},
+            "results": {mode: result.model_dump() for mode, result in results.items()}}
 
 
 def write():
@@ -174,6 +229,7 @@ def write():
     (ROOT / "answer-golden-v1.json").write_text(json.dumps(vector(), indent=2, sort_keys=True) + "\n", encoding="ascii")
     (ROOT / "answer-golden-v2.json").write_text(json.dumps(vector_v2(), indent=2, sort_keys=True) + "\n", encoding="ascii")
     (ROOT / "answer-golden-v3.json").write_text(json.dumps(vector_v3(), indent=2, sort_keys=True) + "\n", encoding="ascii")
+    (ROOT / "answer-golden-v4.json").write_text(json.dumps(vector_v4(), indent=2, sort_keys=True) + "\n", encoding="ascii")
 
 
 if __name__ == "__main__":

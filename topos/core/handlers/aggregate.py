@@ -10,9 +10,11 @@ the transport envelope), and walks ``validate_public_result`` itself.
 Principal policy (channel-verified, never read from the payload): grantee
 requests and THIRD_PARTY principals are denied — aggregates are statistical
 reads over the raw substrate, and the raw substrate is deny-by-default for
-non-native callers (S1). owner_app and owner_automation are served; the
-black-hole guard still excludes protected people for every caller class
-except the owner's own UI.
+non-native callers (S1). owner_app, owner_automation and owner_agent (the
+owner's approved coding agent, ruling D1 (b)) are served; the black-hole
+guard still excludes protected people for every caller class except the
+owner's own UI. Every served call writes one request-log row; an agent's
+names it by its verified client id (CONTRACTS §1.5).
 """
 
 from __future__ import annotations
@@ -160,12 +162,13 @@ async def handle_aggregate(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         validate_public_result(core)
 
         try:
+            from ...core.state import mcp_source_for_principal
             from .common import record_mcp_request
 
             record_mcp_request(
                 conn,
                 "aggregate",
-                source="control_plane",
+                source=mcp_source_for_principal(principal) or "control_plane",
                 requester_id=str(payload.get("requester_id") or "") or None,
             )
         except Exception:  # noqa: BLE001
