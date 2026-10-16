@@ -14,26 +14,29 @@ import unicodedata
 from dataclasses import dataclass
 
 from .answer_checks import (_CITATION, _SCAFFOLD_FOLDS, _TOKEN, DENSE_TEMPLATES, FORM_WORDS, INSTRUCTION_WORDS,
-    TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE, TEMPLATE_VERSION_DENSE_ON_QUESTION,
+    TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE, TEMPLATE_VERSION_DENSE_CITE_CAP, TEMPLATE_VERSION_DENSE_ON_QUESTION,
+    TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP,
     _forms_within_one_suffix, _within_one_suffix, citation_numbers, copied_sentence, echoes_protected_word,
     echoes_question_only_word, normalize_citations, post_check_citations, protected_question_words, question_anchors,
     question_only_anchors, scrub_sentences, split_sentences, _stem, _tokens)
-from .answer_protocol import AnswerOnly, AnswerWithSources, NoAnswer, VERSION
+from .answer_protocol import K_ANSWER, K_ANSWER_V4, AnswerOnly, AnswerWithSources, NoAnswer, VERSION
 from .canonical import PolicyError
 from . import switches
 
 # AQ158 V3: the most released items the model may see, whatever the switch says. The grant's max_k (the owner's
 # "Items per answer", MK165) bounds retrieval below this when it is smaller; the with-sources body's `records` cap
-# (answer_protocol.K_ANSWER, 16 from A2A-4 amendment 13; 8 for an asker that accepts only the older protocol, which
-# retrieval honours through `records_cap`) is the wire's: an answer citing more distinct items than that is
-# `body_invalid`, counted and never sent.
-K_ANSWER_CEILING = 24
+# (answer_protocol.records_cap of the version the asker accepts: 30 for answer protocol 4, `K_ANSWER_V4`; 16 for 3,
+# from A2A-4 amendment 13; 8 for an asker that says nothing) is the wire's, and retrieval honours it through
+# `records_cap`, so no body past it is written. 30 from answer protocol 4 (24 before), so that the switch can reach
+# a v4 asker's cap.
+K_ANSWER_CEILING = 30
 
 
 def k_answer(env=None) -> int:
-    """Released items the answer model sees: `ANSWER_ITEMS`, clamped to the ceiling. The default is 8
-    (`answer_protocol.K_ANSWER_LEGACY`); 16 (`answer_protocol.K_ANSWER`, the wire's cap of cited records) is a
-    setting until its battery clears it (IN167, 13 Oct 2026)."""
+    """Released items the answer model sees: `ANSWER_ITEMS`, clamped to the ceiling (30). The default is 8
+    (`answer_protocol.K_ANSWER_LEGACY`); 16 (`answer_protocol.K_ANSWER`, a v3 asker's cap of cited records) is a
+    setting until its battery clears it (IN167, 13 Oct 2026), and so is 30 (`answer_protocol.K_ANSWER_V4`, a v4
+    asker's)."""
     return max(1, min(K_ANSWER_CEILING, switches.number(switches.ANSWER_ITEMS, env)))
 
 SYSTEM_PROMPT = (
@@ -86,9 +89,40 @@ LENGTH_SENTENCE_DENSE_ON_QUESTION = (
 SYSTEM_PROMPT_DENSE_ON_QUESTION = SYSTEM_PROMPT_DENSE.replace(LENGTH_SENTENCE_DENSE, LENGTH_SENTENCE_DENSE_ON_QUESTION)
 if SYSTEM_PROMPT_DENSE_ON_QUESTION == SYSTEM_PROMPT_DENSE or SYSTEM_PROMPT_DENSE.count(LENGTH_SENTENCE_DENSE) != 1:
     raise RuntimeError("the v10 template must replace exactly v9's length sentence")
-# Each writer template's system prompt, by the version the prompt, the writer and the receipt say.
+# Answer protocol 4 (15 Oct 2026): templates v11 (`TEMPLATE_VERSION_DENSE_CITE_CAP`) and v12
+# (`TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP`) are v9 and v10 with the cite sentence naming the job's own cap of
+# cited records (`answer_protocol.records_cap` of the version its asker accepts: thirty for 4) in place of sixteen.
+# Only that sentence changes; every other word is v9's or v10's. Only a job whose asker parses more than sixteen is
+# written with them (`writer_template`), so the prompt of a v3 or older job (v8, v9 or v10) is byte for byte as before.
+CITE_SENTENCE = "Cite at most sixteen different items."
+_NUMBER_WORDS = {K_ANSWER: "sixteen", K_ANSWER_V4: "thirty"}
+
+
+def cite_sentence(records_cap: int) -> str:
+    """The dense templates' cite sentence for a job whose asker parses `records_cap` cited records: v9's and v10's
+    at sixteen, "Cite at most thirty different items." at thirty (answer protocol 4)."""
+    return f"Cite at most {_NUMBER_WORDS.get(records_cap, str(records_cap))} different items."
+
+
+SYSTEM_PROMPT_DENSE_CITE_CAP = SYSTEM_PROMPT_DENSE.replace(CITE_SENTENCE, cite_sentence(K_ANSWER_V4))
+if (cite_sentence(K_ANSWER) != CITE_SENTENCE or SYSTEM_PROMPT_DENSE_CITE_CAP == SYSTEM_PROMPT_DENSE
+        or SYSTEM_PROMPT_DENSE.count(CITE_SENTENCE) != 1 or LENGTH_SENTENCE_DENSE.count(CITE_SENTENCE) != 1):
+    raise RuntimeError("the v11 template must replace exactly v9's cite sentence")
+SYSTEM_PROMPT_DENSE_ON_QUESTION_CITE_CAP = SYSTEM_PROMPT_DENSE_ON_QUESTION.replace(CITE_SENTENCE,
+                                                                                   cite_sentence(K_ANSWER_V4))
+if (SYSTEM_PROMPT_DENSE_ON_QUESTION_CITE_CAP == SYSTEM_PROMPT_DENSE_ON_QUESTION
+        or SYSTEM_PROMPT_DENSE_ON_QUESTION.count(CITE_SENTENCE) != 1
+        or LENGTH_SENTENCE_DENSE_ON_QUESTION.count(CITE_SENTENCE) != 1):
+    raise RuntimeError("the v12 template must replace exactly v10's cite sentence")
+# Each writer template's system prompt, by the version the prompt, the writer and the receipt say; v11 and v12 at a
+# v4 asker's cap (`system_prompt` writes them at any other).
 SYSTEM_PROMPTS = {TEMPLATE_VERSION: SYSTEM_PROMPT, TEMPLATE_VERSION_DENSE: SYSTEM_PROMPT_DENSE,
-                  TEMPLATE_VERSION_DENSE_ON_QUESTION: SYSTEM_PROMPT_DENSE_ON_QUESTION}
+                  TEMPLATE_VERSION_DENSE_ON_QUESTION: SYSTEM_PROMPT_DENSE_ON_QUESTION,
+                  TEMPLATE_VERSION_DENSE_CITE_CAP: SYSTEM_PROMPT_DENSE_CITE_CAP,
+                  TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP: SYSTEM_PROMPT_DENSE_ON_QUESTION_CITE_CAP}
+#: The templates whose cite sentence names the job's cap, by the template each is v9's or v10's word for word.
+CITE_CAP_TEMPLATES = {TEMPLATE_VERSION_DENSE_CITE_CAP: TEMPLATE_VERSION_DENSE,
+                      TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP: TEMPLATE_VERSION_DENSE_ON_QUESTION}
 
 
 def dense_template() -> bool:
@@ -97,15 +131,29 @@ def dense_template() -> bool:
     return switches.on(switches.ANSWER_DENSE)
 
 
-def writer_template() -> str:
+def writer_template(records_cap: int | None = None) -> str:
     """The writer template a new prompt is written with, read once per job at `build_prompt`: v8 as in 1.5.9, v9
     while ANSWER_DENSE is on (GD-A), v10 while ANSWER_DENSE_ON_QUESTION is on as well (GD-A′).
-    ANSWER_DENSE_ON_QUESTION alone changes nothing."""
+    ANSWER_DENSE_ON_QUESTION alone changes nothing.
+
+    `records_cap` (answer protocol 4): the cited records the job's asker parses. Above sixteen (a v4 asker), v11 in
+    place of v9 and v12 in place of v10; sixteen or fewer, or None (a caller from before 4), v9 and v10 as before.
+    v8 has no cite sentence and is v8 for every asker."""
     if not dense_template():
         return TEMPLATE_VERSION
+    wide = records_cap is not None and records_cap > K_ANSWER
     if switches.on(switches.ANSWER_DENSE_ON_QUESTION):
-        return TEMPLATE_VERSION_DENSE_ON_QUESTION
-    return TEMPLATE_VERSION_DENSE
+        return TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP if wide else TEMPLATE_VERSION_DENSE_ON_QUESTION
+    return TEMPLATE_VERSION_DENSE_CITE_CAP if wide else TEMPLATE_VERSION_DENSE
+
+
+def system_prompt(template: str, records_cap: int | None = None) -> str:
+    """The writer's system text for `template`: v11 and v12 name `records_cap` in their cite sentence (a v4 asker's
+    thirty when it is None); every other template's text is fixed."""
+    base = CITE_CAP_TEMPLATES.get(template)
+    if base is None or records_cap is None:
+        return SYSTEM_PROMPTS[template]
+    return SYSTEM_PROMPTS[base].replace(CITE_SENTENCE, cite_sentence(records_cap))
 
 
 @dataclass(frozen=True)
@@ -153,6 +201,10 @@ class Prompt:
     # be in at least one cited item, not every one (`_cites_question_subject`). Empty while the switch is off, and
     # when the people or the owner's names could not be read: every name then binds in every cited item, as in 1.5.9.
     one_item_names: frozenset[str] = frozenset()
+    # Answer protocol 4: the cited records the job's asker parses, as `build_prompt` was given it (None: a caller from
+    # before 4). It chose the template (v11 or v12 above sixteen) and sets the writer's context window
+    # (`answer_release.answer_num_ctx`). Never in the prompt's text beyond the cite sentence.
+    records_cap: int | None = None
 
 
 @dataclass(frozen=True)
@@ -176,6 +228,8 @@ class CheckedAnswer:
     dropped_question_item: int = 0
     # TR162 D: sentences citing only items outside the question's time scope (`answer_time`).
     dropped_out_of_scope: int = 0
+    # Answer protocol 4: kept sentences dropped from the end so the body fits its asker's caps (`close_answer`'s `fits`).
+    dropped_to_fit: int = 0
 
 
 def _clip(content: str, limit: int = 420) -> str:
@@ -677,7 +731,8 @@ def _domain_evidence(domains) -> str:
 def build_prompt(question: str, records: list, *, precision: str, owner_words: frozenset[str] = frozenset(),
                  item_domains=None, people: frozenset[str] = frozenset(), labels: frozenset[str] = frozenset(),
                  shared_owner_words: frozenset[str] = frozenset(), now: int | None = None, time_scope=None,
-                 time_widened: bool = False, owner_names: frozenset[str] | None = None) -> Prompt:
+                 time_widened: bool = False, owner_names: frozenset[str] | None = None,
+                 records_cap: int | None = None) -> Prompt:
     """Quote only the share's released records, clipped to the fixed prompt budget.
 
     `labels` (round 5): more words that name the share's parts (its policy's result kinds), beside the prompt's own
@@ -690,7 +745,11 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
 
     `owner_names` (GD-L): the owner's own name words and the account's words, read while ANSWER_NAME_ONE_ITEM is on
     (`owner_name_words`). With the switch on, a name term outside `people`, the owner words, the shared owner words
-    and these goes into `Prompt.one_item_names`. None (not read, or unreadable) or no people puts nothing there."""
+    and these goes into `Prompt.one_item_names`. None (not read, or unreadable) or no people puts nothing there.
+
+    `records_cap` (answer protocol 4): the cited records the job's asker parses (`answer_protocol.records_cap`). Above
+    sixteen the dense templates are written as v11 or v12, whose cite sentence names it (`writer_template`); None or
+    sixteen or fewer is the prompt of before, byte for byte."""
     if precision not in ("none", "day", "second") or not 1 <= len(records) <= k_answer():
         raise PolicyError("answer_prompt_invalid")
     lines, raw_texts, record_texts = ["Question (quoted data):", question, "", "Permitted items:"], [], []
@@ -733,13 +792,13 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
         # The block exactly as the prompt shows it: the prompt joins its lines with a blank line (R-158 F6).
         item_lines.append("\n\n".join(lines[first:]))
         record_texts.append(evidence)
-    template = writer_template()
+    template = writer_template(records_cap)
     names = _name_terms(question, owner_words, people, frozenset(labels))
     # GD-L: a name nobody on this node is known by and that is none of the owner's needs only one cited item. It is
     # read here once per job; an empty people set (a store that could not be read gives none) loosens nothing.
     one_item = (names - people - owner_words - frozenset(shared_owner_words) - owner_names
                 if owner_names is not None and people and switches.on(switches.ANSWER_NAME_ONE_ITEM) else frozenset())
-    return Prompt(SYSTEM_PROMPTS[template], "\n\n".join(lines), tuple(raw_texts),
+    return Prompt(system_prompt(template, records_cap), "\n\n".join(lines), tuple(raw_texts),
                   _as_owner(question, owner_words),
                   tuple(record_texts), tuple(text for text in domains if text),
                   names, question,
@@ -749,7 +808,8 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
                   item_times=tuple(getattr(record, "event_at", None) if precision != "none" else None
                                    for record in records),
                   time_scope=time_scope if precision != "none" else None, time_widened=bool(time_widened),
-                  time_line=time_line, template=template, one_item_names=frozenset(one_item))
+                  time_line=time_line, template=template, one_item_names=frozenset(one_item),
+                  records_cap=records_cap)
 
 
 def question_lacks_permitted_anchor(prompt: Prompt) -> bool:
@@ -1161,8 +1221,15 @@ def judge_sentences(sieved: Sieved, prompt: Prompt, support) -> tuple[Sieved, in
 
 
 def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, boundary,
-                 dropped_support: int = 0) -> CheckedAnswer:
-    """Off-limits on the body, the scrub, the closed body (under the gate)."""
+                 dropped_support: int = 0, fits=None) -> CheckedAnswer:
+    """Off-limits on the body, the scrub, the closed body (under the gate).
+
+    `fits` (answer protocol 4): whether an assembled body (the dict the closed body parses from) is within the caps of
+    the job's asker, writer and all (`answer_release.body_fits`). While it says no, the last kept sentence is dropped
+    and the body assembled again (`dropped_to_fit`), so an answer longer than its asker parses is delivered shorter
+    instead of failing whole as `body_invalid`; records that only the dropped sentences cited leave with them. Only
+    whole kept sentences go, from the end: nothing is cut inside one, reordered or added. A single sentence that does
+    not fit is the refusal of before. None (tests, batteries): no trim, as before."""
     sentences = list(sieved.sentences)
     paragraphs = list(_paragraph_numbers(sieved))
     counts = (sieved.generated, 0, sieved.dropped_citation, sieved.dropped_copy, sieved.dropped_question_echo,
@@ -1183,19 +1250,33 @@ def close_answer(sieved: Sieved, records: list, prompt: Prompt, *, mode: str, bo
     if not sentences:
         return CheckedAnswer(NoAnswer(version=VERSION, outcome="no_answer"), *counts, scrub_drops, 0,
                              "all_sentences_dropped", **extra)
+    fit_drops = 0
+    while True:
+        value, cited = _assembled(sentences, paragraphs, records, prompt, mode)
+        if fits is None or fits(value):
+            break
+        if len(sentences) == 1:
+            raise PolicyError("answer_output_invalid")
+        sentences, paragraphs = sentences[:-1], paragraphs[:-1]
+        fit_drops += 1
+    body = (AnswerOnly if mode == "only" else AnswerWithSources).parse(value)
+    return CheckedAnswer(body, sieved.generated, len(sentences), sieved.dropped_citation, sieved.dropped_copy,
+                         sieved.dropped_question_echo, sieved.dropped_relevance, scrub_drops, cited, "answered",
+                         dropped_to_fit=fit_drops, **extra)
+
+
+def _assembled(sentences: list[str], paragraphs: list[int], records: list, prompt: Prompt, mode: str):
+    """The body's dict from the kept sentences, as the closed body parses it, and the count of items it cites:
+    answers only, the citations struck off; with sources, the cited records in first-cited order, renumbered."""
     if mode == "only":
         answer = answer_layout([_CITATION.sub("", sentence).strip() for sentence in sentences], paragraphs, prompt)
-        body = AnswerOnly.parse({"version": VERSION, "outcome": "answered", "answer": answer})
         cited = len({number for sentence in sentences for number in citation_numbers(sentence)})
-    else:
-        ordered = list(dict.fromkeys(number for sentence in sentences for number in citation_numbers(sentence)))
-        mapping = {number: index for index, number in enumerate(ordered, 1)}
-        body = AnswerWithSources.parse({"version": VERSION, "outcome": "answered",
+        return {"version": VERSION, "outcome": "answered", "answer": answer}, cited
+    ordered = list(dict.fromkeys(number for sentence in sentences for number in citation_numbers(sentence)))
+    mapping = {number: index for index, number in enumerate(ordered, 1)}
+    return {"version": VERSION, "outcome": "answered",
             "answer": answer_layout([_renumber(sentence, mapping) for sentence in sentences], paragraphs, prompt),
-            "records": [records[number - 1].model_dump() for number in ordered]})
-        cited = len(ordered)
-    return CheckedAnswer(body, sieved.generated, len(sentences), sieved.dropped_citation, sieved.dropped_copy,
-                         sieved.dropped_question_echo, sieved.dropped_relevance, scrub_drops, cited, "answered", **extra)
+            "records": [records[number - 1].model_dump() for number in ordered]}, len(ordered)
 
 
 def post_check_answer(text: str, records: list, prompt: Prompt, *, mode: str, boundary, support=None) -> CheckedAnswer:

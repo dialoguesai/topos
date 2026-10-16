@@ -202,12 +202,13 @@ ANSWER_SUPPORT_JUDGE_TEMPLATE = _switch(
     "dates as current, or a past item as upcoming, is not supported).", choices=("v1", "v2", "v3", "v4"))
 ANSWER_ITEMS = _switch(
     "ANSWER_ITEMS", "int", 8, 8,
-    "V3. Released items the answer model sees, 1 to 24. The default is 8, as in 1.5.9. 16 is A2A-4 amendment 13's "
+    "V3. Released items the answer model sees, 1 to 30. The default is 8, as in 1.5.9. 16 is A2A-4 amendment 13's "
     "number (lane LA164): built, one environment line away, and not the default because the lane's battery counted "
     "three times the false sentences at 16 (22 against 7); it becomes the default when a battery on the integrated "
-    "branch shows it is no worse than 8. The grant's own max_k (the owner's items per answer) still bounds "
-    "retrieval, the with-sources body carries at most 16 cited records, and an asker whose control plane accepts "
-    "only the older protocol is served at most 8 items and 8 records whatever this says.",
+    "branch shows it is no worse than 8. 30 is answer protocol 4's cap, untested on a battery. The grant's own max_k "
+    "(the owner's items per answer) still bounds retrieval, and so does the asker's protocol: an asker whose control "
+    "plane accepts 4 is served at most 30 items and 30 cited records, one that accepts 3 at most 16 and 16, and one "
+    "that says nothing at most 8 and 8, whatever this says.",
     floor=1)
 ANSWER_QUESTION_ANCHOR = _switch(
     "ANSWER_QUESTION_ANCHOR", "bool", False, False,

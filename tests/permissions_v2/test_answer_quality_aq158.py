@@ -14,7 +14,7 @@ V1 `ANSWER_SUBJECT_WORDS`. Off: the topic-word requirement of amendment 3 is not
    citation, copy, echo, Off-limits and scrub are unchanged.
 V2 `ANSWER_SUPPORT_JUDGE`. On: the pinned local model is asked, per kept sentence, whether the items it cites support
    it, under a closed grammar; anything but a closed "yes" drops the sentence (`dropped_support`).
-V3 `ANSWER_ITEMS`. The released items the model sees, 1 to 24 (default 8); retrieval is still bounded by the grant's
+V3 `ANSWER_ITEMS`. The released items the model sees, 1 to 30 (default 8); retrieval is still bounded by the grant's
    max_k and the knowledge ceiling, and the with-sources body by its 8-record cap.
 
 Invented data only.
@@ -30,7 +30,7 @@ from tests.permissions_v2.test_reconciliation_provenance import legacy  # noqa: 
 from topos.permissions_v2 import answer_release as ar, switches
 from topos.permissions_v2.answer_generation import (K_ANSWER_CEILING, build_prompt, cited_item_lines, k_answer,
     post_check_answer, question_lacks_permitted_anchor)
-from topos.permissions_v2.answer_protocol import K_ANSWER, K_ANSWER_LEGACY
+from topos.permissions_v2.answer_protocol import FETCH, K_ANSWER, K_ANSWER_LEGACY, K_ANSWER_V4, parse_answer_output
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.knowledge_contract import JournalEntryResult, MessageResult
 
@@ -577,7 +577,7 @@ def test_by_default_the_prompt_takes_at_most_eight_items():
         build_prompt("What has the owner been doing?", _many(9), precision="none")
 
 
-@pytest.mark.parametrize("items", [16, 24])
+@pytest.mark.parametrize("items", [16, 24, 30])
 def test_v3_the_prompt_takes_up_to_the_switch(items, monkeypatch):
     monkeypatch.setenv(P + "ANSWER_ITEMS", str(items))
     assert k_answer() == items
@@ -589,7 +589,7 @@ def test_v3_the_prompt_takes_up_to_the_switch(items, monkeypatch):
 
 def test_v3_is_clamped_to_the_ceiling_and_the_floor(monkeypatch):
     monkeypatch.setenv(P + "ANSWER_ITEMS", "99")
-    assert k_answer() == K_ANSWER_CEILING == 24
+    assert k_answer() == K_ANSWER_CEILING == K_ANSWER_V4 == 30          # answer protocol 4 (24 before)
     monkeypatch.setenv(P + "ANSWER_ITEMS", "0")
     assert k_answer() == 1
     monkeypatch.setenv(P + "ANSWER_ITEMS", "sixteen")
@@ -623,18 +623,22 @@ def test_v3_retrieval_asks_for_the_switch_bounded_by_the_grants_max_k(legacy, tm
 
 
 def test_the_with_sources_body_carries_at_most_sixteen_records(monkeypatch):
-    """The wire cap does not move with V3 (it moved to sixteen with A2A-4 amendment 13, LA164): an answer citing
-    more distinct items than the cap is a body the mirrored grammar refuses (`body_invalid` in the service), never a
-    wider body."""
+    """The wire cap does not move with V3 (it moved to sixteen with A2A-4 amendment 13, LA164, and to thirty for an
+    asker that accepts answer protocol 4): an answer citing more distinct items than its asker's cap is a body the
+    mirrored grammar refuses at that asker's caps (`body_invalid` in the service), never a wider body."""
     monkeypatch.setenv(P + "ANSWER_ITEMS", "24")
     records = _many(17)
     prompt = build_prompt("What has the owner been doing?", records, precision="none")
     text = "\n".join(f"Step {i} moved [{i}]." for i in range(1, 18))
+    seventeen = post_check_answer(text, records, prompt, mode="with_sources", boundary=Open())
     with pytest.raises(PolicyError):
-        post_check_answer(text, records, prompt, mode="with_sources", boundary=Open())
+        parse_answer_output(seventeen.body, request_type=FETCH, mode="with_sources", accepted_version=3)
+    assert len(parse_answer_output(seventeen.body, request_type=FETCH, mode="with_sources",
+                                   accepted_version=4).records) == 17
     sixteen = "\n".join(f"Step {i} moved [{i}]." for i in range(1, 17))
     checked = post_check_answer(sixteen, records, prompt, mode="with_sources", boundary=Open())
     assert checked.body.outcome == "answered" and len(checked.body.records) == 16
+    parse_answer_output(checked.body, request_type=FETCH, mode="with_sources", accepted_version=3)
 
 
 # --- review R-158 ---------------------------------------------------------------------------------------------------

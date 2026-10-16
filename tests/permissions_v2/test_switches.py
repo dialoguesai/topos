@@ -371,6 +371,22 @@ def test_the_items_take_la164s_sixteen_from_the_environment_and_eight_without(bo
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_items_reach_answer_protocol_4s_thirty_and_no_further(bound, state, monkeypatch):
+    """Answer protocol 4: the items run 1 to 30 (a v4 asker's cap of cited records); 8 is still the default, and a
+    setting above 30 is read as 30 by the answer path (`answer_generation.k_answer`)."""
+    from topos.permissions_v2.answer_generation import K_ANSWER_CEILING, k_answer
+    state(bound)
+    name = P + "ANSWER_ITEMS"
+    item = switches.lookup(name)
+    assert "1 to 30" in item.purpose and "1 to 24" not in item.purpose
+    assert switches.value(name) == item.unbound == item.bound == 8 and k_answer() == 8
+    monkeypatch.setenv(name, "30")
+    assert switches.value(name) == 30 and k_answer() == K_ANSWER_CEILING == 30
+    monkeypatch.setenv(name, "31")
+    assert switches.value(name) == 31 and k_answer() == 30
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
 @pytest.mark.parametrize("name", ANSWER_TIME)
 def test_each_answer_time_switch_takes_amendment_12s_default_and_its_1_5_9_value_from_the_environment(name, bound, state,
                                                                                                        monkeypatch):

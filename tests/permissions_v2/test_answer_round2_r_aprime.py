@@ -34,7 +34,7 @@ from tests.permissions_v2.test_reconciliation_provenance import legacy  # noqa: 
 from topos.permissions_v2 import answer_release as ar
 from topos.permissions_v2 import search_lanes, search_release, switches
 from topos.permissions_v2.answer_checks import (DENSE_TEMPLATES, TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE,
-    TEMPLATE_VERSION_DENSE_ON_QUESTION)
+    TEMPLATE_VERSION_DENSE_CITE_CAP, TEMPLATE_VERSION_DENSE_ON_QUESTION, TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP)
 from topos.permissions_v2.answer_generation import (LENGTH_SENTENCE, LENGTH_SENTENCE_DENSE,
     LENGTH_SENTENCE_DENSE_ON_QUESTION, SYSTEM_PROMPT, SYSTEM_PROMPT_DENSE, SYSTEM_PROMPT_DENSE_ON_QUESTION,
     SYSTEM_PROMPTS, build_prompt, writer_template)
@@ -259,9 +259,16 @@ def test_v10_differs_from_v9_only_in_the_length_sentence():
         assert words in SYSTEM_PROMPT_DENSE_ON_QUESTION and words not in SYSTEM_PROMPT_DENSE, words
     assert "seven to twelve sentences" in SYSTEM_PROMPT_DENSE and "seven to twelve" not in SYSTEM_PROMPT_DENSE_ON_QUESTION
     assert TEMPLATE_VERSION_DENSE_ON_QUESTION == "topos-answer-template/v10"
-    assert DENSE_TEMPLATES == {TEMPLATE_VERSION_DENSE, TEMPLATE_VERSION_DENSE_ON_QUESTION}
-    assert SYSTEM_PROMPTS == {TEMPLATE_VERSION: SYSTEM_PROMPT, TEMPLATE_VERSION_DENSE: SYSTEM_PROMPT_DENSE,
-                              TEMPLATE_VERSION_DENSE_ON_QUESTION: SYSTEM_PROMPT_DENSE_ON_QUESTION}
+    # Answer protocol 4 adds v11 and v12, v9 and v10 for an asker that parses thirty (`test_answer_protocol_v4`);
+    # the three templates of before are as they were.
+    assert DENSE_TEMPLATES == {TEMPLATE_VERSION_DENSE, TEMPLATE_VERSION_DENSE_ON_QUESTION,
+                               TEMPLATE_VERSION_DENSE_CITE_CAP, TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP}
+    assert set(SYSTEM_PROMPTS) == {TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE, TEMPLATE_VERSION_DENSE_ON_QUESTION,
+                                   TEMPLATE_VERSION_DENSE_CITE_CAP, TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP}
+    assert {key: SYSTEM_PROMPTS[key] for key in (TEMPLATE_VERSION, TEMPLATE_VERSION_DENSE,
+                                                 TEMPLATE_VERSION_DENSE_ON_QUESTION)} == {
+        TEMPLATE_VERSION: SYSTEM_PROMPT, TEMPLATE_VERSION_DENSE: SYSTEM_PROMPT_DENSE,
+        TEMPLATE_VERSION_DENSE_ON_QUESTION: SYSTEM_PROMPT_DENSE_ON_QUESTION}
 
 
 @pytest.mark.parametrize("dense, on_question, template", PAIRS, ids=PAIR_IDS)

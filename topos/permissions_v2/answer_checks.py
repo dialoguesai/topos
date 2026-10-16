@@ -21,9 +21,16 @@ TEMPLATE_VERSION_DENSE = "topos-answer-template/v9"
 # (`answer_generation.SYSTEM_PROMPT_DENSE_ON_QUESTION`), written only while ANSWER_DENSE and ANSWER_DENSE_ON_QUESTION
 # are both on. Everything v9 does beyond its wording, v10 does too (`DENSE_TEMPLATES`).
 TEMPLATE_VERSION_DENSE_ON_QUESTION = "topos-answer-template/v10"
+# Answer protocol 4 (15 Oct 2026): v11 and v12 are v9 and v10 with their one sentence about sixteen cited items naming
+# the job's own cap of cited records instead (`answer_generation.cite_sentence`; thirty for an asker that accepts 4).
+# They are written only for an asker that parses more than sixteen; a v3 or older job is written with v9 or v10,
+# byte for byte. Everything else v9 and v10 do, v11 and v12 do (`DENSE_TEMPLATES`).
+TEMPLATE_VERSION_DENSE_CITE_CAP = "topos-answer-template/v11"
+TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP = "topos-answer-template/v12"
 # The dense templates: the writer's budget is 2,048 tokens (`answer_release.answer_num_predict`) and the body keeps
 # the writer's paragraphs (`answer_generation.answer_layout`). v8 is neither.
-DENSE_TEMPLATES = frozenset({TEMPLATE_VERSION_DENSE, TEMPLATE_VERSION_DENSE_ON_QUESTION})
+DENSE_TEMPLATES = frozenset({TEMPLATE_VERSION_DENSE, TEMPLATE_VERSION_DENSE_ON_QUESTION,
+                             TEMPLATE_VERSION_DENSE_CITE_CAP, TEMPLATE_VERSION_DENSE_ON_QUESTION_CITE_CAP})
 _CITATION = re.compile(r"\[(\d+(?:\s*[,;]\s*\d+)*)\]")
 # CT176: the other bracket forms of a citation (`normalize_citations`): square, full-width or lenticular brackets,
 # spaces inside, numbers or ranges ("1-3", en or em dash) separated by commas or semicolons.
