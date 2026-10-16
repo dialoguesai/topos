@@ -25,6 +25,7 @@
     "explicit_signal_ia_signal_objects_v1": "265e84f58cdb3d329d9c71338d93e261cb84a8f233d5186a45a92676e800d5ab",
     "fact_dimension_by_entity_type_v1": "debc0b1961f20a47d203d611ab05295e3c26c7fb38e59b8e719f4e51586bda58",
     "home_chat_memories_v1": "249038c4f629ee36ec2300e3421cdf167bc29d0477a61fa8781a294cedec0b11",
+    "home_chat_turn_timings_v1": "a60e6b6473068b23b1c11f11aeddbd7ce231769b75d95eb6ea8f1044573318f2",
     "journal_origin_dimension_v1": "732e59c3fba86fa9057b6c4783385d993d12f514d529cae4e4c2201c04130ab3",
     "mention_table_stamp_backfill_v1": "df56305a0c806ff09f0c57fecdffc386274e360fc641e0cd5e12747585b55cca",
     "message_emotions_role_backfill_v1": "d0db5a58d484844872e37395a730f6e7311a7515b1cba16c97e59e960493524c",
