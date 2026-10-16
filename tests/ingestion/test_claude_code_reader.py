@@ -518,8 +518,10 @@ def test_batch_size_is_a_soft_cap_checked_between_files(cursors) -> None:
 
 def test_session_path_reads_one_file_and_still_scans_its_subagents(cursors) -> None:
     path = FIXTURES / "subagent_taint" / SLUG / f"{uid(0x109)}.jsonl"
+    # The session must lie under the tool's root (security re-check N4): the root is its own store, and the
+    # other sessions there stay unread because session_path names exactly one file.
     batch = read_claude_code_batch(
-        root_path=FIXTURES / "plain", cursors=cursors, session_path=str(path), hostnames=(), usernames=(),
+        root_path=FIXTURES / "subagent_taint", cursors=cursors, session_path=str(path), hostnames=(), usernames=(),
     )
     assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(n)}" for n in (0x81, 0x82, 0x85, 0x86)]
     assert batch.ledger.as_dict()["tainted_turns"] == 2
@@ -558,3 +560,17 @@ def test_a_tool_call_taints_by_any_input_that_names_a_topos_surface_not_only_a_s
     assert not _tool_use_taint({"type": "tool_use", "name": "Read", "input": {"file_path": "/Users/someone/project/README.md"}})
     assert not _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "ls -la"}})
     assert not _tool_use_taint({"type": "tool_use", "name": "Edit", "input": None})
+    # an absolute ~/.topos path with no trailing slash is the same surface (security re-check N6)
+    assert _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "ls /Users/someone/.topos"}})
+
+
+def test_a_hooks_session_path_outside_the_tools_root_reads_nothing(cursors, tmp_path) -> None:
+    """The sync door takes session_path from any socket caller (security re-check N4): a path outside the
+    tool's own folder is dropped and counted, never read as a transcript."""
+    outside = tmp_path / "elsewhere" / "sess-x.jsonl"
+    outside.parent.mkdir()
+    outside.write_text('{"type": "user", "uuid": "u-1", "message": {"content": "hi"}, "timestamp": "2026-10-01T09:00:00Z"}\n')
+    batch = read_claude_code_batch(root_path=FIXTURES / "plain", cursors=cursors, session_path=str(outside),
+                                   hostnames=(), usernames=())
+    assert batch.rows == [] and batch.scanned_files == 0
+    assert batch.ledger.as_dict()["dropped_files"] == {"outside_root": 1}

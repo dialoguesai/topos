@@ -54,7 +54,8 @@ DROP_OUTSIDE_WINDOW = "outside_window"
 # Reasons decided per FILE rather than per record, kept apart in the receipt so
 # ``message_nodes == turns_emitted + dropped_nodes_total + merged_blocks +
 # meta_records`` stays a checkable invariant.
-FILE_DROP_REASONS = frozenset({DROP_SKIPPED_FOLDER, DROP_SIDE_FILE, DROP_FILE_GONE, DROP_OUTSIDE_WINDOW})
+DROP_OUTSIDE_ROOT = "outside_root"
+FILE_DROP_REASONS = frozenset({DROP_SKIPPED_FOLDER, DROP_SIDE_FILE, DROP_FILE_GONE, DROP_OUTSIDE_WINDOW, DROP_OUTSIDE_ROOT})
 
 
 def non_keyboard_reason(tag: str) -> str:
@@ -487,7 +488,7 @@ def origin_violation(record: Mapping[str, Any], rules: Sequence[OriginRule] = CL
 # mentions one of these, touches a Topos surface. ``mcp__plugin_topos`` is
 # already covered by ``topos`` and listed for the reader of the contract.
 _TAINT_NAME = re.compile(r"topos|mcp__plugin_topos|remote__", re.IGNORECASE)
-TAINT_COMMAND_MARKERS: Tuple[str, ...] = ("~/.topos", ".topos/", "engine.sock", "topos-node")
+TAINT_COMMAND_MARKERS: Tuple[str, ...] = ("~/.topos", ".topos/", "/.topos", "engine.sock", "topos-node")
 
 
 def taints(tool_or_server_name: Optional[str], command_text: Optional[str]) -> bool:

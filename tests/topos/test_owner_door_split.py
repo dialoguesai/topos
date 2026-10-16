@@ -536,7 +536,8 @@ def test_every_registered_type_is_a_named_read_or_dangerous_nothing_falls_throug
               "put_community_name", "consent_upgrade_step", "start_ingestion", "put_packet_resolution_config",
               "put_exposure_profile_config", "put_signal_settings", "home_chat_memory", "app_ingest",
               "mcp_client_request_elevation", "compute_invoke", "llm_generation", "messenger_person_curate",
-              "replay_projection", "upsert_home_chat_session", "set_device_name"):
+              "replay_projection", "upsert_home_chat_session", "set_device_name",
+              "tools_index"):  # rebuilds the tool index: a write and an instruction sink (re-check N1)
         assert t in hub.DANGEROUS_TYPES, t
     changes = ("put_", "post_", "patch_", "store_", "delete_", "start_", "finish_", "import_", "run_", "set_",
                "update_", "upsert_", "promote_", "revise_", "advance_", "auto_", "consent_", "migrate_")

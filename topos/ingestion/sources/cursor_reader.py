@@ -293,6 +293,16 @@ def _covered_key(db: Path, composer_id: str) -> str:
     return f"{db}::jsonl_covered::{composer_id}"
 
 
+def _within(path: Path, root: Path) -> bool:
+    """Whether ``path`` lies under ``root`` once both are resolved (security re-check N4): a hook's
+    ``transcript_path`` may name only the tool's own files, never another file on the disk."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
 def _iter_transcripts(root: Path) -> List[Path]:
     projects = root / PROJECTS_DIRNAME
     if not projects.is_dir():
@@ -841,7 +851,12 @@ def read_cursor_batch(
 
     try:
         # (a) append-only transcripts
-        transcripts = [Path(session_path)] if only_jsonl else ([] if only_composer else _iter_transcripts(root))
+        if only_jsonl:
+            transcripts = [Path(session_path)] if _within(Path(session_path), root) else []
+            if not transcripts:
+                ledger.drop("outside_root")  # a hook's transcript_path names only the tool's own files
+        else:
+            transcripts = [] if only_composer else _iter_transcripts(root)
         served: Set[str] = set()
         for path in transcripts:
             if len(rows) >= batch_size:

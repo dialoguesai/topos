@@ -83,6 +83,7 @@ TAIL_PROBE_BYTES = 64 * 1024
 TITLE_PROBE_LINES = 400
 DROP_UNPARSEABLE = "unparseable"
 DROP_OTHER_BLOCK = "other_block"
+DROP_OUTSIDE_ROOT = "outside_root"
 
 _TITLE_LINE_RE = re.compile(rb'"type"\s*:\s*"(?:custom-title|ai-title|summary)"')
 _TOOL_USE_HINT = b"tool_use"
@@ -151,10 +152,10 @@ def read_claude_code_batch(
         hostnames = machine_hostnames()
     if usernames is None:
         usernames = machine_usernames()
+    root = Path(root_path) if root_path is not None else DEFAULT_ROOT
     if session_path is not None:
-        candidates = _session_path_candidates(Path(session_path), skip, ledger)
+        candidates = _session_path_candidates(Path(session_path), root, skip, ledger)
     else:
-        root = Path(root_path) if root_path is not None else DEFAULT_ROOT
         candidates = _walk_root(root, skip, ledger)
 
     rows: List[Dict[str, Any]] = []
@@ -204,12 +205,26 @@ def _folder_skipped(slug: str, skip: Set[str]) -> bool:
     return scrubbed in skip
 
 
+def _within(path: Path, root: Path) -> bool:
+    """Whether ``path`` lies under ``root`` once both are resolved (security re-check N4): a hook's
+    ``transcript_path`` may name only the tool's own files, never another file on the disk."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
 def _is_side_file(name: str) -> bool:
     return any(marker in name for marker in SIDE_FILE_MARKERS)
 
 
-def _session_path_candidates(path: Path, skip: Set[str], ledger: Ledger) -> List[Path]:
-    """The hook's ``transcript_path``: one file, still subject to the folder and side-file rules."""
+def _session_path_candidates(path: Path, root: Path, skip: Set[str], ledger: Ledger) -> List[Path]:
+    """The hook's ``transcript_path``: one file under the tool's own root, still subject to the folder and
+    side-file rules. A path outside the root is dropped: the sync door takes it from any socket caller."""
+    if not _within(path, root):
+        ledger.drop(DROP_OUTSIDE_ROOT)
+        return []
     if _folder_skipped(path.parent.name, skip):
         ledger.drop(DROP_SKIPPED_FOLDER)
         return []

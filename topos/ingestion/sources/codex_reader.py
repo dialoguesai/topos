@@ -217,6 +217,16 @@ def _thread_id_from_name(name: str) -> Optional[str]:
     return match.group("thread") if match else None
 
 
+def _within(path: Path, root: Path) -> bool:
+    """Whether ``path`` lies under ``root`` once both are resolved (security re-check N4): a hook's
+    ``transcript_path`` may name only the tool's own files, never another file on the disk."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (ValueError, OSError):
+        return False
+    return True
+
+
 def _iter_rollouts(root: Path) -> List[Path]:
     sessions = root / SESSIONS_DIRNAME
     if not sessions.is_dir():
@@ -665,7 +675,12 @@ def read_codex_batch(
     imported = _load_imported_thread_ids(root)
     imported_touched: Set[str] = set()
     skip = {str(name) for name in skip_folders}
-    files = [Path(session_path)] if session_path else _iter_rollouts(root)
+    if session_path:
+        files = [Path(session_path)] if _within(Path(session_path), root) else []
+        if not files:
+            ledger.drop("outside_root")  # a hook's transcript_path names only the tool's own files
+    else:
+        files = _iter_rollouts(root)
     scanned = touched = 0
     now = time.time()
 

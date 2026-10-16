@@ -213,3 +213,13 @@ def test_default_root_is_codex_home_env(reader, codex_root, monkeypatch: pytest.
     assert len(batch.rows) == TOTAL_ROWS
     monkeypatch.delenv("CODEX_HOME")
     assert reader._default_root() == Path.home() / ".codex"
+
+
+def test_a_hooks_session_path_outside_the_codex_root_reads_nothing(reader, codex_root, tmp_path):
+    """Security re-check N4: the sync door's session_path is confined to the tool's own folder."""
+    outside = tmp_path / "not-the-codex-root" / "rollout-2026-10-01T09-00-00-6f1c2a3b-9d4e-4f50-8a61-7b2c3d4e5f60.jsonl"
+    outside.parent.mkdir()
+    outside.write_text('{"timestamp": "2026-10-01T09:00:00.000Z", "type": "session_meta", "payload": {"id": "thread-zz9"}}\n')
+    batch = _read(reader, codex_root, session_path=str(outside))
+    assert batch.rows == [] and batch.scanned_files == 0
+    assert batch.ledger.dropped.get("outside_root") == 1

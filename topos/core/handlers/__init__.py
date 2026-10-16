@@ -450,8 +450,10 @@ OWNER_DOOR_OPEN_TYPES = frozenset({
     "messenger_person_graph", "messenger_person_provenance", "messenger_relationship_signals",
     "messenger_relationships",
     "ollama_install_status", "ollama_list_models", "ollama_pull_status",
-    "routine_has_active_run", "tools_index", "tools_index_status", "tools_retrieve", "truth_prompts",
+    "routine_has_active_run", "tools_index_status", "tools_retrieve", "truth_prompts",
     "verify_claim", "llm_cancel",
+    # NOT here: tools_index rebuilds the tool index (INSERT OR REPLACE + DELETE with prune_missing,
+    # features/signal/tool_index.py) — a write, and an instruction sink (security re-check N1).
 })
 #: Name shapes that are reads wherever they appear.
 OWNER_DOOR_OPEN_PREFIXES = ("get_", "list_")

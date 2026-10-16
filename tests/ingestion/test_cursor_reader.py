@@ -331,3 +331,13 @@ def test_a_db_write_that_adds_no_bubble_does_not_count_as_touched(reader, env, w
     assert third.rows == [] and third.files_touched == 0
     fourth = _read(reader, env, store)
     assert fourth.rows == [] and fourth.files_touched == 0
+
+
+def test_a_hooks_transcript_path_outside_the_cursor_root_reads_nothing(reader, env, tmp_path):
+    """Security re-check N4: the sync door's session_path is confined to the tool's own folder."""
+    outside = tmp_path / "elsewhere" / "composer-x.jsonl"
+    outside.parent.mkdir()
+    outside.write_text(env.jsonl.read_text())
+    batch = _read(reader, env, session_path=str(outside))
+    assert batch.rows == [] and batch.scanned_files == 0
+    assert batch.ledger.dropped.get("outside_root") == 1
