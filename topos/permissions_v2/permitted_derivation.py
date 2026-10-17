@@ -43,6 +43,8 @@ import sqlite3
 import time
 from typing import Callable, Iterable
 
+from ..storage.share_excluded import row_share_excluded
+
 from . import switches
 from .canonical import PolicyError, digest
 from .fact_contract import atomic_label_syntax
@@ -604,6 +606,10 @@ class PermittedDerivationPass:
                     rows = [dict(zip(names, r)) for r in found]
                     if len(rows) != 1 or message_revision(identity, rows[0].get("content")) != revision:
                         count("refused:message_changed")
+                        continue
+                    if identity.table == "ai_chat_messages" and row_share_excluded(rows[0]):
+                        # NR189: flagged since it was selected; nothing is derived from a row kept from every share.
+                        count("refused:share_excluded")
                         continue
                     code = refusal(spec, boundary)
                     if code is not None:

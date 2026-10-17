@@ -72,6 +72,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from topos.disclosure.content_policy import is_record_nsfw
 from topos.principal import OWNER_APP, current_principal
 from topos.storage.db.write_gate import with_db_write
+from topos.storage.share_excluded import row_share_excluded
 
 from .canonical import PolicyError, canonical_bytes, parse_json
 from .evidence import _copy_count, _key, _row_revision
@@ -359,6 +360,10 @@ def _live_rows(conn, member: dict):
         raise PolicyError("search_index_integrity")
     rows = conn.execute(f"SELECT * FROM {table} WHERE message_id=? AND source_id=?",
                         (member["record_id"], member["source_id"])).fetchmany(2)
+    if table == "ai_chat_messages":
+        # NR189 (D-17): a row the owner keeps from every share is no row here, so a member flagged after its build is
+        # dropped as a deleted one is (DR-31). Read off the selected row: no probe per member.
+        rows = [row for row in rows if not row_share_excluded(row)]
     facts = [conn.execute("SELECT * FROM signal_objects WHERE object_id=?", (fact_id,)).fetchmany(2)
              for fact_id in member["facts"]]
     return rows, facts

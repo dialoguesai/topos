@@ -234,13 +234,18 @@ def load_embedding_records(
     if not ids:
         return []
     placeholders = ",".join("?" for _ in ids)
+    # NR189: never an AI-chat row the owner keeps from every share (ai_chat_messages.share_excluded), even one embedded
+    # before it was flagged: its words would become a cluster's label and an interest's. No column: as before.
+    from ...storage.share_excluded import share_excluded_record_filter
+
+    kept = share_excluded_record_filter(conn, record_column="signal_embeddings.record_id")
     rows = conn.execute(
         f"""
         SELECT embedding_id, record_id, source_id, signal_dimension, text_preview,
                vector_blob, provenance_json, vector_format, chunk_index
         FROM signal_embeddings
         WHERE vector_blob IS NOT NULL
-          AND source_id IN ({placeholders})
+          AND source_id IN ({placeholders}){kept}
         ORDER BY record_id, chunk_index
         LIMIT ?
         """,
@@ -1654,13 +1659,18 @@ def load_clusters_with_members(
         return clusters
 
     ids = list(by_id)
+    # NR189: a relabel reads the stored members' text (and hydrates their canonical rows): never a member flagged
+    # share_excluded since the clusters were built. Membership on disk is untouched.
+    from ...storage.share_excluded import share_excluded_record_filter
+
+    kept = share_excluded_record_filter(conn, record_column="topic_cluster_members.record_id")
     for start in range(0, len(ids), 400):
         chunk = ids[start : start + 400]
         member_rows = conn.execute(
             f"""
             SELECT cluster_id, record_id, source_id, record_type, text_preview, metadata_json
             FROM topic_cluster_members
-            WHERE cluster_id IN ({','.join('?' for _ in chunk)})
+            WHERE cluster_id IN ({','.join('?' for _ in chunk)}){kept}
             ORDER BY cluster_id, member_id
             """,  # noqa: S608 — placeholders only
             tuple(chunk),
