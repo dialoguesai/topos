@@ -35,6 +35,27 @@ MCP_CLIENTS_TABLE = "mcp_clients"
 MCP_CLIENT_ELEVATIONS_TABLE = "mcp_client_elevations"
 TOKEN_PREFIX = "tpk_"
 
+# --------------------------------------------------------------- agents
+# The owner's own approved coding agents share the table but not the namespace
+# (AI-tool on-ramp, CONTRACTS §1.1): row ``client_id = "agent-<client>"``,
+# ``principal_class = "owner_agent"``, and a LABEL ``tpa_<client>.<40 hex>``
+# whose hash is stored exactly like a client token's. The two never cross: a
+# ``tpk_`` token never resolves to an agent row, a ``tpa_`` label never
+# resolves to a third party, and Connected apps never lists, revokes or mints
+# an ``agent-*`` row. It is a label, not a lock — it names the agent for audit
+# and revoke — so re-minting a revoked one needs a fresh approval.
+AGENT_LABEL_PREFIX = "tpa_"
+AGENT_CLIENT_ID_PREFIX = "agent-"
+AGENT_PRINCIPAL_CLASS = "owner_agent"
+#: Canonical clients and their display names; any other slug is accepted and
+#: shown as itself (the name is recorded as claimed).
+AGENT_DISPLAY_NAMES = {
+    "claude-code": "Claude Code",
+    "codex": "Codex",
+    "cursor": "Cursor",
+    "gemini": "Gemini",
+}
+
 #: Elevation ceiling (owner decision, Who's Asking §06): a consented client may
 #: reach `facts`, never `facts_all` — special-class content (health, beliefs,
 #: admin) stays owner-first-party only. Requests for more are clamped, loudly.
@@ -109,6 +130,8 @@ def mint_client_token(
     that is the "re-enroll after cutover" path, and it is an owner action.
     """
     cid = normalize_client_id(client_id)
+    if cid.startswith(AGENT_CLIENT_ID_PREFIX):
+        raise ValueError(f"client_id prefix {AGENT_CLIENT_ID_PREFIX!r} is reserved for approved agents")
     name = str(display_name or "").strip() or cid
     token = f"{TOKEN_PREFIX}{cid}.{secrets.token_hex(20)}"
     ensure_mcp_clients_table(conn)
@@ -157,10 +180,121 @@ def verify_client_token(conn: sqlite3.Connection, presented: str) -> Optional[Di
         return None
     if not row or row.get("revoked_at"):
         return None
+    if row.get("principal_class") == AGENT_PRINCIPAL_CLASS:
+        return None  # an agent row is never a tpk client, whatever its hash says
     if not secrets.compare_digest(str(row.get("token_hash") or ""), _hash_token(token)):
         return None
     _touch_last_used(conn, cid)
     return row
+
+
+def _agent_ids(client: str) -> tuple:
+    """``(row client_id, short client name)`` for an agent, or ValueError."""
+    short = normalize_client_id(client)
+    if short.startswith(AGENT_CLIENT_ID_PREFIX):
+        raise ValueError("name the agent by its client, not by its row id")
+    return normalize_client_id(f"{AGENT_CLIENT_ID_PREFIX}{short}"), short
+
+
+def mint_agent_label(conn: sqlite3.Connection, *, client: str, approved: bool = False) -> Dict[str, Any]:
+    """Enroll (or re-key) an approved agent; returns the row plus the ONE-TIME plaintext ``label``.
+
+    Writes nothing to disk — the label FILE (``~/.topos/agents/<client>.token``)
+    is the CLI's. A revoked agent is re-minted only with ``approved=True``, which
+    the CLI sets after a fresh approval (``--approved``) or a TTY confirmation;
+    otherwise ``agents add`` would silently un-revoke (rev-1 security 12). The
+    hash is never returned: the caller has the label itself, once.
+    """
+    cid, short = _agent_ids(client)
+    ensure_mcp_clients_table(conn)
+    existing = get_client(conn, cid)
+    if existing is not None:
+        if existing.get("principal_class") != AGENT_PRINCIPAL_CLASS:
+            raise ValueError(f"{cid!r} is not an agent row")
+        if existing.get("revoked_at") and not approved:
+            raise ValueError(f"agent {short!r} was disconnected; reconnecting it needs a fresh approval")
+    name = AGENT_DISPLAY_NAMES.get(short, short)
+    label = f"{AGENT_LABEL_PREFIX}{short}.{secrets.token_hex(20)}"
+    from .core.state import commit_connection, with_db_write
+
+    with with_db_write():
+        conn.execute(
+            f"""
+            INSERT INTO {MCP_CLIENTS_TABLE}
+                (client_id, display_name, principal_class, token_hash, created_at)
+            VALUES (?, ?, '{AGENT_PRINCIPAL_CLASS}', ?, ?)
+            ON CONFLICT(client_id) DO UPDATE SET
+                display_name = excluded.display_name,
+                token_hash = excluded.token_hash,
+                created_at = excluded.created_at,
+                revoked_at = NULL
+            """,
+            (cid, name, _hash_token(label), _now()),
+        )
+        commit_connection(conn)
+    row = dict(get_client(conn, cid) or {})
+    row.pop("token_hash", None)
+    return {**row, "client": short, "label": label}
+
+
+def verify_agent_label(conn: sqlite3.Connection, presented: str) -> Optional[Dict[str, Any]]:
+    """Resolve a presented ``tpa_…`` label to its agent row, or None.
+
+    Fail closed on every branch, as ``verify_client_token`` does: wrong prefix
+    (a ``tpk_`` token never matches), wrong shape, unknown agent, a row that is
+    not ``owner_agent``, a revocation tombstone, or a hash mismatch. Read from
+    the table on every call — revocation is checked per request, cached nowhere.
+    """
+    label = str(presented or "")
+    if not label.startswith(AGENT_LABEL_PREFIX) or "." not in label:
+        return None
+    short = label[len(AGENT_LABEL_PREFIX):].split(".", 1)[0]
+    try:
+        cid, _ = _agent_ids(short)
+    except ValueError:
+        return None
+    try:
+        ensure_mcp_clients_table(conn)
+        row = get_client(conn, cid)
+    except Exception:  # noqa: BLE001 — DB trouble must never widen auth
+        logger.warning("agent label verify failed for %r", cid, exc_info=True)
+        return None
+    if not row or row.get("revoked_at") or row.get("principal_class") != AGENT_PRINCIPAL_CLASS:
+        return None
+    if not secrets.compare_digest(str(row.get("token_hash") or ""), _hash_token(label)):
+        return None
+    _touch_last_used(conn, cid)
+    return row
+
+
+def revoke_agent(conn: sqlite3.Connection, *, client: str) -> bool:
+    """Tombstone an agent's row; the next request with its label is refused."""
+    cid, _ = _agent_ids(client)
+    ensure_mcp_clients_table(conn)
+    from .core.state import commit_connection, with_db_write
+
+    with with_db_write():
+        cur = conn.execute(
+            f"UPDATE {MCP_CLIENTS_TABLE} SET revoked_at = ? "
+            f"WHERE client_id = ? AND principal_class = '{AGENT_PRINCIPAL_CLASS}' AND revoked_at IS NULL",
+            (_now(), cid),
+        )
+        commit_connection(conn)
+    return cur.rowcount > 0
+
+
+def list_agents(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """The agents, revoked ones included (tombstones), never a hash."""
+    ensure_mcp_clients_table(conn)
+    cur = conn.execute(
+        f"SELECT client_id, display_name, created_at, last_used_at, revoked_at"
+        f" FROM {MCP_CLIENTS_TABLE} WHERE principal_class = '{AGENT_PRINCIPAL_CLASS}' ORDER BY created_at"
+    )
+    cols = [d[0] for d in cur.description]
+    rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    for row in rows:
+        row["client"] = str(row["client_id"])[len(AGENT_CLIENT_ID_PREFIX):]
+    return rows
 
 
 def _touch_last_used(conn: sqlite3.Connection, client_id: str) -> None:
@@ -191,11 +325,13 @@ def get_client(conn: sqlite3.Connection, client_id: str) -> Optional[Dict[str, A
 
 
 def list_clients(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
-    """Rows for the Settings UI — token hashes never leave the engine."""
+    """Rows for the Settings UI — token hashes never leave the engine. Agents
+    (``principal_class = 'owner_agent'``) have their own list, ``list_agents``."""
     ensure_mcp_clients_table(conn)
     cur = conn.execute(
         f"SELECT client_id, display_name, principal_class, created_at, last_used_at,"
-        f" revoked_at FROM {MCP_CLIENTS_TABLE} ORDER BY created_at"
+        f" revoked_at FROM {MCP_CLIENTS_TABLE} WHERE principal_class != '{AGENT_PRINCIPAL_CLASS}'"
+        f" ORDER BY created_at"
     )
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
@@ -209,7 +345,7 @@ def revoke_client(conn: sqlite3.Connection, client_id: str) -> bool:
     with with_db_write():
         cur = conn.execute(
             f"UPDATE {MCP_CLIENTS_TABLE} SET revoked_at = ? "
-            f"WHERE client_id = ? AND revoked_at IS NULL",
+            f"WHERE client_id = ? AND principal_class != '{AGENT_PRINCIPAL_CLASS}' AND revoked_at IS NULL",
             (_now(), cid),
         )
         commit_connection(conn)
@@ -239,7 +375,9 @@ def request_elevation(
     if not scope:
         raise ValueError("scope_id is required")
     ensure_mcp_clients_table(conn)
-    if get_client(conn, cid) is None:
+    client = get_client(conn, cid)
+    if client is None or client.get("principal_class") == AGENT_PRINCIPAL_CLASS:
+        # An agent reads by ruling D1, not by a consent record: nothing to elevate.
         raise ValueError(f"unknown client {cid!r} — enroll it first")
     existing = active_elevation(conn, client_id=cid, scope_id=scope)
     if existing is not None:

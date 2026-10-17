@@ -34,9 +34,39 @@ _ORDER = {r: i for i, r in enumerate(RESOLUTIONS)}
 #: Providers that run on this machine. Anything else is an egress boundary.
 _LOCAL_PROVIDERS = frozenset({"", "ollama", "local", "scope-head"})
 
+#: Special-class SCOPES (AI-tool on-ramp, CONTRACTS §1.3, ruling D1 (b)): the kinds that stay
+#: with the owner and his app until he switches them on for an agent. The node had no
+#: scope-level definition before this (facts_direct.py's `special` is per PREDICATE, from the
+#: pack's declared sensitivity), so this is it: the two named scopes, plus any registry entry
+#: whose primary dimensions name Health or Beliefs (none does today; the rule is there for the
+#: day one is added without anyone remembering this set).
+SPECIAL_CLASS_SCOPES = frozenset({"health:read", "facts_sensitive:read"})
+_SPECIAL_CLASS_DIMENSIONS = frozenset({"Health", "Beliefs"})
+
 
 def resolution_order(value: str) -> int:
     return _ORDER.get(str(value or "").strip().lower(), 0)
+
+
+def _scope_entry(scope_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        from .scope_registry_loader import get_scope_entry
+
+        return get_scope_entry(scope_id)
+    except Exception:  # noqa: BLE001 — no registry ⇒ only the named set decides
+        return None
+
+
+def is_special_class_scope(scope_id: str) -> bool:
+    """Whether `scope_id` is special-class for an owner's agent (see SPECIAL_CLASS_SCOPES)."""
+    sid = str(scope_id or "").strip()
+    if not sid:
+        return False
+    if sid in SPECIAL_CLASS_SCOPES:
+        return True
+    entry = _scope_entry(sid)
+    dims = entry.get("primary_dimensions") if isinstance(entry, dict) else None
+    return bool(dims) and any(str(d) in _SPECIAL_CLASS_DIMENSIONS for d in dims)
 
 
 def primary_binding_locality(conn: Optional[sqlite3.Connection]) -> Dict[str, Any]:
@@ -94,7 +124,7 @@ def effective_packet_resolution(
       never widen a grantee.
     """
     from ..config.settings import resolve_packet_resolution, settings
-    from ..principal import OWNER_APP, THIRD_PARTY
+    from ..principal import OWNER_AGENT, OWNER_APP, THIRD_PARTY
 
     setting = resolve_packet_resolution(settings, conn)
     locality = primary_binding_locality(conn)
@@ -142,6 +172,33 @@ def effective_packet_resolution(
             effective, reason = "facts", "automation_cap"
         else:
             effective, reason = setting, "active"
+        return {"setting": setting, "effective": effective, "reason": reason,
+                "principal_cls": cls or "", **locality}
+    elif cls == OWNER_AGENT and getattr(principal, "channel", None) != "uds":
+        # The class is minted on the socket only (rev-1 security 19): the word on
+        # any other channel — a stamp, a forwarder — is floored like a third
+        # party, whatever ids the payload carries.
+        is_owner, floor_reason = False, "principal_floor"
+    elif cls == OWNER_AGENT:
+        # The owner's approved coding agent, ruling D1 (b) (AI-tool on-ramp,
+        # CONTRACTS §1.3): a special-class scope is scores_only for it until the
+        # owner switches that kind on; every other scope reads at the owner's
+        # own dial, as his app does. The model-locality gate is SKIPPED for this
+        # class — the agent's model is always hosted, and the ruling is that
+        # the owner's dial applies anyway; the reason says so. The disclosure
+        # tier stays the independent guard, as for owner_app.
+        if is_special_class_scope(scope_id):
+            effective, reason = "scores_only", "owner_agent_special_class"
+        elif str(disclosure_tier or "") != "owner_raw":
+            effective, reason = "scores_only", "non_owner_floor"
+        elif setting == "facts_all":
+            # The consented-client ceiling (mcp_clients.ELEVATION_CEILING) holds for the agent too: the
+            # per-PREDICATE special gate (facts_direct) opens exactly at facts_all, so the owner's own dial
+            # would hand the agent health/beliefs facts through facts:read, whatever the scope's dimensions say
+            # (security review F3, 16 Oct 2026). Special-class CONTENT stays owner-first-party.
+            effective, reason = "facts", "owner_agent_ruling_capped"
+        else:
+            effective, reason = setting, "owner_agent_ruling"
         return {"setting": setting, "effective": effective, "reason": reason,
                 "principal_cls": cls or "", **locality}
     else:  # CP_RELAY or legacy: the forwarded-id equality test

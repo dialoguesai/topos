@@ -1,0 +1,70 @@
+{
+  "workspaces": {
+    "1f2e3d4c5b6a79880000aaaabbbbcccc": {"folder": "file:///Users/someone/dev/beta-project"}
+  },
+  "composers": [
+    {
+      "composerId": "c0c0c0c0-0001-4a0a-8a0a-a0a0a0a0a001",
+      "header": {"workspaceId": "1f2e3d4c5b6a79880000aaaabbbbcccc", "createdAt": "2026-10-15T09:59:00.000Z", "lastUpdatedAt": "2026-10-15T10:05:00.000Z", "isArchived": 0, "isSubagent": 0},
+      "composerData": {"name": "Deterministic flaky test", "createdAt": "2026-10-15T09:59:00.000Z", "status": "completed", "unifiedMode": "agent"},
+      "bubbles": [
+        {"bubbleId": "bubble-n01", "type": 1, "text": "Make the flaky test deterministic", "createdAt": "2026-10-15T10:00:00.000Z"},
+        {"bubbleId": "bubble-n02", "type": 2, "text": "Pinning the random seed in the fixture.", "headerCreatedAt": "2026-10-15T10:00:30.000Z"},
+        {"bubbleId": "bubble-n03", "type": 1, "text": "Read file", "toolFormerData": {"tool": 1, "name": "read_file", "status": "completed", "rawArgs": "{\"path\":\"tests/test_flaky.py\"}"}},
+        {"bubbleId": "bubble-n04", "type": 2, "text": "", "toolFormerData": {"tool": 7, "name": "mcp__topos__query_scope", "status": "completed", "rawArgs": "{\"scope\":\"work_context:read\"}"}},
+        {"bubbleId": "bubble-n05", "type": 2, "text": "Your work scope says the sprint ends Friday."},
+        {"bubbleId": "bubble-n06", "type": 1, "text": "Thanks, also run the linter", "isSteer": true},
+        {"bubbleId": "bubble-n07", "type": 2, "text": "Thinking about lint rules", "isThought": true, "thinking": {"text": "Thinking about lint rules", "signature": "sig"}},
+        {"bubbleId": "bubble-n08", "type": 1, "text": "simulated message", "isSimulatedMsg": true},
+        {"bubbleId": "bubble-n09", "type": 1, "text": "nudge message", "isNudge": true},
+        {"bubbleId": "bubble-n10", "type": 1, "text": "Spawn: review the diff", "subagentSpawnTaskToolCallId": "call-spawn-1"},
+        {"bubbleId": "bubble-n11", "type": 1, "text": ""},
+        {"bubbleId": "bubble-n12", "type": 2, "text": "Lint is clean.", "createdAt": "2026-10-15T10:05:00.000Z"}
+      ],
+      "orphan_bubbles": [
+        {"bubbleId": "bubble-n99", "type": 1, "text": "orphan typed text not in headers"}
+      ]
+    },
+    {
+      "composerId": "c0c0c0c0-0002-4a0a-8a0a-a0a0a0a0a002",
+      "header": {"workspaceId": "1f2e3d4c5b6a79880000aaaabbbbcccc", "createdAt": "2026-10-15T10:10:00.000Z", "lastUpdatedAt": "2026-10-15T10:11:00.000Z", "isArchived": 0, "isSubagent": 1, "subagentTypeName": "reviewer"},
+      "composerData": {"createdAt": "2026-10-15T10:10:00.000Z", "status": "completed", "unifiedMode": "agent"},
+      "bubbles": [
+        {"bubbleId": "bubble-s01", "type": 1, "text": "Review the diff", "createdAt": "2026-10-15T10:10:01.000Z"},
+        {"bubbleId": "bubble-s02", "type": 2, "text": "Fine.", "createdAt": "2026-10-15T10:10:05.000Z"}
+      ]
+    },
+    {
+      "composerId": "c0c0c0c0-0006-4a0a-8a0a-a0a0a0a0a006",
+      "header": null,
+      "composerData": {"createdAt": "2026-10-15T10:12:00.000Z", "status": "completed", "unifiedMode": "agent", "subagentInfo": {"parentComposerId": "c0c0c0c0-0001-4a0a-8a0a-a0a0a0a0a001", "taskId": "task-1"}},
+      "bubbles": [
+        {"bubbleId": "bubble-s03", "type": 1, "text": "Child task prompt", "createdAt": "2026-10-15T10:12:01.000Z"}
+      ]
+    },
+    {
+      "composerId": "c0c0c0c0-0003-4a0a-8a0a-a0a0a0a0a003",
+      "header": {"workspaceId": "empty-window", "createdAt": null, "lastUpdatedAt": null, "isArchived": 0, "isSubagent": 0},
+      "composerData": {"status": "completed", "unifiedMode": "chat"},
+      "bubbles": [
+        {"bubbleId": "bubble-e01", "type": 1, "text": "Quick question about git rebase"},
+        {"bubbleId": "bubble-e02", "type": 2, "text": "Rebase replays commits onto a new base."}
+      ]
+    },
+    {
+      "composerId": "c0c0c0c0-0004-4a0a-8a0a-a0a0a0a0a004",
+      "header": {"workspaceId": "1f2e3d4c5b6a79880000aaaabbbbcccc", "createdAt": "2026-10-15T11:00:00.000Z", "lastUpdatedAt": "2026-10-15T11:02:00.000Z", "isArchived": 0, "isSubagent": 0},
+      "composerData": {"name": "CLI scaffolding", "createdAt": "2026-10-15T11:00:00.000Z", "status": "completed", "unifiedMode": "agent"},
+      "bubbles": [
+        {"bubbleId": "bubble-j01", "type": 1, "text": "Scaffold the CLI", "createdAt": "2026-10-15T11:00:01.000Z"},
+        {"bubbleId": "bubble-j02", "type": 2, "text": "Scaffolded.", "createdAt": "2026-10-15T11:00:09.000Z"}
+      ]
+    },
+    {
+      "composerId": "c0c0c0c0-0005-4a0a-8a0a-a0a0a0a0a005",
+      "header": null,
+      "composerData": {"createdAt": "2026-10-15T11:30:00.000Z", "status": "none", "unifiedMode": "agent"},
+      "bubbles": []
+    }
+  ]
+}

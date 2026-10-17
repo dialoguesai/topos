@@ -676,3 +676,9 @@ async def test_http_signal_upload_records_the_door(conn, http_app, socket, expec
     (row,) = [dict(r) for r in conn.execute(f"SELECT * FROM {TABLE} WHERE source_id='signal'")]
     assert (row["is_from_self"], row["writer_class"]) == (1, expected)
     assert owner_authored(row, table=TABLE)
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

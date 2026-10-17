@@ -1007,6 +1007,12 @@ class RefreshLoop:
             if any(_refresh_only(entry) for entry in due.values()):
                 self._last_refresh_at = now
             self._pass_ended = False
+        # NR179 G1 (`ANSWER_HOLDS_BACKGROUND`, off by default): while a share's answer job runs, the pass waits for it
+        # (at most 110 s) before its protection sync, and each build again before it starts (below), never while
+        # holding the slot. A pass with only ended shares to remove does not wait.
+        from . import answer_gate
+        answer_gate.hold_background_start(
+            only_if=lambda: any(self._policy_hash(grant_id, int(self.clock())) is not None for grant_id in due))
         service = self._index()
         synced = False
         if self._sync_protection is not None:
@@ -1021,6 +1027,8 @@ class RefreshLoop:
         # after a protection change drops every index the shares people use come back first.
         for grant_id in most_read_first(due, self._question_counts()):
             entry = due[grant_id]
+            answer_gate.hold_background_start(
+                only_if=lambda: self._policy_hash(grant_id, int(self.clock())) is not None)
             with self._lock:
                 causes |= entry["causes"]
                 entry["running"] = True

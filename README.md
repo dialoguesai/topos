@@ -102,6 +102,7 @@ Your Topos now shows as **Connected** in the web app, and you can start adding s
 | --- | --- |
 | 💬 **Messages** | iMessage, Signal Desktop |
 | 🤖 **AI history** | ChatGPT (export file, and live conversations) |
+| 🧑‍💻 **AI coding tools** | Claude Code, Codex and Cursor sessions on this computer — what you asked and what the tool replied. Command output, file contents and the tool's private reasoning stay out. |
 | 🗂️ **Work & docs** | GitHub activity, Notion pages, Google Drive |
 | 📅 **Calendar** | Google Calendar |
 | 🌐 **Web** | Browser visits, browser events (highlights, stars) |
@@ -114,12 +115,21 @@ Sources are not hardcoded. Connectors are declared at **[sheaf.dialogues.ai](htt
 
 ### Connect an assistant
 
-Your node speaks [MCP](https://modelcontextprotocol.io), so Claude and ChatGPT can query it — through the control plane, which routes the request to your machine rather than holding your data.
+Your node speaks [MCP](https://modelcontextprotocol.io), so your assistants can ask it questions. Cloud assistants go through the control plane, which routes the request to your machine rather than holding your data; coding tools on this computer talk to the node directly and never leave it.
 
-- **Claude Desktop** — point the MCP adapter at the control plane's `/mcp` endpoint with your Topos key as the bearer token.
-- **ChatGPT** — add the same URL as a connector and sign in with Dialogues.
+| Assistant | How it connects | What it can read |
+| --- | --- | --- |
+| **Claude Code** | Install the Topos plugin, then say "set up Topos". It runs `topos-node pair`, you type a short code in the web app, and the computer joins your account — the key is never shown or pasted. | Your Topos, at the level you set, with the most sensitive kinds (like health and beliefs) off unless you turn them on. |
+| **Codex** | Same plugin, same `topos-node pair` code. | Same as Claude Code. |
+| **Cursor** | Same plugin, same `topos-node pair` code. | Same as Claude Code. |
+| **Claude Desktop** | Point the MCP adapter at the control plane's `/mcp` endpoint, signed in with Dialogues. | What you share with it. |
+| **ChatGPT** | Add the same URL as a connector and sign in with Dialogues. | What you share with it. |
 
-One node, one key, both assistants. See [Docs → Install Topos](https://topos.dialogues.ai/docs/install-topos).
+Each coding tool is listed by name under **Connected apps**, with what it read and when, and can be disconnected there or with `topos-node agents disconnect <name>`.
+
+To keep Topos running on this computer without the app, install it as a login service: `topos-node service install` (macOS and Linux). One thing to know: Messages (iMessage) sync needs the Topos app; the service runs Topos for everything else.
+
+Step by step: [Docs → Set up with Claude Code, Codex or Cursor](https://topos.dialogues.ai/docs/set-up-with-claude-code-codex-cursor) (source: `topos-control-plane/docs/SETUP_AI_CLIENTS.md`). First install: [Docs → Install Topos](https://topos.dialogues.ai/docs/install-topos).
 
 ---
 

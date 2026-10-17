@@ -1054,3 +1054,14 @@ def test_the_narrowed_copy_refuses_a_member_the_file_does_not_hold_or_a_count_th
 def test_the_narrowed_copy_is_made_only_from_the_file_the_check_read(node, narrow):
     assert node.index._narrowed_copy(_path(node), ("not", "this", "file"), frozenset(_ops(node, 3))) is None
     assert list(node.index.root.glob(".build-*.db")) == []
+
+
+# --- NR187 meets NR188: a narrowed publish replaces the file a kept interest verdict was proven for ------------------
+
+def test_a_narrowed_publish_forgets_the_kept_interest_verdict_of_the_file_it_replaced(node, caplog, narrow):
+    name = _path(node).name
+    node.index._keep_interest_verdict(name, ("file", "key", "canonical", "boundary", "inputs"))
+    assert name in node.index._interest_kept
+    _append(node, "7")
+    assert _sweep(node, caplog)[-1] == "message search index narrowed (2 withheld)"
+    assert name not in node.index._interest_kept and name not in node.index._interest_reuses

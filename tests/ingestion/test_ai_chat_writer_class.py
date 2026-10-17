@@ -381,7 +381,9 @@ async def test_the_legacy_path_writes_the_record(conn, tmp_path, monkeypatch, ca
     assert result["status"] == "ok", result
     assert result["records_processed"] == 1
     assert raw.get_file_path(DATASET, "chatgpt.conversation.v1").exists()  # the direct path writes no JSONL
-    assert f"content_preview={INJECTED}" in caplog.text
+    # The line still renders (the NameError this pins), and since NR181 it names the content by length and digest.
+    from topos.core.log_fingerprint import fingerprint
+    assert f"content_preview={fingerprint(INJECTED)}" in caplog.text and INJECTED not in caplog.text
     row = _row(conn, "m-legacy-path")
     assert (row["content"], row["writer_class"]) == (INJECTED, "cp_relay")
 
@@ -750,3 +752,9 @@ async def test_http_ingest_in_legacy_mode_keeps_todays_behaviour(conn, http_app,
     row = _row(conn, "m-legacy-http")
     assert row["writer_class"] == "local_legacy"
     assert owner_authored(row, table="ai_chat_messages")
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

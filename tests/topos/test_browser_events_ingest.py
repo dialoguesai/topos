@@ -10,10 +10,20 @@ from topos.ingestion.log_preview import field_preview
 
 
 def test_field_preview_handles_non_string_content() -> None:
-    assert field_preview({"x": 1, "y": 2}) == json.dumps({"x": 1, "y": 2})
-    assert field_preview(None) == ""
-    assert field_preview("hello world") == "hello world"
-    assert field_preview("x" * 200, max_len=10) == "x" * 10
+    # NR181: a length and a short keyed digest of any field type, never the text itself.
+    import hashlib
+    import hmac
+
+    from topos.core import log_fingerprint
+
+    def keyed(data: bytes) -> str:
+        return hmac.new(log_fingerprint._KEY, data, hashlib.sha256).hexdigest()[:12]
+
+    assert field_preview({"x": 1, "y": 2}).startswith("length=16 hmac=")
+    assert field_preview(None) == "length=0 hmac=" + keyed(b"")
+    assert field_preview("hello world") == "length=11 hmac=" + keyed(b"hello world")
+    assert field_preview("x" * 200, max_len=10) == "length=200 hmac=" + keyed(b"x" * 200)
+    assert hashlib.sha256(b"hello world").hexdigest()[:12] not in field_preview("hello world")
 
 
 @pytest.mark.asyncio

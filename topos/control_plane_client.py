@@ -178,6 +178,11 @@ class ControlPlaneClient:
             int(settings.control_plane_inbound_max_pending),
         )
         self._inbound_semaphore = asyncio.Semaphore(self._inbound_concurrency_limit)
+        # NR183 O1: with TOPOS_PERMISSIONS_V2_OWNER_LANE on, the handler slots are this pool instead of the semaphore,
+        # some of them kept for the owner's own app (permissions_v2/owner_lane.py). None, the switch off: the semaphore.
+        from .permissions_v2 import owner_lane
+
+        self._owner_lane = owner_lane.slots_for(self._inbound_concurrency_limit)
         self._inbound_tasks: set[asyncio.Task] = set()
         # UI reads get a separate bounded reserve, never an unbounded bypass.
         self._fast_inbound_tasks: set[asyncio.Task] = set()
@@ -439,7 +444,9 @@ class ControlPlaneClient:
                         try:
                             data = json.loads(raw)
                         except Exception:
-                            logger.warning("Relay message is not valid JSON: %s", raw)
+                            # NR181: never the frame itself (it can carry a question, an answer or shared records).
+                            from .core.log_fingerprint import fingerprint
+                            logger.warning("Relay message is not valid JSON: %s", fingerprint(raw))
                             continue
                         await self._schedule_inbound_message(ws, data)
             except ConnectionClosed as exc:
@@ -515,9 +522,15 @@ class ControlPlaneClient:
             self._fast_inbound_tasks.add(task)
             task.add_done_callback(self._on_inbound_task_done)
             return
+        # NR183 O1: the owner lane's class for this frame; never read with the lane off.
+        lane = self._owner_lane
+        owner = lane is not None and lane.owner_frame(data)
         async with self._inbound_lock:
             pending_count = len(self._inbound_tasks) - len(self._fast_inbound_tasks)
-            if pending_count >= self._inbound_max_pending:
+            # With the lane on, each class counts its own frames in hand only (DR-04: the owner's activity never
+            # makes a recipient's frame busy); counted out when its task ends, however it ends.
+            if (pending_count >= self._inbound_max_pending if lane is None
+                    else not lane.admit(owner, self._inbound_max_pending)):
                 logger.warning("Dropping inbound request due to saturation pending=%d", pending_count)
                 request_id = data.get("id")
                 if request_id:
@@ -525,7 +538,10 @@ class ControlPlaneClient:
                 return
             # R3a: when it arrived, and whether on the connection this client holds now (see _shed_at_dequeue).
             arrived = (time.monotonic(), ws is self._ws)
-            task = asyncio.create_task(self._handle_message_guarded(ws, data, arrived))
+            task = asyncio.create_task(self._handle_message_guarded(ws, data, arrived) if lane is None
+                                       else self._handle_message_in_lane(lane, owner, ws, data, arrived))
+            if lane is not None:
+                task.add_done_callback(lambda _done: lane.left(owner))
             self._inbound_tasks.add(task)
             task.add_done_callback(self._on_inbound_task_done)
 
@@ -546,6 +562,19 @@ class ControlPlaneClient:
             if arrived is not None and await self._shed_at_dequeue(ws, data, *arrived):
                 return
             await self._handle_message(ws, data)
+
+    async def _handle_message_in_lane(self, lane, owner: bool, ws, data: Dict[str, Any],
+                                      arrived: tuple[float, bool] | None = None) -> None:
+        """NR183 O1, the lane on: ``_handle_message_guarded`` with a slot of the lane's pool for the semaphore. R3a's
+        check runs where it ran, once the slot is held; the slot is given back on every path out, an exception and
+        a cancellation included (one cancelled while it waited holds none: ``InboundSlots.acquire``)."""
+        slot = await lane.acquire(owner)
+        try:
+            if arrived is not None and await self._shed_at_dequeue(ws, data, *arrived):
+                return
+            await self._handle_message(ws, data)
+        finally:
+            lane.release(slot)
 
     async def _shed_at_dequeue(self, ws, data: Dict[str, Any], received: float, on_live_socket: bool) -> bool:
         """NR166 R3a, at the moment a handler slot is free: True when this request is not to be handled.
@@ -779,7 +808,11 @@ class ControlPlaneClient:
             else:
                 resp = await self.handler(data)
         except Exception as exc:  # noqa: BLE001
-            logger.error("Handler raised exception: %s", exc, exc_info=True)
+            # NR181: the error's class and where it was raised, never its text: a handler's error can quote the
+            # frame it was handling (a validation error repeats its input). The frames are code locations only.
+            import traceback
+            logger.error("Handler raised exception: type=%s id=%s error=%s\n%s", msg_type, data.get("id"),
+                         type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__)).rstrip())
             resp = {"id": data.get("id"), "status": "error", "error": str(exc)}
         if resp is None:
             return  # e.g. connection_info or message without id; CP has no pending request to match

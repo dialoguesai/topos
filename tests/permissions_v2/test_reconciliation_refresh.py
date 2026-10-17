@@ -828,3 +828,9 @@ def test_F8_the_door_answers_only_the_paired_owner(store, tmp_path, monkeypatch)
     with TestClient(app) as client:
         response = client.post(REFRESH, json=body())
     assert response.status_code == 503 and response.json()["detail"] == "owner_binding" and synced == []
+
+
+@pytest.fixture(autouse=True)
+def _driven_as_the_owners_app(owner_app_on_the_socket):
+    """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
+    split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""

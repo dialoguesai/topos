@@ -202,7 +202,7 @@ LOCAL_SYNC_KIND = "local_sync"
 
 
 async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Run one iMessage/Signal sync to completion, off the request path.
+    """Run one local sync (iMessage, Signal, an AI coding tool) to completion, off the request path.
 
     This is the whole reason the kind exists. ``run_imessage_sync`` drains the
     entire backlog — hours on a first run — and it used to be awaited inside the
@@ -255,18 +255,18 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     if not source_id or not dataset_id:
         return {"status": "error", "error": "source_id and dataset_id required"}
-    if source_id not in ("imessage", "signal"):
+    # The one table every door reads (CONTRACTS.md §2.8): a source that is not in it cannot run here.
+    from ..ingestion.local_sync_jobs import no_receipt_codes, runner_for
+
+    runner = runner_for(source_id)
+    if runner is None:
         return {"status": "error", "error": f"sync not implemented for source_id={source_id}"}
 
     def _run() -> Dict[str, Any]:
         from ..core.state import get_db_connection
         from ..ingestion.local_sync import (
-            DATASET_NOT_ENROLLED,
             OUTCOME_NEEDS_CONFIRMATION,
             OUTCOME_PREVIEW,
-            SYNC_IN_PROGRESS,
-            run_imessage_sync,
-            run_signal_sync,
             sync_batch_size,
         )
         from ..storage.source_settings import update_sync_result
@@ -276,14 +276,9 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             return {"status": "error", "error": "no database connection"}
 
         batch_size = sync_batch_size(sync_options if isinstance(sync_options, dict) else None)
-        if source_id == "imessage":
-            result = run_imessage_sync(
-                dataset_id, sync_options=sync_options, progress_cb=_on_batch, batch_size=batch_size
-            )
-        else:
-            result = run_signal_sync(
-                dataset_id, sync_options=sync_options, progress_cb=_on_batch, batch_size=batch_size
-            )
+        result = runner.run(
+            dataset_id, sync_options=sync_options, progress_cb=_on_batch, batch_size=batch_size
+        )
 
         status = str(result.get("status") or "error")
         if status != "ok" and signal_key_lost:
@@ -300,12 +295,11 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         # No receipt when nothing was synced and nothing failed on its own
         # account: a plan waiting for the owner, or a preview, must not move
         # last_sync_at; a run refused because another holds the dataset leaves
-        # the receipt to that run; and a dataset refused as not enrolled must not
-        # get a source row, whose INSERT alone moves the enrollment's clock.
-        write_receipt = outcome not in (OUTCOME_NEEDS_CONFIRMATION, OUTCOME_PREVIEW) and code not in (
-            SYNC_IN_PROGRESS,
-            DATASET_NOT_ENROLLED,
-        )
+        # the receipt to that run; and a dataset refused as not enrolled (or a
+        # source that is not enabled, paused, or unpaired) must not get a source
+        # row, whose INSERT alone moves the enrollment's clock and defaults to
+        # enabled=1. The code set lives beside the runner table.
+        write_receipt = outcome not in (OUTCOME_NEEDS_CONFIRMATION, OUTCOME_PREVIEW) and code not in no_receipt_codes()
         # The receipt, on this thread, where taking the write gate is legal.
         # Both branches are best-effort: a sync that moved rows must not be
         # reported as failed because its bookkeeping write lost a lock race.
@@ -327,27 +321,19 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
         except Exception as exc:  # noqa: BLE001
             logger.warning("sync receipt write failed source=%s: %s", source_id, exc)
 
-        if source_id == "imessage":
-            result = {**result, "sync": _sync_summary(result, sync_options)}
-
-        # Nothing new, nothing to recount: an up-to-date run (every scheduled run
-        # that finds no messages) skips the refresh.
-        if status == "ok" and write_receipt and int(result.get("records_processed") or 0) > 0:
-            # The node's own HTTP route has always refreshed messenger analytics
-            # after a sync and the websocket handler never did, so the same sync
-            # produced different state depending on which door it came through.
-            # The executor is now the single door: both get the refresh.
+        # The runner's own follow-up, from the table: iMessage attaches its `sync` summary and,
+        # like Signal, refreshes messenger analytics after a run that moved rows (the node's own
+        # HTTP route always did and the websocket handler never did, so the same sync produced
+        # different state depending on which door it came through; the executor is the single
+        # door). The AI-tool runners attach their summary with the reader's ledger. An up-to-date
+        # run recounts nothing, and a failure here never loses a landed sync.
+        if runner.post_sync is not None:
             try:
-                from ..analytics.messenger_communities import compute_and_persist_messenger_analytics
-
-                compute_and_persist_messenger_analytics(
-                    dataset_id=dataset_id,
-                    conn=own,
-                    source_ids=[source_id],
-                    period_granularity="month",
-                )
-            except Exception as exc:  # noqa: BLE001 — never fail a good sync on analytics
-                logger.warning("messenger analytics refresh failed after sync: %s", exc)
+                decorated = runner.post_sync(own, dataset_id, result, sync_options)
+                if isinstance(decorated, dict):
+                    result = decorated
+            except Exception as exc:  # noqa: BLE001 — never fail a good sync on its follow-up
+                logger.warning("post-sync follow-up failed source=%s: %s", source_id, exc)
 
         # _mark_done reads `messages_processed`; the sync functions speak
         # `records_processed`. Alias rather than rename, so the direct callers

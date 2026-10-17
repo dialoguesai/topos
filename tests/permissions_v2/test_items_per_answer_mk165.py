@@ -111,7 +111,7 @@ def test_a_mutation_carrying_a_policy_above_the_ceiling_is_refused_at_parse_and_
 @pytest.mark.parametrize("max_k, settings", [
     (30, (("8", 8), ("16", 16), ("24", 24))),   # the new default: the switch binds, the grant does not
     (5, (("8", 5), ("16", 5), ("3", 3))),        # the smallest choice: the grant binds
-    (50, (("8", 8), ("24", 24), ("99", 24))),    # the ceiling: the switch's own ceiling (24) binds
+    (50, (("8", 8), ("24", 24), ("30", 30), ("99", 30))),   # the switch's own ceiling (30, answer protocol 4) binds
 ])
 def test_an_answer_retrieves_the_smaller_of_the_grants_max_k_and_answer_items(legacy, tmp_path, monkeypatch, max_k, settings):
     """Unchanged in meaning (A2A-4 §2 `K_ANSWER`, amendment 11.7): the owner's number is a ceiling on an answer's
