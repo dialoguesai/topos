@@ -625,6 +625,34 @@ class PolicyLedger:
             conn.execute("UPDATE p2a_requests SET status='checkpointed' WHERE request_id=?", (lease.request_id,))
             return receipt
 
+    def checkpoint_truth(self, lease, *, intent, output, revision, now):
+        """One consumed read, current explicit pack consent, and a private receipt."""
+        from .truth_contract import VERIFY, TruthIntent, TruthResult, authorize_truth
+        from .signing import request_digest
+        intent, output = TruthIntent.parse(intent.model_dump()), TruthResult.parse(output.model_dump())
+        with self._transaction() as conn:
+            envelope = self._leased_envelope(conn, lease)
+            if envelope.request_type != VERIFY or envelope.request_hash != request_digest(VERIFY, intent.model_dump()):
+                raise PolicyError("request_binding")
+            verify_current_signature(envelope, trusted_keys=self.trusted_keys, now=now)
+            authority, policy = self._authority(conn, envelope.grant_id, now)
+            if any(getattr(envelope, key) != value for key, value in authority.model_dump().items()):
+                raise PolicyError("authority_stale")
+            authorize_truth(policy, intent)
+            decision = {"stage": "output_release", "verdict": "permit", "policy_hash": authority.policy_hash,
+                        "candidate_revision": digest({"pack": intent.pack_id, "question": intent.question_id,
+                                                      "revision": revision}), "evaluator_version": "truth-pack/v1"}
+            receipt = {"version": "topos-local-receipt/v2", "request_id": lease.request_id,
+                "envelope_hash": lease.envelope_hash, "policy_hash": authority.policy_hash,
+                "node_epoch": authority.node_epoch, "protection_revision": authority.protection_revision,
+                "candidate_revision": decision["candidate_revision"], "decision_hash": digest(decision),
+                "output_hash": digest(output.model_dump()), "verdict": "permit", "checked_at": now,
+                "execution_enabled": False}
+            conn.execute("INSERT INTO p2a_receipts VALUES (?,?,?)", (lease.request_id,
+                canonical_bytes(receipt).decode("ascii"), canonical_bytes(decision).decode("ascii")))
+            conn.execute("UPDATE p2a_requests SET status='checkpointed' WHERE request_id=?", (lease.request_id,))
+            return authority
+
     # -- p2c-v1: one set-level decision per search (additive; the methods above are unchanged) --
 
     @staticmethod

@@ -36,6 +36,9 @@ SLOW_SECONDS = 1.0
 ALLOWED_PAUSE = SLOW_SECONDS * 0.6
 #: What each marked type is asked with: enough for its handler to reach the database.
 PAYLOADS = {
+    "calibration_catalog": {},
+    "calibration_answer": {"pack_id": "icebreakers-v1", "question_id": "drink", "value": None, "expected_revision": 0},
+    "calibration_preview": {"pack_id": "icebreakers-v1", "question_id": "drink", "value": "tea"},
     "list_database_tables": {},
     "get_table_count": {"table_name": "messages"},
     "get_table_rows": {"table_name": "messages", "limit": 5},

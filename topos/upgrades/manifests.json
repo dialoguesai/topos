@@ -1080,6 +1080,17 @@
       ]
     },
     {
+      "version": "1.5.12",
+      "summary": "Add Calibrate answer packs and consented claim verification, fix coding-agent setup and durable transcript collection, and select release checks automatically.",
+      "steps": [],
+      "notes": [
+        "Migration 87 (calibration_answers_v1) creates an empty indexed table for current owner calibration answers. Existing records are unchanged; no reprocessing, embedding, model calls or graph rebuild is required. The normal pre-migration backup and downgrade guard apply.",
+        "Structured Icebreakers verification requires explicit truth-pack consent in recipient or owner-app grants. Calibrate answers do not grant access by themselves. The companion control-plane verification route and truth_packs contract must be deployed before enabling the web UI; the node advertises support through capability discovery.",
+        "Coding-session collection commits eligible canonical records and durable processing work atomically before advancing file cursors. Existing records are not bulk reprocessed. The established privacy and authored-only extraction pipeline runs through the background worker.",
+        "Coding-agent setup and status commands load saved configuration; human approval remains required for agent enrollment. A queued source sync reports its job ID rather than claiming completion."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

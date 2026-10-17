@@ -1423,3 +1423,26 @@ async def handle_put_community_name(message: Dict[str, Any]) -> Optional[Dict[st
                             "members": len(rows)}}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles('calibration_catalog', 'calibration_answer', 'calibration_preview', owner_only=True, off_loop=True)
+async def handle_calibration(message):
+    from ...principal import OWNER_APP, current_principal
+    from ...features.calibration.store import catalog, save, verify, RevisionConflict
+    from ...permissions_v2.truth_contract import TruthIntent
+    from ...permissions_v2.canonical import PolicyError
+    req_id = message.get('id')
+    if getattr(current_principal(), 'cls', None) != OWNER_APP:
+        return {'id': req_id, 'status': 'error', 'code': 403, 'error': 'owner_mode_required'}
+    try:
+        conn = hub.get_db_connection()
+        payload = message.get('payload') or {}
+        payload = {k: v for k, v in payload.items() if k != 'topos_id'}
+        kind = message['type']
+        result = (catalog(conn) if kind == 'calibration_catalog' else save(conn, payload)
+                  if kind == 'calibration_answer' else verify(conn, TruthIntent.parse(payload))[0].model_dump())
+        return {'id': req_id, 'status': 'ok', 'payload': result}
+    except RevisionConflict as exc:
+        return {'id': req_id, 'status': 'error', 'code': 409, 'error': str(exc)}
+    except (ValueError, PolicyError) as exc:
+        return {'id': req_id, 'status': 'error', 'code': 400, 'error': str(exc)}

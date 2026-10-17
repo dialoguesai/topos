@@ -7,3 +7,4 @@ listen port so CLI, probes, and the local MCP proxy cannot drift.
 DEFAULT_NODE_PORT = 8676
 DEFAULT_NODE_HTTP_URL = f"http://127.0.0.1:{DEFAULT_NODE_PORT}"
 DEFAULT_NODE_LOCALHOST_URL = f"http://localhost:{DEFAULT_NODE_PORT}"
+DEFAULT_TOPOS_CONTROL_PLANE_URL = "wss://cp.logu3s.com/ws/engine"

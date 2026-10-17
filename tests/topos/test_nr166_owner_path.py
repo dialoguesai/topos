@@ -119,4 +119,6 @@ def test_what_this_branch_sheds_and_what_it_moves_off_the_loop():
         "list_jsonl_files",
         # HT lane: the owner's home-chat timing rows. Written after the turn has ended, so no owner waits on them,
         # and read back as aggregates; off the loop so a write that waits for the gate never stalls it.
-        "record_home_chat_turn_timings", "get_home_chat_turn_timings_summary"}
+        "record_home_chat_turn_timings", "get_home_chat_turn_timings_summary",
+        # Calibrate SQLite reads/writes use the same off-loop handler dispatch.
+        "calibration_catalog", "calibration_answer", "calibration_preview"}

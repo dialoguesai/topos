@@ -763,6 +763,10 @@ class ControlPlaneClient:
 
     async def _handle_message(self, ws, data: Dict[str, Any]) -> None:
         msg_type = str(data.get("type") or "").strip().lower()
+        if msg_type == "permissions_v2_verify_claim":
+            from .permissions_v2.truth_release import dispatch_verify_claim
+            await dispatch_verify_claim(ws, data)
+            return
         if msg_type == "permissions_v2_message_search":
             # p2c-v1: checkpoints and signs under the node gates, then sends with them released.
             from .permissions_v2.search_transport import dispatch_message_search

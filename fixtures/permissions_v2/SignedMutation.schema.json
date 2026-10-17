@@ -1920,6 +1920,24 @@
           "title": "Time Semantics",
           "type": "string"
         },
+        "truth_packs": {
+          "anyOf": [
+            {
+              "items": {
+                "const": "icebreakers-v1",
+                "type": "string"
+              },
+              "maxItems": 1,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Truth Packs"
+        },
         "view_id": {
           "const": "canonical.knowledge_search.v1",
           "title": "View Id",

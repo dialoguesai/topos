@@ -1384,3 +1384,32 @@ async def get_fact_evidence_route(
         return fact_evidence(_entities_conn(), object_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get('/calibration')
+def calibration_pack():
+    from ..features.calibration.store import catalog
+    return catalog(_entities_conn())
+
+
+@router.put('/calibration/answer')
+def calibration_answer(body: dict = Body(...)):
+    from ..features.calibration.store import save, RevisionConflict
+    from ..permissions_v2.canonical import PolicyError
+    try:
+        return save(_entities_conn(), body)
+    except RevisionConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from None
+    except (ValueError, PolicyError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+
+
+@router.post('/calibration/verify-claim')
+def calibration_preview(body: dict = Body(...)):
+    from ..features.calibration.store import verify
+    from ..permissions_v2.truth_contract import TruthIntent
+    from ..permissions_v2.canonical import PolicyError
+    try:
+        return verify(_entities_conn(), TruthIntent.parse(body))[0].model_dump()
+    except PolicyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None

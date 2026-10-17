@@ -144,6 +144,42 @@ def test_add_with_tty_no_declines_with_exit_2(home, registry, monkeypatch):
     assert not (home / ".topos" / "agents" / "claude-code.token").exists()
 
 
+def test_launching_approval_reports_pending_and_never_enrolls(home, registry, monkeypatch):
+    launched = []
+    monkeypatch.setattr(agents_cmd, "_open_approval_terminal", lambda client: launched.append(client) or True)
+    result = _run(["add", "codex", "--open-terminal", "--json"])
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"client": "codex", "status": "approval_pending"}
+    assert launched == ["codex"] and registry.minted == []
+    assert not (home / ".topos" / "agents" / "codex.token").exists()
+
+
+def test_unavailable_approval_window_never_enrolls(home, registry, monkeypatch):
+    monkeypatch.setattr(agents_cmd, "_open_approval_terminal", lambda client: False)
+    result = _run(["add", "codex", "--open-terminal"])
+    assert result.exit_code == 2 and registry.minted == []
+
+
+def test_terminal_launcher_contains_no_credentials_and_uses_normal_human_flow(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    folder = tmp_path / "approval"
+    folder.mkdir(mode=0o700)
+    monkeypatch.setattr(agents_cmd.sys, "platform", "darwin")
+    monkeypatch.setattr(agents_cmd.tempfile, "mkdtemp", lambda **kw: str(folder))
+    monkeypatch.setenv("TOPOS_KEY", ENV_KEY)
+    monkeypatch.setenv("TOPOS_OWNER_KEY", ENV_OWNER_KEY)
+    calls = []
+    monkeypatch.setattr(agents_cmd.subprocess, "run", lambda argv, **kw: calls.append(argv) or SimpleNamespace(returncode=0))
+    assert agents_cmd._open_approval_terminal("codex")
+    script = folder / "Connect-to-TOPOS.command"
+    contents = script.read_text()
+    assert calls == [["/usr/bin/open", "-a", "Terminal", str(script)]]
+    assert "-m topos.cli agents add codex" in contents
+    assert "--approved" not in contents
+    assert all(secret not in contents for secret in SECRETS)
+    assert stat.S_IMODE(script.stat().st_mode) == 0o700
+
+
 def test_add_json_reports_the_client_without_the_label(home, registry, monkeypatch):
     monkeypatch.setattr(agents_cmd, "_can_prompt", lambda: True)
     result = _run(["add", "claude-code", "--json"], input_text="y\n")

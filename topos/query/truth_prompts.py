@@ -83,6 +83,8 @@ def suggest_prompts(
             continue
         topic = str(payload.get("object_value") or "").strip()
         predicate = str(payload.get("predicate") or "").strip()
+        if predicate.startswith("calibration_"):
+            continue  # calibration labels require explicit signed truth-pack consent
         if not topic or not predicate:
             continue
         if str(payload.get("disclosure") or "scoped") in resolved.excluded_disclosures:

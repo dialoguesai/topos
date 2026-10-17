@@ -60,7 +60,7 @@ def verify_node_result(raw, *, trusted_keys: Mapping[str, bytes], envelope: AnyS
     if type(now) is not int or now < 0:
         raise PolicyError("clock_invalid")
     envelope = parse_envelope(envelope)
-    output = parse_disclosure(output, capability=envelope.capability_version)
+    output = parse_disclosure(output, capability=envelope.capability_version, request_type=envelope.request_type)
     result = SignedNodeResult.parse(raw.model_dump() if isinstance(raw, SignedNodeResult) else raw)
     authority = parse_authority({field: getattr(envelope, field) for field in AuthorityBinding.model_fields})
     if (result.envelope_hash != digest(envelope.model_dump()) or result.request_id != envelope.request_id

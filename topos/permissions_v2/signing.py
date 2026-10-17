@@ -154,17 +154,29 @@ class SignedKnowledgeAnswerEnvelope(SignedKnowledgeEnvelope):
     request_type: AnswerRequestType
 
 
+class KnowledgeTruthEnvelopeBody(KnowledgeEnvelopeBody):
+    request_type: Literal["permissions.v2.verify_claim"]
+
+
+class SignedKnowledgeTruthEnvelope(KnowledgeTruthEnvelopeBody):
+    signature: Signature
+
+
+class TruthRequestContext(RequestContext):
+    request_type: Literal["permissions.v2.verify_claim"]
+
+
 class AnswerRequestContext(RequestContext):
     request_type: AnswerRequestType
 
 
 AnyAuthorityBinding = (KnowledgeAuthorityBinding | AuthorityBinding | FactAuthorityBinding | AttestedSourceAuthorityBinding
                        | OpaqueSourceAuthorityBinding | SearchAuthorityBinding | DirectSearchAuthorityBinding)
-AnySignedEnvelope = (SignedKnowledgeAnswerEnvelope | SignedKnowledgeEnvelope | SignedEnvelope | SignedFactEnvelope | SignedAttestedSourceEnvelope | SignedOpaqueSourceEnvelope
+AnySignedEnvelope = (SignedKnowledgeTruthEnvelope | SignedKnowledgeAnswerEnvelope | SignedKnowledgeEnvelope | SignedEnvelope | SignedFactEnvelope | SignedAttestedSourceEnvelope | SignedOpaqueSourceEnvelope
                      | SignedSearchEnvelope | SignedDirectSearchEnvelope)
-AnyEnvelopeBody = (KnowledgeAnswerEnvelopeBody | KnowledgeEnvelopeBody | EnvelopeBody | FactEnvelopeBody | AttestedSourceEnvelopeBody | OpaqueSourceEnvelopeBody
+AnyEnvelopeBody = (KnowledgeTruthEnvelopeBody | KnowledgeAnswerEnvelopeBody | KnowledgeEnvelopeBody | EnvelopeBody | FactEnvelopeBody | AttestedSourceEnvelopeBody | OpaqueSourceEnvelopeBody
                    | SearchEnvelopeBody | DirectSearchEnvelopeBody)
-AnyRequestContext = RequestContext | FactRequestContext | SearchRequestContext | AnswerRequestContext
+AnyRequestContext = TruthRequestContext | RequestContext | FactRequestContext | SearchRequestContext | AnswerRequestContext
 
 
 def _value(raw):
@@ -198,6 +210,8 @@ def parse_authority(raw) -> AnyAuthorityBinding:
 def parse_envelope(raw, *, signed=True):
     raw = _value(raw)
     if raw.get("capability_version") == "permissions-beta/p2c-v3":
+        if raw.get("request_type") == "permissions.v2.verify_claim":
+            return (SignedKnowledgeTruthEnvelope if signed else KnowledgeTruthEnvelopeBody).parse(raw)
         if raw.get("request_type") in ("permissions.v2.answer", "permissions.v2.answer.fetch"):
             return (SignedKnowledgeAnswerEnvelope if signed else KnowledgeAnswerEnvelopeBody).parse(raw)
         return (SignedKnowledgeEnvelope if signed else KnowledgeEnvelopeBody).parse(raw)
@@ -218,6 +232,8 @@ def parse_envelope(raw, *, signed=True):
 
 def parse_request_context(raw) -> AnyRequestContext:
     raw = _value(raw)
+    if raw.get("request_type") == "permissions.v2.verify_claim":
+        return TruthRequestContext.parse(raw)
     if raw.get("request_type") in ("permissions.v2.answer", "permissions.v2.answer.fetch"):
         return AnswerRequestContext.parse(raw)
     if raw.get("request_type") == "permissions.v2.fact.read":

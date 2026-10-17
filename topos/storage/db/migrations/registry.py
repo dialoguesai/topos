@@ -12,6 +12,10 @@ from typing import Callable, List, Optional
 
 import sqlite3
 
+from .calibration_answers_v1 import (
+    MIGRATION_ID as CALIBRATION_ANSWERS_V1_ID,
+    apply_calibration_answers_v1_up,
+)
 from .home_chat_memories_v1 import MIGRATION_ID as HOME_CHAT_MEMORIES_V1_ID, apply_home_chat_memories_v1_up
 from .home_chat_turn_timings_v1 import (
     MIGRATION_ID as HOME_CHAT_TURN_TIMINGS_V1_ID,
@@ -489,6 +493,8 @@ MIGRATIONS: List[MigrationSpec] = [
     # 86, after 83 (AI-chat titles) and 84/85 (the on-ramp tables), agreed 15 Oct 2026: one content-free timing row
     # per owner home-chat turn (HT lane). A ledger step, not always_run: one CREATE TABLE IF NOT EXISTS, no row read.
     _spec(86, HOME_CHAT_TURN_TIMINGS_V1_ID, apply_home_chat_turn_timings_v1_up),
+    # Current owner answers for the opt-in Calibrate truth pack; additive and ledger guarded.
+    _spec(87, CALIBRATION_ANSWERS_V1_ID, apply_calibration_answers_v1_up),
 ]
 
 

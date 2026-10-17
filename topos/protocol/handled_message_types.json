@@ -6,6 +6,9 @@
   "auto_resolve_source_contacts",
   "blackhole_check_text",
   "blackhole_status",
+  "calibration_answer",
+  "calibration_catalog",
+  "calibration_preview",
   "check_inbox_write",
   "complexity_influence",
   "complexity_summary",
@@ -293,6 +296,9 @@
   "verify_claim"
  ],
  "owner_only_message_types": [
+  "calibration_answer",
+  "calibration_catalog",
+  "calibration_preview",
   "delete_database_rows",
   "delete_database_table",
   "get_database_explorer_summary",
