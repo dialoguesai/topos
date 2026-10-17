@@ -92,6 +92,8 @@ async def test_executor_reloads_current_eligible_records_and_runs_only_owed_jobs
         called.append((job_names, [r['message_id'] for r in records]))
         return {'errors': []}
     async def pipeline(**kw):
+        from topos.enrichment.pipeline_activity import is_derivation_in_flight
+        assert is_derivation_in_flight()
         assert 'private' not in [r['message_id'] for r in kw['canonical_records']]
         assert kw['run_enrichment'] is False
         assert kw['fill_graph'] is False
