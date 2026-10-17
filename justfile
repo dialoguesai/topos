@@ -145,10 +145,11 @@ eval-release:
     uv run python scripts/preflight_release_env.py
     uv run python scripts/run_any_to_any_release.py
 
-# Release gate: everything ci.yml checks, runnable locally before tagging a
-# release (dep pins in sync, migration checksums, public test lane incl. the
-# handled-message-types protocol snapshot guards, the six-pair sharing gate,
-# build + release smoke).
+# Core release gate: everything ci.yml checks, runnable locally when CI is
+# unavailable (dep pins, migration checksums, public tests, privacy tests,
+# build and release smoke). CI runs the public lane in seven separate processes
+# on separate runners; this local fallback runs it serially to preserve the
+# suite's session-level leak and owner-database guards.
 #
 # EVERY leg runs under the owner-database tripwire. The pytest legs get it from
 # tests/conftest.py; the others get it from scripts/live_db_tripwire.py, which
@@ -170,9 +171,15 @@ gate:
     uv run python scripts/live_db_tripwire.py scripts/sync_migration_checksums.py --check
     uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
     just test-privacy-battery
-    just eval-release
     uv run python scripts/live_db_tripwire.py --command uv build
     uv run python scripts/live_db_tripwire.py scripts/release_smoke_test.py
+
+# Local fallback for sharing-impact releases when CI is unavailable. The rig
+# runs once, after the core gate. With green CI, run `just eval-release` alone
+# when RELEASING.md requires it; do not repeat the parallel CI suite locally.
+gate-sharing:
+    just gate
+    just eval-release
 
 # Home chat Wave A retrieval-quality gates. LOCAL ONLY: these drive
 # demo/signal_dimension_harness, whose fixture data cannot ship in this repo

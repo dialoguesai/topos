@@ -25,9 +25,9 @@ jobs:
   public-lane:
     name: public lane (${{ matrix.shard }})
     runs-on: ubuntu-latest
-    # 30, not 20: a slow runner takes ~1.75x a slice's usual time (features_topos_core on 297aa9d2:
-    # 96 % at 18.7 min, no stall, no failure). 30 still ends a degraded run long before the 147 minutes
-    # one took on 2026-09-25.
+    # Keep a ceiling for noisy runners; split a shard when its normal duration
+    # grows. permissions_v2 took 25m14s on the 1.5.11 PR, so it is now two
+    # processes with roughly half its tests each (tests/lane_shards.py).
     timeout-minutes: 45
     strategy:
       # Every slice runs to its end, so a red run still reports its whole
@@ -36,7 +36,7 @@ jobs:
       matrix:
         # tests/test_lane_shards.py fails when this list and the table in
         # tests/lane_shards.py disagree.
-        shard: [permissions_v2, permissions_v2_answers, permissions_v2_families, message_search_gap, features_topos_core, rest]
+        shard: [permissions_v2, permissions_v2_split, permissions_v2_answers, permissions_v2_families, message_search_gap, features_topos_core, rest]
 
     steps:
       - name: Checkout
