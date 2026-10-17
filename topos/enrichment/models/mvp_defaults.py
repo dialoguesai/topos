@@ -35,7 +35,9 @@ JOB_SPEC_VERSIONS: dict[str, int] = {
     # 3: coding capture-app names use source/context type evidence. The
     # bounded coding-source recovery lane refreshes these; no global sweep.
     "entities": 3,
-    "embeddings": 1,
+    # 2: completion now follows persistence in signal_embeddings. Existing
+    # vectors remain valid; this invalidates the old completion witness only.
+    "embeddings": 2,
     "sentiment": 1,
     "topics": 1,
     "dimension_summary": 1,

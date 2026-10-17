@@ -364,6 +364,9 @@ async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
     signal_errors = list(signal_out.get("errors") or []) if isinstance(signal_out, dict) else []
     enrich_errors = list(enrich_out.get("errors") or []) if isinstance(enrich_out, dict) else []
     privacy_errors = list((pipeline_outcome.get("privacy_disclosure_layer") or {}).get("errors") or [])
+    privacy_result = pipeline_outcome.get("privacy_disclosure_layer") or {}
+    if any(privacy_result.get(k) for k in ("failed_batches", "failed_records", "nsfw_failed_batches")):
+        privacy_errors.append("Privacy processing has unfinished records")
     signal_errors.extend(f"Deferred signal job: {j}" for j in signal_out.get("deferred_jobs") or [])
     enrich_errors.extend(privacy_errors)
     status = "error" if (signal_errors or enrich_errors) else "ok"

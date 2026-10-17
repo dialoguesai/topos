@@ -152,6 +152,9 @@ async def execute_catchup(payload: dict) -> dict:
         for lane in ("signal_derivation", "privacy_disclosure_layer"):
             lane_result = result.get(lane) or {}
             errors.extend(lane_result.get("errors") or [])
+            if lane == "privacy_disclosure_layer" and any(lane_result.get(k) for k in
+                    ("failed_batches", "failed_records", "nsfw_failed_batches")):
+                errors.append("Privacy processing has unfinished records")
             errors.extend(f"Deferred signal job: {j}" for j in lane_result.get("deferred_jobs") or [])
         if not errors:
             from ..enrichment.record_progress import mark_records_processed_in_a_worker
