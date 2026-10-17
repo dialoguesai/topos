@@ -34,7 +34,7 @@ AnswerMode = Literal["only", "with_sources", "records"]
 # encoding and a policy signed before this field keeps its bytes.
 WriterDisclosure = Literal["origin", "provider", "model", "build"]
 # The declared-or-absent fields of the declaration (the serializer leaves an absent one out of the dump).
-DECLARED_OR_ABSENT = ("answers", "writer_disclosure", "selective_facts", "release_conversation_title")
+DECLARED_OR_ABSENT = ("answers", "writer_disclosure", "selective_facts", "release_conversation_title", "truth_packs")
 # A released AI chat's title (release_conversation_title): scrubbed and cut to this before it leaves the node.
 MAX_CONVERSATION_TITLE_CHARS = 200
 ConversationTitle = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=MAX_CONVERSATION_TITLE_CHARS)]
@@ -84,7 +84,7 @@ class KnowledgeDeclaration(SearchDeclaration):
     # The owner's consent to name the AI chat a released message came from. Absent is off; on is the literal true,
     # so a policy signed before this field keeps its bytes and off has one encoding.
     release_conversation_title: Literal[True] | None = None
-
+    truth_packs: list[Literal["icebreakers-v1"]] | None = Field(default=None, min_length=1, max_length=1)
     @model_validator(mode="after")
     def selection_needs_facts(self):
         if self.selective_facts is not None and "fact" not in self.result_types:

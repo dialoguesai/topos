@@ -326,6 +326,8 @@ def verify_claim(
         if disclosure in resolved.excluded_disclosures:
             continue
         predicate = str(payload.get("predicate") or "")
+        if predicate.startswith("calibration_"):
+            continue  # calibration labels require explicit signed truth-pack consent
         fact_blob = f"{predicate.replace('_', ' ')} {payload.get('object_value') or ''}"
         fact_category, fact_safe = categorize(fact_blob)
         if not fact_safe or fact_category not in resolved.allowed_categories:

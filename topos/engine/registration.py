@@ -100,6 +100,11 @@ def _answer_model_status() -> str:
         return "missing"
 
 
+def _truth_version() -> int:
+    from ..permissions_v2 import switches
+    return 1 if switches.on(switches.MESSAGE_SEARCH) else 0
+
+
 def _fact_ontology_switches() -> int:
     """`permissions_v2_fact_ontology_switches`: 1, this node releases a fact only while the fact's ontology is
     switched on here (selective_facts.ONTOLOGY_SWITCHES_VERSION, where the rule is). It says what the code does, so
@@ -200,6 +205,7 @@ def build_engine_capabilities() -> Dict[str, Any]:
         # single ones. 0 whenever either search flag is off, so the CP never sends what we refuse.
         "permissions_v2_search_batch_version": _search_batch_version(),
         "permissions_v2_answer_version": _answer_version(),
+        "permissions_v2_truth_version": _truth_version(),
         "permissions_v2_answer_model": _answer_model_status(),
         # Facts by ontology: >= 1 says this node shares a fact only while its ontology is switched on here. The
         # control plane offers Facts, and forwards a fact, only for a node that says so (a node before the rule

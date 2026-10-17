@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- [S1] [P] Add the owner Calibrate truth pack and indexed verify_claim through explicitly consented recipient and owner grants. Answer edits and clears take effect on the next verification; existing authority, exclusions, revocation, and final-send checks remain in force. Migration 87 adds calibration_answers without changing existing rows. Legacy free-text verification excludes calibration labels. No enrichment invalidation is needed.
+
 - [O] Select node CI and sharing-release checks automatically from changed code. Documentation, release stamping, and explicitly mapped owner status/drawing changes use focused checks; shared or unmapped code retains full checks. Run package/privacy work alongside public shards, and require matching-tree Rig D evidence before publishing sharing-impact releases.
 
 ### Changed
