@@ -88,6 +88,50 @@ def test_dispatch_uses_subprocess_for_file_db(file_db, monkeypatch):
     assert report == {"edges_after": 1}
 
 
+def test_graph_rebuild_running_tracks_actual_work_and_clears_on_exit(monkeypatch):
+    from topos.features.entities import maintenance
+
+    started = threading.Event()
+    release = threading.Event()
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+
+    def rebuild(_conn):
+        started.set()
+        assert release.wait(2)
+        return {"done": True}
+
+    monkeypatch.setattr(maintenance, "rebuild_entity_graph", rebuild)
+    result = {}
+    worker = threading.Thread(target=lambda: result.update(run_graph_rebuild(conn)))
+    assert not rebuild_subprocess.graph_rebuild_running()
+    worker.start()
+    assert started.wait(2)
+    try:
+        assert rebuild_subprocess.graph_rebuild_running()
+    finally:
+        release.set()
+        worker.join(timeout=2)
+        conn.close()
+    assert result == {"done": True}
+    assert not rebuild_subprocess.graph_rebuild_running()
+
+
+def test_graph_rebuild_running_clears_after_failure(monkeypatch):
+    from topos.features.entities import maintenance
+
+    conn = sqlite3.connect(":memory:")
+
+    def rebuild(_conn):
+        assert rebuild_subprocess.graph_rebuild_running()
+        raise RuntimeError("rebuild failed")
+
+    monkeypatch.setattr(maintenance, "rebuild_entity_graph", rebuild)
+    with pytest.raises(RuntimeError, match="rebuild failed"):
+        run_graph_rebuild(conn)
+    conn.close()
+    assert not rebuild_subprocess.graph_rebuild_running()
+
+
 def test_dispatch_runs_in_process_for_memory_db(monkeypatch):
     conn = sqlite3.connect(":memory:")
     apply_all_migrations(conn)

@@ -90,6 +90,19 @@ _live_lock = threading.Lock()
 _live: Dict[int, subprocess.Popen] = {}
 _stopped: Set[int] = set()
 _accepting = True
+_activity_lock = threading.Lock()
+_active_rebuilds = 0
+
+
+def graph_rebuild_running() -> bool:
+    """Whether this node is currently running an entity-graph rebuild.
+
+    The parent waits for subprocess rebuilds here, so this covers the timer,
+    the manual endpoint, and upgrade steps without querying the database or
+    depending on the child process's own status endpoint.
+    """
+    with _activity_lock:
+        return _active_rebuilds > 0
 
 
 class GraphRebuildSubprocessError(RuntimeError):
@@ -135,12 +148,19 @@ def run_graph_rebuild(conn: sqlite3.Connection) -> Dict[str, Any]:
     Raises :class:`WriteGateDeferred` when another rebuild holds the advisory
     lock, so callers treat it exactly like stepping aside for a derivation.
     """
-    db_path = _database_file(conn) if _subprocess_enabled() else None
-    if not db_path:
-        from .maintenance import rebuild_entity_graph
+    global _active_rebuilds
+    with _activity_lock:
+        _active_rebuilds += 1
+    try:
+        db_path = _database_file(conn) if _subprocess_enabled() else None
+        if not db_path:
+            from .maintenance import rebuild_entity_graph
 
-        return rebuild_entity_graph(conn)
-    return rebuild_in_subprocess(db_path)
+            return rebuild_entity_graph(conn)
+        return rebuild_in_subprocess(db_path)
+    finally:
+        with _activity_lock:
+            _active_rebuilds -= 1
 
 
 def _child_gets_own_session() -> bool:

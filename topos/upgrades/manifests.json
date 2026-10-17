@@ -1072,6 +1072,14 @@
       ]
     },
     {
+      "version": "1.5.11",
+      "summary": "Add graph-rebuild activity to shell status and a cumulative monochrome tray badge. No data migration, reprocessing, or derived invalidation.",
+      "steps": [],
+      "notes": [
+        "Additive graph_rebuild.running shell-status field reports only an active entity-graph rebuild. Existing clients ignore it; tray-only animation does not modify owner data."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

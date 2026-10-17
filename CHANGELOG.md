@@ -9,6 +9,11 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.11] — 2026-10-17
+
+### Added
+- **Graph rebuild activity in the shell status and trays.** `[P]` `/v1/shell/status` now reports `graph_rebuild.running` while an entity-graph rebuild actually runs. The signal covers manual, automatic, and upgrade rebuilds through the common entry point; it does not claim progress or change graph data. `[O]` The Python tray shows a four-bar monochrome badge that fills cumulatively over 2.16 seconds and resets, while the node remains healthy. The menu says graph rebuilding may slow responses. The badge clears after a rebuild ends or the status request fails. Older shell clients ignore the additive field. No migration or derived invalidation is needed.
+
 ## [1.5.10] — 2026-10-16
 
 ### Added

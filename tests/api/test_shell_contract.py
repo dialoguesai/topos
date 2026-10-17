@@ -35,6 +35,13 @@ class TestShellStatus:
         assert payload["pid"] > 0
         assert payload["log_file"] is None
         assert payload["update"]["available"] is False
+        assert payload["graph_rebuild"] == {"running": False}
+
+    def test_reports_active_graph_rebuild(self, client, monkeypatch):
+        from topos.features.entities import rebuild_subprocess
+
+        monkeypatch.setattr(rebuild_subprocess, "graph_rebuild_running", lambda: True)
+        assert client.get("/v1/shell/status").json()["graph_rebuild"] == {"running": True}
 
     def test_reports_log_file_and_update(self, client, monkeypatch, tmp_path):
         monkeypatch.setenv("TOPOS_LOG_FILE", str(tmp_path / "node.log"))
@@ -232,6 +239,24 @@ class TestTrayConsumesContract:
         assert t.update["available"] is True
         assert t.version == "1.3.2"
         assert t.log_path == Path("/tmp/logs/node.log")
+
+    def test_tray_rebuild_signal_resets_after_status_error(self, monkeypatch):
+        import httpx
+
+        payload = {"update": {}, "graph_rebuild": {"running": True}}
+        monkeypatch.setattr(
+            httpx, "get", lambda url, timeout: TestProbeRunningNode._Resp(200, payload)
+        )
+        t = self._tray()
+        t._fetch_shell_status()
+        assert t.graph_rebuild_running is True
+
+        def fail(*_args, **_kwargs):
+            raise httpx.ConnectError("status unavailable")
+
+        monkeypatch.setattr(httpx, "get", fail)
+        t._fetch_shell_status()
+        assert t.graph_rebuild_running is False
 
     def test_attached_menu_offers_quit_and_tray_only_exit(self):
         # Quit means quit, attached or not (design of record, 0.2.11 — see
