@@ -69,10 +69,9 @@ on:
     tags:
       - "v*"
   # Runs on every PR so upgrade-step breakage is caught BEFORE a release is
-  # cut, not by the tag build afterwards. Deliberately NOT path-filtered: this
-  # is a required check, and GitHub treats a required check that never reports
-  # as permanently pending, so a `paths:` filter would block merges on exactly
-  # the PRs it skipped. Keep it unfiltered unless it stops being required.
+  # cut, not by the tag build afterwards. Always report this check: the node
+  # planner skips fixture work inside the job for docs/explicit fast paths.
+  # Scheduled, dispatched and tagged runs retain the full upgrade matrix.
   pull_request:
 
 permissions:
@@ -86,18 +85,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      - name: Select upgrade checks for this PR
+        id: select
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          CHANGE_BASE: ${{ github.event.pull_request.base.sha }}
+        run: python scripts/select_release_checks.py --base "$CHANGE_BASE"
+
       - name: Set up uv
+        if: ${{ steps.select.outputs.upgrade != 'false' }}
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
 
       - name: Install dependencies
+        if: ${{ steps.select.outputs.upgrade != 'false' }}
         run: uv sync --extra dev --extra local
 
       # The extraction step runs a real NER pass, so the weights are now on the
@@ -105,6 +115,7 @@ jobs:
       # model was ever fetched). Cache them so a Hugging Face outage or a slow
       # download does not reintroduce a red-by-default job.
       - name: Cache NER model weights
+        if: ${{ steps.select.outputs.upgrade != 'false' }}
         uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
@@ -112,6 +123,7 @@ jobs:
           restore-keys: hf-ner-
 
       - name: Restore cached fixture
+        if: ${{ steps.select.outputs.upgrade != 'false' }}
         id: cache-fixture
         uses: actions/cache@v4
         with:
@@ -120,6 +132,7 @@ jobs:
           key: upgrade-fixture-1.1.0-${{ hashFiles('topos/storage/db/migrations/registry.py', 'topos/storage/db/migrations/registry_checksums.json', 'scripts/build_upgrade_fixture.py') }}
 
       - name: Build from-current fixture (baseline 1.1.0)
+        if: ${{ steps.select.outputs.upgrade != 'false' }}
         # Support floor. PyPI install of old wheels can be heavy/flaky; CI uses
         # --from-current (current schema + stamped baseline). Nightly may omit
         # --from-current when topos-node==1.1.0 (or other floor) installs cleanly.
@@ -135,6 +148,7 @@ jobs:
           cp "${FIXTURE}" /tmp/upgrade-fixture.db
 
       - name: Run upgrade matrix (from 1.1.0)
+        if: ${{ steps.select.outputs.upgrade != 'false' }}
         env:
           # Placeholder ONLY — satisfies the Settings validator, which rejects
           # construction without a key and so aborted every step before this.
@@ -146,7 +160,7 @@ jobs:
       # The second start runs even when the first failed: a red step among the
       # floor's twenty must not hide the result of the hop nodes actually make.
       - name: Build from-current fixture (the release nodes run today)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.select.outputs.upgrade != 'false' }}
         # Not cached: it is a few seconds, and its version moves with every release.
         run: |
           PREVIOUS="$(uv run python scripts/run_upgrade_matrix.py --print-previous-release --stage-unreleased)"
@@ -156,12 +170,13 @@ jobs:
           cp /tmp/upgrade-fixture-previous.db /tmp/upgrade-fixture-previous-as-built.db
 
       - name: Run upgrade matrix (from the release nodes run today)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.select.outputs.upgrade != 'false' }}
         env:
           TOPOS_KEY: ci-upgrade-matrix-dummy-key # placeholder, as above
         run: uv run python scripts/run_upgrade_matrix.py --db /tmp/upgrade-fixture-previous.db --stage-unreleased
 
       - name: Upload fixture artifact
+        if: ${{ steps.select.outputs.upgrade != 'false' }}
         uses: actions/upload-artifact@v4
         with:
           name: upgrade-fixture-1.1.0
@@ -170,6 +185,7 @@ jobs:
           retention-days: 30
 
       - name: Upload fixture artifact (previous release)
+        if: ${{ steps.select.outputs.upgrade != 'false' }}
         uses: actions/upload-artifact@v4
         with:
           name: upgrade-fixture-previous-release

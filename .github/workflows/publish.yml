@@ -8,6 +8,7 @@ on:
 permissions:
   contents: read
   id-token: write
+  statuses: read
 
 jobs:
   smoke:
@@ -17,6 +18,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -27,6 +30,11 @@ jobs:
         uses: astral-sh/setup-uv@v4
         with:
           enable-cache: true
+
+      - name: Enforce checks for all changes since the previous node release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python scripts/node_release_gate.py --verify
 
       - name: Ensure tag matches package version
         run: |

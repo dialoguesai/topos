@@ -142,8 +142,16 @@ test-live-node *args:
 # Phase 4 release evaluation: six owner-recipient pairs and the boundary battery
 # on the isolated Rig D. See scripts/run_any_to_any_release.py for required paths.
 eval-release:
-    uv run python scripts/preflight_release_env.py
-    uv run python scripts/run_any_to_any_release.py
+    uv run python scripts/node_release_gate.py --force-rig
+
+# Preview the automatic policy for every change since the previous node tag.
+release-plan *args:
+    uv run python scripts/select_release_checks.py {{args}}
+
+# Run/record Rig D only when the release range requires it. After a squash
+# merge, --evidence <rig-output>/node-release-gate.json reuses the exact tree.
+release-checks *args:
+    uv run python scripts/node_release_gate.py {{args}}
 
 # Core release gate: everything ci.yml checks, runnable locally when CI is
 # unavailable (dep pins, migration checksums, public tests, privacy tests,

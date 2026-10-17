@@ -54,7 +54,7 @@ def test_the_ci_matrix_names_every_slice_exactly_once() -> None:
 def test_the_ci_lane_step_runs_the_matrix_slice() -> None:
     """Without the flag every job would run the whole lane seven times."""
     lane_lines = [
-        line for line in _ci_text().splitlines()
+        line for line in _ci_job("public-lane").splitlines()
         if re.match(r"^\s*run:\s*uv run pytest tests\s", line)
     ]
     assert lane_lines, f"no `run: uv run pytest tests ...` line in {CI_WORKFLOW}"
@@ -81,6 +81,8 @@ def _ci_step(job: str, step_name: str) -> str:
 
 def test_nothing_in_the_lane_job_skips_a_slice_or_forgives_its_red() -> None:
     job = _ci_job("public-lane")
+    assert "needs: plan" in job
+    assert "if: ${{ needs.plan.outputs.run_public == 'true' }}" in job
     for word in ("exclude:", "include:", "continue-on-error"):
         assert word not in job, (
             f"ci.yml's public-lane job now says `{word}`. That can skip a slice or turn a red "
@@ -95,19 +97,14 @@ def test_nothing_in_the_lane_job_skips_a_slice_or_forgives_its_red() -> None:
 def test_the_package_job_goes_red_with_the_lane() -> None:
     """Not merely skipped: a skipped job reports as passing to a required check."""
     job = _ci_job("test-and-package")
-    assert re.search(r"^\s*needs:\s*public-lane\s*$", job, re.MULTILINE), job
-    assert re.search(r"^    if:\s*\$\{\{\s*!cancelled\(\)\s*\}\}\s*$", job, re.MULTILINE), (
-        "test-and-package must run when a slice is red (and only skip on cancel), so that its "
-        "check goes red with the lane instead of reporting `skipped`"
-    )
-    first_step = re.search(r"^\s*steps:\s*\n\s*- name: ([^\n]+)\n(.*?)(?=^\s*- name:)", job,
-                           re.MULTILINE | re.DOTALL)
-    assert first_step is not None, job
-    body = first_step.group(2)
-    assert "needs.public-lane.result != 'success'" in body and "exit 1" in body, (
-        f"the first step of test-and-package ({first_step.group(1)!r}) must fail the job when "
-        "the lane did not pass, before any gated step runs"
-    )
+    assert "needs: [plan, public-lane, targeted-checks, package-checks]" in job
+    assert "if: ${{ always() }}" in job, "a failed planner or dependency must not skip the aggregate"
+    for name in ("plan", "public-lane", "targeted-checks", "package-checks"):
+        assert f"needs.{name}.result" in job
+    assert 'test "$PLAN_RESULT" = success' in job
+    assert 'for lane in PUBLIC TARGETED PACKAGE' in job
+    assert 'test "${!result}" = success' in job and 'exit 1' in job
+    assert 'test "${!result}" = skipped' in job, "unexpected skips must fail"
 
 
 def test_every_prefix_still_names_tests() -> None:

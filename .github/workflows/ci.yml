@@ -5,6 +5,12 @@ on:
   push:
     branches:
       - main
+  schedule:
+    - cron: "0 8 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 # One run per workflow and ref: a newer push cancels the run it supersedes, on
 # main as well as on a PR branch. On 2026-09-25 six merges to main inside two
@@ -16,6 +22,49 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  plan:
+    name: Select node checks
+    runs-on: ubuntu-latest
+    outputs:
+      run_public: ${{ steps.select.outputs.run_public }}
+      run_targeted: ${{ steps.select.outputs.run_targeted }}
+      privacy: ${{ steps.select.outputs.privacy }}
+      package: ${{ steps.select.outputs.package }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate selection policy
+        run: python -m unittest discover -s tests/release_policy -p 'test_*.py'
+      - name: Guard against private repo references
+        run: |
+          ! rg -n "topos-enterprise|topos_enterprise|topos-node-enterprise" \
+            --glob '!tests/test_extensions.py' \
+            --glob '!.github/**' \
+            .
+      - name: Select checks from the complete change range
+        id: select
+        env:
+          CHANGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          FORCE_FULL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        run: |
+          if [ "$FORCE_FULL" = true ] || [ -z "$CHANGE_BASE" ] || [ "$CHANGE_BASE" = 0000000000000000000000000000000000000000 ]; then
+            python scripts/select_release_checks.py --base previous-release --force-full --output check-plan.json
+          else
+            python scripts/select_release_checks.py --base "$CHANGE_BASE" --output check-plan.json
+          fi
+      - name: Save check plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: node-check-plan
+          path: check-plan.json
+          if-no-files-found: error
+
   # The public lane, one job per slice (tests/lane_shards.py). Each slice runs
   # `just gate`'s lane command plus `--lane-shard`, which deselects what the
   # slice does not own after collection; `rest` owns whatever no other slice
@@ -24,6 +73,8 @@ jobs:
   # tests each inside those runs.
   public-lane:
     name: public lane (${{ matrix.shard }})
+    needs: plan
+    if: ${{ needs.plan.outputs.run_public == 'true' }}
     runs-on: ubuntu-latest
     # Keep a ceiling for noisy runners; split a shard when its normal duration
     # grows. permissions_v2 took 25m14s on the 1.5.11 PR, so it is now two
@@ -87,26 +138,42 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  # The steps after the first are unchanged, and gated on every lane slice.
-  # This job runs even when a slice is red, so that this check goes red with the
-  # lane, as it did when the lane was a step in it. Skipped behind a failed
-  # `needs`, it would report "skipped", which GitHub counts as passing for a
-  # required check.
-  test-and-package:
-    needs: public-lane
-    if: ${{ !cancelled() }}
+  targeted-checks:
+    name: Focused node regression tests
+    needs: plan
+    if: ${{ needs.plan.outputs.run_targeted == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+      - name: Download check plan
+        uses: actions/download-artifact@v4
+        with:
+          name: node-check-plan
+      - name: Install dependencies
+        run: uv sync --extra dev --extra local
+      - name: Run focused tests after normal collection
+        run: uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q --release-check-plan check-plan.json
+
+  # Independent package/privacy work runs alongside public tests, not after
+  # the slowest shard. The stable aggregate below fails if either fails.
+  package-checks:
+    name: Privacy and package checks
+    needs: plan
+    if: ${{ needs.plan.outputs.package == 'true' || needs.plan.outputs.privacy == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
     steps:
-      - name: Public lane passed
-        # Fails the job when any slice did not pass, which skips every step
-        # below, as a red lane skipped them before.
-        if: ${{ needs.public-lane.result != 'success' }}
-        run: |
-          echo "::error::public lane: ${{ needs.public-lane.result }}; the steps below are skipped"
-          exit 1
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -151,6 +218,7 @@ jobs:
       # This workflow must stay self-contained: no ../ references.
 
       - name: Privacy firewall + eval gates
+        if: ${{ needs.plan.outputs.privacy == 'true' }}
         # The privacy evals are marked `private` (excluded from the public lane by design), so
         # run them by path here: UAR/CER (zero-leak), minimality (sensitive-excess=0),
         # negotiation ratchet, minimizer subset/injection, disclosure idempotence + existence
@@ -160,10 +228,41 @@ jobs:
         run: uv run pytest tests/evals/privacy/ -q
 
       - name: Build package artifacts
+        if: ${{ needs.plan.outputs.package == 'true' }}
         run: uv build
 
       - name: Validate package metadata
+        if: ${{ needs.plan.outputs.package == 'true' }}
         run: uvx --from twine twine check dist/*
 
       - name: Fresh-install smoke test (wheel)
+        if: ${{ needs.plan.outputs.package == 'true' }}
         run: python scripts/release_smoke_test.py
+
+  # Always reports, including when selection or a required job failed. An
+  # unexpected skip/cancel fails; only skips explicitly chosen by the plan pass.
+  test-and-package:
+    needs: [plan, public-lane, targeted-checks, package-checks]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify every selected check passed
+        env:
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PUBLIC_REQUIRED: ${{ needs.plan.outputs.run_public }}
+          PUBLIC_RESULT: ${{ needs.public-lane.result }}
+          TARGETED_REQUIRED: ${{ needs.plan.outputs.run_targeted }}
+          TARGETED_RESULT: ${{ needs.targeted-checks.result }}
+          PACKAGE_REQUIRED: ${{ needs.plan.outputs.package == 'true' || needs.plan.outputs.privacy == 'true' }}
+          PACKAGE_RESULT: ${{ needs.package-checks.result }}
+        run: |
+          test "$PLAN_RESULT" = success
+          for lane in PUBLIC TARGETED PACKAGE; do
+            required="${lane}_REQUIRED"
+            result="${lane}_RESULT"
+            if [ "${!required}" = true ]; then
+              test "${!result}" = success || { echo "::error::$lane was required but ${!result}"; exit 1; }
+            else
+              test "${!result}" = skipped || { echo "::error::$lane unexpectedly ${!result}"; exit 1; }
+            fi
+          done

@@ -132,5 +132,5 @@ def test_sharing_rig_is_a_separate_gate_and_runs_once() -> None:
     assert re.search(r"^\s*just gate\s*$", sharing, re.MULTILINE)
     assert re.search(r"^\s*just eval-release\s*$", sharing, re.MULTILINE)
     assert _resolved_recipe_body("gate-sharing").count(
-        "uv run python scripts/run_any_to_any_release.py"
+        "uv run python scripts/node_release_gate.py --force-rig"
     ) == 1
