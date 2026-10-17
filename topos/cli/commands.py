@@ -371,7 +371,7 @@ def main(
         # These commands import Settings outside the server startup path. Load
         # the existing install's configuration first, without prompting for or
         # exposing a key. Pair must also work on a machine with no key yet.
-        if ctx.invoked_subcommand in {"agents", "pair", "mcp"}:
+        if ctx.invoked_subcommand in {"agents", "pair", "mcp", "status", "doctor"}:
             env_path = _user_env_path()
             warning = _apply_env_file_key_policy(env_path)
             if warning:

@@ -3,6 +3,7 @@ import json
 import os
 import subprocess
 import sys
+import pytest
 
 
 def _run(tmp_path, code):
@@ -31,19 +32,20 @@ def test_pair_origin_resolves_before_a_key_exists(tmp_path):
     assert result.stdout.strip() == "https://cp.logu3s.com"
 
 
-def test_mcp_registry_bootstraps_saved_install_in_a_fresh_process(tmp_path):
+@pytest.mark.parametrize("command", ["mcp", "status", "doctor"])
+def test_registry_commands_bootstrap_saved_install_in_a_fresh_process(tmp_path, command):
     folder = tmp_path / ".topos"
     folder.mkdir()
     (folder / ".env").write_text("TOPOS_KEY=synthetic-test-only\n")
-    result = _run(tmp_path, '''
+    result = _run(tmp_path, f'''
 import click
 from topos.cli.commands import main
-@click.command('mcp')
+@click.command({command!r})
 def probe():
     from topos.mcp_server import registry_entries
     print(len(registry_entries()))
 main.add_command(probe)
-main(['mcp'])
+main([{command!r}])
 ''')
     assert result.returncode == 0, result.stderr
     assert int(result.stdout.strip()) > 0
