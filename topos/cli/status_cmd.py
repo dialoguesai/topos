@@ -483,3 +483,5 @@ def doctor_command(as_json: bool) -> None:
         for finding in findings:
             click.echo(f"- {finding['message']}\n  fix: {finding['fix']}")
     sys.exit(EXIT_NEEDS_HUMAN if findings else EXIT_OK)
+
+# Temporary focused-check validation; this branch is never merged.
