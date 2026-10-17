@@ -332,8 +332,20 @@ async def ingest_ui_payload(
 
 
 async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
+    """Keep coding recovery and ordinary coding batches under one graph debounce."""
+    from .ai_tool_sync import AI_TOOL_SOURCE_IDS
+    from ..enrichment.pipeline_activity import derivation_in_flight
+
+    if enrichment_ctx.get("source_id") in AI_TOOL_SOURCE_IDS:
+        with derivation_in_flight():
+            return await _run_ui_payload_enrichment_inner(enrichment_ctx)
+    return await _run_ui_payload_enrichment_inner(enrichment_ctx)
+
+
+async def _run_ui_payload_enrichment_inner(enrichment_ctx: dict) -> dict:
     """Run post-canonical enrichment for a deferred inbox ingest."""
     from ..sources.registry import REGISTRY
+    from .ai_tool_sync import AI_TOOL_SOURCE_IDS
 
     source_id = str(enrichment_ctx.get("source_id") or "").strip()
     source = REGISTRY.get(source_id)
@@ -358,6 +370,9 @@ async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
         source_def=source,
         canonical_records=canonical_records,
         sync_batch_id=sync_batch_id,
+        # Coding batches are background work: coalesce the whole queue's
+        # graph refresh, including the ordinary batches ahead of recovery.
+        fill_graph=source_id not in AI_TOOL_SOURCE_IDS,
     )
     enrich_out = pipeline_outcome.get("canonical_enrichment") or {}
     signal_out = pipeline_outcome.get("signal_derivation") or {}

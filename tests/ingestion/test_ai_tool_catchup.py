@@ -107,3 +107,18 @@ async def test_executor_reloads_current_eligible_records_and_runs_only_owed_jobs
     assert result['status'] == 'ok'
     assert called == [(['entities'], ['old-human']), (['embeddings'], ['old-ai'])]
     assert conn.execute("SELECT count(*) FROM enrichment_record_progress WHERE job_id='ai_tool_pipeline'").fetchone()[0] == 2
+
+@pytest.mark.asyncio
+async def test_normal_coding_ingestion_also_coalesces_graph_refresh(conn, monkeypatch):
+    from topos.ingestion.ingest_helpers import run_ui_payload_enrichment
+    from topos.enrichment.pipeline_activity import is_derivation_in_flight
+    monkeypatch.setattr('topos.core.state.get_db_connection', lambda: conn)
+    async def pipeline(**kw):
+        assert is_derivation_in_flight()
+        assert kw['fill_graph'] is False
+        return {}
+    monkeypatch.setattr('topos.ingestion.ingest_helpers.run_post_canonical_pipeline', pipeline)
+    result = await run_ui_payload_enrichment({'source_id': 'codex_sessions',
+                'canonical_records': [{'message_id': 'old-human', 'source_id': 'codex_sessions'}]})
+    assert result['status'] == 'ok'
+    assert not is_derivation_in_flight()
