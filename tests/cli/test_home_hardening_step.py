@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from topos import owner_key
-from topos.upgrades import STEP_KINDS, hardening, load_unreleased
+from topos.upgrades import STEP_KINDS, hardening, load_manifests
 from topos.upgrades.runner import DEFAULT_EXECUTORS
 
 
@@ -122,9 +122,15 @@ def test_owner_key_persisted_reads_the_file_not_the_process_env(tmp_path: Path, 
 
 
 def test_manifest_declares_the_step_with_a_registered_executor():
-    staging = load_unreleased()
-    assert staging is not None
-    step = next(s for s in staging["steps"] if s["id"] == "harden-home-permissions")
+    matches = [
+        (release["version"], step)
+        for release in load_manifests(include_unreleased=True)
+        for step in release["steps"]
+        if step["id"] == "harden-home-permissions"
+    ]
+    assert len(matches) == 1
+    version, step = matches[0]
+    assert version in {"unreleased", "1.5.10"}
     assert step["kind"] == "local_hardening"
     assert "local_hardening" in STEP_KINDS
     assert DEFAULT_EXECUTORS["local_hardening"] is hardening.exec_local_hardening
