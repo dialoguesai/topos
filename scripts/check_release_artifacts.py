@@ -32,6 +32,7 @@ EXECUTABLE_KINDS = frozenset({
     "canonical_reprocess",
     "derived_rebuild",
     "reembed",
+    "local_hardening",
     "none",
 })
 
