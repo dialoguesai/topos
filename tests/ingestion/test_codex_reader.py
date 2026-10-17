@@ -77,6 +77,21 @@ def test_multiple_session_meta_lines_are_one_conversation(reader, codex_root):
     assert batch.ledger.dropped.get("fork_duplicate") == 1
 
 
+def test_preview_drains_multiple_batches_with_real_reader_cursors(reader, codex_root, monkeypatch):
+    from topos.ingestion import ai_tool_sync
+
+    def read(**kwargs):
+        return reader.read_codex_batch(**{**kwargs, "root_path": codex_root})
+
+    monkeypatch.setattr(ai_tool_sync, "_reader_for", lambda tool: read)
+    monkeypatch.setattr(ai_tool_sync, "node_secret_values", lambda conn: ())
+    monkeypatch.setattr(ai_tool_sync, "DEFAULT_BATCH_SIZE", 2)
+    result = ai_tool_sync.preview_ai_tool_source(None, "codex_sessions")
+    assert result["sessions"] > 0
+    assert result["turns"] > 2
+    assert result["bytes_text"] > 0
+
+
 def test_fork_replay_deduped_across_files_first_writer_wins(reader, codex_root):
     batch = _read(reader, codex_root)
     assert len(batch.rows) == TOTAL_ROWS

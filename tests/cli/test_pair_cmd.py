@@ -237,6 +237,19 @@ def test_cp_404_prints_the_exact_fallback_message(home: Path, monkeypatch):
     assert not (home / ".topos" / "pairing.json").exists()
 
 
+def test_add_agent_404_uses_local_approval_instead_of_manual_node_key(home, monkeypatch):
+    env = home / ".topos" / ".env"
+    env.parent.mkdir(parents=True, exist_ok=True)
+    env.write_text("TOPOS_KEY=synthetic-test-only\n")
+    cp = _FakeCP(key=_key(), env_path=env, start_status=404)
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    result = CliRunner().invoke(main, ["pair", "--add-agent", "--client", "codex"])
+    assert result.exit_code == 2
+    assert "topos-node agents add codex" in result.stderr
+    assert "--manual" not in result.stderr
+    assert "synthetic-test-only" not in result.output
+
+
 def test_wait_prints_masked_account_and_exit_0(home: Path, monkeypatch):
     key = _key()
     cp = _FakeCP(key=key, env_path=home / ".topos" / ".env")

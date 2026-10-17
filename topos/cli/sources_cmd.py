@@ -172,6 +172,13 @@ def sources_sync(source_id: str, session_path: Optional[str], as_json: bool, qui
     """Sync now (refused unless the source is enabled)."""
 
     def project(result: dict) -> tuple[dict, str]:
+        # The owner door queues durable work; an accepted job has not synced
+        # anything yet. Do not project its missing counts as a completed sync.
+        if result.get("job_id"):
+            status = "already_running" if result.get("already_running") else "queued"
+            return {"source_id": source_id, "status": status, "job_id": result["job_id"]}, (
+                f"{source_id} sync {status.replace('_', ' ')} (job {result['job_id']})."
+            )
         counts = _ints(result)
         ledger = result.get("ledger") if isinstance(result.get("ledger"), dict) else {}
         ledger_counts = _ints(ledger)

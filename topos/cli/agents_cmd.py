@@ -21,9 +21,12 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sqlite3
 import stat
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -44,6 +47,36 @@ _JSON_OPTION = click.option("--json", "as_json", is_flag=True, help="Machine-rea
 
 def _can_prompt() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _open_approval_terminal(client: str) -> bool:
+    """Launch the normal human-only TTY flow; launching alone grants nothing."""
+    if sys.platform != "darwin":
+        return False
+    folder = Path(tempfile.mkdtemp(prefix="topos-agent-approval-"))
+    script = folder / "Connect-to-TOPOS.command"
+    command = shlex.join([sys.executable, "-m", "topos.cli", "agents", "add", client])
+    # Only paths cross into the new terminal's environment, never credentials.
+    path_env = {k: os.environ[k] for k in ("TOPOS_ENV_FILE", "TOPOS_DATABASE_PATH") if os.environ.get(k)}
+    exports = "".join(f"export {k}={shlex.quote(v)}\n" for k, v in path_env.items())
+    script.write_text(
+        '#!/bin/sh\ntrap \'rm -f -- "$0"\' EXIT\n' + exports +
+        'printf "\\nConnect your coding tool to your existing TOPOS account\\n\\n"\n' + command +
+        '\nresult=$?\nif [ "$result" -eq 0 ]; then\n'
+        'printf "\\nConnected. Return to your coding assistant to finish verification.\\n"\n'
+        'else\nprintf "\\nConnection was not approved or could not finish. Return to your assistant.\\n"\nfi\n'
+        'printf "\\nPress Return to close this setup window.\\n"\nread -r answer\nexit "$result"\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o700)
+    try:
+        subprocess.run(["/usr/bin/open", "-a", "Terminal", str(script)], check=True,
+                       capture_output=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        script.unlink(missing_ok=True)
+        folder.rmdir()
+        return False
+    return True
 
 
 def _fail(message: str, code: int = EXIT_NEEDS_HUMAN) -> None:
@@ -188,10 +221,19 @@ def agents_group() -> None:
     is_flag=True,
     help="Enrol on the approval `topos-node pair --add-agent` recorded (no prompt).",
 )
-def agents_add(name: str, as_json: bool, approved: bool) -> None:
+@click.option("--open-terminal", is_flag=True, help="Open the approval prompt in Terminal on macOS; no command typing needed.")
+def agents_add(name: str, as_json: bool, approved: bool, open_terminal: bool) -> None:
     """Connect an AI coding tool to this Topos (asks you first)."""
     client = _client_or_fail(name)
     display = DISPLAY_NAMES[client]
+    if open_terminal:
+        if approved:
+            raise click.UsageError("Use either --approved or --open-terminal.")
+        if not _open_approval_terminal(client):
+            _fail("Could not open the approval window. Open Topos on this Mac, then try again.")
+        _echo({"client": client, "status": "approval_pending"}, as_json,
+              f"Opened the {display} approval prompt. Confirm it in Terminal, then return here.")
+        return
     registry = _registry()
     db_path = _database_path()
     if not db_path.is_file():

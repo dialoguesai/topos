@@ -20,7 +20,7 @@ os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
 
 
-DEFAULT_TOPOS_CONTROL_PLANE_URL = "wss://cp.logu3s.com/ws/engine"
+from topos.defaults import DEFAULT_TOPOS_CONTROL_PLANE_URL
 
 #: The 9B local model these defaults settle on, named in its PORTABLE build.
 #: Resolved to this machine's build at Settings() time — Apple Silicon takes

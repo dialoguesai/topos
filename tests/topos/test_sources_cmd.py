@@ -75,6 +75,21 @@ def test_backfill_choices_are_all_or_30d():
     assert result.exit_code == 2
 
 
+@pytest.mark.parametrize("already_running", [False, True])
+def test_accepted_sync_reports_job_acceptance_not_completed_ingestion(already_running):
+    node = _node()
+    node.door_results[("codex_sessions", "sync")] = (200, {
+        "status": "ok", "job_id": "job-123", "already_running": already_running,
+    })
+    with serve_fake_node(node, _socket_path()):
+        result = _run(["sync", "codex_sessions", "--json"])
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        "source_id": "codex_sessions", "job_id": "job-123",
+        "status": "already_running" if already_running else "queued",
+    }
+
+
 def test_pause_resume_and_sync_with_session(caplog):
     node = _node()
     with serve_fake_node(node, _socket_path()):
