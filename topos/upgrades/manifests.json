@@ -1048,8 +1048,8 @@
       "notes": []
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.5.10",
+      "summary": "Owner-agent onboarding, AI coding-session ingestion, and answer and sharing hardening; one local permission-hardening step and additive schema migrations.",
       "steps": [
         {
           "id": "harden-home-permissions",
@@ -1068,8 +1068,14 @@
         "Additive ai_chat_latest_title_v1 migration, order 83, adds one nullable column (ai_chat_conversations.latest_title); no row is read or changed. A chat's later titles go there, outside every review and Off-limits context revision, so the upgrade stales no review and no search index. Migration ledger enables pre-upgrade backup and downgrade protection.",
         "Migration 84 (ingestion_file_cursors_v1) creates an initially empty per-file cursor table for AI coding-tool transcript imports. It stores a SHA-256 hash of each absolute path, never the path itself. Existing records are not read, changed or reprocessed.",
         "Migration 85 (ai_coding_sessions_v1) adds ai_chat_messages.share_excluded with NOT NULL DEFAULT 0, write-time triggers and an index when the AI-chat table exists, plus an owner-only facets table. It runs at every boot because AI-chat tables can be created lazily. Existing rows remain unflagged; direct sharing reads reject rows flagged by later coding-tool syncs. An interest label minted before a flag can retain words until its next relabel or recompute. The new column is outside the review revision so the upgrade alone does not stale existing reviews or share indexes.",
-        "Migration 86 (home_chat_turn_timings_v1) creates an initially empty, content-free owner home-chat timing table and timestamp indexes. It does not read or rewrite existing turns, trigger model calls, or bulk reprocess data. Migrations 84–86 advance the schema stamp, require the pre-upgrade backup, and prevent older engines from reopening the upgraded database."
+        "Migration 86 (home_chat_turn_timings_v1) creates an initially empty, content-free owner home-chat timing table and timestamp indexes. It does not read or rewrite existing turns, trigger model calls, or bulk reprocess data. Migrations 84\u201386 advance the schema stamp, require the pre-upgrade backup, and prevent older engines from reopening the upgraded database."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }
