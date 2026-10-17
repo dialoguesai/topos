@@ -201,9 +201,11 @@ def public_view(record: Dict[str, Any]) -> Dict[str, Any]:
 
 def _cp_http_base() -> str:
     """The HTTP origin of the control plane the node dials over websocket."""
-    from topos.config.settings import settings
+    # Pairing is unauthenticated and must work before a node key exists.
+    # Importing Settings here validates TOPOS_KEY and prevents first pairing.
+    from topos.defaults import DEFAULT_TOPOS_CONTROL_PLANE_URL
 
-    raw = str(getattr(settings, "topos_control_plane_url", "") or "").strip()
+    raw = str(os.environ.get("TOPOS_CONTROL_PLANE_URL") or DEFAULT_TOPOS_CONTROL_PLANE_URL or "").strip()
     if not raw:
         return "https://cp.logu3s.com"
     if raw.startswith("wss://"):
@@ -241,6 +243,11 @@ def start_pairing(*, client_name: str, mode: str) -> Dict[str, Any]:
     except httpx.HTTPError:
         raise NeedsHuman(CP_UNREACHABLE_MESSAGE)
     if response.status_code == 404:
+        if mode == "add_agent":
+            raise NeedsHuman(
+                "browser approval isn't available on this control plane yet; "
+                f"run `topos-node agents add {client_name}` in your own terminal and confirm its prompt"
+            )
         raise NeedsHuman(CP_404_MESSAGE)
     if response.status_code in (429, 503):
         raise NeedsHuman(CP_BUSY_MESSAGE)

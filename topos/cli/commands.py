@@ -368,6 +368,16 @@ def main(
       profile     Manage multiple Topoi on this machine (list, new, switch, remove).
     """
     if ctx.invoked_subcommand is not None:
+        # These commands import Settings outside the server startup path. Load
+        # the existing install's configuration first, without prompting for or
+        # exposing a key. Pair must also work on a machine with no key yet.
+        if ctx.invoked_subcommand in {"agents", "pair"}:
+            env_path = _user_env_path()
+            warning = _apply_env_file_key_policy(env_path)
+            if warning:
+                click.echo(warning, err=True)
+            _load_env_file(env_path)
+            _load_env_file(LEGACY_ENV_PATH)
         return
 
     if (set_topos_key or topos_key) and not _can_prompt_for_input():

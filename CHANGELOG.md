@@ -9,6 +9,12 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Coding-agent setup loads the saved install before accessing the registry or pairing service.** `[O]` `agents` and `pair` no longer require an exported node key. First pairing resolves its control-plane origin without constructing key-dependent settings. When browser add-agent approval is unavailable, the existing-node fallback asks the owner to approve `agents add` in their own terminal instead of entering a node key again. Approval and revocation checks are unchanged.
+- **Codex transcript preview can finish a multi-batch scan.** `[O]` Preview uses the same cursor value type as the persistent reader, fixing an attribute error previously reported as `reader_unavailable`.
+- **Coding-session collection does not wait for model processing.** `[O]` Newly collected, eligible records enter the existing durable deferred-processing queue in the same transaction as their canonical write. File cursors advance only after that transaction succeeds, so a failed enqueue can be retried without losing history. Privacy disclosure, embeddings and authored-only extraction still use the normal canonical pipeline. Collection can persist its checkpoint and sync receipt while that work continues; no existing records are reprocessed by the upgrade.
+- **The sync command distinguishes acceptance from completion.** `[P]` An accepted background sync reports `queued` or `already_running` with its job id, rather than claiming it synced with empty counts. A successful source receipt remains the completion signal.
+
 ## [1.5.11] — 2026-10-17
 
 ### Added

@@ -23,7 +23,6 @@ Nothing here edits ``storage/canonical/*``: every canonical write goes through
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import json
 import logging
@@ -36,7 +35,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 from .checkpoints.checkpoint_store import IngestionCheckpoint
 from .checkpoints.sqlite_checkpoint_store import SqliteCheckpointStore
 from .sources.base import RawRecord
-from ..storage.db.write_gate import commit_connection, with_db_write
+from ..storage.db.write_gate import batched_writes, commit_connection, with_db_write
 
 logger = logging.getLogger("topos.ingestion.ai_tool_sync")
 
@@ -498,13 +497,35 @@ class _MemoryCursorStore:
     """A cursor store that remembers nothing past the call: what a counts-only preview reads through."""
 
     def __init__(self) -> None:
-        self._rows: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        self._rows: Dict[Tuple[str, str], Any] = {}
 
     def get(self, source_id: str, path: Any):
         return self._rows.get((source_id, str(path)))
 
     def put(self, source_id: str, path: Any, *, size: int, mtime: float, offset: int, record_count: int) -> None:
-        self._rows[(source_id, str(path))] = {"size": size, "mtime": mtime, "offset": offset, "record_count": record_count}
+        from .checkpoints.file_cursors import FileCursor
+
+        self._rows[(source_id, str(path))] = FileCursor(
+            size=size, mtime=mtime, offset=offset, record_count=record_count,
+        )
+
+
+class _PendingCursorStore(_MemoryCursorStore):
+    """Readers advance in memory until canonical rows and their work are durable."""
+
+    def __init__(self, persistent: Any) -> None:
+        super().__init__()
+        self.persistent = persistent
+
+    def get(self, source_id: str, path: Any):
+        pending = super().get(source_id, path)
+        return pending if pending is not None else self.persistent.get(source_id, path)
+
+    def flush(self) -> None:
+        for (source_id, path), cursor in self._rows.items():
+            self.persistent.put(source_id, path, size=cursor.size, mtime=cursor.mtime,
+                                offset=cursor.offset, record_count=cursor.record_count)
+        self._rows.clear()
 
 
 def preview_ai_tool_source(conn: Any, source_id: str, *, skip: Sequence[str] = ()) -> Dict[str, Any]:
@@ -585,22 +606,27 @@ def _parser_for(schema_id: str) -> Optional[Any]:
     return parser_cls
 
 
-def _post_canonical(*, source_def: Any, canonical_records: List[Dict[str, Any]], sync_batch_id: str) -> Dict[str, Any]:
-    """Enrichment and signal derivation for one batch, through the canonical pipeline's own entry."""
-    from .canonical_pipeline import run_post_canonical_pipeline
+def _post_canonical(*, source_def: Any, canonical_records: List[Dict[str, Any]], sync_batch_id: str,
+                    db_conn: Any) -> Dict[str, Any]:
+    """Persist the normal post-canonical work before moving to the next batch.
 
-    coroutine = run_post_canonical_pipeline(
-        source_def=source_def, canonical_records=canonical_records, sync_batch_id=sync_batch_id,
+    Use the same durable deferred path as inbox ingestion. Privacy disclosure,
+    embeddings and authored-only extraction still run through the canonical
+    pipeline; hours of model work must not hold up collecting transcript files
+    or prevent the sync receipt and checkpoint from being written.
+    """
+    from ..pipeline.job_store import enqueue_job
+
+    if db_conn is None:
+        raise RuntimeError("no database connection for deferred coding-session processing")
+    job_id = enqueue_job(
+        db_conn, kind="inbox_deferred_enrichment", source_id=source_def.source_id,
+        sync_batch_id=sync_batch_id,
+        idempotency_key=f"ai-tool-derivation:{sync_batch_id}",
+        payload={"source_id": source_def.source_id, "sync_batch_id": sync_batch_id,
+                 "canonical_records": canonical_records},
     )
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coroutine)
-    # Called from a thread that owns a running loop: run the pipeline on its own thread and loop.
-    import concurrent.futures
-
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(asyncio.run, coroutine).result()
+    return {"status": "queued", "job_id": job_id}
 
 
 def node_secret_values(conn: Any = None) -> Tuple[str, ...]:
@@ -917,7 +943,7 @@ def _run_locked(
         return _refused(PARSER_UNAVAILABLE, f"This build can't read {spec.display_name} transcripts yet.")
     try:
         reader = _reader_for(spec.tool)
-        cursors = _cursor_store_for(db_conn)
+        cursors = _PendingCursorStore(_cursor_store_for(db_conn))
     except (ImportError, AttributeError):
         return _refused(READER_UNAVAILABLE, f"This build can't read {spec.display_name} transcripts yet.")
     parser = parser_cls(dataset_id=dataset_id, _schema_id=schema_id)
@@ -1016,26 +1042,25 @@ def _run_locked(
                 ledger = _merge_ledgers(ledger, {"dropped": {"fork_duplicate": len(already)}, "dropped_total": len(already)})
         if normalized:
             sync_batch_id = f"{source_id}:{uuid.uuid4().hex[:12]}"
-            result = canonicalize_normalized_batch(
-                db_conn, source_def, normalized,
-                dataset_id=dataset_id, sync_batch_id=sync_batch_id, parser_cls=parser_cls,
-                writer_class=WRITER_OWNER_APP, writer_dataset_id=dataset_id,
-            )
-            if result.errors and not result.canonical_records and not result.messages_created:
-                first = result.errors[0]
-                message = first.get("error") if isinstance(first, dict) else str(first)
-                return {"status": "error", "error": str(message or "canonical write failed"),
-                        "records_processed": totals["processed"], "records_skipped": totals["skipped"], "ledger": ledger}
-            written = {str(rec.get("message_id") or "") for rec in result.canonical_records if isinstance(rec, dict)}
-            totals["facets"] += _write_facets(db_conn, spec.tool, {k: v for k, v in facets.items() if k in written})
-            excluded_set = set(excluded)
-            shareable = [rec for rec in result.canonical_records
-                         if isinstance(rec, dict) and str(rec.get("message_id") or "") not in excluded_set]
-            if shareable:
-                try:
-                    _post_canonical(source_def=source_def, canonical_records=shareable, sync_batch_id=sync_batch_id)
-                except Exception as exc:  # noqa: BLE001 — enrichment never fails a landed batch
-                    logger.warning("[PIPELINE:ENRICHMENT] %s post-canonical failed (non-fatal): %s", source_id, exc, exc_info=True)
+            with batched_writes(db_conn):
+                result = canonicalize_normalized_batch(
+                    db_conn, source_def, normalized,
+                    dataset_id=dataset_id, sync_batch_id=sync_batch_id, parser_cls=parser_cls,
+                    writer_class=WRITER_OWNER_APP, writer_dataset_id=dataset_id,
+                )
+                if result.errors and not result.canonical_records and not result.messages_created:
+                    first = result.errors[0]
+                    message = first.get("error") if isinstance(first, dict) else str(first)
+                    return {"status": "error", "error": str(message or "canonical write failed"),
+                            "records_processed": totals["processed"], "records_skipped": totals["skipped"], "ledger": ledger}
+                written = {str(rec.get("message_id") or "") for rec in result.canonical_records if isinstance(rec, dict)}
+                totals["facets"] += _write_facets(db_conn, spec.tool, {k: v for k, v in facets.items() if k in written})
+                excluded_set = set(excluded)
+                shareable = [rec for rec in result.canonical_records
+                             if isinstance(rec, dict) and str(rec.get("message_id") or "") not in excluded_set]
+                if shareable:
+                    _post_canonical(source_def=source_def, canonical_records=shareable,
+                                    sync_batch_id=sync_batch_id, db_conn=db_conn)
             _request_disclosure()
             totals["processed"] += len(normalized)
             totals["created"] += int(result.messages_created or 0)
@@ -1047,6 +1072,10 @@ def _run_locked(
             _mark_share_excluded(db_conn, excluded)
             totals["excluded"] += len([i for i in excluded if i in written])
 
+        # A read cursor must never skip a batch whose canonical write or
+        # durable processing enqueue failed. Replaying a committed batch is
+        # harmless because the canonical writer is idempotent.
+        cursors.flush()
         newest = str(getattr(batch, "newest_created_at", None) or "")
         if newest and newest > final_last_record_id:
             final_last_record_id = newest

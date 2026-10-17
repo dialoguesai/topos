@@ -59,6 +59,49 @@ def _run(dataset_id: str = DATASET, **kw):
     return run_claude_code_sync(dataset_id, **kw)
 
 
+def test_failed_deferred_enqueue_rolls_back_rows_and_leaves_cursor_replayable(node, monkeypatch):
+    from topos.ingestion import ai_tool_sync as lane
+    from topos.ingestion.checkpoints.file_cursors import FileCursorStore
+    from topos.pipeline import job_store
+
+    persistent = FileCursorStore(node)
+    original_enqueue = job_store.enqueue_job
+
+    def reader_for_attempt():
+        fake = FakeReader(_batch())
+
+        def read(**kwargs):
+            batch = fake(**kwargs)
+            if batch.rows:
+                kwargs["cursors"].put(SOURCE, "/synthetic/transcript", size=10, mtime=1,
+                                      offset=10, record_count=len(batch.rows))
+            return batch
+        return read
+
+    arm(monkeypatch, node, reader=reader_for_attempt(), post_canonical=None)
+    monkeypatch.setattr(lane, "_cursor_store_for", lambda conn: persistent)
+    enable(node, SOURCE)
+
+    def fail_enqueue(*args, **kwargs):
+        raise RuntimeError("synthetic queue write failure")
+
+    monkeypatch.setattr(job_store, "enqueue_job", fail_enqueue)
+    failed = _run()
+    assert failed["status"] == "error"
+    assert chat_rows(node) == []
+    assert persistent.get(SOURCE, "/synthetic/transcript") is None
+
+    monkeypatch.setattr(job_store, "enqueue_job", original_enqueue)
+    # The retry reader must be shared across batches, just as the real reader is.
+    retry_reader = reader_for_attempt()
+    monkeypatch.setattr(lane, "_reader_for", lambda tool: retry_reader)
+    recovered = _run()
+    assert recovered["status"] == "ok", recovered
+    assert len(chat_rows(node)) == 4
+    assert persistent.get(SOURCE, "/synthetic/transcript").offset == 10
+    assert node.execute("SELECT count(*) FROM pipeline_jobs WHERE kind='inbox_deferred_enrichment'").fetchone()[0] == 1
+
+
 # --- refusals ------------------------------------------------------------------
 
 
@@ -249,6 +292,18 @@ def test_nothing_derived_references_a_share_excluded_row(node, monkeypatch) -> N
     enable(node, SOURCE)
     result = _run()
     assert result["status"] == "ok", result
+    # Collection completes before model work; the durable worker still runs
+    # the same privacy/enrichment pipeline, with no excluded record queued.
+    import asyncio
+    from topos.ingestion.ingest_helpers import run_inbox_deferred_enrichment
+
+    queued = node.execute(
+        "SELECT payload_json FROM pipeline_jobs WHERE kind='inbox_deferred_enrichment' AND source_id=?",
+        (SOURCE,),
+    ).fetchall()
+    assert queued and handed == {"canonical": [], "signal": []}
+    for (payload,) in queued:
+        asyncio.run(run_inbox_deferred_enrichment(json.loads(payload)))
     # Positive control: the jobs ran and derived from the kept rows.
     assert set(handed["canonical"]) == {"claude_code:u1", "claude_code:u2", "claude_code:u3"}
     assert set(handed["signal"]) == {"claude_code:u1", "claude_code:u2", "claude_code:u3"}
