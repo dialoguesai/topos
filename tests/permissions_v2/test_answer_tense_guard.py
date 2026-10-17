@@ -322,7 +322,10 @@ def _deed_answer(prompt):
     return f"The owner designed the shelf labels [{_number(prompt, 'shelf labels')}]."
 
 
-def test_off_the_receipt_has_no_new_key_and_the_answer_is_as_before(tmp_path):
+def test_off_the_receipt_has_no_new_key_and_the_answer_is_as_before(tmp_path, monkeypatch):
+    # NR179's judge reserve (8 s by default since 1.5.10) adds its `dropped_unjudged` counter, so it is set to 1.5.9's
+    # none here, in this test's environment only: this pins the tense guard's own key.
+    monkeypatch.setenv(P + "ANSWER_JUDGE_RESERVE_SECONDS", "0")
     body, receipt, _prompts = _service_ask(tmp_path, _deed_answer)
     assert body["outcome"] == "answered" and receipt["reason"] == "answered"
     assert "dropped_plan_as_deed" not in receipt["sentences"]

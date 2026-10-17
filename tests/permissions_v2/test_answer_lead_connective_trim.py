@@ -12,7 +12,7 @@ tests pin:
   - nothing changes when the lead was kept, in the second delivered sentence, mid-sentence, for a word that is not a
     connective ("Also known as"), for an opener not on the list, or when the rest would be empty or open with a
     citation;
-  - off (the default): the body and the receipt are byte for byte those of node main 28b7cbbc;
+  - off (the default): the body and the receipt are byte for byte those of node main (`MAIN`);
   - mutants of the switch check, the lead-dropped condition and the closed lists each turn a named check red.
 
 Invented data only: no names, no model (the writer is a stand-in, the judge the folder's stand-in or a test's own).
@@ -34,8 +34,10 @@ from topos.permissions_v2.answer_generation import (ALSO_SUBJECTS, LEAD_CONNECTI
                                                     close_answer, lead_dropped, trim_lead_connective, writer_lead)
 
 SWITCH = switches.ANSWER_LEAD_CONNECTIVE_TRIM.name
-#: Node main when this lane started (it includes #128, the 1.5.10 answer defaults, and #126): off is byte for byte it.
-MAIN = "28b7cbbc1e702b239b473f8fbf5b76ab0a0a32e6"
+#: Node main 125e01de (WS0's #130-#135, with NR179's judge reserve and its `dropped_unjudged` receipt key), which this
+#: branch merged: off is byte for byte it. It was 28b7cbbc when this lane started; it moves again to the main this
+#: branch is last merged with.
+MAIN = "125e01de9bf99edc676eda50e36d32ccd4833a29"
 QUESTION = "What has the owner been working on?"
 LAMP = _message("1", "Working on the reading room and rewired the reading lamp on Sunday.")
 BIKE = _message("2", "Working on the bike shed and fixed the bike chain on Saturday.")

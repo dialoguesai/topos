@@ -44,8 +44,10 @@ SWITCH = switches.ANSWER_DENIED_DOMAIN_REFUSAL.name
 #: The density fixture's share: these five denied, the rest permitted.
 DENIED = frozenset({"health", "family", "finance", "relationships", "home"})
 PERMITTED = frozenset({"work", "plans", "hobbies"})
-#: The commit this lane starts from (the final 1.5.10 quality candidate): the switch-off guard compares against it.
-BASE = "9ddc77b5c63b06215273f7e225c7b3a0e7027a2d"
+#: What the switch-off guard compares against: node main 125e01de (WS0's #130-#135, with NR179's judge reserve and its
+#: `dropped_unjudged` receipt key), which this branch merged. It was 9ddc77b5, the commit this lane started from; it
+#: moves again to the main this branch is last merged with.
+BASE = "125e01de9bf99edc676eda50e36d32ccd4833a29"
 NO_ANSWER = {"version": "topos-answer/v1", "outcome": "no_answer"}
 
 
@@ -415,7 +417,7 @@ def test_off_the_health_question_reaches_the_model_and_nothing_of_the_rule_is_re
 
 
 def test_off_receipts_and_bodies_are_byte_for_byte_those_of_the_commit_before(legacy, tmp_path, monkeypatch):
-    """The answer service of the commit this lane starts from and this one, on one node, the same two questions (one
+    """The answer service of `BASE` and this one, on one node, the same two questions (one
     the rule would refuse, one it would not): the fetched bodies and the stored receipt and decision rows are the same
     bytes, but for the request's own id and hash and the job's random id (each ask is a new signed request)."""
     from tests.permissions_v2 import ft168_support as ft
