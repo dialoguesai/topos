@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **Release validation and public CI balance.** `[O]` The full sharing rig is required for sharing-impact releases and run weekly on current main; core-only releases use the parallel PR CI suite and tag-driven smoke checks. The local fallback no longer runs the rig twice, and the slowest public CI shard is split across two isolated runner processes. No node data or protocol changes.
+
 ## [1.5.11] — 2026-10-17
 
 ### Added

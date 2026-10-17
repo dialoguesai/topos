@@ -123,3 +123,14 @@ def test_every_ci_pytest_target_is_reachable_from_the_local_gate(recipe: str) ->
         f"{missing}. A lane that only exists in CI is a lane developers "
         "discover by breaking it."
     )
+
+
+def test_sharing_rig_is_a_separate_gate_and_runs_once() -> None:
+    """A core-only release must not spend an hour on Rig D, or run it twice."""
+    assert "just eval-release" not in _recipe_body("gate")
+    sharing = _recipe_body("gate-sharing")
+    assert re.search(r"^\s*just gate\s*$", sharing, re.MULTILINE)
+    assert re.search(r"^\s*just eval-release\s*$", sharing, re.MULTILINE)
+    assert _resolved_recipe_body("gate-sharing").count(
+        "uv run python scripts/run_any_to_any_release.py"
+    ) == 1

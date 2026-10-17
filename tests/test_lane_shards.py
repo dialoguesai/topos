@@ -52,7 +52,7 @@ def test_the_ci_matrix_names_every_slice_exactly_once() -> None:
 
 
 def test_the_ci_lane_step_runs_the_matrix_slice() -> None:
-    """Without the flag every job would run the whole lane: nothing lost, four times the minutes."""
+    """Without the flag every job would run the whole lane seven times."""
     lane_lines = [
         line for line in _ci_text().splitlines()
         if re.match(r"^\s*run:\s*uv run pytest tests\s", line)
@@ -134,7 +134,8 @@ def test_no_prefix_is_claimed_twice() -> None:
 @pytest.mark.parametrize(
     ("nodeid", "owner"),
     [
-        ("tests/permissions_v2/test_evidence.py::test_x", "permissions_v2"),
+        ("tests/permissions_v2/test_evidence.py::test_x", "permissions_v2_split"),
+        ("tests/permissions_v2/test_owner_identity_binding.py::test_x", "permissions_v2"),
         # the longer prefix wins over tests/permissions_v2/
         ("tests/permissions_v2/test_message_search_index.py::test_x", "message_search_gap"),
         ("tests/permissions_v2/test_journal_family.py::test_x", "permissions_v2_families"),

@@ -52,6 +52,11 @@ the test and red the run from ``pytest_sessionfinish``. Under xdist those run
 in a worker, and a worker's ``session.exitstatus`` never reaches the
 controller: a toy suite with that shape exited 1 serially and 0 under
 ``-n 2`` (xdist 3.8.0, pytest 9.0.3). The lane would pass with a leak live.
+
+Rebalanced 2026-10-17 after the 1.5.11 PR: permissions_v2 took 25m14s,
+while the other five slices took 10-16 minutes. The new split claims 2,429
+of its 4,775 collected test cases by file-family prefix; CI runs the two
+processes on separate runners so session-level guards remain effective.
 """
 
 from __future__ import annotations
@@ -70,6 +75,24 @@ REST = "rest"
 #: also claim tests/topos_home_pin.py.
 SHARDS: Dict[str, Tuple[str, ...]] = {
     "permissions_v2": ("tests/permissions_v2/",),
+    "permissions_v2_split": (
+        "tests/permissions_v2/test_fact",
+        "tests/permissions_v2/test_evidence",
+        "tests/permissions_v2/test_switches",
+        "tests/permissions_v2/test_nr184",
+        "tests/permissions_v2/test_refresh",
+        "tests/permissions_v2/test_contract",
+        "tests/permissions_v2/test_ingest",
+        "tests/permissions_v2/test_ai_",
+        "tests/permissions_v2/test_bk5",
+        "tests/permissions_v2/test_canonical",
+        "tests/permissions_v2/test_native",
+        "tests/permissions_v2/test_n4",
+        "tests/permissions_v2/test_nr186",
+        "tests/permissions_v2/test_fuzz",
+        "tests/permissions_v2/test_review",
+        "tests/permissions_v2/test_bk3",
+    ),
     "permissions_v2_families": (
         "tests/permissions_v2/test_search",
         "tests/permissions_v2/test_journal",
@@ -97,8 +120,8 @@ SHARDS: Dict[str, Tuple[str, ...]] = {
 #: Runs in every slice, not only in the one that owns it: the guard that ci.yml's
 #: matrix still names every slice. Run by one slice only, taking THAT slice out
 #: of the matrix would take the guard with it, and CI would go green with a
-#: quarter of the lane unrun. About twenty sub-second tests, so four copies cost
-#: nothing.
+#: part of the lane unrun. About twenty sub-second tests, so one copy per
+#: shard costs little.
 EVERY_SLICE: Tuple[str, ...] = ("tests/test_lane_shards.py",)
 
 

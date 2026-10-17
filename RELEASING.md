@@ -65,15 +65,52 @@ python scripts/cut_release.py --bump patch   # or --version X.Y.Z
 # Ask: are steps ordered (depends_on) correctly? Is anything consent:auto
 # that could burn an hour of laptop CPU?
 
-just eval-release     # the six-pair sharing gate on the isolated Rig D (set the five A2A_RIG_* paths;
-                      # scripts/run_any_to_any_release.py). It fails when any pair or battery fails.
-just gate             # dep pins + public tests + build + smoke
-
-# Then commit, push main, tag, push tag (see .cursor/skills/release-topos):
+# Commit the candidate on a release branch and open a PR.
 git add -A && git commit -m "Release X.Y.Z: <why>."
-git push origin main
+git push -u origin HEAD
+```
+
+Require every PR CI check to pass on the candidate commit. CI runs the public
+suite in seven parallel, separate processes, followed by privacy tests, build,
+and fresh-install smoke. Run `just gate` only when CI is unavailable or a local
+reproduction is needed; running it after green CI repeats the same long suite.
+
+If the change has sharing impact (rules below), also run `just eval-release`
+once on isolated Rig D with the five `A2A_RIG_*` paths. When CI is unavailable,
+`just gate-sharing` runs the core local gate and Rig D once each. Do not run
+`just eval-release` and then `just gate-sharing`.
+
+After the required checks pass, merge the reviewed candidate to `main`, verify
+the merged tree matches the tested candidate, then tag that merged commit:
+
+```bash
+git switch main && git pull --ff-only origin main
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
+
+### Sharing-impact decision
+
+Record the decision and the passing CI run in the release PR. Run the full
+six-pair Rig D gate for a change that can affect sharing, consent, permissions,
+authentication, recipient-facing reads or search, disclosure/refusal behavior
+or timing, the sharing ledger, shared-data storage or migrations, the
+control-plane protocol, or node lifecycle around those paths. Run it when the
+impact is uncertain. A failed weekly Rig D run also blocks a release until
+investigated.
+
+For a change confined to presentation, packaging, docs, or an additive
+owner-only status field with no effect on those paths, passing targeted tests,
+all PR CI checks, and the tag-driven publish checks are sufficient. The
+release PR must say why Rig D was not required. Run the full rig on current
+`main` at least weekly as a separate backstop, and record its verdict.
+
+The public tests are already parallelized across seven isolated CI runners.
+Do not substitute `pytest-xdist` on one runner: the suite's session-level
+leak, thread-lifetime, and owner-database guards can fail in a worker without
+making the controller fail (see `tests/lane_shards.py`). The isolated Rig D
+timing battery also relies on paced requests; threads or processes sharing
+that rig would alter the latency measurement. Parallelize independent work
+on separate machines only after validating the resulting verdict.
 
 `publish.yml` then verifies tag==pyproject, release artifacts
 (manifest + changelog + checksums), fresh-install + upgrade smoke, and
