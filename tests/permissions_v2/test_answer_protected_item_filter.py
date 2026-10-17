@@ -501,6 +501,8 @@ def test_off_the_service_is_byte_for_byte_the_service_of_before(tmp_path, monkey
     shutil.copytree(root, kept)
     before_release = ft.module_at(BASE, "answer_release")
     before_release.build_prompt = ft.module_at(BASE, "answer_generation").build_prompt
+    # The dynamic module does not receive conftest's hermetic judge patch; use the same stand-in for both services.
+    before_release._judge_local = answer_release._judge_local
     assert not hasattr(before_release, "withhold_protected_items")
 
     def run(service_class) -> str:
