@@ -253,10 +253,18 @@ jobs:
           PUBLIC_RESULT: ${{ needs.public-lane.result }}
           TARGETED_REQUIRED: ${{ needs.plan.outputs.run_targeted }}
           TARGETED_RESULT: ${{ needs.targeted-checks.result }}
+          PRIVACY_REQUIRED: ${{ needs.plan.outputs.privacy }}
+          BUILD_REQUIRED: ${{ needs.plan.outputs.package }}
           PACKAGE_REQUIRED: ${{ needs.plan.outputs.package == 'true' || needs.plan.outputs.privacy == 'true' }}
           PACKAGE_RESULT: ${{ needs.package-checks.result }}
         run: |
           test "$PLAN_RESULT" = success
+          for flag in PUBLIC_REQUIRED TARGETED_REQUIRED PRIVACY_REQUIRED BUILD_REQUIRED; do
+            case "${!flag}" in
+              true|false) ;;
+              *) echo "::error::Missing or invalid planner output: $flag"; exit 1 ;;
+            esac
+          done
           for lane in PUBLIC TARGETED PACKAGE; do
             required="${lane}_REQUIRED"
             result="${lane}_RESULT"

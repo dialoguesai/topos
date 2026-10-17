@@ -7,7 +7,7 @@ Implements PLAN_NODE_RELEASE_MIGRATIONS §4d / §5 release cut:
   python scripts/cut_release.py --bump patch   # or minor | major
 
 Does NOT commit, push, or tag — the release-topos skill / human does that
-after reviewing the diff and running privacy eval + just gate.
+after reviewing the diff and passing the automatically selected checks.
 """
 
 from __future__ import annotations
@@ -196,9 +196,9 @@ def main() -> None:
     print(f"Release {version} files are stamped.")
     print("Next (release-topos skill):")
     print("  1. Review the diff (manifest entry IS the data-impact review)")
-    print("  2. just eval-release")
-    print("  3. just gate")
-    print("  4. commit, push main, tag v{version}, push tag".format(version=version))
+    print("  2. Commit the candidate, open a PR, and pass its automatically selected CI checks")
+    print("  3. just release-plan; just release-checks (runs Rig D only when required)")
+    print("  4. Merge, reuse identical-tree evidence if needed, then tag v{version} and push (RELEASING.md)".format(version=version))
 
 
 if __name__ == "__main__":
