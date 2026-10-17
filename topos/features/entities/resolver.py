@@ -46,6 +46,12 @@ _NER_TYPE_MAP = {
     "PER": "person",
     "PERSON": "person",
     "ORG": "org",
+    "ORGANIZATION": "org",
+    "ORGANISATION": "org",
+    "PROJECT": "project",
+    "SOFTWARE": "product",
+    "SOFTWARE PRODUCT": "product",
+    "REPOSITORY": "project",
     "LOC": "place",
     "GPE": "place",
     "FAC": "place",  # buildings, airports, venues

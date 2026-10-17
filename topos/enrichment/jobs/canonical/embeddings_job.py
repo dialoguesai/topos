@@ -172,8 +172,10 @@ class EmbeddingsJob(BaseEnrichmentJob):
             input_payload={"texts": texts, "batch_size": 32, "input_role": "passage"},
         )
         if result.status != "completed":
-            return []
+            raise RuntimeError(f"Embedding did not complete: {result.status}")
         vectors = result.output.get("vectors") or []
+        if len(vectors) != len(meta):
+            raise RuntimeError("Embedding returned an incomplete batch")
         out: List[Dict[str, Any]] = []
         for row_meta, vector in zip(meta, vectors):
             out.append(

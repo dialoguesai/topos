@@ -206,6 +206,8 @@ class EnrichmentOrchestrator(BaseObject):
                     progress_callback(0, total_messages, job_name, jobs_percent, 0.0)
                 
                 records = await job.enrich(job_messages, progress_callback=job_progress_callback)
+                if any(r.get("_deferred") for r in records if isinstance(r, dict)):
+                    raise RuntimeError("Enrichment deferred: provider unavailable")
 
                 # Mark the INPUT records as processed by this job — not the output.
                 # The whole batch: a row the job may not read is done for it too.
@@ -225,7 +227,6 @@ class EnrichmentOrchestrator(BaseObject):
                 # In a worker thread (NR166 R3b): the marker is written under the write gate, and this coroutine
                 # runs on the app's loop, which then waited for the gate with every other request behind it.
                 # `_mark_processed` resolves its own connection, so the worker uses the worker's.
-                await asyncio.to_thread(self._mark_processed, job_name, canonical_messages)
 
                 derived_table = job.get_derived_table()
                 if records and derived_table:
@@ -313,6 +314,9 @@ class EnrichmentOrchestrator(BaseObject):
                     # "2,904 of 726" to anyone rendering the pair.
                     progress_callback(total_messages, total_messages, job_name, job_progress_percent, 100.0)
                 
+                # A completion marker must follow every output write. Failed writes
+                # leave the input owed, so catch-up can retry it.
+                await asyncio.to_thread(self._mark_processed, job_name, canonical_messages)
                 results["jobs_run"] += 1
             except Exception as exc:
                 logger.error(

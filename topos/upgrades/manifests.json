@@ -1093,8 +1093,18 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
-      "notes": []
+      "steps": [
+        {
+          "id": "coding-session-derivation-recovery",
+          "kind": "none",
+          "title": "Resume unfinished coding-session processing",
+          "why": "The durable worker discovers missing per-job completion markers at normal startup and after sync; it queues bounded recovery independently of transcript cursors. The source must still be enabled and unpaused. No synchronous upgrade sweep or global model reprocess.",
+          "order": 1
+        }
+      ],
+      "notes": [
+        "Coding-session derivation debt resumes through the normal durable worker for enabled, unpaused sources, in bounded batches. No transcript rewind, canonical rewrite or model switch. entities spec 3 corrects capture-application types from source and software-context evidence; other source types are not automatically reprocessed."
+      ]
     }
   ]
 }

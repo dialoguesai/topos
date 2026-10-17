@@ -373,7 +373,23 @@ def _sync_summary(result: Dict[str, Any], sync_options: Any) -> Dict[str, Any]:
     return summary
 
 
+async def _execute_ai_tool_catchup(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from ..ingestion.ai_tool_catchup import execute_catchup
+
+    return await execute_catchup(payload)
+
+
+def _enqueue_ai_tool_catchup(conn: Any, source_id: Optional[str] = None, retry_failed: bool = False) -> None:
+    from ..ingestion.ai_tool_catchup import enqueue_catchup
+
+    try:
+        enqueue_catchup(conn, source_id, retry_failed)
+    except Exception:
+        logger.warning("Coding-session catch-up discovery failed", exc_info=True)
+
+
 EXECUTORS: Dict[str, ExecutorFn] = {
+    "ai_tool_enrichment_catchup": _execute_ai_tool_catchup,
     "inbox_deferred_enrichment": _execute_inbox_deferred_enrichment,
     "file_ingestion": _execute_file_ingestion,
     "enrichment_process_source": _execute_enrichment_process_source,
@@ -572,7 +588,7 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
     jobs = [job]
     if kind == "inbox_deferred_enrichment":
         jobs, payload = await _run_db(conn_factory, _coalesce_inbox_jobs, job, payload)
-    if kind in ("enrichment_process_source", LOCAL_SYNC_KIND):
+    if kind in ("enrichment_process_source", "ai_tool_enrichment_catchup", LOCAL_SYNC_KIND):
         payload["_progress_updater"] = _progress_updater
     if kind == LOCAL_SYNC_KIND:
         payload["_job_id"] = job_id
@@ -684,6 +700,9 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
                 )
 
     await _run_db(conn_factory, _mark_done)
+    if kind in ("ai_tool_enrichment_catchup", "inbox_deferred_enrichment", LOCAL_SYNC_KIND):
+        for sid in {entry.get("source_id") for entry in jobs if entry.get("source_id")}:
+            await _run_db(conn_factory, _enqueue_ai_tool_catchup, sid, kind == LOCAL_SYNC_KIND)
     _release_secrets(jobs)
 
 
@@ -750,6 +769,8 @@ async def _worker_loop(
 
     idle_delay = idle_seconds
     next_debt_sweep = 0.0
+    if sweep_debts and _enabled():
+        await _run_db(conn_factory, _enqueue_ai_tool_catchup, None, True)
     while True:
         try:
             if not _enabled():

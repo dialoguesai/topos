@@ -225,3 +225,33 @@ class TestGraphLaneUnit:
         )
         assert items == []
         assert not ledger.as_public()["ledger"]
+
+class TestRawGraphScope:
+    def test_graph_scope_reads_the_spine_instead_of_empty_canonical_pages(self, conn):
+        _seed_graph(conn)
+        bundle = AdapterFactory.create('local_database', conn=conn)
+        result = DefaultSignalRetrievalAdapter(bundle).retrieve(RetrievalRequest(
+            manifest=resolve_scope_manifest('graph:read'), access_mode='raw',
+            query_text='Who is connected to Topos?', disclosure_tier='owner_raw', owner_mode=True,
+        ))
+        rows = result.context_packet['rows']
+        assert any(r.get('canonical_name') == 'Topos' for r in rows)
+        assert any(r.get('source_name') == 'Ada Quill' and r.get('target_name') == 'Topos' for r in rows)
+        assert not any('embedding_blob' in r or 'metadata_json' in r for r in rows)
+
+    def test_graph_read_fails_closed_below_owner_tier(self, conn):
+        from topos.query.graph_rows import graph_rows
+        _seed_graph(conn)
+        assert graph_rows(conn, 'entity_edges', 'Topos', limit=20, disclosure_tier='default_disclosure') == []
+
+    def test_fabricated_entity_does_not_dump_unrelated_graph(self, conn):
+        from topos.query.graph_rows import graph_rows
+        _seed_graph(conn)
+        assert graph_rows(conn, 'entity_edges', 'Zxyquuxland', limit=20, disclosure_tier='owner_raw') == []
+
+    def test_protected_endpoint_cannot_leak_through_an_edge(self, conn):
+        from topos.query.graph_rows import graph_rows
+        _seed_graph(conn)
+        _blackhole(conn, 'ent_ghost', 'Casper Veil')
+        rows = graph_rows(conn, 'entity_edges', 'Topos', limit=20, disclosure_tier='owner_raw')
+        assert not any(r['src_entity_id'] == 'ent_ghost' for r in rows)

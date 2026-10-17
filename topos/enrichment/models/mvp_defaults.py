@@ -32,7 +32,9 @@ JOB_SPEC_VERSIONS: dict[str, int] = {
     # Safe to bump only because derived rows are now keyed on their identity
     # (topos/storage/derived_row_identity.py); under the old per-run uuid this
     # would have appended a second copy of every row it re-derived.
-    "entities": 2,
+    # 3: coding capture-app names use source/context type evidence. The
+    # bounded coding-source recovery lane refreshes these; no global sweep.
+    "entities": 3,
     "embeddings": 1,
     "sentiment": 1,
     "topics": 1,

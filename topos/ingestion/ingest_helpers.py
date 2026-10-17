@@ -363,7 +363,18 @@ async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
     signal_out = pipeline_outcome.get("signal_derivation") or {}
     signal_errors = list(signal_out.get("errors") or []) if isinstance(signal_out, dict) else []
     enrich_errors = list(enrich_out.get("errors") or []) if isinstance(enrich_out, dict) else []
+    privacy_errors = list((pipeline_outcome.get("privacy_disclosure_layer") or {}).get("errors") or [])
+    signal_errors.extend(f"Deferred signal job: {j}" for j in signal_out.get("deferred_jobs") or [])
+    enrich_errors.extend(privacy_errors)
     status = "error" if (signal_errors or enrich_errors) else "ok"
+    if status == "ok":
+        from .ai_tool_sync import AI_TOOL_SOURCE_IDS
+        if source_id in AI_TOOL_SOURCE_IDS:
+            from ..core.state import get_db_connection
+            from ..enrichment.record_progress import mark_records_processed_in_a_worker
+            await mark_records_processed_in_a_worker(
+                get_db_connection, source_id, "ai_tool_pipeline", canonical_records, 1
+            )
     result = {
         "status": status,
         "signal_jobs_run": (signal_out.get("jobs_run") if isinstance(signal_out, dict) else 0) or 0,
