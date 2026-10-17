@@ -44,10 +44,10 @@ SWITCH = switches.ANSWER_DENIED_DOMAIN_REFUSAL.name
 #: The density fixture's share: these five denied, the rest permitted.
 DENIED = frozenset({"health", "family", "finance", "relationships", "home"})
 PERMITTED = frozenset({"work", "plans", "hobbies"})
-#: What the switch-off guard compares against: node main 125e01de (WS0's #130-#135, with NR179's judge reserve and its
-#: `dropped_unjudged` receipt key), which this branch merged. It was 9ddc77b5, the commit this lane started from; it
-#: moves again to the main this branch is last merged with.
-BASE = "125e01de9bf99edc676eda50e36d32ccd4833a29"
+#: What the switch-off guard compares against: #137's head 383ecb1d (NR189 on NR188 #138 and node main 125e01de, with
+#: NR179's judge reserve and its `dropped_unjudged` receipt key), which this branch merged. It was 9ddc77b5, the
+#: commit this lane started from; it moves again to the main this branch is last merged with.
+BASE = "383ecb1d1967562ee87f9cd26e6eeb63d5099e2c"
 NO_ANSWER = {"version": "topos-answer/v1", "outcome": "no_answer"}
 
 

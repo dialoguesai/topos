@@ -47,10 +47,10 @@ from topos.permissions_v2.knowledge_contract import (FactResult, GoalResult, Int
                                                      MessageResult, RelationshipResult)
 
 SWITCH = "TOPOS_PERMISSIONS_V2_ANSWER_PROTECTED_ITEM_FILTER"
-#: The answer service and the prompt of before Fix A: node main 125e01de (WS0's #130-#135, with NR179's judge
-#: reserve and its `dropped_unjudged` receipt key), which this branch merged. It was 9ddc77b5, the commit this lane
-#: started from; it moves again to the main this branch is last merged with.
-BASE = "125e01de9bf99edc676eda50e36d32ccd4833a29"
+#: The answer service and the prompt of before Fix A: #137's head 383ecb1d (NR189 on NR188 #138 and node main
+#: 125e01de, with NR179's judge reserve and its `dropped_unjudged` receipt key), which this branch merged. It was
+#: 9ddc77b5, the commit this lane started from; it moves again to the main this branch is last merged with.
+BASE = "383ecb1d1967562ee87f9cd26e6eeb63d5099e2c"
 PROTECTED = "Harlan Ostrow"
 #: A form of the protected surname the matcher reads only as a proper noun, at the start of a line: released.
 GAP = "Saturday plans\nOstrows are visiting for lunch"
