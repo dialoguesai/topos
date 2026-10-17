@@ -97,7 +97,12 @@ closed names, counts and durations.
   across a restart, and an owner can find the share by hashing the names in the index folder. Beside it, two facts
   that tell shares apart at a glance: ``mode=<only|with_sources|records|unknown>`` (the share's mode as the last
   request or build in this process saw it) and ``members=<N|->`` (its index's member count as last seen; on an
-  ``index_rebuild`` line, the count that build ended with).
+  ``index_rebuild`` line, the count that build ended with). NR188 (DR-31): an ``index_stale`` line about a member's
+  ``dependencies`` or ``classification_context`` also carries ``sub=<word>``, what moved (``conversation_context``,
+  ``row_binding``, ``row_revision``, ``missing``; ``neighbour_inserted``, ``neighbour_changed``, ``row_unavailable``);
+  with ``TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`` on, ``scope=member`` marks the first member a check withheld
+  rather than the whole index going, and the sweep's narrowed publish is an ``index_rebuild`` line with
+  ``state=narrowed`` and the members the narrowed index holds.
 """
 from __future__ import annotations
 
@@ -838,6 +843,9 @@ def index_event(stage: str, path, seconds: float = 0.0, **fields) -> None:
         extra = {"state": _word(fields["state"])} if "state" in fields else {}
         if "reason" in fields:
             extra["class"] = _word(fields["reason"])
+        for name in ("sub", "scope"):   # NR188: what moved, in a fixed word, and whether only members were withheld
+            if name in fields:
+                extra[name] = _word(fields[name])
         counted = fields.get("members")
         if stage == "index_rebuild" and extra.get("state") == "ready":
             share_seen(path, members=counted)

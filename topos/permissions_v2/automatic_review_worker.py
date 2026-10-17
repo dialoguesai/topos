@@ -11,6 +11,8 @@ import contextvars
 import threading
 import time
 
+from topos.storage.share_excluded import COLUMN as SHARE_EXCLUDED, share_excluded_clause
+
 from .automatic_message_review import prepare, assess, publish, is_current, machine_key
 from .canonical import PolicyError
 from .evidence import _owner
@@ -104,6 +106,9 @@ class AutomaticReviewWorker:
             if not required <= columns:
                 raise PolicyError("message_schema_unavailable")
             dataset = "dataset_id" if table == "conversation_messages" else "NULL"
+            # NR189: an AI-chat row the owner keeps from every share is never assessed for one (the column read above).
+            kept = (share_excluded_clause(conn, present=SHARE_EXCLUDED in columns)
+                    if table == "ai_chat_messages" else "")
             scope, args = "", [after_id, request.after, request.before]
             if ingested_after is not None:
                 # Whole conversations: a new row changes its neighbours' context revision.
@@ -113,7 +118,7 @@ class AutomaticReviewWorker:
             return [tuple(row) for row in conn.execute(
                 f"SELECT message_id,source_id,{dataset} FROM {table} WHERE message_id>? "
                 "AND julianday(event_at)>=julianday(?,'unixepoch') "
-                f"AND julianday(event_at)<=julianday(?,'unixepoch'){scope} ORDER BY message_id LIMIT 200",
+                f"AND julianday(event_at)<=julianday(?,'unixepoch'){kept}{scope} ORDER BY message_id LIMIT 200",
                 args).fetchall()]
 
     def _journal_page(self, after_id, request, ingested_after=None):

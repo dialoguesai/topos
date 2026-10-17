@@ -195,6 +195,14 @@ SWEEP_INTEREST_VERDICT_FULL_EVERY = _switch(
     "NR187 (WS0 review, Q3). With the sweep's interest verdict kept, every this-many-th sweep of an index decides its "
     "interests in full all the same (30, about 5 minutes at the daemon's pace). 1 is every sweep; the reader holds it "
     "to at most 360.", floor=1)
+INDEX_NARROW_MEMBERS = _switch(
+    "INDEX_NARROW_MEMBERS", "bool", True, True,
+    "NR188 (DR-31). A share index member that failed only because new data moved its classification context or its "
+    "dependencies is withheld, and the rest of the index keeps serving: the sweep publishes the index without it and "
+    "owes one rebuild that brings it back. Every other change still removes the whole index. On by default, bound "
+    "and unbound (owner ruling of 16 Oct 2026, after the independent review: \"On, accept the hint\"); the hint is "
+    "that a recipient who keeps asking can tell which shared conversation got new activity, and roughly when, from "
+    "its records leaving and coming back. Off: the whole index goes, as before 1.5.10.")
 SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
@@ -443,6 +451,7 @@ SWITCHES = (
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
     DECIDE_OUTSIDE_GATE, OWNER_LANE, OWNER_LANE_SLOTS, OWNER_LANE_SHARED_MAX, OWNER_LANE_TYPES, REVIEW_PASS_BOUNDARY,
     REVIEW_PASS_BOUNDARY_MAX_AGE, SWEEP_INTEREST_VERDICT, SWEEP_INTEREST_VERDICT_FULL_EVERY,
+    INDEX_NARROW_MEMBERS,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,

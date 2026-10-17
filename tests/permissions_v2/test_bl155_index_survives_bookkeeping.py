@@ -53,6 +53,14 @@ PARTICIPANT_UPSERT = """
 """
 
 
+@pytest.fixture
+def switched_off(monkeypatch):
+    """NR188: the whole-index drops below are the pins of the switch-off path (`TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`
+    off, main's behaviour). With it on (the default since the owner's ruling of 16 Oct) the moved members are withheld
+    and the rest keeps serving: test_nr188_narrow_member_drop.py holds those counterparts."""
+    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS", "false")
+
+
 def _node(tmp_path, *, protected=True, members=6):
     return twins.build(tmp_path / "twin", members=members, hidden_facts=0, seed=3, protected=protected)
 
@@ -183,14 +191,14 @@ def test_a_protected_contact_joining_drops_at_once(tmp_path, caplog):
 
 # --- 3. a new participant or a new sender drops it ---------------------------------------------------------------
 
-def test_an_ordinary_new_participant_drops(tmp_path, caplog):
+def test_an_ordinary_new_participant_drops(tmp_path, caplog, switched_off):
     node = _node(tmp_path)
     _upsert_participant(node, "contact-new")
     assert _sweep(node, caplog) == ["message search index stale (dependencies)"]
     assert not _path(node).exists()
 
 
-def test_a_new_message_from_a_new_sender_drops(tmp_path, caplog):
+def test_a_new_message_from_a_new_sender_drops(tmp_path, caplog, switched_off):
     node = _node(tmp_path)
     _append_message(node, sender_id="contact-new", is_from_self=0)
     assert _sweep(node, caplog) == ["message search index stale (dependencies)"]
@@ -199,7 +207,7 @@ def test_a_new_message_from_a_new_sender_drops(tmp_path, caplog):
 
 # --- 4. a new message next to a shared one drops it --------------------------------------------------------------
 
-def test_a_new_neighbour_from_self_drops(tmp_path, caplog):
+def test_a_new_neighbour_from_self_drops(tmp_path, caplog, switched_off):
     node = _node(tmp_path)
     _append_message(node, sender_id="self", is_from_self=1)
     assert _sweep(node, caplog) == ["message search index stale (classification_context)"]
@@ -259,7 +267,7 @@ def _first_member_in(node, conversation_id):
 
 # --- the upgrade: an index sealed under another contract fails once and rebuilds once ------------------------------
 
-def test_an_index_sealed_under_another_contract_rebuilds_once(tmp_path, caplog, monkeypatch):
+def test_an_index_sealed_under_another_contract_rebuilds_once(tmp_path, caplog, monkeypatch, switched_off):
     with monkeypatch.context() as patched:
         patched.setattr(eb, "CONTEXT_REVISION_CONTRACT", "context-before-1.5.2/test")
         node = _node(tmp_path)

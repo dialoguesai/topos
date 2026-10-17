@@ -58,6 +58,8 @@ import time
 from collections import Counter
 from pathlib import Path
 
+from topos.storage.share_excluded import share_excluded_clause
+
 from .canonical import PolicyError, digest
 
 VERSION = "topos-share-counts/v1"
@@ -222,6 +224,10 @@ class _Walk:
             # source's whole history. A journal entry's time may come from another column; journals are read whole.
             where += " AND event_at >= ?"
             args.append(time.strftime("%Y-%m-%d", time.gmtime(self.lower_us // 1_000_000)))
+        if table == "ai_chat_messages":
+            # NR189: a row the owner keeps from every share is in no count, shareable or held back. One probe per
+            # count; a database without the column counts as before.
+            where += share_excluded_clause(self.conn)
         out = []
         for raw in self.conn.execute(f"SELECT * FROM {table} WHERE {where} ORDER BY {id_column}", args):
             row = dict(raw)

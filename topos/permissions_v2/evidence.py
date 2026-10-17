@@ -32,6 +32,7 @@ from topos.features.provenance.roles import record_role
 from topos.storage.db.migrations.permissions_read_path_indexes_v1 import CONTENT_KEY
 from topos.storage.db.migrations import permissions_fact_lineage_keys_v1 as lineage_keys
 from topos.storage.db.write_gate import with_db_write
+from topos.storage.share_excluded import row_share_excluded
 
 from .canonical import MAX_INTEGER, PolicyError, Rows, canonical_bytes, digest, digest_stream
 from .contract import Hash, Identifier, Number, StrictModel
@@ -54,8 +55,13 @@ EVIDENCE_LEAF_TABLES = (*LEAF_TABLES, JOURNAL_TABLE)
 REVIEW_SURFACE_EXCLUSIONS = {
     "conversation_messages": frozenset({"ingested_at", "sync_batch_id", "created_at", "content_hash",
         "content_disclosure", "content_disclosure_hash", "content_disclosure_model"}),
+    # share_excluded (migration 85, NOT NULL DEFAULT 0): the column appearing with 0 on every stored row would move
+    # every AI-chat review and context revision. It is a restriction, not reviewed content: a row set to 1 is refused
+    # at the evidence load and dropped by the member re-check whatever its revision (NR189, DR-31), so it is left out
+    # of the surface only together with those two filters, never alone (WS0 ruling, 16 Oct 2026).
     "ai_chat_messages": frozenset({"ingested_at", "sync_batch_id", "content_hash", "content_disclosure",
-        "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", "content_disclosure_model"}),
+        "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", "content_disclosure_model",
+        "share_excluded"}),
     # latest_title (migration 83): the title a later batch brings. Only a share that opted into chat titles releases
     # it, and the Off-limits veto reads it as it reads every column, but no review pins it, so a chat named or renamed
     # after its messages were reviewed withholds none of them. `title`, set by the record that made the chat, stays.
@@ -903,6 +909,11 @@ class EvidenceResolver:
         if len(rows) != 1:
             raise PolicyError("evidence_ambiguous")
         row = dict(rows[0])
+        if table == "ai_chat_messages" and row_share_excluded(row):
+            # NR189 (D-17, on-ramp CONTRACTS §2.6): a row the owner keeps from every share is, to every share, no
+            # row. Read off the row already selected, so no probe per load; a database without the column reads
+            # as before.
+            raise PolicyError("evidence_missing")
         if any(marker in row for marker in ("_p2b_parent_revision", "_p2b_source_revision", "_p2b_native_event_nanoseconds", "_p2b_native_classification")):
             raise PolicyError("evidence_malformed")
         if _deleted(row):
