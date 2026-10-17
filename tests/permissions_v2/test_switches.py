@@ -140,7 +140,10 @@ NR183_TYPES = ("query", "aggregate", "tools_retrieve", "get_sources", "get_analy
                "upsert_home_chat_session", "delete_home_chat_session", "home_chat_memory")
 V183 = {**V187, P + "OWNER_LANE": False, P + "OWNER_LANE_SLOTS": 4, P + "OWNER_LANE_SHARED_MAX": 2,
         P + "OWNER_LANE_TYPES": NR183_TYPES}
-TABLE = {**V166, **V183}
+#: Lane NR188 (16 Oct 2026, DR-31): a member moved only by new data is withheld and the rest of the share index keeps
+#: serving; on bound and unbound alike (owner ruling, 16 Oct, after the independent review). 56 + 1 = 57.
+V188 = {**V183, P + "INDEX_NARROW_MEMBERS": True}
+TABLE = {**V166, **V188}
 
 
 @pytest.fixture(autouse=True)
@@ -278,8 +281,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 56
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 55
+    assert len(switches.SWITCHES) == len(TABLE) == 57
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 56
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -339,6 +342,19 @@ def test_the_ct176_citation_forms_are_on_bound_or_not_and_off_is_one_environment
     assert switches.value(name) is True
     monkeypatch.setenv(name, "false")
     assert switches.value(name) is False
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_nr188_narrow_members_switch_is_on_bound_or_not_and_off_is_one_environment_line(bound, state, monkeypatch):
+    """NR188: on with nothing set (owner ruling, 16 Oct), read without an `is_bound()` stat; off is one environment
+    line, which is main's whole-index drop."""
+    state(bound)
+    name = P + "INDEX_NARROW_MEMBERS"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V188[name] is True
+    assert switches.on(name) is True
+    monkeypatch.setenv(name, "false")
+    assert switches.on(name) is False
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])

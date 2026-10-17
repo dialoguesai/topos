@@ -42,6 +42,11 @@ indexes whose basis cannot see a review change (p2c-v1) are dropped in the chang
 (`drop_unguarded`). The owner-change queue and the refresh loop's restore build under `BUILD_SLOT`, one build at a
 time. A change of only the fields no build reads re-stamps the basis instead (`restamp`, A2A-4 Q5). The request path's
 guard is unchanged.
+
+NARROW MEMBERS (NR188, DR-31; `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`, on by default): new data never takes an
+index dark. A member that fails only at its `dependencies` or its `classification_context`, as a clean revision
+mismatch, is withheld (`_members_current`); the sweep publishes the index without it (`_narrow`) and the request path
+refuses, without shredding, until it has. Every other failure still deletes the whole index, as above.
 """
 from __future__ import annotations
 
@@ -514,6 +519,112 @@ def _reuse(path: str, hit: bool, kept=None, now=None, **how) -> None:
     search_timing.reuse(path, hit, kept, now, **how)
 
 
+def _narrow_members() -> bool:
+    """NR188 (DR-31; on by default): whether a member moved only by new data is withheld alone (`_members_current`)
+    instead of its whole index going."""
+    from . import switches
+    return switches.on(switches.INDEX_NARROW_MEMBERS)
+
+
+#: NR188 (review #3): a narrowed copy carries this table, one row, nothing else: the index it holds withholds members
+#: moved by new data and owes its share one rebuild. A build writes a fresh file without it; a restamp copies it. The
+#: request path never reads it (`_open` and `load` read meta, members and vectors only), so it changes no basis.
+_NARROWED_DDL = "CREATE TABLE narrowed (singleton INTEGER PRIMARY KEY CHECK(singleton=1))"
+#: NR188 (review #3): sweeps in a row a busy BUILD_SLOT may hold a narrowed publish back before it is made under the
+#: write gate alone (`_narrow`), so a long build of another share cannot keep this one refused for long.
+NARROW_SLOT_WAITS = 3
+
+
+def _narrowed_file(path) -> bool:
+    """NR188 (review #3): whether the index file at `path` is a narrowed copy that still owes its share a rebuild."""
+    try:
+        conn = sqlite3.connect(Path(path).as_uri() + "?mode=ro", uri=True)
+    except sqlite3.Error:
+        return False
+    try:
+        return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='narrowed'").fetchone() is not None
+    except sqlite3.Error:
+        return False
+    finally:
+        conn.close()
+
+
+def _elapsed_since(started: float) -> float:
+    """NR188 (review #4): seconds since `started` (time.monotonic), to carry a sweep's clock to the present."""
+    return time.monotonic() - started
+
+
+#: NR188 (review #2): the most narrowed publishes remembered per index file, each the identity it replaced and the
+#: identity it published (`SearchIndexService.same_or_narrowed`). Change tokens only: stat integers.
+SUCCESSORS_KEPT = 8
+
+
+#: NR188: the `dependencies` words that are a clean revision mismatch, so a narrow failure with the switch on. `missing`
+#: (no dependencies sealed where the boundary needs them) is not one: it drops the whole index, as every other class.
+NARROW_DEPENDENCY_WORDS = frozenset({"row_revision", "row_binding", "conversation_context"})
+
+
+def _context_rows(conn, identity, row, exclude: frozenset) -> list:
+    """Attribution only (NR188): the neighbouring rows `automatic_message_review.context_for` reads as this item's
+    context, [message_id, content, event_at] in order, as they would be without the rows in `exclude`. The same two
+    bounded reads; `context_for` itself is not changed (the grant census pins it)."""
+    from .automatic_message_review import CONTEXT_VERSIONS
+    table = identity.table
+    if table not in CONTEXT_VERSIONS:
+        return []
+    conversation, event = row.get("conversation_id"), row.get("event_at")
+    if not conversation or not isinstance(event, str):
+        return []
+    scope, args = "conversation_id=? AND source_id=?", [conversation, identity.source_id]
+    if table == "conversation_messages":
+        scope += " AND dataset_id=?"
+        args.append(identity.dataset_id)
+    else:  # ai_chat_messages: the owner's turns, as context_for reads them
+        scope += " AND sender_type IN ('human','user')"
+    if exclude:
+        scope += " AND message_id NOT IN (" + ",".join("?" for _ in exclude) + ")"
+        args.extend(sorted(exclude))
+    before = conn.execute(f"SELECT message_id,content,event_at FROM {table} WHERE {scope} "
+        "AND (event_at,message_id)<(?,?) ORDER BY event_at DESC,message_id DESC LIMIT 2",
+        (*args, event, identity.record_id)).fetchall()
+    after = conn.execute(f"SELECT message_id,content,event_at FROM {table} WHERE {scope} "
+        "AND (event_at,message_id)>(?,?) ORDER BY event_at,message_id LIMIT 2",
+        (*args, event, identity.record_id)).fetchall()
+    return [list(r) for r in [*reversed(before), *after]]
+
+
+def _context_revision(conn, identity, row, boundary, exclude: frozenset) -> str:
+    """Attribution only (NR188): `context_for`'s revision of this item's context, as it would be without the rows in
+    `exclude`. With nothing excluded it is `context_for`'s own revision (test_nr188_narrow_member_drop pins that, so a
+    change there is caught). Decides nothing."""
+    from .automatic_message_review import CONTEXT_VERSIONS, _bound_terms
+    from .canonical import digest
+    context = _context_rows(conn, identity, row, exclude)
+    terms = sorted(boundary.terms | boundary.handles)
+    return digest({"version": CONTEXT_VERSIONS[identity.table], "context": context,
+                   "protected_terms": _bound_terms(boundary, identity, row, [r[1] for r in context], terms, False)})
+
+
+def _context_drift(conn, identity, row, boundary, sealed) -> str:
+    """Attribution only (NR188): the fixed word for why a member's sealed classification context no longer matches.
+
+    `neighbour_inserted` when leaving out some of the rows now next to it gives the sealed revision back: rows were
+    added beside it (what a sync does), and nothing else moved. `neighbour_changed` for anything else (a neighbour's
+    text or time changed, a neighbour went, the protected words that reach it moved), or when it cannot be told. At
+    most 15 tries (the window holds at most four rows), run only for the first such failure of a check. Never raises,
+    decides nothing, and keeps nothing it read."""
+    import itertools
+    try:
+        neighbours = [r[0] for r in _context_rows(conn, identity, row, frozenset())]
+        for size in range(1, len(neighbours) + 1):
+            for removed in itertools.combinations(neighbours, size):
+                if _context_revision(conn, identity, row, boundary, frozenset(removed)) == sealed:
+                    return "neighbour_inserted"
+    except Exception:  # noqa: BLE001 -- attribution only: what cannot be told is a change
+        pass
+    return "neighbour_changed"
+
+
 #: NR187: the most index files whose sweep interest verdict is kept at once. The sweep also drops the entry of every
 #: index file that is gone or went stale (`_sweep`), so there are never more entries than index files.
 INTEREST_KEPT_MAX = 64
@@ -775,6 +886,14 @@ class SearchIndexService:
         # BL-157: index file -> (the file identity the sweep checked, the review digest it saw), for an index kept
         # serving while the node-wide review digest moved (`_current(refresh=True)`); the refresh loop takes them.
         self._refresh_needed: dict[str, tuple] = {}
+        # NR188: index file -> the file identity of the narrowed index a sweep published, which owes the refresh loop
+        # one rebuild (`take_narrowed`, cause `members_narrowed`). Memory only.
+        self._narrowed_owed: dict[str, tuple] = {}
+        # NR188 (review #2): index file -> {the file identity a narrowed publish replaced: the one it published}, so a
+        # removal decided about a file still removes the narrowed copy that took its place (`same_or_narrowed`).
+        self._successors: dict[str, dict] = {}
+        # NR188 (review #3): index file -> the sweeps in a row a busy BUILD_SLOT held its narrowed publish back.
+        self._slot_waits: dict[str, int] = {}
         self._sweep_stats = threading.local()   # per thread: the last sweep's gated steps (search_timing.timed_sweep)
         # BL-171: the last proven review-guard verdict per index file (`_reviews_current_kept`), and the probe whose
         # review token says whether the review store moved since (its own connection, so its data_version compares).
@@ -808,10 +927,59 @@ class SearchIndexService:
         return {name: revision for name, (state, revision) in taken.items()
                 if state is not None and _file_state(self.root / name) == state}
 
+    def same_or_narrowed(self, path: Path, state) -> bool:
+        """NR188 (review #2): whether the index file at `path` now is the file whose identity is `state`, or a narrowed
+        copy that a sweep published in its place (or a copy of that copy, up to SUCCESSORS_KEPT). A removal decided about
+        a file (the sweep's, `check_own`'s, a decision's `purge_stale`) then removes that copy too, as it would have
+        removed the file itself with the switch off: the copy has the file's basis and a subset of its members, so a
+        stale basis is stale for both. When the member that failed was one the copy withheld, the copy may still be
+        current; it is removed all the same (availability, not disclosure: the refresh loop restores it). Never True
+        for a file a build or a restamp published."""
+        current = _file_state(path)
+        if current is None:
+            return False
+        if current == state:
+            return True
+        with self._published_lock:
+            chain = dict(self._successors.get(Path(path).name, {}))
+        seen, here = {state}, state
+        for _ in range(SUCCESSORS_KEPT):
+            here = chain.get(here)
+            if here is None or here in seen:
+                return False
+            if here == current:
+                return True
+            seen.add(here)
+        return False
+
+    def take_narrowed(self) -> set[str]:
+        """NR188: the index files a sweep narrowed since the last call that are still the narrowed file (a build that
+        replaced one since has brought its members back). Each owes the refresh loop one rebuild, cause
+        `members_narrowed`, so the withheld members return with their new context (DR-31's delay). A narrowed publish is
+        never in `take_published`: it settles no restore. A restamp of a narrowed index owes the same rebuild (review
+        #3): it is reported here again with its new identity, so the build a restamp's publish settles is asked for once
+        more. After a restart, `narrowed_files` says which indexes still owe one."""
+        with self._published_lock:
+            taken, self._narrowed_owed = self._narrowed_owed, {}
+        return {name for name, state in taken.items() if state is not None and _file_state(self.root / name) == state}
+
+    def narrowed_files(self) -> set[str]:
+        """NR188 (review #3): the index files here that are narrowed copies still owing their share a rebuild (the
+        `narrowed` table only a narrowed copy, or a restamp of one, carries). Read by the refresh loop's first
+        observation after a start, so a restart between a narrowed publish and its rebuild loses nothing."""
+        try:
+            return {path.name for path in self.root.glob("grant-*.db") if _narrowed_file(path)}
+        except OSError:
+            return set()
+
     def _discard_unsafe(self, grant_id: str, *, now: int) -> bool:
         """BL-157: after a refresh that could not publish (the store kept moving while it ran), keep the serving index
         only when the full current check proves it, review guard included; anything else is purged as before.
-        True when it stays. An index without the guard (built before 1.5.3) never stays."""
+        True when it stays. An index without the guard (built before 1.5.3) never stays.
+
+        NR188 (switch on): an index whose only failures are members moved by new data stays too. The request path
+        refuses those members until the sweep withholds them, so a build that new data kept from publishing never
+        takes the share dark."""
         from .index_review_guard import VERSION
         path = index_path(self.root, grant_id)
         with with_db_write():
@@ -821,7 +989,7 @@ class SearchIndexService:
                     with self.ledger._transaction() as db:
                         authority, _policy = self.ledger._authority(db, grant_id, now)
                     with self.resolver._read() as (conn, _floor):
-                        if self._current(path, grant_id, authority, clock_state(conn), conn):
+                        if self._current(path, grant_id, authority, clock_state(conn), conn, narrowed=set()):
                             return True
             except Exception:  # noqa: BLE001 -- unreadable never proves anything
                 pass
@@ -1023,8 +1191,11 @@ class SearchIndexService:
             raise
         finally:
             _built(temporary)
+        narrowed = _narrowed_file(path)   # NR188 (review #3): a restamp copies the members, not the build they owe
         with self._published_lock:
             self._published.add(path.name)
+            if narrowed:
+                self._narrowed_owed[path.name] = _file_state(path)
         return {"state": index["state"], "member_count": index["count"]}
 
     def _stamp_current(self, path: Path, grant_id: str, authority) -> bool:
@@ -1430,6 +1601,10 @@ class SearchIndexService:
         per sweep, and every writer waited, recipients' searches included (2 Oct: 39% of the gate while the
         index existed). A recipient's own gated recheck before release is unchanged, so nothing here decides
         what a recipient receives.
+
+        NR188 (DR-31, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`, on by default): an index whose only failures are
+        members moved by new data (`_members_current`) is not removed. The sweep publishes it without them
+        (`_narrow`): the file it checked, members removed only, under BUILD_SLOT and the gate.
         """
         holds: list = []
         self._sweep_stats.holds = holds
@@ -1449,6 +1624,7 @@ class SearchIndexService:
 
     def _sweep(self, *, now: int | None = None, on_error: str = "purge", holds: list | None = None) -> int:
         now = int(time.time()) if now is None else now
+        started = time.monotonic()   # NR188 (review #4): the narrowed publish re-reads the authority at now + elapsed
         removed = 0
         shred_orphan_builds(self.root)   # R-N154 L5: not counted; they were never published indexes
         try:
@@ -1468,6 +1644,7 @@ class SearchIndexService:
             with _gated(holds):
                 authorities = self._authorities(now)
             stale = []
+            narrow = []   # NR188: (path, grant id, the authority checked, the file checked, the members withheld)
             # NR187: the canonical token, read BEFORE the snapshot below is established (`_interests_current_kept`).
             memo = self._canonical_token() if keep_interests else _NO_INTEREST_MEMO
             conn = sqlite3.connect(self.resolver.path.as_uri() + "?mode=ro", uri=True)
@@ -1482,17 +1659,22 @@ class SearchIndexService:
                         with _gated(holds):
                             review_digest = self.reviews.current_authority_digest()
                     checked = _file_state(path)  # the file this check reads; None when it is already gone
+                    withheld: set = set()        # NR188: filled only with the switch on (`_current`)
                     if checked is not None and not self._current(path, grant_id, authority, clock, conn,
                                                                  review_digest=review_digest, refresh=True,
+                                                                 narrowed=withheld,
                                                                  interest_before=memo):
                         stale.append((path, grant_id, checked))
+                    elif checked is not None and withheld:
+                        narrow.append((path, grant_id, authority, checked, frozenset(withheld)))
             finally:
                 conn.close()
             for path, grant_id, checked in stale:
                 self._forget_interest_verdict(path.name)   # NR187: a stale index keeps no verdict, removed or not
                 with _gated(holds):
-                    if _file_state(path) != checked:
-                        continue  # replaced by a publish, or removed, since the check read it
+                    if not self.same_or_narrowed(path, checked):
+                        continue  # replaced by a publish, or removed, since the check read it (NR188: a narrowed
+                                  # copy of it is not a publish, and goes with it)
                     active = False
                     if grant_id is not None:
                         with self.ledger._transaction() as db:
@@ -1506,6 +1688,8 @@ class SearchIndexService:
                     else:
                         _shred(path)
                     removed += 1
+            for path, grant_id, authority, checked, withheld in narrow:
+                self._narrow(path, grant_id, authority, checked, withheld, now=now, started=started, holds=holds)
         except Exception as exc:  # noqa: BLE001
             # Owner hooks and the daemon: if the check cannot run, no index survives it. A recipient
             # request instead refuses, so one caller's transient error never empties other grants.
@@ -1519,15 +1703,161 @@ class SearchIndexService:
                 removed += purge_all(self.root)
         return removed
 
-    def _entity_dependencies_current(self, conn, boundary, dependencies, checked, provenance=None, laps=None):
+    def _narrow(self, path, grant_id, authority, checked, withheld: frozenset, *, now: int, started: float | None = None,
+                holds=None) -> bool:
+        """NR188: publish the index the sweep checked without the members it withheld. True when it published.
+
+        BUILD_SLOT first, in the builds' order, and never waited for: a build running now publishes after this check
+        anyway, and the next sweep narrows what is left. Then, outside the write gate, a new file is written from the
+        checked file alone (`_narrowed_copy`): its meta (format, basis, state, model, dimensions) and its other members
+        and their vectors, byte for byte; members are removed, never added. Then, under the gate, it replaces the
+        index only if the index file is still the very file the check read and the grant's authority is still the one
+        it was checked under (a revocation, an expiry or a re-signed policy since: nothing is published, the copy is
+        shredded, and the next sweep decides the index whole). The basis is the one checked, so the request path's
+        guard decides the new file exactly as it would the old one. It is not a build: it is never reported as
+        published (`take_published`), so it settles no restore, and it owes one rebuild (`take_narrowed`). If the copy
+        cannot be made, the index goes, as it would have without the switch.
+
+        Review #3: a slot held through NARROW_SLOT_WAITS sweeps in a row (a long build of another share) no longer holds
+        the publish back: it is then made under the write gate alone. That is as safe: every publish of an index file
+        (a build, a restamp, this) replaces it under the gate, and this one only over the very file it checked, so a
+        build that publishes first is never overwritten and one that publishes after replaces the copy whole; the slot
+        only spares writing a copy a running build will replace. Review #4: the authority is read again at the sweep's
+        `now` carried forward by the seconds the sweep has run (`started`), so an expiry while it ran is seen."""
+        from . import search_timing
+        held = BUILD_SLOT.acquire(blocking=False)
+        with self._published_lock:
+            waited = 0 if held else self._slot_waits.get(path.name, 0) + 1
+            if waited:
+                self._slot_waits[path.name] = waited
+            else:
+                self._slot_waits.pop(path.name, None)
+        if not held and waited < NARROW_SLOT_WAITS:
+            return False
+        if not held:
+            with self._published_lock:
+                self._slot_waits.pop(path.name, None)
+        current_now = now if started is None else now + max(0, int(_elapsed_since(started)))
+        try:
+            try:
+                made = self._narrowed_copy(path, checked, withheld)
+            except Exception as exc:  # noqa: BLE001 -- class name only; this index goes, as without the switch
+                _log.warning("message search index narrowing unavailable (%s)", type(exc).__name__)
+                with _gated(holds):
+                    if _file_state(path) == checked:
+                        _shred(path)
+                return False
+            if made is None:
+                return False
+            temporary, remaining = made
+            published = False
+            try:
+                with _gated(holds):
+                    if _file_state(path) != checked:
+                        return False      # replaced by a publish, or removed, since the check read it
+                    with self.ledger._transaction() as db:
+                        try:
+                            again = self.ledger._authority(db, grant_id, current_now)[0]
+                        except PolicyError:
+                            again = None
+                    if again is None or again != authority:
+                        return False
+                    os.replace(temporary, path)
+                    os.chmod(path, 0o600)
+                    published = True
+                    successor = _file_state(path)
+                    with self._published_lock:
+                        self._narrowed_owed[path.name] = successor
+                        chain = self._successors.setdefault(path.name, {})
+                        chain[checked] = successor
+                        while len(chain) > SUCCESSORS_KEPT:
+                            chain.pop(next(iter(chain)))
+            finally:
+                if not published:
+                    _shred(temporary)
+                _built(temporary)
+        finally:
+            if held:
+                BUILD_SLOT.release()
+        # NR187 meets NR188: the kept interest verdict was proven for the file this publish replaced. Its stat identity
+        # is part of the kept state, so it could never match the new file; it is dropped here all the same, so nothing
+        # is kept about a file that is gone.
+        self._forget_interest_verdict(path.name)
+        _log.warning("message search index narrowed (%d withheld)", len(withheld))
+        search_timing.index_event("index_rebuild", path, state="narrowed", members=remaining)
+        return True
+
+    def _narrowed_copy(self, path, checked, withheld: frozenset) -> tuple | None:
+        """NR188 (`_narrow`, under BUILD_SLOT, outside the gate): a new private build file holding the checked index
+        file without `withheld`, and how many members it holds; None when the file is no longer the one checked.
+
+        Read from that file only, and only if its stat identity is the checked one before and after the read (any
+        write or replacement moves it). Every withheld member must be one of its members and its member count what its
+        meta says, or nothing is made (integrity). The copy is written whole in one transaction, as `_publish` writes
+        a build, so no page of the old file, and none of a withheld member's term bag or vectors, is carried into it.
+        The caller publishes it or shreds it."""
+        if _file_state(path) != checked:
+            return None
+        source = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+        try:
+            meta = source.execute("SELECT format, basis_json, state, model, dims, member_count FROM meta "
+                                  "WHERE singleton=1").fetchone()
+            rows = source.execute("SELECT opaque_id, event_at_us, doc_len, terms_json, sealed FROM members "
+                                  "ORDER BY opaque_id").fetchall()
+            vectors = source.execute("SELECT opaque_id, chunk_index, vector FROM vectors "
+                                     "ORDER BY opaque_id, chunk_index").fetchall()
+        finally:
+            source.close()
+        if _file_state(path) != checked:
+            return None
+        present = {row[0] for row in rows}
+        if meta is None or meta[0] != FORMAT or len(rows) != meta[5] or not withheld or not withheld <= present:
+            raise PolicyError("search_index_integrity")
+        kept = [row for row in rows if row[0] not in withheld]
+        temporary = _build_file(self.root)
+        try:
+            conn = sqlite3.connect(str(temporary), isolation_level=None)
+            try:
+                conn.execute("PRAGMA journal_mode=DELETE")
+                conn.execute("BEGIN")
+                for sql in _DDL:
+                    conn.execute(sql)
+                conn.execute(_NARROWED_DDL)
+                conn.execute("INSERT INTO narrowed VALUES (1)")   # review #3: owes a rebuild, on disk, with the file
+                conn.execute("INSERT INTO meta VALUES (1, ?, ?, ?, ?, ?, ?)",
+                             (meta[0], meta[1], meta[2], meta[3], meta[4], len(kept)))
+                conn.executemany("INSERT INTO members VALUES (?, ?, ?, ?, ?)", kept)
+                conn.executemany("INSERT INTO vectors VALUES (?, ?, ?)",
+                                 [vector for vector in vectors if vector[0] not in withheld])
+                conn.execute("COMMIT")
+            finally:
+                conn.close()
+            with open(temporary, "rb") as handle:
+                os.fsync(handle.fileno())
+        except BaseException:
+            _shred(temporary)
+            _built(temporary)
+            raise
+        return temporary, len(kept)
+
+    def _entity_dependencies_current(self, conn, boundary, dependencies, checked, provenance=None, laps=None,
+                                     why: dict | None = None, every: bool = False):
         """Every support contributor, including leaves other than the ranked member.
 
         `provenance`: a search pass's ExistingProvenancePass (N3c), which proves recovered iMessage rows with
         one service; the caller must `finish` it after the pass's last member before a True counts.
         `laps` (timing only, IF-3 v1.4) accumulates the seconds spent in the dependencies' boundary checks.
+
+        NR188: `why` (a dict, attribution) receives what moved: `sub` is `missing` when no dependencies are sealed
+        where the boundary needs them, and `moved` maps each dependency that moved, by its key, to `row_revision` (its
+        revision moved) or `conversation_context` (only its context did). `every` (the switch on) checks every
+        dependency, not only up to the first that moved, so a veto or an unreadable row in any of them still raises.
         """
         if not isinstance(dependencies, list) or (boundary.active and not dependencies):
+            if why is not None:
+                why["sub"] = "missing"
             return False
+        current = True
         for dependency in dependencies:
             identity = self.resolver._identity(dependency["table"], dependency["record_id"],
                                               dependency["source_id"], dependency["dataset_id"])
@@ -1542,13 +1872,19 @@ class SearchIndexService:
                     laps["dependency_boundary"] = laps.get("dependency_boundary", 0.0) + time.perf_counter() - lap
                 checked[key] = (revision, context)
             if checked[key] != (dependency["revision"], dependency["context"]):
-                return False
-        return True
+                if why is not None:
+                    why.setdefault("moved", {})[key] = ("row_revision" if checked[key][0] != dependency["revision"]
+                                                        else "conversation_context")
+                if not every:
+                    return False
+                current = False
+        return current
 
     def _current(self, path, grant_id, authority, clock, conn, *, deep: bool = True, digest_point: str | None = None,
                  verified: SearchVerification | None = None, before=None, laps: dict | None = None,
                  provenance_point: str | None = None, members: bool = True, review_digest: str | None = None,
                  only: frozenset[str] | None = None, refresh: bool = False, review_guard: bool = True,
+                 narrowed: set | None = None,
                  interest_before=_NO_INTEREST_MEMO) -> bool:
         """Whether the grant's index still describes R(g) on `conn`'s snapshot.
 
@@ -1577,16 +1913,34 @@ class SearchIndexService:
         state that decides before anything is decided. A guard verdict proven for this exact file and key is reused
         while the review store has not moved at all (`_reviews_current_kept`).
 
+        NR188 (DR-31). A stale line about a member's `dependencies` or `classification_context` is followed by a
+        second line with one fixed word saying what moved (`_members_current`); the `index_stale` event carries it as
+        `sub`. `narrowed` (a set): with `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS` on, a member that failed only at
+        those two classes as a clean revision mismatch is added to it instead of failing the index; True then means
+        every OTHER member checked is current, and the caller must never serve or keep serving the members it holds.
+        With the switch off it stays empty and the check is main's.
+
         NR187: `interest_before` (the daemon sweep only, with SWEEP_INTEREST_VERDICT on) is the canonical token the sweep
         read before `conn`'s snapshot was established (None when unreadable). The interest step then reuses this very
         file's last True interest verdict while nothing it reads has changed (`_interests_current_kept`). Every other
         caller, and the sweep with the switch off, decides the interests in full as before.
         """
-        def stale(stage):
+        def stale(stage, sub=None):
             _log.warning("message search index stale (%s)", stage)
+            if sub is not None:
+                _log.warning("message search index member drift (%s: %s)", stage, sub)   # NR188: a fixed word
             from . import search_timing
-            search_timing.index_event("index_stale", path, reason=stage)   # attribution only (NR166)
+            search_timing.index_event("index_stale", path, reason=stage,     # attribution only (NR166, NR188)
+                                      **({"sub": sub} if sub is not None else {}))
             return False
+
+        def withheld(stage, sub):
+            """NR188 (switch on): the first member of this check withheld at `stage`, and why, in fixed words."""
+            _log.warning("message search index member drift (%s: %s)", stage, sub)
+            from . import search_timing
+            search_timing.index_event("index_stale", path, reason=stage, sub=sub, scope="member")
+
+        narrowing = narrowed is not None and _narrow_members()
 
         conn.row_factory = sqlite3.Row
         if grant_id is None or authority is None or authority.capability_version not in RELEASABLE_SEARCH_CAPABILITIES:
@@ -1667,6 +2021,7 @@ class SearchIndexService:
             with boundary.one_pass():
                 current = self._members_current(index, key, conn, boundary, authority, deep, stale,
                                                  provenance=provenance, laps=laps, only=only,
+                                                 narrowed=narrowed if narrowing else None, withheld=withheld,
                                                  interest_memo=None if interest_before is _NO_INTEREST_MEMO
                                                  else (path, opened_state, interest_before))
             if current and review_moved and refresh:
@@ -1860,16 +2215,36 @@ class SearchIndexService:
             return False
 
     def _members_current(self, index, key, conn, boundary, authority, deep, stale, provenance=None, laps=None,
-                         only: frozenset[str] | None = None, interest_memo: tuple | None = None) -> bool:
+                         only: frozenset[str] | None = None, narrowed: set | None = None, withheld=None,
+                         interest_memo: tuple | None = None) -> bool:
         """`_current`'s per-member half: every sealed member re-checked against `conn`'s snapshot.
 
         With `provenance`, the pass's store check and snapshot re-hash run once, after the last member. With `only`,
         exactly those members (each must be present), for the re-check of a written answer (BL-159). `interest_memo`
         (NR187, the daemon sweep with its switch on): (index path, its stat identity before it was opened, the canonical
         token read before the snapshot), for `_interests_current_kept`; None decides the interests in full.
+
+        NR188 (DR-31). A failure at `dependencies` or `classification_context` is said with a fixed word (`stale`'s
+        second argument): `dependencies` is `conversation_context` (only a dependency's conversation context moved:
+        a new participant or sender), `row_binding` (the member's own row: its revision moved and its stored columns
+        did not, so what the node binds onto it at load moved: its source's posture, its proof, its AI chat's row),
+        `row_revision` (any other dependency revision move, the member's own stored row included) or `missing`;
+        `classification_context` is `neighbour_inserted`, `neighbour_changed` (`_context_drift`) or `row_unavailable`.
+
+        `narrowed` (a set, given by `_current` only with the switch on): a member whose ONLY failures are at
+        `dependencies` (each moved dependency a clean revision mismatch, every one of them checked) and at
+        `classification_context` (a clean revision mismatch) is a narrow failure: it is added to the set, and the loop
+        goes on with it (its other checks must all pass) and with every other member, exactly as today. Its own
+        `context` check reads the very value its own-row dependency check has just found moved (one `boundary.check`
+        of the same row on the same snapshot); only that duplicate is part of the same failure (`_same_drift`). Every
+        other failure fails the index as before: any exception (an `entity_protected` veto, an unreadable row:
+        `member_unavailable`), `missing`, `row_unavailable`, `live_rows`, `projection`, `projection_context`, any other
+        `context` move, `fingerprint`, `lineage`, `interest`, and the provenance pass's refusal. `withheld(stage, word)`
+        reports the first narrow failure of each class once per check.
         """
         checked = {}
         interests = []
+        said = set()   # NR188: the classes whose first narrow failure this check has reported
         if laps is not None:
             laps.update(dependencies=0.0, dependency_boundary=0.0)
 
@@ -1892,14 +2267,23 @@ class SearchIndexService:
                     interests.append(member)
                     continue
                 lap = time.perf_counter()
+                why: dict = {}   # NR188: what moved, for the fixed word
                 try:
                     current = self._entity_dependencies_current(conn, boundary, member.get("entity_dependencies"), checked,
-                                                                provenance=provenance, laps=laps)
+                                                                provenance=provenance, laps=laps, why=why,
+                                                                every=narrowed is not None)
                 finally:
                     if laps is not None:
                         laps["dependencies"] = laps.get("dependencies", 0.0) + time.perf_counter() - lap
+                moved = False    # NR188: this member failed so far only as a narrow failure
                 if not current:
-                    return stale("dependencies")
+                    word = self._dependency_word(conn, member, why)
+                    if narrowed is None or word not in NARROW_DEPENDENCY_WORDS:
+                        return stale("dependencies", word)
+                    moved = True
+                    if "dependencies" not in said:
+                        said.add("dependencies")
+                        withheld("dependencies", word)
                 # Deleted, scrubbed, edited, re-flagged or superseded since the build: the index no
                 # longer describes R(g), so it goes (the owner's next rebuild restores search).
                 lap = time.perf_counter()
@@ -1908,8 +2292,18 @@ class SearchIndexService:
                 if authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH:
                     from .automatic_message_review import context_for
                     from .evidence import EvidenceIdentity
-                    if len(rows) != 1 or context_for(conn, EvidenceIdentity.parse(member["message"]), dict(rows[0]), boundary=boundary)[0] != member.get("review_context_revision"):
-                        return stale("classification_context")
+                    if len(rows) != 1:
+                        return stale("classification_context", "row_unavailable")
+                    identity = EvidenceIdentity.parse(member["message"])
+                    if context_for(conn, identity, dict(rows[0]), boundary=boundary)[0] != member.get("review_context_revision"):
+                        if narrowed is None:
+                            return stale("classification_context", _context_drift(
+                                conn, identity, dict(rows[0]), boundary, member.get("review_context_revision")))
+                        moved = True
+                        if "classification_context" not in said:
+                            said.add("classification_context")
+                            withheld("classification_context", _context_drift(
+                                conn, identity, dict(rows[0]), boundary, member.get("review_context_revision")))
                     if member.get('projection'):
                         from .knowledge_projections import current_revision
                         projection=member['projection']
@@ -1926,8 +2320,13 @@ class SearchIndexService:
                             if context_for(conn,identity,self.resolver._load(conn,identity,provenance=provenance),boundary=boundary)[0]!=context['revision']:
                                 return stale('projection_context')
                 lap = spent("review_context", lap)
-                if len(rows) != 1 or boundary.check(table=member["table"], record_id=member["record_id"],
-                        source_id=member["source_id"], dataset_id=member["dataset_id"], row=dict(rows[0])) != member.get("entity_context_revision"):
+                if len(rows) != 1:
+                    return stale("context")
+                entity_context = boundary.check(table=member["table"], record_id=member["record_id"],
+                                                source_id=member["source_id"], dataset_id=member["dataset_id"],
+                                                row=dict(rows[0]))
+                if entity_context != member.get("entity_context_revision") and not (
+                        moved and self._same_drift(member, entity_context, why, checked)):
                     return stale("context")
                 lap = spent("entity_context", lap)
                 if _member_fingerprint(rows, facts, table=member["table"]) != member["fingerprint"]:
@@ -1937,6 +2336,8 @@ class SearchIndexService:
                     return stale("lineage")
                 if deep:
                     spent("lineage", lap)
+                if moved:
+                    narrowed.add(opaque)   # NR188: withheld; every other member is still checked
             except (PolicyError, sqlite3.Error, KeyError):
                 return stale("member_unavailable")
         if provenance is not None:
@@ -1961,9 +2362,50 @@ class SearchIndexService:
             return stale("member_unavailable")
         return True
 
+    def _own_key(self, member: dict) -> str:
+        """NR188: the key `_entity_dependencies_current` gives the member's own row among its dependencies."""
+        return _key(self.resolver._identity(member["table"], member["record_id"], member["source_id"],
+                                            member["dataset_id"]))
+
+    def _dependency_word(self, conn, member: dict, why: dict) -> str:
+        """NR188, attribution: the fixed word for a member's failed dependency check (`_members_current`). Never
+        raises: what cannot be told is `row_revision`, the word that is no narrower than the others."""
+        if why.get("sub") == "missing":
+            return "missing"
+        moved = why.get("moved") or {}
+        rows = [name for name, word in moved.items() if word == "row_revision"]
+        if moved and not rows:
+            return "conversation_context"
+        try:
+            if (rows == [self._own_key(member)]
+                    and _member_fingerprint(*_live_rows(conn, member), table=member["table"]) == member.get("fingerprint")):
+                return "row_binding"
+        except Exception:  # noqa: BLE001 -- attribution only
+            pass
+        return "row_revision"
+
+    def _same_drift(self, member: dict, current_context, why: dict, checked: dict) -> bool:
+        """NR188: whether a member's own `context` check found its context moved exactly as its own-row dependency
+        check found that dependency's context moved. Both are one `boundary.check` of the member's own row on this
+        snapshot, sealed equal at the build: then it is the dependency failure read twice, not a failure of its own.
+        Anything else (no own-row dependency, sealed values that differ, a value that differs now) is not."""
+        try:
+            own = self._own_key(member)
+        except (PolicyError, KeyError):
+            return False
+        sealed = next((dependency for dependency in member.get("entity_dependencies") or ()
+                       if isinstance(dependency, dict)
+                       and (dependency.get("table"), dependency.get("record_id"), dependency.get("source_id"),
+                            dependency.get("dataset_id"))
+                       == (member["table"], member["record_id"], member["source_id"], member["dataset_id"])), None)
+        return (own in (why.get("moved") or {}) and sealed is not None
+                and sealed.get("context") == member.get("entity_context_revision")
+                and own in checked and checked[own][1] == current_context)
+
     def check_own(self, grant_id: str, authority, *, now: int, digest_point: str | None = None,
                   verified: SearchVerification | None = None, laps: dict | None = None,
-                  provenance_point: str | None = None, members: bool = True, review_guard: bool = True) -> None:
+                  provenance_point: str | None = None, members: bool = True, review_guard: bool = True,
+                  released: frozenset[str] | None = None) -> None:
         """The request path's check: this grant's file only, O(|R(g)|). Refuses; never purges others.
 
         ``members=False`` (N5, index load): the basis, key and index integrity, O(1) in the members.
@@ -1972,9 +2414,16 @@ class SearchIndexService:
         ``digest_point`` names the timing line of the review digest's gate wait (search_timing.gate_wait),
         ``provenance_point`` those of the provenance pass's two gate entries (IF-3 v1.4).
         ``verified`` is the search's own SearchVerification, shared by its stages.
+
+        NR188 (switch on). A failure of only members moved by new data refuses as not served now
+        (`search_index_stale`) and never shreds: the sweep withholds them within one sweep gap. ``released`` (the
+        send check: the records the checkpointed decision released): every one must still be a member of the file
+        checked, or the send refuses, again without shredding, since the sweep may have withheld one after the
+        checkpoint. With the switch off neither applies.
         """
         path = index_path(self.root, grant_id)
         checked_state = _file_state(path)   # BL-157: shred only the file this check read, never a newer publication
+        withheld: set = set()               # NR188: filled only with the switch on (`_current`)
         try:
             before = verified.canonical_token() if verified is not None else None  # before the snapshot below
             conn = sqlite3.connect(self.resolver.path.as_uri() + "?mode=ro", uri=True)
@@ -1983,7 +2432,8 @@ class SearchIndexService:
                 current = path.exists() and self._current(path, grant_id, authority, clock_state(conn), conn, deep=False,
                                                           digest_point=digest_point, verified=verified, before=before,
                                                           laps=laps, provenance_point=provenance_point,
-                                                          members=members, review_guard=review_guard)
+                                                          members=members, review_guard=review_guard,
+                                                          narrowed=withheld)
             finally:
                 conn.close()
         except (sqlite3.Error, PolicyError):
@@ -1991,9 +2441,22 @@ class SearchIndexService:
         if not current:
             if path.exists():
                 with with_db_write():
-                    if _file_state(path) == checked_state:
+                    if self.same_or_narrowed(path, checked_state):   # NR188: or the narrowed copy in its place
                         _shred(path)
             raise PolicyError("search_index_stale")
+        if withheld:
+            raise PolicyError("search_index_stale")   # NR188: kept for the sweep to narrow, never shredded here
+        if released is not None and _narrow_members() and not self._holds(path, checked_state, released):
+            raise PolicyError("search_index_stale")   # NR188: a released record withheld since the checkpoint
+
+    def _holds(self, path: Path, checked_state, released) -> bool:
+        """NR188: whether the file `check_own` checked (the same stat identity) still holds every released record."""
+        try:
+            index = self._open(path)
+        except PolicyError:
+            return False
+        return (_file_state(path) == checked_state
+                and set(released) <= {opaque for opaque, _sealed in index["sealed"]})
 
     def send_token(self, grant_id: str, verified: SearchVerification, ledger_path) -> dict | None:
         """N5: every store the send check's `check_own` depends on, as it stands now; None when a part is unreadable.
