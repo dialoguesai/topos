@@ -26,6 +26,7 @@ class AggregateTests(unittest.TestCase):
         script = "\n".join(line[10:] for line in job.split("        run: |\n", 1)[1].splitlines())
         base = {"PLAN_RESULT": "success", "PUBLIC_REQUIRED": "true", "PUBLIC_RESULT": "success",
                 "TARGETED_REQUIRED": "false", "TARGETED_RESULT": "skipped",
+                "PRIVACY_REQUIRED": "true", "BUILD_REQUIRED": "true",
                 "PACKAGE_REQUIRED": "true", "PACKAGE_RESULT": "success"}
         def succeeds(values):
             return subprocess.run(["bash", "-e", "-c", script], env={**os.environ, **values},
@@ -41,6 +42,10 @@ class AggregateTests(unittest.TestCase):
                     self.assertFalse(succeeds({**base, f"{name}_RESULT": bad}))
         self.assertFalse(succeeds({**base, "TARGETED_REQUIRED": "true"}))
         self.assertFalse(succeeds({**base, "TARGETED_RESULT": "failure"}))
+        for name in ("PUBLIC_REQUIRED", "TARGETED_REQUIRED", "PRIVACY_REQUIRED", "BUILD_REQUIRED"):
+            for bad in ("", "unexpected"):
+                with self.subTest(name=name, bad=bad):
+                    self.assertFalse(succeeds({**base, name: bad}))
 
     def test_publish_checks_cumulative_policy_before_uploading(self):
         workflow = (ROOT / ".github/workflows/publish.yml").read_text()
