@@ -84,6 +84,9 @@ class SelectionTests(unittest.TestCase):
                                           old_project.replace("click==8", "click==9"))])["sharing_rig"])
         self.assertTrue(classify([modified("topos/__version__.py", '__version__ = "1.5.11"\n',
                                           '__version__ = __import__("os").getcwd()\n')])["sharing_rig"])
+        lock = '[[package]]\nname = "topos-node"\nversion = "1.5.11"\n[[package]]\nname = "click"\nversion = "8.0"\n'
+        self.assertEqual(classify([modified("uv.lock", lock, lock.replace("1.5.11", "1.5.12"))])["mode"], "metadata")
+        self.assertTrue(classify([modified("uv.lock", lock, lock.replace('"8.0"', '"9.0"'))])["sharing_rig"])
         new_manifest["releases"][1]["steps"] = [{"kind": "derived_rebuild"}]
         self.assertTrue(classify([modified("topos/upgrades/manifests.json", json.dumps(old_manifest),
                                           json.dumps(new_manifest))])["sharing_rig"])

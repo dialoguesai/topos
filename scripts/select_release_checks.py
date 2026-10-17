@@ -68,6 +68,12 @@ def _drawing_only(before: str, after: str) -> bool:
 
 
 def _version_only(path: str, before: str, after: str) -> bool:
+    if path == "uv.lock":
+        # uv sync updates this package's own version during a release cut.
+        # Every dependency, source, hash and other package entry must be identical.
+        def normalize(text: str) -> str:
+            return re.sub(r'(?m)(^name = "topos-node"\nversion = )"[^"\n]+"', r'\1"VERSION"', text, count=1)
+        return before != after and normalize(before) == normalize(after)
     if path == "pyproject.toml":
         def normalize(text: str) -> str:
             # Only the version in [project], never dependency versions.

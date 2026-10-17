@@ -112,7 +112,7 @@ or Git-range errors fail the check; they never select a fast route.
 | Changed code | Automatic PR checks |
 |---|---|
 | Documentation only | Planner self-tests and secret scanning; no public suite, package, or upgrade fixture |
-| Version stamping and empty upgrade-manifest entries only | Planner plus package/install smoke |
+| Version stamping (including only this package's version in `uv.lock`) and empty upgrade-manifest entries | Planner plus package/install smoke |
 | Existing owner status CLI, or only known tray drawing functions | Mapped regression tests, privacy, package/install smoke |
 | Added/changed isolated `tests/cli/test_*.py` or `tests/topos/test_*.py` | Changed public test files and selection guards |
 | Other code, shared fixtures, CI/tooling, removed tests | All seven public shards, privacy, package/install smoke, upgrade fixtures |
