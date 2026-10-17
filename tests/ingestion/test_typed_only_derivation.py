@@ -69,6 +69,8 @@ class _NoProfiles:
 
 @pytest.fixture
 def node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sqlite3.Connection:
+    # Synthetic source enrollment must not depend on the host's free space.
+    monkeypatch.setattr("topos.engine.disk_space.free_bytes", lambda path=None: 1_000_000_000_000)
     conn = build_node(tmp_path / "typed-only.db")
     for target in ("topos.core.state.get_db_connection", "topos.api.enrichment.get_db_connection",
                    "topos.ingestion.reprocess.get_db_connection"):
@@ -238,11 +240,22 @@ def test_rows_for_job_reads_the_role_off_the_row() -> None:
 
 def test_the_sync_hands_entities_topics_and_goals_only_the_typed_rows(node, seen, monkeypatch) -> None:
     from topos.ingestion.ai_tool_sync import run_claude_code_sync
+    from topos.ingestion.ingest_helpers import run_inbox_deferred_enrichment
 
     arm(monkeypatch, node, reader=FakeReader(_batch()), post_canonical=None)
     enable(node, SOURCE)
     result = run_claude_code_sync(DATASET)
     assert result["status"] == "ok", result
+
+    # Collection queues processing durably. Exercise the worker before checking
+    # which records its real pipeline hands to each recording job.
+    queued = node.execute(
+        "SELECT payload_json FROM pipeline_jobs WHERE kind='inbox_deferred_enrichment' AND source_id=?",
+        (SOURCE,),
+    ).fetchall()
+    assert queued and seen == {"canonical": {}, "signal": {}}
+    for (payload,) in queued:
+        asyncio.run(run_inbox_deferred_enrichment(json.loads(payload)))
 
     _assert_typed_only(seen, "canonical", jobs={"entities", "topics"})
     _assert_typed_only(seen, "signal")
