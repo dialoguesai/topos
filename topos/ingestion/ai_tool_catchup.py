@@ -17,6 +17,38 @@ KIND = "ai_tool_enrichment_catchup"
 BATCH_SIZE = 256
 
 
+def project_stored_outputs(conn: Any, source_id: str, records: list[dict], jobs: list[str]) -> None:
+    """Complete signal projections from persisted extraction, without another model call.
+
+    The canonical writer stores typed entity/topic rows; their signal-lane
+    counterpart also writes facts. Reuse those exact outputs so recovery
+    fills both surfaces rather than running NER and topic extraction twice.
+    """
+    from ..enrichment.authored_only import rows_for_job
+    from ..enrichment.job_writer import write_signal_records
+    from ..storage.adapters.factory import AdapterFactory
+
+    adapters = None
+    for job, table in (("entities", "message_entities"), ("topics", "message_topics")):
+        if job not in jobs:
+            continue
+        ids = [str(r.get("message_id") or r.get("record_id"))
+               for r in rows_for_job(job, records, source_id=source_id)]
+        if not ids:
+            continue
+        rows = conn.execute(
+            f"SELECT d.payload_json FROM {table} d JOIN ai_chat_messages m "
+            "ON m.message_id=COALESCE(d.message_id,d.record_id) AND m.source_id=d.source_id "
+            "WHERE d.source_id=? AND COALESCE(m.share_excluded,0)=0 AND m.message_id IN ("
+            + ",".join("?" for _ in ids) + ")", [source_id, *ids]
+        ).fetchall()
+        outputs = [json.loads(r[0]) for r in rows]
+        if outputs:
+            adapters = adapters or AdapterFactory.create("local_database", conn=conn)
+            write_signal_records(job, outputs, adapters=adapters, conn=conn,
+                                 provenance={"job_id": job, "source_id": source_id})
+
+
 def enqueue_catchup(conn: Any, source_id: str | None = None, retry_failed: bool = False) -> list[str]:
     from .ai_tool_sync import AI_TOOL_SOURCE_IDS, source_state
     from ..enrichment.models.mvp_defaults import job_spec_version
@@ -143,7 +175,11 @@ async def _execute_catchup_inner(payload: dict) -> dict:
         from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
         from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
         canonical_jobs = set(effective_canonical_enrichment_jobs(definition))
-        signal_jobs = [j for j in resolved_signal_derivation_jobs(definition) if j not in canonical_jobs]
+        resolved_jobs = resolved_signal_derivation_jobs(definition)
+        await asyncio.to_thread(lambda: project_stored_outputs(
+            get_db_connection(), sid, batch, [j for j in resolved_jobs if j in canonical_jobs]
+        ))
+        signal_jobs = [j for j in resolved_jobs if j not in canonical_jobs]
         result = await run_post_canonical_pipeline(
             source_def=definition, canonical_records=batch, job_names=signal_jobs,
             sync_batch_id=f"catchup:{sid}:{hashlib.sha256(''.join(sorted(processed)).encode()).hexdigest()[:16]}",

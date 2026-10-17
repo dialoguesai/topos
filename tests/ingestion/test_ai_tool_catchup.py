@@ -122,3 +122,24 @@ async def test_normal_coding_ingestion_also_coalesces_graph_refresh(conn, monkey
                 'canonical_records': [{'message_id': 'old-human', 'source_id': 'codex_sessions'}]})
     assert result['status'] == 'ok'
     assert not is_derivation_in_flight()
+
+
+@pytest.mark.parametrize("job,table,fields", [
+    ("topics", "message_topics", {"topic": "Synthetic release work"}),
+    ("entities", "message_entities", {"entity_text": "Synthetic app", "entity_type": "PRODUCT"}),
+])
+def test_stored_outputs_project_idempotently_without_private_rows(conn, job, table, fields):
+    from topos.ingestion.ai_tool_catchup import project_stored_outputs
+    from topos.enrichment.derived_tables import DerivedTablesManager
+    manager = DerivedTablesManager(conn)
+    rows = [{'message_id': rid, 'record_id': rid, 'source_id': 'codex_sessions',
+             **fields, 'model': 'synthetic', 'provider': 'test'}
+             for rid in ['old-human', 'private']]
+    manager.write_enrichment_batch(rows, table)
+    records = [{'message_id': rid, 'source_id': 'codex_sessions', 'sender_type': 'human',
+                'writer_class': 'owner_app', '_table': 'ai_chat_messages'} for rid in ['old-human', 'private']]
+    project_stored_outputs(conn, 'codex_sessions', records, [job])
+    facts = conn.execute("SELECT record_id FROM signal_facts WHERE source_id='codex_sessions'").fetchall()
+    assert facts == [('old-human',)]
+    project_stored_outputs(conn, 'codex_sessions', records, [job])
+    assert conn.execute("SELECT count(*) FROM signal_facts WHERE source_id='codex_sessions'").fetchone()[0] == 1

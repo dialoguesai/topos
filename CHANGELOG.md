@@ -9,7 +9,7 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
-- **Coding-session recovery and graph reads** `[E:entities] [O]`: enabled coding sources recover committed messages whose enrichment did not finish, in bounded durable batches independent of transcript cursors. Completion markers follow successful output persistence; unavailable models and incomplete embedding batches remain errors. Source status distinguishes eligible, processed and pending records. Owner graph queries read the entity spine with endpoint protection instead of empty canonical-adapter pages. Capture applications are typed as products only with source and software-context evidence; entity identities and correction provenance are retained.
+- **Coding-session recovery and graph reads** `[E:entities] [O]`: enabled coding sources recover committed messages whose enrichment did not finish, in bounded durable batches independent of transcript cursors. Completion markers follow successful output persistence; unavailable models and incomplete embedding batches remain errors. Source status distinguishes eligible, processed and pending records. Recovery reuses stored entity/topic outputs for retry-safe signal facts, and partial goal-model failures remain unfinished. Owner graph queries read the entity spine with endpoint protection instead of empty canonical-adapter pages. Capture applications are typed as products only with source and software-context evidence; entity identities and correction provenance are retained.
 
 ## [1.5.12] — 2026-10-17
 

@@ -95,3 +95,24 @@ async def test_facts_job_defers_when_hosted_wallet_empty(monkeypatch: pytest.Mon
         [{"message_id": "m1", "content": "hello", "source_id": "github_activity"}]
     )
     assert out == [{"_deferred": True, "error": "insufficient_credits"}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed_status", ["deferred", "failed"])
+async def test_goal_batch_never_marks_partial_model_success_complete(monkeypatch, failed_status):
+    async def fake_run(*_args, **kwargs):
+        if kwargs["record_ids"] == ["a1"]:
+            return SimpleNamespace(status="completed", output={"goals": [{"text": "Finish the release"}]})
+        return SimpleNamespace(status=failed_status, error="unavailable", output={})
+
+    monkeypatch.setattr("topos.enrichment.jobs.canonical.goal_extraction_job.run_engine_task", fake_run)
+    monkeypatch.setattr("topos.enrichment.jobs.canonical.goal_extraction_job.get_signal_extraction_model_request",
+                        lambda: ("platform", "test-model"))
+    records = [{"message_id": rid, "_table": "ai_chat_messages", "sender_type": "human",
+                "content": "Finish the release", "source_id": "codex_sessions"} for rid in ("a1", "a2")]
+    job = GoalExtractionJob(engine=SimpleNamespace())
+    if failed_status == "failed":
+        with pytest.raises(RuntimeError, match="did not complete"):
+            await job.enrich(records)
+    else:
+        assert await job.enrich(records) == [{"_deferred": True, "error": "unavailable"}]

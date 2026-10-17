@@ -34,6 +34,16 @@ _SIGNAL_ONLY_JOBS = frozenset({
 })
 
 
+def _extraction_fact_id(job: str, table: str, record: Dict[str, Any]) -> str:
+    """Keep the signal projection stable when an extraction is retried."""
+    from ..storage.derived_row_identity import derived_row_id_for
+
+    row_id = derived_row_id_for(table, record)
+    if row_id is None:
+        return str(uuid.uuid4())
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"topos:signal:{job}:{record.get('source_id')}:{row_id}"))
+
+
 def _merge_provenance(record: Dict[str, Any], provenance: Dict[str, Any]) -> Dict[str, Any]:
     merged = {**record}
     for key in ("provider", "model", "job_id", "sync_batch_id", "batch_id"):
@@ -390,6 +400,7 @@ def _write_signal_records_unlocked(
             adapters.signal.put_fact(
                 _merge_provenance(
                     {
+                        "fact_id": _extraction_fact_id("entities", "message_entities", rec),
                         "dimension": dimension_for_entity_type(
                             entity_type, fallback=dimension_for_record(rec)
                         ),
@@ -440,6 +451,7 @@ def _write_signal_records_unlocked(
             adapters.signal.put_fact(
                 _merge_provenance(
                     {
+                        "fact_id": _extraction_fact_id("topics", "message_topics", rec),
                         "dimension": "memory",
                         "source_id": rec.get("source_id"),
                         "record_id": rec.get("message_id"),
@@ -458,6 +470,7 @@ def _write_signal_records_unlocked(
             adapters.signal.put_fact(
                 _merge_provenance(
                     {
+                        "fact_id": _extraction_fact_id("goal_extraction", "user_goals", rec),
                         "dimension": "work",
                         "source_id": rec.get("source_id"),
                         "record_id": rec.get("message_id"),
