@@ -38,22 +38,40 @@ def _roster(node, contact_id, role="participant"):
 
 # --- BL-155 -------------------------------------------------------------------------------------------------------
 
-def test_a_participant_swapped_in_the_same_row_drops(tmp_path, caplog):
+#: NR188: with `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS` off (main's behaviour) such a change drops the index; with it
+#: on (the default since the owner's ruling of 16 Oct) every member of the conversation is withheld instead and the
+#: index stays, holding none of them. Either way the change is seen: a revision that missed it would keep all six.
+NARROW = "TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS"
+
+
+def _seen(node, caplog, narrowing):
+    if narrowing:
+        assert _sweep(node, caplog) == [] and _path(node).exists()
+        assert node.index._open(_path(node))["count"] == 0          # all six withheld, the index kept
+    else:
+        assert _sweep(node, caplog) == STALE_DEPENDENCIES
+        assert not _path(node).exists()
+
+
+@pytest.mark.parametrize("narrowing", [False, True], ids=["switch_off", "switch_on"])
+def test_a_participant_swapped_in_the_same_row_drops(tmp_path, caplog, monkeypatch, narrowing):
     """The roster keeps its size; only `contact_id` changes. A mutant that leaves `contact_id` out of the roster digest
     is caught by the exact-set pin only; this pins the behaviour itself."""
+    monkeypatch.setenv(NARROW, "true" if narrowing else "false")
     node = _node(tmp_path)
     _roster(node, "contact-ordinary")
     assert node.rebuild()[_grant(node)] == "ready"
     assert _sweep(node, caplog) == [] and _path(node).exists()
     with sqlite3.connect(node.corpus.path) as conn:
         conn.execute("UPDATE conversation_participants SET contact_id='contact-swapped' WHERE contact_id='contact-ordinary'")
-    assert _sweep(node, caplog) == STALE_DEPENDENCIES
-    assert not _path(node).exists()
+    _seen(node, caplog, narrowing)
 
 
-def test_a_changed_column_on_the_parent_row_drops(tmp_path, caplog):
+@pytest.mark.parametrize("narrowing", [False, True], ids=["switch_off", "switch_on"])
+def test_a_changed_column_on_the_parent_row_drops(tmp_path, caplog, monkeypatch, narrowing):
     """`context_tag` stays in the revision (BL155 §6): a tag written on the conversation row drops the index, while the
     bump that follows it does not."""
+    monkeypatch.setenv(NARROW, "true" if narrowing else "false")
     node = _node(tmp_path)
     with sqlite3.connect(node.corpus.path) as conn:
         conn.execute("ALTER TABLE conversations ADD COLUMN context_tag TEXT")
@@ -62,8 +80,7 @@ def test_a_changed_column_on_the_parent_row_drops(tmp_path, caplog):
     assert _sweep(node, caplog) == [] and _path(node).exists()
     with sqlite3.connect(node.corpus.path) as conn:
         conn.execute("UPDATE conversations SET context_tag='work', context_tag_source='owner'")
-    assert _sweep(node, caplog) == STALE_DEPENDENCIES
-    assert not _path(node).exists()
+    _seen(node, caplog, narrowing)
 
 
 def _revision(corpus):

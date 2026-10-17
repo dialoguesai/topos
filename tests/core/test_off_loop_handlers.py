@@ -46,6 +46,9 @@ PAYLOADS = {
     "get_upgrade_status": {},
     "get_user_identity": {"dataset_id": "an-invented-dataset"},
     "put_user_identity": {"dataset_id": "an-invented-dataset", "display_name": "An Invented Name"},
+    # HT lane: the owner's home-chat timing rows. The first write creates the table, so the slow connection is reached.
+    "record_home_chat_turn_timings": {"user_id": "an-invented-account", "records": []},
+    "get_home_chat_turn_timings_summary": {"user_id": "an-invented-account", "days": 7},
 }
 
 

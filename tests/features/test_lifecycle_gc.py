@@ -171,7 +171,7 @@ class TestAuditRetention:
         conn.execute("INSERT INTO uma_access_requests (created_at) VALUES (datetime('now', '-5 days'))")
         conn.execute("INSERT INTO mcp_request_log (requested_at) VALUES (datetime('now', '-120 days'))")
         removed = apply_audit_retention(conn, days=90)
-        assert removed == {"uma_access_requests": 1, "mcp_request_log": 1}
+        assert removed == {"uma_access_requests": 1, "mcp_request_log": 1, "home_chat_turn_timings": 0}
         assert conn.execute("SELECT COUNT(*) FROM uma_access_requests").fetchone()[0] == 1
 
     def test_zero_days_disables(self, conn):

@@ -126,3 +126,53 @@ async def handle_home_chat_memory(message: Dict[str, Any]) -> Optional[Dict[str,
         return {"id": message.get("id"), "status": "ok", "payload": result}
     except ValueError as exc:
         return {"id": message.get("id"), "status": "error", "error": str(exc), "error_code": str(exc)}
+
+
+# --- HT lane: one content-free timing row per owner home-chat turn (topos/home_chat/turn_timings.py) -------------
+# Both types run off the event loop: the write takes the write gate, and the gate is exactly what an index rebuild
+# holds for a minute at a time. Both require the caller's id, so the relay's owner rule (rule (b) in __init__.py)
+# always has a name to compare on a bound node, the same protection as the session types above.
+
+
+def _timings_caller_refusal(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    pl = message.get("payload") or {}
+    if isinstance(pl, dict) and str(pl.get("user_id") or "").strip():
+        return None
+    return {"id": message.get("id"), "status": "error", "error": "user_id required", "error_code": "USER_ID_REQUIRED"}
+
+
+@handles("record_home_chat_turn_timings", off_loop=True)
+async def handle_record_home_chat_turn_timings(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    from ...__version__ import __version__
+    from ...home_chat import turn_timings
+
+    refusal = _timings_caller_refusal(message)
+    if refusal:
+        return refusal
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": message.get("id"), "status": "error", "error": "Database not available"}
+    try:
+        result = turn_timings.record_batch(conn, message["payload"].get("records"), node_version=__version__)
+    except ValueError as exc:
+        # The batch's shape only; a record's values are never logged or echoed.
+        return {"id": message.get("id"), "status": "error", "error": str(exc), "error_code": str(exc)}
+    if result["refused"]:
+        logger.warning("home chat timings refused %d record(s): fields=%s", result["refused"],
+                       ",".join(result["refused_fields"]))
+    return {"id": message.get("id"), "status": "ok", "payload": result}
+
+
+@handles("get_home_chat_turn_timings_summary", off_loop=True)
+async def handle_get_home_chat_turn_timings_summary(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    from ...home_chat import turn_timings
+
+    refusal = _timings_caller_refusal(message)
+    if refusal:
+        return refusal
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": message.get("id"), "status": "error", "error": "Database not available"}
+    days = message["payload"].get("days")
+    days = days if isinstance(days, int) and not isinstance(days, bool) else 30
+    return {"id": message.get("id"), "status": "ok", "payload": turn_timings.summarize(conn, days=days)}
