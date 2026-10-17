@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- [O] Select node CI and sharing-release checks automatically from changed code. Documentation, release stamping, and explicitly mapped owner status/drawing changes use focused checks; shared or unmapped code retains full checks. Run package/privacy work alongside public shards, and require matching-tree Rig D evidence before publishing sharing-impact releases.
+
 ### Changed
 - **Release validation and public CI balance.** `[O]` The full sharing rig is required for sharing-impact releases and run weekly on current main; core-only releases use the parallel PR CI suite and tag-driven smoke checks. The local fallback no longer runs the rig twice, and the slowest public CI shard is split across two isolated runner processes. No node data or protocol changes.
 

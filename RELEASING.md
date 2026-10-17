@@ -70,27 +70,67 @@ git add -A && git commit -m "Release X.Y.Z: <why>."
 git push -u origin HEAD
 ```
 
-Require every PR CI check to pass on the candidate commit. CI runs the public
-suite in seven parallel, separate processes, followed by privacy tests, build,
-and fresh-install smoke. Run `just gate` only when CI is unavailable or a local
-reproduction is needed; running it after green CI repeats the same long suite.
+Require every selected PR CI check to pass on the candidate commit. The
+`Select node checks` job computes a plan from the complete PR diff and explains
+its choices in the Actions summary. `test-and-package` always reports and fails
+if selection failed or any required job failed, was cancelled, or was skipped.
+The plan is also saved as the `node-check-plan` Actions artifact.
+Branch rules should require the stable `test-and-package` aggregate, rather
+than individual shard names that are intentionally skipped on focused plans.
 
-If the change has sharing impact (rules below), also run `just eval-release`
-once on isolated Rig D with the five `A2A_RIG_*` paths. When CI is unavailable,
-`just gate-sharing` runs the core local gate and Rig D once each. Do not run
-`just eval-release` and then `just gate-sharing`.
+Before tagging, use `just release-plan` to preview the cumulative release plan
+and `just release-checks` to apply its sharing-rig requirement. Both compare
+against the previous reachable stable **node** tag, not the last commit or
+the tray app's `app-v*` tag. Version stamping cannot hide earlier runtime changes.
+Run `just gate` only when CI is unavailable or a local reproduction is needed;
+running it after green CI repeats the same long suite.
 
-After the required checks pass, merge the reviewed candidate to `main`, verify
-the merged tree matches the tested candidate, then tag that merged commit:
+For sharing-impact releases set the five `A2A_RIG_*` paths. `just release-checks`
+runs the isolated rig once, saves `node-release-gate.json` next to its verdict,
+and records `release/sharing-rig` on the candidate commit. After merging, reuse
+that evidence on the identical merged tree; a different tree requires a new run.
+For other releases this command automatically reports that no rig is needed.
+
+After the required checks pass, merge the candidate to `main`, verify its tree
+matches the tested candidate, then record the applicable gate and tag it:
 
 ```bash
 git switch main && git pull --ff-only origin main
+# Sharing-impact release: reuse the candidate's identical-tree evidence.
+just release-checks --evidence /absolute/rig-output/node-release-gate.json
+# Other releases: just release-checks (automatically skips Rig D).
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```
 
-### Sharing-impact decision
+### Automatic selection
 
-Record the decision and the passing CI run in the release PR. Run the full
+`scripts/select_release_checks.py` owns the conservative allowlist. A new or
+unmapped runtime file, shared data/auth/query/lifecycle code, dependency change,
+or runtime removal selects the full suite and the sharing rig. Classification
+or Git-range errors fail the check; they never select a fast route.
+
+| Changed code | Automatic PR checks |
+|---|---|
+| Documentation only | Planner self-tests and secret scanning; no public suite, package, or upgrade fixture |
+| Version stamping (including only this package's version in `uv.lock`) and empty upgrade-manifest entries | Planner plus package/install smoke |
+| Existing owner status CLI, or only known tray drawing functions | Mapped regression tests, privacy, package/install smoke |
+| Added/changed isolated `tests/cli/test_*.py` or `tests/topos/test_*.py` | Changed public test files and selection guards |
+| Other code, shared fixtures, CI/tooling, removed tests | All seven public shards, privacy, package/install smoke, upgrade fixtures |
+
+Source allowlists are deliberately narrow. Changing tray shutdown/update/profile
+handling selects full checks even when the same file also changes a drawing.
+An additive field inside `topos/api/shell.py` is not automatically considered a
+display-only change: that module also owns mutating update endpoints. Broaden
+the mapping only after reviewing the module's callers and regression coverage.
+
+Targeted runs collect the normal suite before deselecting, retaining the same
+imports and session-level leak/owner-database guards. Full CI runs weekly and
+on manual dispatch regardless of changed paths. The nightly/tag upgrade matrix
+also stays full; only PR fixture work follows the plan.
+
+### Sharing-impact requirement
+
+Record the generated plan and passing CI run in the release PR. Run the full
 six-pair Rig D gate for a change that can affect sharing, consent, permissions,
 authentication, recipient-facing reads or search, disclosure/refusal behavior
 or timing, the sharing ledger, shared-data storage or migrations, the
@@ -98,10 +138,10 @@ control-plane protocol, or node lifecycle around those paths. Run it when the
 impact is uncertain. A failed weekly Rig D run also blocks a release until
 investigated.
 
-For a change confined to presentation, packaging, docs, or an additive
-owner-only status field with no effect on those paths, passing targeted tests,
-all PR CI checks, and the tag-driven publish checks are sufficient. The
-release PR must say why Rig D was not required. Run the full rig on current
+For a change the automatic allowlist confines to presentation, documentation,
+owner status, or release stamping, passing selected CI checks and tag-driven
+publish checks are sufficient. Unmapped packaging/dependency/runtime changes
+remain full checks. Run the full rig on current
 `main` at least weekly as a separate backstop, and record its verdict.
 
 The public tests are already parallelized across seven isolated CI runners.
@@ -112,9 +152,14 @@ timing battery also relies on paced requests; threads or processes sharing
 that rig would alter the latency measurement. Parallelize independent work
 on separate machines only after validating the resulting verdict.
 
-`publish.yml` then verifies tag==pyproject, release artifacts
+`publish.yml` independently recomputes the entire release range and refuses a
+sharing-impact release without a passing `release/sharing-rig` status for the
+exact tagged tree. It then verifies tag==pyproject, release artifacts
 (manifest + changelog + checksums), fresh-install + upgrade smoke, and
 Trusted Publishing to PyPI.
+
+This policy applies to `dialoguesai/topos` (`topos-node`). The separate tray
+repository's signed/notarized app release workflow is unaffected.
 
 ## Post-release
 
