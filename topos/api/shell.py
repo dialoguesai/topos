@@ -97,6 +97,7 @@ def _client_is_local(request: Request) -> bool:
 @router.get("/status")
 async def shell_status() -> dict:
     from ..cli.service_cmd import current_supervisor
+    from ..features.entities.rebuild_subprocess import graph_rebuild_running
     from ..owner_key import owner_key_persisted
     from ..sanitization.prewarm import prewarm_status
 
@@ -123,6 +124,10 @@ async def shell_status() -> dict:
         # field (its CodingKeys are explicit), which needs its own signed build —
         # shipping the data first means that release is a display change only.
         "models": prewarm_status(),
+        # True only while the entity graph actually rebuilds, including
+        # automatic refreshes, manual requests, and upgrade rebuilds. A dirty
+        # or debouncing graph is not yet rebuilding.
+        "graph_rebuild": {"running": graph_rebuild_running()},
         # Additive, for `topos-node status` / `doctor` over the owner socket and the
         # plugin's SessionStart hook (CONTRACTS §4): the control-plane link as a word,
         # who supervises this process, whether the owner key is on disk (DIGEST J6),

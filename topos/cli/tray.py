@@ -2,10 +2,11 @@
 
 Port of the original open-source topos-cli ``menu_bar_app`` (pystray + PIL):
 the Topos glyph, with a badge composited in the corner *only when there is
-something to say*. A running node shows the bare mark. ``!`` means it needs
+something to say*. A healthy idle node shows the bare mark. ``!`` means it needs
 the user, ``x`` means it is failing (after repeated misses — a single late
 probe is a busy node, not a dead one), ``v`` means a newer topos-node is on
-PyPI, and a turning arc means it is starting. The menu offers API docs, the
+PyPI, a turning arc means it is starting, and four cumulative bars mean its
+graph is rebuilding. The menu offers API docs, the
 hosted Topos app, a one-click update when one is available, and Quit.
 
 There is deliberately no "healthy" badge. This used to keep a coloured dot lit
@@ -56,6 +57,8 @@ MARK_INK_FRACTION = 17.5 / 22.0
 BADGE_FRACTION = 8.4 / 22.0
 CLEARANCE_FRACTION = 1.2 / 22.0
 MARGIN_FRACTION = 0.5 / 22.0
+REINDEX_FRAME_COUNT = 24
+REINDEX_FRAME_SECONDS = 0.09
 
 
 def _mark_box(size: float) -> tuple[float, float, float, float]:
@@ -184,13 +187,11 @@ def _glyph_filename() -> str:
 def create_status_image(status: str, glyph: str | None = None, phase: float | None = None):
     """Topos glyph, with a badge composited bottom-right when one is warranted.
 
-    ``healthy`` draws nothing at all — the mark being in the tray is the claim
-    that the node is up. ``down`` gets a cross, ``update`` a download arrow, and
-    anything else (``starting``, and any status this does not recognise) gets an
-    exclamation point: an unknown state is not a claim that all is well. With
-    ``phase`` (0..1) the badge becomes a rotating three-quarter arc — the
-    "starting" spinner. A static badge through a multi-minute first run reads as
-    a hang; motion reads as "wait, it's working".
+    ``healthy`` draws nothing. ``down`` gets a cross, ``update`` a download
+    arrow, ``starting`` a turning arc when a phase is supplied, and
+    ``reindexing`` four cumulative bars. Unknown states get an exclamation
+    point. The reindexing bars say the node is still up, though graph work may
+    make responses slower.
 
     Every badge is monochrome, drawn in whichever of black/white contrasts with
     the active glyph. Meaning is carried by the symbol, never by a hue, so the
@@ -213,6 +214,8 @@ def create_status_image(status: str, glyph: str | None = None, phase: float | No
     dc = ImageDraw.Draw(canvas)
     if status == "update":
         _draw_download_badge(dc, ink, size)
+    elif status == "reindexing":
+        _draw_reindex_badge(dc, ink, size, phase or 0.0)
     elif phase is not None:
         _draw_spinner_badge(dc, ink, size, phase)
     elif status == "healthy":
@@ -308,6 +311,32 @@ def _draw_download_badge(dc, ink, size: float) -> None:
     half = 1.7 * u
     dc.polygon([(cx - half, cy), (cx + half, cy), (cx, cy + 1.7 * u)], fill=ink)
 
+
+def _draw_reindex_badge(dc, ink, size: float, phase: float) -> None:
+    """Four bars accumulating over a 2.16s loop in the existing corner gap."""
+    u = _pt(size)
+    left, _top, right, _bottom = _badge_ring(size)
+    cx = (left + right) / 2.0
+    scale = size / ICON_SIZE
+    row_height = 1.05 * scale
+    row_gap = 0.95 * scale
+    first_y = 21.0 * scale
+    frame = int((phase % 1.0) * REINDEX_FRAME_COUNT)
+    stage, tick = divmod(frame, REINDEX_FRAME_COUNT // 4)
+    channel = ink[0]
+    for row in range(4):
+        strength = 1.0 if row < stage else (min(1.0, (tick + 1) / 2.0) if row == stage else 0.0)
+        alpha = round(60 + 195 * strength)
+        width = (4.65 + 0.85 * strength) * u
+        x_shift = (row - 1.5) * 0.31 * u
+        x0 = cx + x_shift - width / 2.0
+        y0 = first_y + row * (row_height + row_gap)
+        dc.rounded_rectangle(
+            (x0, y0, x0 + width, y0 + row_height),
+            radius=row_height / 2.0,
+            fill=(channel, channel, channel, alpha),
+        )
+
 def _draw_spinner_badge(dc, ink, size: float, phase: float) -> None:
     """Starting, installing, restarting — said by moving, not by colour.
 
@@ -353,6 +382,7 @@ class ToposTray:
         self.attached = attached
         self._glyph = _glyph_filename()
         self.status = "starting"
+        self.graph_rebuild_running = False
         self.update = {"available": False, "latest": None, "applying": False, "last_result": None}
         self._icon = None
         # From /v1/shell/status: lets Quit stop a node this process did not
@@ -392,6 +422,8 @@ class ToposTray:
                 consecutive_failures=consecutive_failures,
                 current_status=self.status,
             )
+            if healthy and self.graph_rebuild_running:
+                next_status = "reindexing"
             self._set_status(next_status)
             time.sleep(HEALTH_POLL_SECONDS)
 
@@ -401,10 +433,17 @@ class ToposTray:
         try:
             payload = httpx.get(self.status_url, timeout=3.0).json()
         except Exception:
+            # The last successful response may describe a rebuild that has
+            # already finished. Do not leave its moving badge stuck on screen.
+            if self.graph_rebuild_running:
+                self.graph_rebuild_running = False
+                self._refresh()
             return
         update = payload.get("update") or {}
-        changed = update != self.update
+        rebuilding = (payload.get("graph_rebuild") or {}).get("running") is True
+        changed = update != self.update or rebuilding != self.graph_rebuild_running
         self.update = update
+        self.graph_rebuild_running = rebuilding
         if isinstance(payload.get("pid"), int):
             self.node_pid = payload["pid"]
         if payload.get("version"):
@@ -449,16 +488,25 @@ class ToposTray:
             pass
 
     def _animate_while_starting(self) -> None:
-        """Spin the badge while the node is starting; idle otherwise."""
+        """Animate the starting arc or cumulative graph-rebuild bars."""
         phase = 0.0
+        previous = None
         while self._icon is not None and self._icon.visible:
-            if self.status == "starting":
-                phase = (phase + 1.0 / 14.0) % 1.0
+            status = self.status
+            if status != previous:
+                phase = 0.0
+                previous = status
+            if status in ("starting", "reindexing"):
                 try:
-                    self._icon.icon = create_status_image("starting", glyph=self._glyph, phase=phase)
+                    self._icon.icon = create_status_image(status, glyph=self._glyph, phase=phase)
                 except Exception:  # noqa: BLE001 — a still badge beats a dead tray
                     pass
-                time.sleep(1.0 / 12.0)
+                if status == "starting":
+                    phase = (phase + 1.0 / 14.0) % 1.0
+                    time.sleep(1.0 / 12.0)
+                else:
+                    phase = (phase + 1.0 / REINDEX_FRAME_COUNT) % 1.0
+                    time.sleep(REINDEX_FRAME_SECONDS)
             else:
                 time.sleep(0.5)
 
@@ -519,6 +567,7 @@ class ToposTray:
         labels = {
             "starting": "starting…",
             "healthy": "running",
+            "reindexing": "rebuilding graph (may be slower)",
             "down": "not responding",
         }
         items = [
@@ -560,6 +609,7 @@ class ToposTray:
         labels = {
             "starting": "starting…",
             "healthy": "running",
+            "reindexing": "rebuilding graph (may be slower)",
             "down": "not responding",
         }
         items = [

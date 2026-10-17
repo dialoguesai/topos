@@ -106,7 +106,7 @@ class TestStatusImage:
             "menu-bar extras measure 18-19pt and this shipped at 13"
         )
 
-    @pytest.mark.parametrize("status", ["starting", "down", "update"])
+    @pytest.mark.parametrize("status", ["starting", "down", "update", "reindexing"])
     def test_no_badge_touches_the_canvas_edge(self, status):
         """A cleared circle that runs off the edge is squared off by it, and the
         straight edge that leaves reads as a notch bitten out of the corner."""
@@ -117,7 +117,8 @@ class TestStatusImage:
 
     @pytest.mark.parametrize(
         "status,phase",
-        [("starting", None), ("down", None), ("update", None), ("starting", 0.25)],
+        [("starting", None), ("down", None), ("update", None), ("starting", 0.25),
+         ("reindexing", 0.75)],
     )
     def test_the_badge_is_a_hole_not_a_disc(self, status, phase):
         """The gap is transparency, not a colour — which is what makes the badge
@@ -149,18 +150,18 @@ class TestStatusImage:
         image = tray.create_status_image("healthy", glyph=glyph)
         assert list(image.getdata()) == list(self._bare_glyph(glyph).getdata())
 
-    @pytest.mark.parametrize("status", ["starting", "down", "update"])
+    @pytest.mark.parametrize("status", ["starting", "down", "update", "reindexing"])
     @pytest.mark.parametrize("glyph", GLYPHS)
     def test_every_other_status_draws_something(self, status, glyph):
         image = tray.create_status_image(status, glyph=glyph)
         assert list(image.getdata()) != list(self._bare_glyph(glyph).getdata())
 
-    def test_the_states_are_four_different_icons(self):
+    def test_the_states_are_different_icons(self):
         drawn = {
             status: tuple(tray.create_status_image(status, glyph="topos_white.png").getdata())
-            for status in ("healthy", "starting", "down", "update")
+            for status in ("healthy", "starting", "down", "update", "reindexing")
         }
-        assert len(set(drawn.values())) == 4, "two states render the same icon"
+        assert len(set(drawn.values())) == 5, "two states render the same icon"
 
     @pytest.mark.parametrize(
         "status,phase",
@@ -170,6 +171,7 @@ class TestStatusImage:
             ("down", None),
             ("update", None),
             ("starting", 0.3),
+            ("reindexing", 0.8),
         ],
     )
     @pytest.mark.parametrize("glyph", GLYPHS)
@@ -374,6 +376,36 @@ class TestStartingSpinner:
         spinning = tray.create_status_image("starting", glyph="topos_white.png", phase=0.0)
         still = tray.create_status_image("starting", glyph="topos_white.png")
         assert list(spinning.getdata()) != list(still.getdata())
+
+
+class TestReindexingBadge:
+    def test_rows_accumulate_then_reset(self):
+        from PIL import Image, ImageDraw
+
+        size = tray.ICON_SIZE * tray.SUPERSAMPLE
+        def row_alpha(phase):
+            canvas = Image.new("RGBA", (size, size))
+            tray._draw_reindex_badge(ImageDraw.Draw(canvas), (255, 255, 255, 255), size, phase)
+            x = round(size * 25 / tray.ICON_SIZE)
+            return [canvas.getpixel((x, round(size * (21 + 2 * row) / tray.ICON_SIZE)))[3]
+                    for row in range(4)]
+
+        one = row_alpha(0.10)
+        two = row_alpha(0.35)
+        four = row_alpha(0.95)
+        reset = row_alpha(1.10)
+        assert one[0] > one[1]
+        assert two[0] == one[0] and two[1] > one[1]
+        assert all(value == four[0] for value in four)
+        assert reset == one
+
+    def test_menu_names_active_rebuild(self):
+        t = tray.ToposTray(
+            host="127.0.0.1", port=DEFAULT_NODE_PORT, version="1.5.10",
+            package_name="topos-node", on_quit=lambda: None,
+        )
+        t.status = "reindexing"
+        assert "rebuilding graph (may be slower)" in t._menu_labels()[0]
 
 
 class TestFailedUpdateIsVisible:
