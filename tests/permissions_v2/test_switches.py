@@ -143,7 +143,15 @@ V183 = {**V187, P + "OWNER_LANE": False, P + "OWNER_LANE_SLOTS": 4, P + "OWNER_L
 #: Lane NR188 (16 Oct 2026, DR-31): a member moved only by new data is withheld and the rest of the share index keeps
 #: serving; on bound and unbound alike (owner ruling, 16 Oct, after the independent review). 56 + 1 = 57.
 V188 = {**V183, P + "INDEX_NARROW_MEMBERS": True}
-TABLE = {**V166, **V188}
+#: PR #136 (16 Oct 2026, the 1.5.10 answers follow-up), one layer on the final one, every switch off bound and
+#: unbound alike: Fix A, a released record whose own shown text carries an Off-limits term is withheld from the
+#: writer (57 + 1); G2, the tense guard drops a sentence that states as done what the cited items give only as an
+#: intention (+ 1); G1, a question about a domain the grant denies, which no released item carries, is refused
+#: before the model (+ 1); the lead connective trim, when the writer's lead sentence was dropped, takes one closed
+#: opening connective off the first delivered sentence (+ 1). 57 + 4 = 61.
+V136 = {**V188, P + "ANSWER_PROTECTED_ITEM_FILTER": False, P + "ANSWER_TENSE_GUARD": False,
+        P + "ANSWER_DENIED_DOMAIN_REFUSAL": False, P + "ANSWER_LEAD_CONNECTIVE_TRIM": False}
+TABLE = {**V166, **V136}
 
 
 @pytest.fixture(autouse=True)
@@ -281,8 +289,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 57
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 56
+    assert len(switches.SWITCHES) == len(TABLE) == 61
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 60
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -434,6 +442,61 @@ def test_the_gdl_name_in_one_item_is_off_bound_or_not_and_on_is_one_environment_
     name = P + "ANSWER_NAME_ONE_ITEM"
     item = switches.lookup(name)
     assert item.unbound == item.bound == VGDL[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_fix_a_protected_item_filter_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """Fix A: off with nothing set (every released record reaches the writer, 1.5.9's prompt), read without an
+    `is_bound()` stat; on is one environment line."""
+    state(bound)
+    name = P + "ANSWER_PROTECTED_ITEM_FILTER"
+    item = switches.lookup(name)
+    assert item.kind == "bool"
+    assert item.unbound == item.bound == V136[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_g2_tense_guard_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """G2: off with nothing set (no tense check, the receipt of before), read without an `is_bound()` stat; on is one
+    environment line."""
+    state(bound)
+    name = P + "ANSWER_TENSE_GUARD"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V136[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_g1_denied_domain_refusal_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """G1: off with nothing set (no question refused for its domain, 1.5.9's answers), read without an `is_bound()`
+    stat; on is one environment line (`tests/permissions_v2/test_answer_denied_domain.py` pins what it does)."""
+    state(bound)
+    name = P + "ANSWER_DENIED_DOMAIN_REFUSAL"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == V136[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_lead_connective_trim_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
+    """Lead connective trim: off with nothing set (the answer as written, the receipt of before), read without an
+    `is_bound()` stat; on is one environment line (`tests/permissions_v2/test_answer_lead_connective_trim.py` pins
+    what it does)."""
+    state(bound)
+    name = P + "ANSWER_LEAD_CONNECTIVE_TRIM"
+    item = switches.lookup(name)
+    assert item.kind == "bool"
+    assert item.unbound == item.bound == V136[name] is False
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True

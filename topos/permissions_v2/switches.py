@@ -396,6 +396,52 @@ ANSWER_JUDGE_RESERVE_SECONDS = _switch(
     "is read within 6 to 60. Because of that cut-off a reserve above about 10 buys little (in WS0's review grid 20 "
     "cost 10 answers); 6 to 10 is the suggestion. 8 is the default on bound and unbound alike since 1.5.10 (owner, "
     "16 Oct: '8 seconds (Recommended)', D1). 0: no reserve, as in 1.5.9.")
+# Fix A (16 Oct 2026, the owner's decision as the PM relayed it): a real-app answer that 1.5.9 gave in five sentences
+# was refused whole as `answer_protected` by the 1.5.10 candidate. Off, bound and unbound alike, until it is measured.
+ANSWER_PROTECTED_ITEM_FILTER = _switch(
+    "ANSWER_PROTECTED_ITEM_FILTER", "bool", False, False,
+    "Fix A. Before the writer, a released record whose own text as the prompt shows it (the clipped body, the kind, "
+    "the date, the supporting text line) carries an Off-limits term (`mentions_protected`) is withheld from the "
+    "prompt and from the with-sources body; when none is left the job ends as `nothing_matched`. It only removes "
+    "records the grant already released: it never adds one or loosens a check, every re-check still walks every "
+    "released record, and the Off-limits check on the written body still runs and still refuses the whole answer. "
+    "It cannot help a protected term the writer writes that no item shows. While it is on the receipt counts the "
+    "withheld records (`items_withheld_protected`). Off: every released record reaches the writer, as in 1.5.9.")
+# Lever 4b / G2 (16 Oct 2026, the owner's "build the tense guard now"): a plan stated as a deed. A setting until a
+# battery at n >= 20 per arm measures it; it only drops sentences, so it releases nothing the share would not.
+ANSWER_TENSE_GUARD = _switch(
+    "ANSWER_TENSE_GUARD", "bool", False, False,
+    "G2. After the out-of-scope guard and before the judge, a kept sentence is dropped (`dropped_plan_as_deed`) "
+    "when it states as done (\"designed\", \"has built\") a verb that a cited item names only as an intention (a "
+    "closed list: will, 'll, shall, going to, plan to, want to, hope to, agreed to, need to, have to and the like) "
+    "and no cited item states as done, when the deed's object shares a content word with the intention's and no "
+    "cited item states that object done with another verb. Never a present or progressive sentence, one that "
+    "frames the act as a plan itself (\"plans to design\"), or a verb no cited item intends; it never rewrites a "
+    "sentence. Off: no check, and the receipt of before.")
+# Lane G1 (16 Oct 2026, grantee answer levers, narrow first; the owner's "build the denied-domain refusal too"): a
+# question about a domain the grant denies. Seen on the grantee density fixture: a health question to a share that
+# denies health was answered with the share's work notes, each sentence true of its item. Off until a measurement
+# shows the answer rate on answerable questions does not drop.
+ANSWER_DENIED_DOMAIN_REFUSAL = _switch(
+    "ANSWER_DENIED_DOMAIN_REFUSAL", "bool", False, False,
+    "G1. Before the model, a question is refused as question_not_supported (the anchor rule's reason: nothing says "
+    "which domain) when it names a domain the grant's deny rules deny (the domain's name alone, whole words at most "
+    "one suffix apart: \"finances\", \"families\"; never a catalog phrase word such as \"people\" or \"events\"), "
+    "that name is no permitted domain's, and no released item the answer would be written from carries it. A "
+    "question that names no denied domain is never refused, and retrieval and what a grant releases are unchanged. "
+    "The owner's private receipt says refused_denied_domain while it is on. Off: nothing of it is read and the "
+    "receipt has no new key, as in 1.5.9.")
+# Lead connective trim (16 Oct 2026, the live UI gate): two answers opened with a connective ("Additionally, ...")
+# because a check or the judge had dropped the writer's lead sentence. Layout only; off, bound and unbound alike.
+ANSWER_LEAD_CONNECTIVE_TRIM = _switch(
+    "ANSWER_LEAD_CONNECTIVE_TRIM", "bool", False, False,
+    "When a check or the judge dropped the writer's first sentence, the answer's first delivered sentence loses one "
+    "opening connective of a closed list (\"Additionally,\", \"Also,\", \"In addition,\", \"Furthermore,\", "
+    "\"Moreover,\", \"Besides,\", \"As well,\"; or the \"also\" of \"He also\", \"They also\", \"The owner also\" and "
+    "the like) and its next word is capitalised. After the judge and every check, before the body is assembled: no "
+    "verdict changes, no other sentence or mid-sentence word is touched, citations stay, nothing is added, dropped "
+    "or reordered. While it is on the receipt says lead_connective_trimmed. Off: the answer as written, and the "
+    "receipt of before.")
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
@@ -411,6 +457,7 @@ SWITCHES = (
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
     ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR, ANSWER_DENSE_ON_QUESTION,
     ANSWER_NAME_ONE_ITEM, ANSWER_HOLDS_BACKGROUND, ANSWER_JUDGE_RESERVE_SECONDS,
+    ANSWER_PROTECTED_ITEM_FILTER, ANSWER_TENSE_GUARD, ANSWER_DENIED_DOMAIN_REFUSAL, ANSWER_LEAD_CONNECTIVE_TRIM,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 
