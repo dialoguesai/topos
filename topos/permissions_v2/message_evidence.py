@@ -19,6 +19,7 @@ from .message_review_contract import MessageSnapshot, MessageClassification, Own
 from topos.disclosure.content_policy import is_record_nsfw
 from topos.features.provenance.roles import record_role
 from topos.storage.db.migrations import permissions_fact_lineage_keys_v1 as lineage_keys
+from topos.storage.share_excluded import COLUMN as SHARE_EXCLUDED, share_excluded_clause
 
 MESSAGE_REVIEW = "topos-owner-message-review/v1"
 MESSAGE_CONTRACT = "owner_authored_message_v1"
@@ -555,8 +556,10 @@ def _page_rows(conn, table, after, before):
     else:
         if not {"message_id", "source_id", "event_at", "sender_type"} <= columns:
             return []
+        # NR189: never a row the owner keeps from every share (the column read above, no second probe).
+        kept = share_excluded_clause(conn, alias="m", present=SHARE_EXCLUDED in columns)
         sql = ("SELECT m.message_id,m.source_id,NULL,m.event_at FROM ai_chat_messages m "
-               f"WHERE m.sender_type IN ('human','user') AND {window}")
+               f"WHERE m.sender_type IN ('human','user') AND {window}{kept}")
     return conn.execute(sql, (after - 86400, before + 86400)).fetchall()
 
 

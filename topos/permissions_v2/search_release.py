@@ -203,7 +203,8 @@ class _Decision:
             return
         with with_db_write():
             self._unmoved()
-            if _file_state(index_path(release.index.root, self._grant_id)) == self._loaded_state:
+            # NR188 (review #2): the file the decision loaded, or a narrowed copy a sweep put in its place.
+            if release.index.same_or_narrowed(index_path(release.index.root, self._grant_id), self._loaded_state):
                 purge(release.index.root, self._grant_id)
 
 
@@ -588,13 +589,21 @@ class MessageSearchRelease:
                     if _file_state(path) != loaded_state:
                         raise PolicyError("search_index_stale")
                     laps = {} if self.observe is not None else None  # timing only, as the search paths' recheck
+                    withheld: set = set()   # NR188: filled only with the switch on
                     if not self.index._current(path, grant_id, current, clock_state(conn), conn,
                                                deep=False, verified=verified, before=before, laps=laps,
-                                               only=None if record_ids is None else frozenset(record_ids)):
+                                               only=None if record_ids is None else frozenset(record_ids),
+                                               narrowed=withheld):
                         # R-N154 L1: as the search paths do. A failed check (basis, guard, or a member the answer was
                         # written from) is a failed index: remove it now rather than at the next sweep. Still the file
                         # the check read: its state was compared just above, under the same gate.
                         deciding.purge_stale()
+                        raise PolicyError("search_index_stale")
+                    if withheld:
+                        # NR188 (switch on): a member this retrieval would read moved only by new data. Not served
+                        # now and never shredded here: the sweep withholds it within one sweep gap. A written
+                        # answer's fetch is held meanwhile (NOT_SERVED_NOW), then ends `answer_evidence_moved` if
+                        # one of its items was withheld, or is delivered.
                         raise PolicyError("search_index_stale")
                     started = self._stage("answer_recheck", started, **_lap_fields(laps))
                     now = self.clock()
@@ -838,10 +847,14 @@ class MessageSearchRelease:
                 # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
                 if _file_state(index_path(self.index.root, grant_id)) != loaded_state:
                     raise PolicyError("search_index_stale")
+                withheld: set = set()   # NR188: filled only with the switch on
                 if not self.index._current(index_path(self.index.root, grant_id), grant_id, current, clock_state(conn),
-                                           conn, deep=False, verified=verified, before=before, laps=laps):
+                                           conn, deep=False, verified=verified, before=before, laps=laps,
+                                           narrowed=withheld):
                     deciding.purge_stale()  # N5: index load checks the basis only, so this pass removes it
                     raise PolicyError("search_index_stale")
+                if withheld:
+                    raise PolicyError("search_index_stale")   # NR188: not served now; the sweep withholds, never here
                 read_now = self.clock()
                 decided: dict[str, tuple | None] = {}
                 with self.reviews._db() as review_db:
@@ -940,10 +953,14 @@ class MessageSearchRelease:
                 # The file index load checked, loaded and ranked, or a refusal (N5 review, R2).
                 if _file_state(index_path(self.index.root, signed.grant_id)) != loaded_state:
                     raise PolicyError("search_index_stale")
+                withheld: set = set()   # NR188: filled only with the switch on
                 if not self.index._current(index_path(self.index.root, signed.grant_id), signed.grant_id,
-                        current, clock_state(conn), conn, deep=False, verified=verified, before=before, laps=laps):
+                        current, clock_state(conn), conn, deep=False, verified=verified, before=before, laps=laps,
+                        narrowed=withheld):
                     deciding.purge_stale()  # N5: index load checks the basis only
                     raise PolicyError("search_index_stale")
+                if withheld:
+                    raise PolicyError("search_index_stale")   # NR188: not served now; the sweep withholds, never here
                 # The grant's rolling window, from the clock of this very read (never the earlier one).
                 read_now = self.clock()
                 lower_us = max(lower_us, (read_now - window.max_age_seconds) * 1_000_000)
