@@ -415,6 +415,9 @@ TRANSCRIPT_SOURCE_DOORS = frozenset({"source_sync", "post_source_install"})
 #: socket. A type that reads AND writes by an ``operation`` field (ownership, checking_model, entailment_review,
 #: message_review, identity_command, affinity_config) is a mutation: the split is per type, not per payload.
 OWNER_DOOR_READ_TYPES = frozenset({
+    # Calibrate's catalog and private verification preview change no answer.
+    # calibration_answer remains a dangerous mutation by subtraction.
+    "calibration_catalog", "calibration_preview",
     # owner_only reads
     "get_database_explorer_summary", "pooled_scope_backfill_dry_run", "graph_cypher_query",
     "mcp_client_list", "mcp_client_list_elevations",

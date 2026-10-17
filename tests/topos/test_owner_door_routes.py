@@ -179,6 +179,16 @@ def test_every_mutating_decorator_under_topos_api_is_in_the_census() -> None:
     assert not unknown, unknown
 
 
+def test_calibration_answers_need_confirmation_and_previews_are_reads() -> None:
+    from topos.core.handlers import DANGEROUS_TYPES, OWNER_DOOR_READ_TYPES
+
+    assert census.lookup("PUT", "/v1/signal/calibration/answer").verdict == census.DANGEROUS
+    assert census.lookup("POST", "/v1/signal/calibration/verify-claim").verdict == census.OPEN
+    assert "calibration_answer" in DANGEROUS_TYPES
+    assert {"calibration_catalog", "calibration_preview"} <= OWNER_DOOR_READ_TYPES
+    assert not {"calibration_catalog", "calibration_preview"} & DANGEROUS_TYPES
+
+
 def test_the_census_names_only_routes_that_exist() -> None:
     """No stale entries: every census template (carve-outs for routes other lanes add excepted) is mounted."""
     mounted = {p for _m, p in _mounted_mutating_routes()}

@@ -50,6 +50,8 @@ Owner routes use the existing signal infrastructure:
 
 The hosted UI reaches the equivalent `/v1/topos/{topos_id}/signal/...` proxy routes. Owner-only stamped handlers reject recipient and owner-app grantee credentials. The API returns 409 for concurrent edits; the UI reloads instead of silently overwriting them.
 
+On the local owner socket, saving, changing, or clearing an answer requires the existing owner-confirmation rules for authoritative fact changes. The catalog and private verification preview are reads; neither writes an answer nor grants sharing permission.
+
 `calibration_answers` is created by registered migration 87 in the node's existing database. The answer writer reuses its idempotent DDL for legacy databases. Its primary key `(pack_id, question_id)` provides the current-answer index. Each answer also goes through `FactStore` with owner attribution, a distinct single-valued `calibration_<question>` predicate, and a calibration source reference. Fact revisions and index changes commit together using the existing write gate. Clearing closes the current fact. Verification checks that the linked fact is still current and unchanged and respects exclusions and record/entity protections.
 
 No LLM, embeddings, recent-fact scan, or background extraction is required to check a claim. Broader ingestion-derived facts and beliefs are future adapters; this milestone only verifies explicitly labeled pack answers. The pack's `kind` and version leave room for other calibration task types without changing the product entry point.

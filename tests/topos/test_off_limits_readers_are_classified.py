@@ -47,6 +47,8 @@ READERS = {
     "permissions_v2/permitted_derivation.py": SHARE,
     "permissions_v2/refresh_loop.py": SHARE,
     "permissions_v2/search_index.py": SHARE,
+    # Signed grant verification constructs the full grantee protection guard.
+    "permissions_v2/truth_release.py": SHARE,
     # BL-146 round 4 (U2, H1): an Off-limits name is another party's word, never the owner's, when the answer step
     # reads a question to a share; it reads every entry's names, as the share side does.
     "permissions_v2/answer_generation.py": SHARE,

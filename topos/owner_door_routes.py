@@ -273,6 +273,8 @@ CENSUS: Tuple[RouteRule, ...] = (
     _o("POST", "/v1/shell/update/check", "a read"),
     _d("POST", "/v1/upgrade/consent", "consents to an upgrade step (migrations)"),
     # signal.py (the signal_* family) — fit/evaluate is a read
+    _d("PUT", "/v1/signal/calibration/answer", "asserts, revises or clears an authoritative owner answer"),
+    _o("POST", "/v1/signal/calibration/verify-claim", "private owner preview: reads the current answer"),
     _d("PUT", "/v1/signal/affinity/config", "signal_affinity_config"),
     _d("POST", "/v1/signal/affinity/pairs/label", "signal_affinity_label"),
     _d("POST", "/v1/signal/affinity/recompute", "signal_affinity_recompute"),
