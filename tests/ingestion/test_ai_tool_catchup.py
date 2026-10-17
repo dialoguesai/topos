@@ -94,6 +94,7 @@ async def test_executor_reloads_current_eligible_records_and_runs_only_owed_jobs
     async def pipeline(**kw):
         assert 'private' not in [r['message_id'] for r in kw['canonical_records']]
         assert kw['run_enrichment'] is False
+        assert kw['fill_graph'] is False
         assert not set(kw['job_names']) & {'entities', 'topics', 'embeddings'}
         return {'signal_derivation': {'errors': []}, 'privacy_disclosure_layer': {'errors': []}}
     monkeypatch.setattr('topos.enrichment.orchestrator.EnrichmentOrchestrator.run_canonical', canonical)

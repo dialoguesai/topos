@@ -82,7 +82,7 @@ def enqueue_catchup(conn: Any, source_id: str | None = None, retry_failed: bool 
     return queued
 
 
-async def execute_catchup(payload: dict) -> dict:
+async def _execute_catchup_inner(payload: dict) -> dict:
     from .ai_tool_sync import AI_TOOL_SOURCE_IDS, source_state
     from .canonical_pipeline import run_post_canonical_pipeline
     from ..core.state import get_db_connection
@@ -147,7 +147,7 @@ async def execute_catchup(payload: dict) -> dict:
         result = await run_post_canonical_pipeline(
             source_def=definition, canonical_records=batch, job_names=signal_jobs,
             sync_batch_id=f"catchup:{sid}:{hashlib.sha256(''.join(sorted(processed)).encode()).hexdigest()[:16]}",
-            run_enrichment=False, enrichment_progress=progress,
+            run_enrichment=False, enrichment_progress=progress, fill_graph=False,
         )
         for lane in ("signal_derivation", "privacy_disclosure_layer"):
             lane_result = result.get(lane) or {}
@@ -190,3 +190,13 @@ def processing_status(conn: Any, source_id: str) -> dict:
         out.append({"job_id": job, "eligible_records": eligible, "processed_records": done,
                     "pending_records": eligible - done})
     return {"jobs": out}
+
+
+async def execute_catchup(payload: dict) -> dict:
+    # Batch recovery yields between jobs but never rebuilds the entire graph
+    # between model stages. The ordinary debounced refresh runs after the
+    # catch-up queue quiets, using all the newly persisted evidence at once.
+    from ..enrichment.pipeline_activity import derivation_in_flight
+
+    with derivation_in_flight():
+        return await _execute_catchup_inner(payload)

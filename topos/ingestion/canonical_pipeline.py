@@ -1146,6 +1146,7 @@ async def run_post_canonical_pipeline(
     # phase that actually takes the time.
     enrichment_progress: Optional[Any] = None,
     enrichment_records: Optional[List[Dict[str, Any]]] = None,
+    fill_graph: bool = True,
 ) -> Dict[str, Any]:
     """Run privacy disclosure, canonical enrichment, then signal derivation.
 
@@ -1302,7 +1303,7 @@ async def run_post_canonical_pipeline(
     # So: mark, then rebuild inline while nothing is deriving. ~7-9 minutes on
     # a 17k-edge node, inside the import, which is the point. Skipped when the
     # graph is not dirty, so a re-import that changed nothing pays nothing.
-    if canonical_records:
+    if canonical_records and fill_graph:
         from ..features.entities.rebuild_subprocess import GraphRebuildStopped
 
         try:
