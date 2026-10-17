@@ -16,9 +16,10 @@ permissions:
 # main as well as on a PR branch. On 2026-09-25 six merges to main inside two
 # minutes started six full runs, and all six ran to completion in parallel
 # although only the newest could say anything about main. Same shape as the
-# control-plane's ci.yml.
+# control-plane's ci.yml. Full backstops have their own group so a routine
+# docs push cannot cancel the weekly full suite before it finishes.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full' || 'change' }}
   cancel-in-progress: true
 
 jobs:

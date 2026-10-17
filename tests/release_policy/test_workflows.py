@@ -15,6 +15,7 @@ class AggregateTests(unittest.TestCase):
             self.assertIn(f"steps.select.outputs.{flag}", workflow)
             self.assertIn(f"needs.plan.outputs.{flag}", workflow)
         self.assertIn("--force-full", workflow)
+        self.assertIn("&& 'full' || 'change'", workflow, "routine pushes must not cancel full backstops")
         self.assertIn("--release-check-plan check-plan.json", workflow)
         upgrades = (ROOT / ".github/workflows/upgrade-matrix.yml").read_text()
         self.assertIn("github.event_name == 'pull_request'", upgrades)
