@@ -246,7 +246,7 @@ def start_pairing(*, client_name: str, mode: str) -> Dict[str, Any]:
         if mode == "add_agent":
             raise NeedsHuman(
                 "browser approval isn't available on this control plane yet; "
-                f"run `topos-node agents add {client_name}` in your own terminal and confirm its prompt"
+                f"open its approval prompt with `topos-node agents add {client_name} --open-terminal` on macOS"
             )
         raise NeedsHuman(CP_404_MESSAGE)
     if response.status_code in (429, 503):

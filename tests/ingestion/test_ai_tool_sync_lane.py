@@ -48,6 +48,10 @@ def _batch():
 
 @pytest.fixture
 def node(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sqlite3.Connection:
+    # Synthetic sync tests must not depend on the developer volume's free space.
+    # The disk-floor test overrides this with its explicit low-space fixture.
+    from topos.engine import disk_space
+    monkeypatch.setattr(disk_space, "free_bytes", lambda path=None: 1_000_000_000_000)
     conn = build_node(tmp_path / "node.db")
     yield conn
     conn.close()
