@@ -18,7 +18,11 @@ def graph_rows(conn: Any, table: str, query: str, *, limit: int,
     # The query pipeline has already resolved the tier from the authenticated
     # principal. Owner agents still receive the ordinary blackhole guard.
     guard = BlackholeGuard(conn, caller_class=CallerClass.OWNER_AGENT)
-    anchors = [r["entity_id"] for r in link_query_entities(conn, query)] if query.strip() else []
+    linked = link_query_entities(conn, query) if query.strip() else []
+    # Prefer full-name/alias matches over a partial overlap with framing such
+    # as "knowledge graph", which otherwise anchors unrelated Graph entities.
+    exact = [r for r in linked if r.get("match_score") == 1.0]
+    anchors = [r["entity_id"] for r in (exact or linked)]
     if query.strip() and not anchors:
         return []  # a specific unmatched ask must not become a graph dump
     params: list[Any] = []

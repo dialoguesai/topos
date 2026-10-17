@@ -255,3 +255,12 @@ class TestRawGraphScope:
         _blackhole(conn, 'ent_ghost', 'Casper Veil')
         rows = graph_rows(conn, 'entity_edges', 'Topos', limit=20, disclosure_tier='owner_raw')
         assert not any(r['src_entity_id'] == 'ent_ghost' for r in rows)
+
+    def test_named_anchor_outranks_partial_graph_framing_matches(self, conn):
+        from topos.query.graph_rows import graph_rows
+        _seed_graph(conn)
+        conn.execute("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name,mention_count) VALUES ('unrelated','org','Graph Exchange','graph exchange',3)")
+        conn.commit()
+        rows = graph_rows(conn, 'entities', 'Who is connected to Topos in my knowledge graph?',
+                          limit=20, disclosure_tier='owner_raw')
+        assert [r['entity_id'] for r in rows] == ['ent_topos']
