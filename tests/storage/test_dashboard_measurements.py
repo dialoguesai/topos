@@ -73,6 +73,26 @@ def test_logical_fact_revisions_and_history(db):
     assert report(db)["metrics"]["new_facts"]["buckets"][-1]["sources"] == [{"source_id": "profile", "count": 1}]
 
 
+def test_erased_receipts_invalidate_coverage_and_rebaseline(db):
+    db.execute("INSERT INTO documents VALUES('fresh', 'erase_source', 'new')")
+    db.commit()
+    db.execute("DELETE FROM dashboard_measurement_items WHERE source_id='erase_source'")
+    assert count(db, "inbound_records") is None
+    db.rollback()
+    assert count(db, "inbound_records") == 1
+    db.execute("DELETE FROM documents WHERE source_id='erase_source'")
+    db.execute("DELETE FROM dashboard_measurement_items WHERE source_id='erase_source'")
+    assert count(db, "inbound_records") is None
+    install_measurements(db)
+    assert count(db, "inbound_records") == 0
+    assert report(db)["metrics"]["inbound_records"]["buckets"][0]["count"] is None
+    db.execute("INSERT OR REPLACE INTO documents VALUES('old', 'test_source', 'retry')")
+    assert count(db, "inbound_records") == 0
+    db.execute("INSERT INTO documents VALUES('fresh', 'erase_source', 'deliberate new import')")
+    db.execute("INSERT OR REPLACE INTO documents VALUES('fresh', 'erase_source', 'retry')")
+    assert count(db, "inbound_records") == 1
+
+
 def test_late_table_and_coverage_gap_are_baselined(db):
     db.execute("CREATE TABLE ai_chat_messages(message_id TEXT PRIMARY KEY, source_id TEXT)")
     db.execute("INSERT INTO ai_chat_messages VALUES('missed', 'synthetic_chat')")

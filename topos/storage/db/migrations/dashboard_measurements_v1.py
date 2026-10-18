@@ -36,6 +36,12 @@ def install_measurements(conn: sqlite3.Connection) -> None:
     conn.execute("""CREATE INDEX IF NOT EXISTS idx_dashboard_measurement_time
         ON dashboard_measurement_items(recorded_at, metric, source_id)
         WHERE recorded_at IS NOT NULL""")
+    # Explicit source erasure also removes its identity receipts. Never keep
+    # claiming complete history after evidence has been erased.
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS dashboard_measurement_erased
+        AFTER DELETE ON dashboard_measurement_items BEGIN
+          DELETE FROM dashboard_measurement_coverage WHERE family=OLD.family;
+        END""")
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for table, pk in INBOUND_TABLES.items():
         if table not in tables:
@@ -52,10 +58,13 @@ def install_measurements(conn: sqlite3.Connection) -> None:
 
 def _install(conn, table, metric, key, source, predicate, *, live="1"):
     trigger = f"dashboard_measure_{table}"
-    if conn.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN (?,?)", (trigger, trigger + "_update")).fetchone()[0] == 2:
+    covered = conn.execute("SELECT 1 FROM dashboard_measurement_coverage WHERE family=?", (table,)).fetchone()
+    if covered and conn.execute("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN (?,?)", (trigger, trigger + "_update")).fetchone()[0] == 2:
         return
     conn.execute(f"DROP TRIGGER IF EXISTS {trigger}")
     conn.execute(f"DROP TRIGGER IF EXISTS {trigger}_update")
+    if not covered:
+        conn.execute("UPDATE dashboard_measurement_items SET recorded_at=NULL WHERE family=?", (table,))
     # If a table was rebuilt or a trigger removed, restart that family's coverage.
     # Rows accumulated during a gap are baseline, never fictional arrivals.
     conn.execute(f"""INSERT INTO dashboard_measurement_coverage VALUES (?, {NOW})

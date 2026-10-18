@@ -177,7 +177,10 @@ def test_purge_legacy_summary_shape(conn: sqlite3.Connection) -> None:
 
     assert "tables_dropped" in summary
     assert "rows_deleted" in summary
-    assert summary["rows_deleted"] == 1
+    # Source erasure includes the dashboard's source-attributed identity receipt.
+    assert summary["rows_deleted"] == 2
+    assert conn.execute("SELECT COUNT(*) FROM dashboard_measurement_items WHERE source_id='grow_journal'").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM dashboard_measurement_coverage WHERE family='journal_entries'").fetchone()[0] == 0
     assert isinstance(summary["table_actions"], list)
 
 

@@ -12,6 +12,8 @@ The identity ledger has no copied payloads. It intentionally keeps identity rece
 
 ## Coverage
 
+Explicit source erasure removes its source-attributed receipts too, invalidating coverage for the affected family. Until instrumentation re-baselines the remaining identities, that metric is unavailable. Re-baselining starts a new observation window; erased history is never presented as measured zero. A later import of deliberately erased data belongs to that new window.
+
 Migration 88 seeds existing identities with NULL observation times. It never reconstructs historical arrivals from mutable `ingested_at`, event time or fact validity time. Triggers record UTC observation time. Earlier dates are `count: null, coverage: unavailable`, the activation day and current day are partial, and only fully covered days may be measured zero. Lazy-created canonical tables get triggers before their writer runs. Aggregate coverage conservatively starts at the latest covered family start. A missing trigger makes its metric unavailable; repairing it baselines intervening rows and restarts coverage. Queries do not create schema.
 
 ## Rollout
