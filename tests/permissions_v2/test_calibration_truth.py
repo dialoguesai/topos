@@ -1,4 +1,5 @@
 """Real SQLite labels, signed grants, signatures and replay/revocation boundaries."""
+import json
 import sqlite3
 from types import SimpleNamespace
 import pytest
@@ -51,11 +52,14 @@ def test_external_fact_revision_withholds_stale_label(conn):
     conn.commit()
     assert verify(conn, TruthIntent.parse(CLAIM))[0].verdict == 'unknown'
 
-def build_node(tmp_path, monkeypatch, actor='actor-1', consent=True):
+def build_node(tmp_path, monkeypatch, actor='actor-1', consent=True, pending_privacy=False):
     corpus = mc.build(tmp_path/'corpus', seed=23, counts={'clean_positive_C': 1})
     with sqlite3.connect(corpus.path) as c:
         apply_all_migrations(c)
         save(c, dict(CLAIM, expected_revision=0))
+        if pending_privacy:
+            from topos.features.lifecycle.blackhole import BlackholeStore
+            BlackholeStore(c).blackhole_entity(entity_ref='Unrelated private name', carried=True)
     policy = knowledge_policy()
     policy['binding']['actor_id'] = actor
     if consent:
@@ -144,6 +148,116 @@ def test_protected_calibration_fact_is_unknown(conn):
     assert verify(conn, TruthIntent.parse(CLAIM), guard=BlackholeGuard(conn, caller_class=CallerClass.GRANTEE))[0].verdict == 'unknown'
 
 
+@pytest.mark.parametrize('actor', ['actor-1', 'owner-1'])
+def test_direct_answers_work_for_both_grants_during_pending_privacy_rebuild(tmp_path, monkeypatch, actor):
+    from topos.features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+    node = build_node(tmp_path, monkeypatch, actor, pending_privacy=True)
+    with sqlite3.connect(node.corpus.path) as c:
+        guard = BlackholeGuard(c, caller_class=CallerClass.GRANTEE)
+        assert guard.withhold_pending_rebuild()
+        assert guard.filter_name_string_artifacts([{'summary': 'legacy untracked prose'}], text_keys=('summary',)) == []
+    assert signed_call(node, actor)['verdict'] == 'supports'
+    assert signed_call(node, actor, dict(CLAIM, value='coffee'), 'pending-2')['verdict'] == 'contradicts'
+    with sqlite3.connect(node.corpus.path) as c:
+        save(c, dict(CLAIM, value='coffee', expected_revision=1))
+    assert signed_call(node, actor, request_id='pending-3')['verdict'] == 'contradicts'
+    assert signed_call(node, actor, dict(CLAIM, value='coffee'), 'pending-4')['verdict'] == 'supports'
+    with sqlite3.connect(node.corpus.path) as c:
+        save(c, dict(CLAIM, value=None, expected_revision=2))
+        assert BlackholeGuard(c, caller_class=CallerClass.GRANTEE).withhold_pending_rebuild()
+    assert signed_call(node, actor, request_id='pending-5')['verdict'] == 'unknown'
+
+
+def test_unrelated_record_protection_does_not_taint_a_direct_answer(conn):
+    from topos.features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+    from topos.features.facts.store import FactStore
+    save(conn, dict(CLAIM, expected_revision=0))
+    other = FactStore(conn).assert_fact(subject_entity_id='other', predicate='private_note', object_value='private')
+    conn.execute("INSERT INTO owner_only_records(canonical_table,record_id) VALUES('signal_objects',?)", (other['object_id'],))
+    conn.commit()
+    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE)
+    assert guard.withhold_pending_rebuild()
+    assert verify(conn, TruthIntent.parse(CLAIM), guard=guard)[0].verdict == 'supports'
+    assert guard.filter_name_string_artifacts([{'summary': 'legacy untracked prose'}], text_keys=('summary',)) == []
+
+
+@pytest.mark.parametrize('refs', [
+    'null', 'not json', '{}', '[]', '[null]',
+    json.dumps([dict(type='calibration_answer', pack_id=PACK, question_id='drink', revision=0)]),
+    json.dumps([dict(type='calibration_answer', pack_id=PACK, question_id='drink', revision=2)]),
+    json.dumps([dict(type='calibration_answer', pack_id=PACK, question_id='drink', revision=True)]),
+    json.dumps([dict(type='calibration_answer', pack_id='another-pack', question_id='drink', revision=1)]),
+    json.dumps([dict(type='calibration_answer', pack_id=PACK, question_id='time', revision=1)]),
+    json.dumps([dict(type='message', record_id='private')]),
+    json.dumps([dict(type='calibration_answer', pack_id=PACK, question_id='drink', revision=1, record_id='private')]),
+    json.dumps([dict(type='calibration_answer', pack_id=PACK, question_id='drink', revision=1), dict(type='message', record_id='private')]),
+])
+def test_incomplete_mixed_or_unbound_answer_provenance_is_unknown(conn, refs):
+    save(conn, dict(CLAIM, expected_revision=0))
+    conn.execute('UPDATE signal_objects SET source_refs_json=?', (refs,))
+    conn.commit()
+    assert verify(conn, TruthIntent.parse(CLAIM))[0].verdict == 'unknown'
+
+
+def test_same_value_refresh_requires_current_revision_reference(conn):
+    save(conn, dict(CLAIM, expected_revision=0))
+    save(conn, dict(CLAIM, expected_revision=1))
+    assert verify(conn, TruthIntent.parse(CLAIM))[0].verdict == 'supports'
+    refs = [dict(type='calibration_answer', pack_id=PACK, question_id='drink', revision=1)]
+    conn.execute('UPDATE signal_objects SET source_refs_json=?', (json.dumps(refs),))
+    conn.commit()
+    assert verify(conn, TruthIntent.parse(CLAIM))[0].verdict == 'unknown'
+
+
+@pytest.mark.parametrize('column,value', [('object_type','brief'), ('object_key','fact:someone:else'), ('signal_dimension','goals')])
+def test_answer_index_cannot_certify_another_artifact_type(conn, column, value):
+    save(conn, dict(CLAIM, expected_revision=0))
+    conn.execute(f'UPDATE signal_objects SET {column}=?', (value,))
+    conn.commit()
+    assert verify(conn, TruthIntent.parse(CLAIM))[0].verdict == 'unknown'
+
+
+@pytest.mark.parametrize('field,value', [('object_entity_id','private-person'), ('asserted_by','assistant'),
+    ('disclosure','owner_only'), ('subject_entity_id','other'), ('predicate','other'), ('object_value','coffee')])
+def test_generic_fact_edits_cannot_certify_a_direct_answer(conn, field, value):
+    save(conn, dict(CLAIM, expected_revision=0))
+    payload = json.loads(conn.execute('SELECT payload_json FROM signal_objects').fetchone()[0])
+    payload[field] = value
+    conn.execute('UPDATE signal_objects SET payload_json=?', (json.dumps(payload),))
+    conn.commit()
+    assert verify(conn, TruthIntent.parse(CLAIM))[0].verdict == 'unknown'
+
+
+@pytest.mark.parametrize('payload', ['not json','[]','null'])
+def test_malformed_backing_fact_is_unknown(conn, payload):
+    save(conn, dict(CLAIM, expected_revision=0))
+    conn.execute('UPDATE signal_objects SET payload_json=?', (payload,))
+    conn.commit()
+    assert verify(conn, TruthIntent.parse(CLAIM))[0].verdict == 'unknown'
+
+
+@pytest.mark.parametrize('name', ['tea','coffee','drink'])
+def test_pending_protected_answer_claim_or_prompt_is_still_unknown(conn, name):
+    from topos.features.lifecycle.blackhole import BlackholeStore
+    from topos.features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+    save(conn, dict(CLAIM, expected_revision=0))
+    BlackholeStore(conn).blackhole_entity(entity_ref=name)
+    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE)
+    assert guard.withhold_pending_rebuild()
+    assert verify(conn, TruthIntent.parse(dict(CLAIM,value='coffee')), guard=guard)[0].verdict == 'unknown'
+
+
+def test_protected_self_is_still_unknown(conn):
+    from topos.features.lifecycle.blackhole import BlackholeStore
+    from topos.features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+    save(conn, dict(CLAIM, expected_revision=0))
+    conn.execute("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name) VALUES('self','person','Owner','owner')")
+    conn.commit()
+    BlackholeStore(conn).blackhole_entity(entity_ref='self')
+    guard = BlackholeGuard(conn, caller_class=CallerClass.GRANTEE)
+    assert verify(conn, TruthIntent.parse(CLAIM), guard=guard)[0].verdict == 'unknown'
+
+
 def test_indexed_read_has_no_recent_fact_cutoff(conn):
     save(conn, dict(CLAIM, expected_revision=0))
     from topos.features.facts.store import FactStore
@@ -158,7 +272,7 @@ def test_indexed_read_has_no_recent_fact_cutoff(conn):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize('change', ['none', 'clear', 'revoke'])
+@pytest.mark.parametrize('change', ['none', 'clear', 'revoke', 'protect_fact', 'mixed_lineage', 'protect_claim'])
 async def test_transport_rechecks_before_sending(tmp_path, monkeypatch, change):
     import json
     node = build_node(tmp_path, monkeypatch)
@@ -177,6 +291,16 @@ async def test_transport_rechecks_before_sending(tmp_path, monkeypatch, change):
         if change == 'revoke':
             with owner():
                 node.ledger.revoke('grant-search', expected_epoch=node.epoch(), command_id='transport-revoke')
+        if change in ('protect_fact', 'mixed_lineage', 'protect_claim'):
+            with sqlite3.connect(node.corpus.path) as c:
+                if change == 'protect_fact':
+                    fact_id = c.execute('SELECT fact_id FROM calibration_answers').fetchone()[0]
+                    c.execute("INSERT INTO owner_only_records(canonical_table,record_id) VALUES('signal_objects',?)", (fact_id,))
+                elif change == 'mixed_lineage':
+                    c.execute("UPDATE signal_objects SET source_refs_json='[]' WHERE object_key='fact:self:calibration_drink'")
+                else:
+                    from topos.features.lifecycle.blackhole import BlackholeStore
+                    BlackholeStore(c).blackhole_entity(entity_ref='tea')
         return result
     monkeypatch.setattr(truth_release, 'dispatch', changed)
     frames = []
