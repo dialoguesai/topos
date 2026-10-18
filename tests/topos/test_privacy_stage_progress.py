@@ -218,7 +218,9 @@ def test_the_graph_fills_before_the_long_phase_not_after_it():
     # nothing left to enrich (a re-import) never fills at all.
     guard_end = src.index("records_for_enrichment\n    ):")
     assert fill > guard_end
-    assert "if canonical_records:" in src[fill - 1500:fill]
+    assert inspect.signature(canonical_pipeline.run_post_canonical_pipeline).parameters["fill_graph"].default is True
+    # Explicit background coding recovery opts out; ordinary imports keep the fill.
+    assert "if canonical_records and fill_graph:" in src[fill - 1500:fill]
 
 
 def test_refresh_now_skips_when_not_dirty_or_deriving():

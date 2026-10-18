@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.13] — 2026-10-17
+
 - **Coding-session recovery and graph reads** `[E:entities] [O]`: enabled coding sources recover committed messages whose enrichment did not finish, in bounded durable batches independent of transcript cursors. Completion markers follow successful output persistence; unavailable models and incomplete embedding batches remain errors. Source status distinguishes eligible, processed and pending records. Recovery keeps new batches within incremental clustering limits, resumes from committed stage markers, and reuses stored entity/topic outputs for retry-safe signal facts. Partial goal-model failures remain unfinished. Owner graph queries read the entity spine with endpoint protection instead of empty canonical-adapter pages. Capture applications are typed as products only with source and software-context evidence; entity identities and correction provenance are retained.
 - [O] Verify directly entered Calibrate answers during unrelated pending privacy rebuilds only when the current answer revision has complete, calibration-only provenance. Protected facts, subjects, terms, mixed or stale lineage, grant consent, revocation, and final-send checks still fail closed. Legacy derived prose keeps its rebuild guard. No data migration or enrichment invalidation is needed.
 

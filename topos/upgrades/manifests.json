@@ -1091,8 +1091,8 @@
       ]
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.5.13",
+      "summary": "Recover interrupted coding-session processing, restore owner graph reads, correct capture-app entity types, and verify direct Calibrate answers during unrelated pending privacy rebuilds.",
       "steps": [
         {
           "id": "coding-session-derivation-recovery",
@@ -1103,8 +1103,18 @@
         }
       ],
       "notes": [
-        "Coding-session derivation debt resumes through the normal durable worker for enabled, unpaused sources, in bounded batches. No transcript rewind, canonical rewrite or model switch. entities spec 3 corrects capture-application types from source and software-context evidence; other source types are not automatically reprocessed."
+        "Coding-session derivation debt resumes through the normal durable worker for enabled, unpaused sources, in bounded batches. No transcript rewind, canonical rewrite or model switch. entities spec 3 corrects capture-application types from source and software-context evidence; other source types are not automatically reprocessed.",
+        "Canonical embedding completion spec 2 witnesses successful searchable-vector persistence. Existing vectors remain valid; no embedding model or dimensions change, and the upgrade does not launch a global re-embed.",
+        "Recovery and resumed legacy jobs use 128-record signal chunks within incremental clustering limits. Completed stages and chunks survive restart; model failures and partial deferrals remain visibly unfinished.",
+        "Owner-only graph reads use the entity spine and the owner-agent protection guard. Lower disclosure tiers remain closed for this graph-row route.",
+        "Direct Calibrate answers retain their revision and calibration-only provenance checks during unrelated pending privacy rebuilds; protected or mixed derived lineage keeps its existing refusal behavior. No schema migration is introduced."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }
