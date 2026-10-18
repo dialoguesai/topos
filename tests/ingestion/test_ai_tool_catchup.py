@@ -162,3 +162,25 @@ async def test_resumed_payload_skips_completed_stages_but_finishes_pipeline(conn
                'ai_tool_pipeline': ['old-human']}}
     assert (await execute_catchup(payload))['messages_processed'] == 1
     assert (await execute_catchup(payload))['messages_processed'] == 0
+
+
+def test_recovery_discovery_stays_within_incremental_clustering_limit():
+    from topos.ingestion.ai_tool_catchup import BATCH_SIZE, MAX_RESUMED_BATCH_SIZE
+    from topos.enrichment.jobs.canonical.topic_clusters_job import _INCREMENTAL_MAX_BATCH
+    assert BATCH_SIZE <= _INCREMENTAL_MAX_BATCH
+    assert MAX_RESUMED_BATCH_SIZE >= 256
+
+
+@pytest.mark.asyncio
+async def test_existing_larger_durable_payload_remains_resumable(conn, monkeypatch):
+    from topos.ingestion.ai_tool_catchup import execute_catchup
+    ids = [f'legacy-{n}' for n in range(129)]
+    conn.executemany("INSERT INTO ai_chat_messages(message_id,source_id,sender_type,content,share_excluded) VALUES (?, 'codex_sessions', 'assistant', 'synthetic text', 0)", [(rid,) for rid in ids])
+    conn.commit()
+    monkeypatch.setattr('topos.core.state.get_db_connection', lambda: conn)
+    async def pipeline(**kwargs):
+        assert len(kwargs['canonical_records']) == 129
+        return {}
+    monkeypatch.setattr('topos.ingestion.canonical_pipeline.run_post_canonical_pipeline', pipeline)
+    result = await execute_catchup({'source_id': 'codex_sessions', 'missing': {'ai_tool_pipeline': ids}})
+    assert result['status'] == 'ok' and result['messages_processed'] == 129

@@ -14,7 +14,11 @@ import json
 from typing import Any
 
 KIND = "ai_tool_enrichment_catchup"
-BATCH_SIZE = 256
+# Stay within incremental topic assignment's 200-record limit. Larger
+# recovery batches force a global cluster rebuild for every chunk of debt.
+BATCH_SIZE = 128
+# Accept durable payloads already queued by the first recovery candidate.
+MAX_RESUMED_BATCH_SIZE = 256
 
 
 def project_stored_outputs(conn: Any, source_id: str, records: list[dict], jobs: list[str]) -> None:
@@ -134,7 +138,7 @@ async def _execute_catchup_inner(payload: dict) -> dict:
         if not state.get("enabled") or state.get("paused"):
             return None
         ids = sorted({str(rid) for batch in (payload.get("missing") or {}).values() for rid in batch})
-        if not ids or len(ids) > BATCH_SIZE:
+        if not ids or len(ids) > MAX_RESUMED_BATCH_SIZE:
             raise ValueError("Invalid catch-up batch size")
         cursor = conn.execute(
             "SELECT * FROM ai_chat_messages WHERE source_id=? AND COALESCE(share_excluded,0)=0 "
