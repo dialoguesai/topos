@@ -172,15 +172,25 @@ def test_recovery_discovery_stays_within_incremental_clustering_limit():
 
 
 @pytest.mark.asyncio
-async def test_existing_larger_durable_payload_remains_resumable(conn, monkeypatch):
+@pytest.mark.parametrize("fail_second", [False, True])
+async def test_existing_larger_durable_payload_remains_resumable(conn, monkeypatch, fail_second):
     from topos.ingestion.ai_tool_catchup import execute_catchup
     ids = [f'legacy-{n}' for n in range(129)]
     conn.executemany("INSERT INTO ai_chat_messages(message_id,source_id,sender_type,content,share_excluded) VALUES (?, 'codex_sessions', 'assistant', 'synthetic text', 0)", [(rid,) for rid in ids])
     conn.commit()
     monkeypatch.setattr('topos.core.state.get_db_connection', lambda: conn)
+    sizes = []
     async def pipeline(**kwargs):
-        assert len(kwargs['canonical_records']) == 129
+        sizes.append(len(kwargs['canonical_records']))
+        if fail_second and len(sizes) == 2:
+            return {'signal_derivation': {'errors': ['synthetic failure']}}
         return {}
     monkeypatch.setattr('topos.ingestion.canonical_pipeline.run_post_canonical_pipeline', pipeline)
     result = await execute_catchup({'source_id': 'codex_sessions', 'missing': {'ai_tool_pipeline': ids}})
-    assert result['status'] == 'ok' and result['messages_processed'] == 129
+    assert result['status'] == ('error' if fail_second else 'ok')
+    assert sizes == [128, 1]
+    assert conn.execute("SELECT count(*) FROM enrichment_record_progress WHERE job_id='ai_tool_pipeline'").fetchone()[0] == (128 if fail_second else 129)
+    if fail_second:
+        result = await execute_catchup({'source_id': 'codex_sessions', 'missing': {'ai_tool_pipeline': ids}})
+        assert result['status'] == 'ok' and result['messages_processed'] == 1
+        assert sizes == [128, 1, 1]

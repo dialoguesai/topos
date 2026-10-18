@@ -188,27 +188,33 @@ async def _execute_catchup_inner(payload: dict) -> dict:
         from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
         canonical_jobs = set(effective_canonical_enrichment_jobs(definition))
         resolved_jobs = resolved_signal_derivation_jobs(definition)
-        await asyncio.to_thread(lambda: project_stored_outputs(
-            get_db_connection(), sid, batch, [j for j in resolved_jobs if j in canonical_jobs]
-        ))
-        signal_jobs = [j for j in resolved_jobs if j not in canonical_jobs]
-        result = await run_post_canonical_pipeline(
-            source_def=definition, canonical_records=batch, job_names=signal_jobs,
-            sync_batch_id=f"catchup:{sid}:{hashlib.sha256(''.join(sorted(processed)).encode()).hexdigest()[:16]}",
-            run_enrichment=False, enrichment_progress=progress, fill_graph=False,
-        )
-        for lane in ("signal_derivation", "privacy_disclosure_layer"):
-            lane_result = result.get(lane) or {}
-            errors.extend(lane_result.get("errors") or [])
-            if lane == "privacy_disclosure_layer" and any(lane_result.get(k) for k in
-                    ("failed_batches", "failed_records", "nsfw_failed_batches")):
-                errors.append("Privacy processing has unfinished records")
-            errors.extend(f"Deferred signal job: {j}" for j in lane_result.get("deferred_jobs") or [])
-        if not errors:
-            from ..enrichment.record_progress import mark_records_processed_in_a_worker
-            await mark_records_processed_in_a_worker(
-                get_db_connection, sid, "ai_tool_pipeline", batch, 1
+        for start in range(0, len(batch), BATCH_SIZE):
+            # Previously queued 256-record payloads must also use the
+            # incremental path when resumed by a newer node.
+            chunk = batch[start:start + BATCH_SIZE]
+            await asyncio.to_thread(lambda: project_stored_outputs(
+                get_db_connection(), sid, chunk, [j for j in resolved_jobs if j in canonical_jobs]
+            ))
+            signal_jobs = [j for j in resolved_jobs if j not in canonical_jobs]
+            result = await run_post_canonical_pipeline(
+                source_def=definition, canonical_records=chunk, job_names=signal_jobs,
+                sync_batch_id=f"catchup:{sid}:{hashlib.sha256(''.join(str(r.get('message_id') or r.get('record_id')) for r in chunk).encode()).hexdigest()[:16]}",
+                run_enrichment=False, enrichment_progress=progress, fill_graph=False,
             )
+            for lane in ("signal_derivation", "privacy_disclosure_layer"):
+                lane_result = result.get(lane) or {}
+                errors.extend(lane_result.get("errors") or [])
+                if lane == "privacy_disclosure_layer" and any(lane_result.get(k) for k in
+                        ("failed_batches", "failed_records", "nsfw_failed_batches")):
+                    errors.append("Privacy processing has unfinished records")
+                errors.extend(f"Deferred signal job: {j}" for j in lane_result.get("deferred_jobs") or [])
+            if errors:
+                break
+            if not errors:
+                from ..enrichment.record_progress import mark_records_processed_in_a_worker
+                await mark_records_processed_in_a_worker(
+                    get_db_connection, sid, "ai_tool_pipeline", chunk, 1
+                )
     return {"status": "error" if errors else "ok", "messages_processed": len(processed),
             "errors": errors, **({"error": str(errors[:3])} if errors else {})}
 
