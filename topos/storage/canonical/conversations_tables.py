@@ -128,6 +128,9 @@ def ensure_conversation_messages_table(conn) -> None:
             CREATE INDEX IF NOT EXISTS idx_{CONVERSATION_MESSAGES_TABLE}_event_at
             ON {CONVERSATION_MESSAGES_TABLE}(event_at)
         """)
+        from ..db.migrations.dashboard_measurements_v1 import install_measurements
+
+        install_measurements(conn)
         commit_connection(conn)
 
 

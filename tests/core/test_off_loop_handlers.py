@@ -36,6 +36,7 @@ SLOW_SECONDS = 1.0
 ALLOWED_PAUSE = SLOW_SECONDS * 0.6
 #: What each marked type is asked with: enough for its handler to reach the database.
 PAYLOADS = {
+    "get_dashboard_measurements": {"period_start": "2026-01-01", "period_end": "2026-01-02"},
     "calibration_catalog": {},
     "calibration_answer": {"pack_id": "icebreakers-v1", "question_id": "drink", "value": None, "expected_revision": 0},
     "calibration_preview": {"pack_id": "icebreakers-v1", "question_id": "drink", "value": "tea"},

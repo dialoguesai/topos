@@ -171,6 +171,7 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
     timeline_daily,
     graph_query,
     graph_summary,
+    dashboard,
 )
 
 
