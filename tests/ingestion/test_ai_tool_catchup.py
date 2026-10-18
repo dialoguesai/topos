@@ -143,3 +143,22 @@ def test_stored_outputs_project_idempotently_without_private_rows(conn, job, tab
     assert facts == [('old-human',)]
     project_stored_outputs(conn, 'codex_sessions', records, [job])
     assert conn.execute("SELECT count(*) FROM signal_facts WHERE source_id='codex_sessions'").fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_resumed_payload_skips_completed_stages_but_finishes_pipeline(conn, monkeypatch):
+    from topos.ingestion.ai_tool_catchup import execute_catchup
+    monkeypatch.setattr('topos.core.state.get_db_connection', lambda: conn)
+    mark_records_processed(conn, 'codex_sessions', 'topics',
+                           [{'message_id': 'old-human'}], job_spec_version('topics'))
+    async def canonical(*args, **kwargs):
+        raise AssertionError('committed topic extraction must survive a restart')
+    async def pipeline(**kwargs):
+        assert [r['message_id'] for r in kwargs['canonical_records']] == ['old-human']
+        return {}
+    monkeypatch.setattr('topos.enrichment.orchestrator.EnrichmentOrchestrator.run_canonical', canonical)
+    monkeypatch.setattr('topos.ingestion.canonical_pipeline.run_post_canonical_pipeline', pipeline)
+    payload = {'source_id': 'codex_sessions', 'missing': {'topics': ['old-human'],
+               'ai_tool_pipeline': ['old-human']}}
+    assert (await execute_catchup(payload))['messages_processed'] == 1
+    assert (await execute_catchup(payload))['messages_processed'] == 0

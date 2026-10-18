@@ -158,8 +158,16 @@ async def _execute_catchup_inner(payload: dict) -> dict:
                     "messages_total": total_count, "current_job_name": job_name,
                     "current_job_progress_percent": current_job_progress})
 
+    def remaining(job, ids):
+        from ..enrichment.record_progress import _processed_record_ids
+        from ..enrichment.models.mvp_defaults import job_spec_version
+        # A durable payload can outlive several completed stages after a
+        # restart. Recheck their committed markers rather than replaying them.
+        done = _processed_record_ids(get_db_connection(), sid, job, job_spec_version(job))
+        return [by_id[rid] for rid in ids if rid in by_id and rid not in done]
+
     for job, ids in (payload.get("missing") or {}).items():
-        batch = [by_id[rid] for rid in ids if rid in by_id]
+        batch = await asyncio.to_thread(remaining, job, ids)
         if not batch:
             continue
         if job != "ai_tool_pipeline" and job not in current_jobs:
