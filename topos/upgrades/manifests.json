@@ -1092,7 +1092,7 @@
     },
     {
       "version": "1.5.13",
-      "summary": "Recover interrupted coding-session processing, restore owner graph reads, correct capture-app entity types, and verify direct Calibrate answers during unrelated pending privacy rebuilds.",
+      "summary": "Recover interrupted coding-session processing, restore owner graph reads, correct capture-app entity types, add owner dashboard measurements, and verify direct Calibrate answers.",
       "steps": [
         {
           "id": "coding-session-derivation-recovery",
@@ -1107,8 +1107,9 @@
         "Canonical embedding completion spec 2 witnesses successful searchable-vector persistence. Existing vectors remain valid; no embedding model or dimensions change, and the upgrade does not launch a global re-embed.",
         "Recovery and resumed legacy jobs use 128-record signal chunks within incremental clustering limits. Completed stages and chunks survive restart; model failures and partial deferrals remain visibly unfinished.",
         "Owner-only graph reads use the entity spine and the owner-agent protection guard. Lower disclosure tiers remain closed for this graph-row route.",
-        "Direct Calibrate answers retain their revision and calibration-only provenance checks during unrelated pending privacy rebuilds; protected or mixed derived lineage keeps its existing refusal behavior. No schema migration is introduced.",
-        "Global topic consolidation stays queued while bounded coding recovery or newly collected coding batches are pending. Its successful persistence marks the graph dirty after consolidation, so the ordinary debounced refresh sees the completed topic projection. No clustering algorithm or model changes."
+        "Direct Calibrate answers retain their revision and calibration-only provenance checks during unrelated pending privacy rebuilds; protected or mixed derived lineage keeps its existing refusal behavior. The Calibrate correction requires no data reprocessing.",
+        "Global topic consolidation stays queued while bounded coding recovery or newly collected coding batches are pending. Its successful persistence marks the graph dirty after consolidation, so the ordinary debounced refresh sees the completed topic projection. No clustering algorithm or model changes.",
+        "[S1] [P] Migration 88 records first arrivals and logical facts atomically. Existing identities are an unmeasured baseline; no LLM reprocessing, byte-volume claims or historical backfill."
       ]
     },
     {
