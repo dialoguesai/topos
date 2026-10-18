@@ -160,7 +160,7 @@ async def _execute_topic_consolidation(payload: Dict[str, Any]) -> Dict[str, Any
     it runs alone, and only after the batch that triggered it has finished.
     """
     from ..core.state import get_db_connection
-    from ..enrichment.pipeline_activity import is_derivation_in_flight
+    from ..enrichment.pipeline_activity import is_derivation_in_flight, derivation_in_flight
     from ..features.signal.topic_clustering import (
         _resolved_topic_cluster_source_ids,
         recompute_topic_clusters,
@@ -178,14 +178,19 @@ async def _execute_topic_consolidation(payload: Dict[str, Any]) -> Dict[str, Any
         own = get_db_connection()
         if own is None:
             return {"status": "error", "error": "no database connection"}
-        return recompute_topic_clusters(
+        result = recompute_topic_clusters(
             own,
             source_ids=list(_resolved_topic_cluster_source_ids()),
             sync_batch_id=None,
             min_records=3,
         )
+        if str(result.get("status") or "") not in ("error", "skipped"):
+            from ..features.entities.graph_refresh import mark_graph_dirty
+            mark_graph_dirty()
+        return result
 
-    result = await asyncio.to_thread(_run)
+    with derivation_in_flight():
+        result = await asyncio.to_thread(_run)
     if str(result.get("status") or "") == "error":
         return result
     logger.info("topic consolidation complete: %s", result)
@@ -434,6 +439,22 @@ def _executable_kinds() -> list[str]:
     newer node version) stays queued and visible instead of being claimed and
     immediately failed as unknown."""
     return sorted(set(EXECUTORS) - _LONG_RUNNING_KINDS)
+
+
+def _claimable_kinds(conn, kinds: list[str]) -> list[str]:
+    """Coalesce global topic work behind the bounded coding recovery queue.
+
+    Incremental assignment still runs in every batch. Rebuilding all clusters
+    whenever its candidate pool reaches 100 would repeatedly relabel the whole
+    corpus while thousands of coding records still await vectors.
+    """
+    if "topic_consolidation" not in kinds or "ai_tool_enrichment_catchup" not in kinds:
+        return kinds
+    pending = conn.execute(
+        "SELECT 1 FROM pipeline_jobs WHERE kind='ai_tool_enrichment_catchup' "
+        "AND status IN ('queued','running') LIMIT 1"
+    ).fetchone()
+    return [kind for kind in kinds if kind != "topic_consolidation"] if pending else kinds
 
 
 def _long_running_kinds() -> list[str]:
@@ -812,7 +833,7 @@ async def _worker_loop(
                 if own is None:
                     return None
                 claimed = claim_next_job(
-                    own, lease_owner=_lease_owner, kinds=kinds_fn(), lease_seconds=lease_seconds
+                    own, lease_owner=_lease_owner, kinds=_claimable_kinds(own, kinds_fn()), lease_seconds=lease_seconds
                 )
                 with handoff_lock:
                     late = handoff["cancelled"]
@@ -1021,7 +1042,7 @@ async def process_pending_jobs_once(conn_factory: Callable[[], Any], *, limit: i
         # Both lanes: this helper means "drain what is runnable", and the
         # long-running kinds are runnable — they are merely given their own
         # worker in production so they cannot block the general queue.
-        return claim_next_job(own, lease_owner=_lease_owner, kinds=sorted(EXECUTORS))
+        return claim_next_job(own, lease_owner=_lease_owner, kinds=_claimable_kinds(own, sorted(EXECUTORS)))
 
     for _ in range(max(1, int(limit))):
         job = await asyncio.to_thread(_claim)

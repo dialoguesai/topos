@@ -1107,7 +1107,8 @@
         "Canonical embedding completion spec 2 witnesses successful searchable-vector persistence. Existing vectors remain valid; no embedding model or dimensions change, and the upgrade does not launch a global re-embed.",
         "Recovery and resumed legacy jobs use 128-record signal chunks within incremental clustering limits. Completed stages and chunks survive restart; model failures and partial deferrals remain visibly unfinished.",
         "Owner-only graph reads use the entity spine and the owner-agent protection guard. Lower disclosure tiers remain closed for this graph-row route.",
-        "Direct Calibrate answers retain their revision and calibration-only provenance checks during unrelated pending privacy rebuilds; protected or mixed derived lineage keeps its existing refusal behavior. No schema migration is introduced."
+        "Direct Calibrate answers retain their revision and calibration-only provenance checks during unrelated pending privacy rebuilds; protected or mixed derived lineage keeps its existing refusal behavior. No schema migration is introduced.",
+        "Global topic consolidation stays queued while bounded coding recovery is pending. Its successful persistence marks the graph dirty after consolidation, so the ordinary debounced refresh sees the completed topic projection. No clustering algorithm or model changes."
       ]
     },
     {
