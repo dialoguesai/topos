@@ -1091,6 +1091,14 @@
       ]
     },
     {
+      "version": "1.5.13",
+      "summary": "Owner dashboard measurements and direct Calibrate answer certification.",
+      "steps": [],
+      "notes": [
+        "[S1] [P] Migration 88 records first arrivals and logical facts atomically. Existing identities are an unmeasured baseline; no LLM reprocessing, byte-volume claims or historical backfill."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

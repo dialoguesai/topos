@@ -9,6 +9,10 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.13] — 2026-10-17
+
+- [S1] [P] Owner dashboard counters for new canonical records and logical facts, with transactional retry/update deduplication and explicit unavailable/partial history. Migration 88 baselines existing identities; no historical backfill or reprocessing.
+
 - [O] Verify directly entered Calibrate answers during unrelated pending privacy rebuilds only when the current answer revision has complete, calibration-only provenance. Protected facts, subjects, terms, mixed or stale lineage, grant consent, revocation, and final-send checks still fail closed. Legacy derived prose keeps its rebuild guard. No data migration or enrichment invalidation is needed.
 
 ## [1.5.12] — 2026-10-17
