@@ -5,6 +5,34 @@ import sqlite3
 from ..storage.db.migrations.dashboard_measurements_v1 import INBOUND_TABLES
 
 
+def forget_erased_fact_measurements(conn, logical_keys):
+    """Forget value-bearing receipts during explicit source/record erasure.
+
+    The caller holds its write transaction. A surviving revision or another
+    source's fact retains its receipt. Ordinary pruning and replacement writes
+    never call this, so arrival deduplication survives those operations.
+    """
+    keys = sorted({str(key) for key in logical_keys if key is not None})
+    if not keys or not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dashboard_measurement_items'"
+    ).fetchone():
+        return 0
+    removed = 0
+    for start in range(0, len(keys), 128):
+        chunk = keys[start:start + 128]
+        placeholders = ",".join("?" for _ in chunk)
+        cursor = conn.execute(
+            "DELETE FROM dashboard_measurement_items "
+            "WHERE metric='new_facts' AND family='signal_objects' "
+            f"AND item_key IN ({placeholders}) "
+            "AND item_key NOT IN (SELECT object_key FROM signal_objects "
+            "WHERE object_type='fact' AND object_key IS NOT NULL)",
+            chunk,
+        )
+        removed += max(0, cursor.rowcount)
+    return removed
+
+
 def daily_measurements(conn, start: str, end: str, *, now=None):
     first, last = date.fromisoformat(start), date.fromisoformat(end)
     if first.isoformat() != start or last.isoformat() != end or not 0 < (last-first).days <= 366:

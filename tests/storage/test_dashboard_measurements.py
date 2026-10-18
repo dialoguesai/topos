@@ -160,3 +160,85 @@ def test_concurrent_retry_has_one_receipt(tmp_path):
         list(pool.map(write, range(12)))
     with sqlite3.connect(path) as conn:
         assert count(conn, "inbound_records") == 1
+
+
+@pytest.mark.parametrize("erase_mode", ["source", "records"])
+def test_explicit_fact_erasure_forgets_value_keys_and_retains_shared_evidence(
+    tmp_path, monkeypatch, erase_mode
+):
+    import json
+    from topos.features.lifecycle import derived_scrub
+    from topos.features.entities import dossier
+    from topos.storage.db.migrations import apply_all_migrations
+
+    # Unrelated graph/stat/dossier rebuilds do not participate in fact erasure.
+    monkeypatch.setattr(derived_scrub, "_rebuild_entity_edges", lambda c: 0)
+    monkeypatch.setattr(derived_scrub, "refold_statistics", lambda c: {})
+    monkeypatch.setattr(derived_scrub, "repromote_stat_insights", lambda c: {})
+    monkeypatch.setattr(derived_scrub, "sweep_orphans", lambda c: {})
+    monkeypatch.setattr(dossier, "refresh_dossiers", lambda c: 0)
+    erased = {"source_id": "erase_source", "record_id": "erase-record", "table": "ai_chat_messages"}
+    kept = {"source_id": "keep_source", "record_id": "keep-record", "table": "ai_chat_messages"}
+
+    with sqlite3.connect(str(tmp_path / "erasure.db")) as conn:
+        apply_all_migrations(conn)
+        conn.execute("PRAGMA recursive_triggers=ON")
+
+        def fact(oid, key, refs, closed=None, replace=False):
+            conn.execute(
+                "INSERT " + ("OR REPLACE " if replace else "") + "INTO signal_objects "
+                "(object_id,signal_dimension,object_type,object_key,payload_json,source_refs_json,"
+                "valid_from,valid_to,created_at,updated_at) VALUES (?, 'work', 'fact', ?, '{}', ?,"
+                "'2026-01-01', ?, '2026-01-01', '2026-01-01')",
+                (oid, key, json.dumps(refs), closed),
+            )
+
+        secret = "fact:synthetic:erase-this-value"
+        shared = "fact:synthetic:shared-value"
+        revision = "fact:synthetic:surviving-revision"
+        fact("erase-old", secret, [erased], closed="2026-01-02")
+        fact("erase-current", secret, [erased])
+        fact("mixed", shared, [erased, kept])
+        fact("revision-old", revision, [kept], closed="2026-01-02")
+        fact("revision-current", revision, [erased])
+        fact("untouched", "fact:synthetic:other", [kept])
+        conn.commit()
+        if erase_mode == "source":
+            derived_scrub.purge_facts_for_source(conn, "erase_source")
+        else:
+            derived_scrub.purge_derived_for_records(conn, ["erase-record"])
+
+        assert conn.execute("SELECT count(*) FROM signal_objects WHERE object_key=?", (secret,)).fetchone()[0] == 0
+        assert conn.execute("SELECT count(*) FROM dashboard_measurement_items WHERE item_key=?", (secret,)).fetchone()[0] == 0
+        for key in (shared, revision, "fact:synthetic:other"):
+            assert conn.execute("SELECT count(*) FROM dashboard_measurement_items WHERE item_key=?", (key,)).fetchone()[0] == 1
+        refs = json.loads(conn.execute("SELECT source_refs_json FROM signal_objects WHERE object_id='mixed'").fetchone()[0])
+        assert refs == [kept]
+        assert count(conn, "new_facts") is None
+
+        # Rebaseline the surviving facts. A replacement must retain its old
+        # receipt even with recursive DELETE triggers enabled by the writer.
+        install_measurements(conn)
+        fact("mixed", shared, [kept], replace=True)
+        assert count(conn, "new_facts") == 0
+
+
+def test_fact_receipt_erasure_supports_databases_without_measurements():
+    from topos.dashboard.measurements import forget_erased_fact_measurements
+    with sqlite3.connect(":memory:") as conn:
+        assert forget_erased_fact_measurements(conn, ["fact:synthetic:value"]) == 0
+
+
+def test_fact_receipt_erasure_and_coverage_roll_back_together_across_chunks(db):
+    from topos.dashboard.measurements import forget_erased_fact_measurements
+    keys = [f"fact:synthetic:erased-{i}" for i in range(130)]
+    db.executemany("INSERT INTO signal_objects VALUES(?,?,'fact','work',NULL)",
+                   [(f"synthetic-{i}", key) for i, key in enumerate(keys)])
+    db.commit()
+    before = db.execute("SELECT count(*) FROM dashboard_measurement_items").fetchone()[0]
+    db.execute("DELETE FROM signal_objects WHERE signal_dimension='work'")
+    assert forget_erased_fact_measurements(db, keys) == 130
+    assert count(db, "new_facts") is None
+    db.rollback()
+    assert db.execute("SELECT count(*) FROM dashboard_measurement_items").fetchone()[0] == before
+    assert count(db, "new_facts") == 130

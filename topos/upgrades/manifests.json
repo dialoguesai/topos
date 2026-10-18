@@ -1109,7 +1109,8 @@
         "Owner-only graph reads use the entity spine and the owner-agent protection guard. Lower disclosure tiers remain closed for this graph-row route.",
         "Direct Calibrate answers retain their revision and calibration-only provenance checks during unrelated pending privacy rebuilds; protected or mixed derived lineage keeps its existing refusal behavior. The Calibrate correction requires no data reprocessing.",
         "Global topic consolidation stays queued while bounded coding recovery or newly collected coding batches are pending. Its successful persistence marks the graph dirty after consolidation, so the ordinary debounced refresh sees the completed topic projection. No clustering algorithm or model changes.",
-        "[S1] [P] Migration 88 records first arrivals and logical facts atomically. Existing identities are an unmeasured baseline; no LLM reprocessing, byte-volume claims or historical backfill."
+        "[S1] [P] Migration 88 records first arrivals and logical facts atomically. Existing identities are an unmeasured baseline; no LLM reprocessing, byte-volume claims or historical backfill.",
+        "Explicit source or record erasure removes value-bearing dashboard logical-fact receipts only when no fact with that key survives. Shared evidence, revisions, replacement writes and ordinary pruning retain deduplication; erased receipt coverage becomes unavailable until re-baselining."
       ]
     },
     {

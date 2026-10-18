@@ -656,19 +656,19 @@ def purge_facts_for_source(
     """
     rows = conn.execute(
         """
-        SELECT object_id, source_refs_json FROM signal_objects
+        SELECT object_id, source_refs_json, object_key FROM signal_objects
         WHERE object_type='fact'
         """
     ).fetchall()
 
     all_ref_ids: Set[str] = set()
     parsed: List[tuple] = []
-    for object_id, refs_json in rows:
+    for object_id, refs_json, object_key in rows:
         try:
             refs = json.loads(refs_json or "[]")
         except json.JSONDecodeError:
             refs = []
-        parsed.append((str(object_id), refs))
+        parsed.append((str(object_id), refs, object_key))
         for ref in refs:
             ref_key = ref_record_key(ref)
             if ref_key and ref_key[1]:
@@ -691,10 +691,11 @@ def purge_facts_for_source(
 
     deleted = 0
     trimmed = 0
+    erased_keys = set()
     # The per-fact judgement is in-memory (maps precomputed above), so the
     # batch hold covers writes only.
     with batched_writes(conn):
-        for object_id, refs in parsed:
+        for object_id, refs, object_key in parsed:
             if not refs:
                 continue
             scrubbed = [r for r in refs if isinstance(r, dict) and _ref_is_scrubbed(r)]
@@ -709,7 +710,11 @@ def purge_facts_for_source(
                 trimmed += 1
             else:
                 conn.execute("DELETE FROM signal_objects WHERE object_id=?", (object_id,))
+                erased_keys.add(object_key)
                 deleted += 1
+        from ...dashboard.measurements import forget_erased_fact_measurements
+
+        forget_erased_fact_measurements(conn, erased_keys)
     return {"facts_deleted": deleted, "facts_trimmed": trimmed}
 
 
@@ -1071,12 +1076,13 @@ def purge_derived_for_records(
     # withdrawn record outlives it exactly as a fact would.
     id_set = set(ids)
     rows = conn.execute(
-        "SELECT object_id, source_refs_json FROM signal_objects"
+        "SELECT object_id, source_refs_json, object_key, object_type FROM signal_objects"
     ).fetchall()
     facts_deleted = 0
     facts_trimmed = 0
+    erased_keys = set()
     with batched_writes(conn):
-        for object_id, refs_json in rows:
+        for object_id, refs_json, object_key, object_type in rows:
             try:
                 refs = json.loads(refs_json or "[]")
             except json.JSONDecodeError:
@@ -1101,7 +1107,12 @@ def purge_derived_for_records(
                 facts_trimmed += 1
             else:
                 conn.execute("DELETE FROM signal_objects WHERE object_id=?", (str(object_id),))
+                if object_type == "fact":
+                    erased_keys.add(object_key)
                 facts_deleted += 1
+        from ...dashboard.measurements import forget_erased_fact_measurements
+
+        forget_erased_fact_measurements(conn, erased_keys)
     report["facts_deleted"] = facts_deleted
     report["facts_trimmed"] = facts_trimmed
     report.update(_purge_extraction_artifacts_for_records(conn, id_set))
