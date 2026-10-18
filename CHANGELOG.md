@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- [O] Verify directly entered Calibrate answers during unrelated pending privacy rebuilds only when the current answer revision has complete, calibration-only provenance. Protected facts, subjects, terms, mixed or stale lineage, grant consent, revocation, and final-send checks still fail closed. Legacy derived prose keeps its rebuild guard. No data migration or enrichment invalidation is needed.
+
 ## [1.5.12] — 2026-10-17
 
 - [S1] [P] Add the owner Calibrate truth pack and indexed verify_claim through explicitly consented recipient and owner grants. Answer edits and clears take effect on the next verification; existing authority, exclusions, revocation, and final-send checks remain in force. Migration 87 adds calibration_answers without changing existing rows. Legacy free-text verification excludes calibration labels. No enrichment invalidation is needed.
