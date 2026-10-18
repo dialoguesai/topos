@@ -73,6 +73,25 @@ class EmbeddingsJob(BaseEnrichmentJob):
     def get_job_name(self) -> str:
         return "embeddings"
 
+    def write_derived(self, records, canonical_messages, *, tables_manager) -> int:
+        """Canonical embedding runs must persist to the searchable vector store.
+
+        The legacy message_embeddings writer is a deliberate no-op. Routing
+        through it marked messages complete without storing their vectors.
+        Use the same transactional writer as the signal lane.
+        """
+        from ....storage.adapters.factory import AdapterFactory
+        from ...job_writer import write_signal_records
+
+        conn = getattr(tables_manager, "conn", None)
+        if conn is None:
+            raise RuntimeError("No database connection for embedding persistence")
+        return write_signal_records(
+            "embeddings", records, conn=conn,
+            adapters=AdapterFactory.create("local_database", conn=conn),
+            provenance={"job_id": "embeddings"},
+        )
+
     async def enrich(
         self,
         canonical_messages: List[Dict[str, Any]],
@@ -172,8 +191,10 @@ class EmbeddingsJob(BaseEnrichmentJob):
             input_payload={"texts": texts, "batch_size": 32, "input_role": "passage"},
         )
         if result.status != "completed":
-            return []
+            raise RuntimeError(f"Embedding did not complete: {result.status}")
         vectors = result.output.get("vectors") or []
+        if len(vectors) != len(meta):
+            raise RuntimeError("Embedding returned an incomplete batch")
         out: List[Dict[str, Any]] = []
         for row_meta, vector in zip(meta, vectors):
             out.append(

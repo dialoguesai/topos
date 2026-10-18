@@ -84,7 +84,7 @@ class TopicsJob(BaseEnrichmentJob):
                     )
                     return None
                 if result.status != "completed":
-                    return []
+                    raise RuntimeError(f"Topic extraction did not complete: {result.status}")
                 rows: List[Dict[str, Any]] = []
                 for topic in result.output.get("topics") or []:
                     rows.append(
@@ -112,6 +112,6 @@ class TopicsJob(BaseEnrichmentJob):
                 progress_callback(min(processed, total), total)
             logger.info("TopicsJob progress %d/%d", min(processed, total), total)
 
-        if deferred and not results:
+        if deferred:
             return [{"_deferred": True, "error": deferred_error}]
         return results

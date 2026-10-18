@@ -572,3 +572,52 @@ async def test_job_cancelled_by_node_shutdown_is_requeued(
             await task
 
     assert get_job(conn, "jc1")["status"] == ("queued" if node_stopping else "running")
+
+
+def test_topic_consolidation_waits_for_recovery_without_losing_its_queue_row(conn):
+    from topos.pipeline.job_runner import _claimable_kinds, _executable_kinds
+    enqueue_job(conn, kind='topic_consolidation', payload={}, job_id='consolidate')
+    enqueue_job(conn, kind='ai_tool_enrichment_catchup', source_id='codex_sessions', payload={}, job_id='recover')
+    kinds = _claimable_kinds(conn, _executable_kinds())
+    assert 'topic_consolidation' not in kinds
+    claimed = claim_next_job(conn, lease_owner='test', kinds=kinds)
+    assert claimed['job_id'] == 'recover'
+    assert get_job(conn, 'consolidate')['status'] == 'queued'
+    conn.execute("UPDATE pipeline_jobs SET status='done' WHERE job_id='recover'")
+    conn.commit()
+    kinds = _claimable_kinds(conn, _executable_kinds())
+    assert 'topic_consolidation' in kinds
+    assert claim_next_job(conn, lease_owner='test', kinds=kinds)['job_id'] == 'consolidate'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('status', ['ok', 'error'])
+async def test_topic_consolidation_refreshes_graph_only_after_successful_write(monkeypatch, status):
+    from topos.pipeline.job_runner import _execute_topic_consolidation
+    from topos.enrichment.pipeline_activity import is_derivation_in_flight
+    calls = []
+    monkeypatch.setattr('topos.core.state.get_db_connection', lambda: object())
+    def recompute(*args, **kwargs):
+        assert is_derivation_in_flight()
+        calls.append('persisted' if status == 'ok' else 'failed')
+        return {'status': status}
+    def dirty():
+        assert is_derivation_in_flight() and calls == ['persisted']
+        calls.append('graph_dirty')
+    monkeypatch.setattr('topos.features.signal.topic_clustering.recompute_topic_clusters', recompute)
+    monkeypatch.setattr('topos.features.entities.graph_refresh.mark_graph_dirty', dirty)
+    result = await _execute_topic_consolidation({})
+    assert result['status'] == status
+    assert calls == (['persisted', 'graph_dirty'] if status == 'ok' else ['failed'])
+    assert not is_derivation_in_flight()
+
+
+@pytest.mark.parametrize('source_id,waits', [('codex_sessions', True), ('browser_visits', False)])
+def test_consolidation_handles_live_coding_queue_without_blocking_other_sources(conn, source_id, waits):
+    from topos.pipeline.job_runner import _claimable_kinds, _executable_kinds
+    enqueue_job(conn, kind='topic_consolidation', payload={}, job_id='consolidate-live')
+    enqueue_job(conn, kind='inbox_deferred_enrichment', source_id=source_id, payload={}, job_id='live-ingest')
+    kinds = _claimable_kinds(conn, _executable_kinds())
+    assert ('topic_consolidation' not in kinds) == waits
+    claimed = claim_next_job(conn, lease_owner='test', kinds=kinds)
+    assert claimed['job_id'] == ('live-ingest' if waits else 'consolidate-live')

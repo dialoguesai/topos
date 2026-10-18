@@ -176,3 +176,29 @@ def test_the_automatic_lane_groups_by_source(conn, monkeypatch):
 
     assert processed_record_ids(conn, "grow_journal", JOB, 0) == {"a"}
     assert processed_record_ids(conn, "imessage", JOB, 0) == {"b"}
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['failed_write', 'deferred', 'empty_success'])
+async def test_completion_is_marked_only_after_successful_persistence(monkeypatch, mode):
+    from types import SimpleNamespace
+    from topos.enrichment.orchestrator import EnrichmentOrchestrator
+
+    async def enrich(*a, **kw):
+        if mode == 'deferred':
+            return [{'_deferred': True, 'error': 'provider offline'}]
+        return [] if mode == 'empty_success' else [{'record_id': 'm1'}]
+
+    def write(*a, **kw):
+        raise RuntimeError('synthetic disk write failure')
+
+    job = SimpleNamespace(get_job_name=lambda: 'synthetic', should_run=lambda rows: True,
+                          get_derived_table=lambda: 'message_entities', enrich=enrich)
+    orch = EnrichmentOrchestrator()
+    orch.canonical_jobs = [job]
+    monkeypatch.setattr(orch, '_tables_manager_for_worker',
+                        lambda: SimpleNamespace(write_enrichment_batch=write))
+    marks = []
+    monkeypatch.setattr(orch, '_mark_processed', lambda *a: marks.append(a))
+    result = await orch.run_canonical([{'message_id': 'm1', 'source_id': 'imessage', 'content': 'synthetic'}])
+    assert bool(marks) == (mode == 'empty_success')
+    assert bool(result['errors']) == (mode != 'empty_success')

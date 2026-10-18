@@ -71,6 +71,7 @@ READERS = {
     # --- readers that answer a request ----------------------------------------------------------------------------
     "features/lifecycle/blackhole_guard.py": REQUEST,
     "query/retrieval.py": REQUEST,
+    "query/graph_rows.py": "owner-agent-only graph request: verified owner_raw tier; the explicit OWNER_AGENT guard reads its OWNER view, never a grant or lower-tier route",
     "query/closeness.py": REQUEST,
     "query/aggregate.py": GUARD,
     "core/handlers/aggregate.py": GUARD,

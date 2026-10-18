@@ -171,6 +171,7 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
     timeline_daily,
     graph_query,
     graph_summary,
+    dashboard,
 )
 
 
@@ -419,6 +420,7 @@ OWNER_DOOR_READ_TYPES = frozenset({
     # calibration_answer remains a dangerous mutation by subtraction.
     "calibration_catalog", "calibration_preview",
     # owner_only reads
+    "get_dashboard_measurements",
     "get_database_explorer_summary", "pooled_scope_backfill_dry_run", "graph_cypher_query",
     "mcp_client_list", "mcp_client_list_elevations",
     "permissions_v2_status", "permissions_v2_share_catalog", "permissions_v2_share_counts",

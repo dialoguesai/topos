@@ -111,7 +111,7 @@ class GoalExtractionJob(BaseEnrichmentJob):
                     )
                     return []
                 if result.status != "completed":
-                    return []
+                    raise RuntimeError(f"Goal extraction did not complete: {result.status}")
                 rows: List[Dict[str, Any]] = []
                 for goal in result.output.get("goals") or []:
                     goal_text = str(goal.get("text") or "").strip()
@@ -145,12 +145,6 @@ class GoalExtractionJob(BaseEnrichmentJob):
             if progress_callback:
                 progress_callback(min(processed, total), total)
 
-        if deferrals == total and total > 0 and not results:
-            return [{"_deferred": True, "error": deferred_error}]
         if deferrals:
-            logger.warning(
-                "GoalExtractionJob skipped %d/%d messages (Ollama deferred)",
-                deferrals,
-                total,
-            )
+            return [{"_deferred": True, "error": deferred_error}]
         return results

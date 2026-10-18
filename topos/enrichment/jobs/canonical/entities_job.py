@@ -196,6 +196,13 @@ class EntitiesJob(BaseEnrichmentJob):
                         # artifacts before they reach storage or the registry.
                         if not is_valid_entity_surface(ent.get("entity_text")):
                             continue
+                        from ....features.entities.coding_types import capture_product_type
+
+                        corrected_type = None
+                        if str(ent.get("entity_type") or "").upper() in ("WORK_OF_ART", "MISC"):
+                            corrected_type = capture_product_type(
+                                str(ent.get("entity_text") or ""), str(src.get("source_id") or ""), src["text"]
+                            )
                         results.append(
                             {
                                 "message_id": src["id"],
@@ -204,18 +211,15 @@ class EntitiesJob(BaseEnrichmentJob):
                                 "event_at": src.get("event_at"),
                                 "canonical_table": src.get("canonical_table"),
                                 "entity_text": ent.get("entity_text"),
-                                "entity_type": ent.get("entity_type"),
+                                "entity_type": corrected_type or ent.get("entity_type"),
                                 "confidence": ent.get("confidence"),
                                 "provider": result.output.get("provider", "huggingface"),
                                 "model": result.output.get("model"),
                             }
                         )
             else:
-                logger.debug(
-                    "entities batch %s status=%s; skipping %d messages",
-                    batch[0]["id"],
-                    result.status,
-                    len(batch),
+                raise RuntimeError(
+                    f"Entity extraction did not complete: {result.status}"
                 )
             processed += len(batch)
             if progress_callback:
@@ -349,6 +353,18 @@ class EntitiesJob(BaseEnrichmentJob):
                 continue
             record_id = str(rec.get("record_id") or "")
             msg = msg_by_id.get(record_id, {})
+            from ....features.entities.coding_types import capture_product_type, repair_capture_product_type
+
+            if capture_product_type(surface, str(rec.get("source_id") or ""), str(msg.get("content") or "")):
+                # Retype an existing capture-app node in place, retaining ids
+                # used by graph edges and mentions. Never merge identities.
+                for old_id, in conn.execute(
+                    "SELECT entity_id FROM entities WHERE normalized_name=? AND entity_type='work_of_art'",
+                    (surface.casefold().strip(),),
+                ).fetchall():
+                    repair_capture_product_type(conn, old_id, surface=surface,
+                                                source_id=str(rec.get("source_id") or ""),
+                                                text=str(msg.get("content") or ""))
             try:
                 entity_id, _tier = resolver.resolve(
                     surface,

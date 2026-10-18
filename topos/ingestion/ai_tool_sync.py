@@ -458,7 +458,10 @@ def describe_ai_tool_source(conn: Any, source_id: str) -> Dict[str, Any]:
 
     state = source_state(conn, source_id)
     schedule = describe_schedule(conn, state["dataset_id"], source_id) if state["dataset_id"] else None
-    return {**state, "schedule": schedule, "checkpoint": describe_ai_tool_checkpoint(conn, state["dataset_id"] or "", source_id)}
+    from .ai_tool_catchup import processing_status
+    return {**state, "schedule": schedule,
+            "processing": processing_status(conn, source_id),
+            "checkpoint": describe_ai_tool_checkpoint(conn, state["dataset_id"] or "", source_id)}
 
 
 def describe_ai_tool_checkpoint(conn: Any, dataset_id: str, source_id: str) -> Dict[str, Any]:

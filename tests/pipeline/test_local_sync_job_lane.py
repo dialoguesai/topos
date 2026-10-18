@@ -47,9 +47,10 @@ def test_the_two_lanes_together_cover_every_executor() -> None:
     assert not set(_executable_kinds()) & set(_long_running_kinds())
 
 
-def test_the_general_lane_still_holds_exactly_the_pre_existing_kinds() -> None:
+def test_general_lane_retains_existing_kinds_and_adds_bounded_coding_recovery() -> None:
     """Adding a kind must not quietly move an existing one off its worker."""
     assert _executable_kinds() == [
+        "ai_tool_enrichment_catchup",
         "enrichment_process_source",
         "file_ingestion",
         "inbox_deferred_enrichment",

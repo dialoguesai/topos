@@ -160,7 +160,7 @@ async def _execute_topic_consolidation(payload: Dict[str, Any]) -> Dict[str, Any
     it runs alone, and only after the batch that triggered it has finished.
     """
     from ..core.state import get_db_connection
-    from ..enrichment.pipeline_activity import is_derivation_in_flight
+    from ..enrichment.pipeline_activity import is_derivation_in_flight, derivation_in_flight
     from ..features.signal.topic_clustering import (
         _resolved_topic_cluster_source_ids,
         recompute_topic_clusters,
@@ -178,14 +178,19 @@ async def _execute_topic_consolidation(payload: Dict[str, Any]) -> Dict[str, Any
         own = get_db_connection()
         if own is None:
             return {"status": "error", "error": "no database connection"}
-        return recompute_topic_clusters(
+        result = recompute_topic_clusters(
             own,
             source_ids=list(_resolved_topic_cluster_source_ids()),
             sync_batch_id=None,
             min_records=3,
         )
+        if str(result.get("status") or "") not in ("error", "skipped"):
+            from ..features.entities.graph_refresh import mark_graph_dirty
+            mark_graph_dirty()
+        return result
 
-    result = await asyncio.to_thread(_run)
+    with derivation_in_flight():
+        result = await asyncio.to_thread(_run)
     if str(result.get("status") or "") == "error":
         return result
     logger.info("topic consolidation complete: %s", result)
@@ -373,7 +378,23 @@ def _sync_summary(result: Dict[str, Any], sync_options: Any) -> Dict[str, Any]:
     return summary
 
 
+async def _execute_ai_tool_catchup(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from ..ingestion.ai_tool_catchup import execute_catchup
+
+    return await execute_catchup(payload)
+
+
+def _enqueue_ai_tool_catchup(conn: Any, source_id: Optional[str] = None, retry_failed: bool = False) -> None:
+    from ..ingestion.ai_tool_catchup import enqueue_catchup
+
+    try:
+        enqueue_catchup(conn, source_id, retry_failed)
+    except Exception:
+        logger.warning("Coding-session catch-up discovery failed", exc_info=True)
+
+
 EXECUTORS: Dict[str, ExecutorFn] = {
+    "ai_tool_enrichment_catchup": _execute_ai_tool_catchup,
     "inbox_deferred_enrichment": _execute_inbox_deferred_enrichment,
     "file_ingestion": _execute_file_ingestion,
     "enrichment_process_source": _execute_enrichment_process_source,
@@ -418,6 +439,28 @@ def _executable_kinds() -> list[str]:
     newer node version) stays queued and visible instead of being claimed and
     immediately failed as unknown."""
     return sorted(set(EXECUTORS) - _LONG_RUNNING_KINDS)
+
+
+def _claimable_kinds(conn, kinds: list[str]) -> list[str]:
+    """Coalesce global topic work behind the bounded coding recovery queue.
+
+    Incremental assignment still runs in every batch. Rebuilding all clusters
+    whenever its candidate pool reaches 100 would repeatedly relabel the whole
+    corpus while thousands of coding records still await vectors. A newly
+    collected coding batch also holds consolidation: recovery discovery waits
+    for that ordinary batch to finish before queuing its next chunk.
+    """
+    if "topic_consolidation" not in kinds or "ai_tool_enrichment_catchup" not in kinds:
+        return kinds
+    from ..ingestion.ai_tool_sync import AI_TOOL_SOURCE_IDS
+    marks = ",".join("?" for _ in AI_TOOL_SOURCE_IDS)
+    pending = conn.execute(
+        "SELECT 1 FROM pipeline_jobs WHERE status IN ('queued','running') AND "
+        "(kind='ai_tool_enrichment_catchup' OR "
+        f"(kind='inbox_deferred_enrichment' AND source_id IN ({marks}))) LIMIT 1",
+        list(AI_TOOL_SOURCE_IDS),
+    ).fetchone()
+    return [kind for kind in kinds if kind != "topic_consolidation"] if pending else kinds
 
 
 def _long_running_kinds() -> list[str]:
@@ -572,7 +615,7 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
     jobs = [job]
     if kind == "inbox_deferred_enrichment":
         jobs, payload = await _run_db(conn_factory, _coalesce_inbox_jobs, job, payload)
-    if kind in ("enrichment_process_source", LOCAL_SYNC_KIND):
+    if kind in ("enrichment_process_source", "ai_tool_enrichment_catchup", LOCAL_SYNC_KIND):
         payload["_progress_updater"] = _progress_updater
     if kind == LOCAL_SYNC_KIND:
         payload["_job_id"] = job_id
@@ -684,6 +727,9 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
                 )
 
     await _run_db(conn_factory, _mark_done)
+    if kind in ("ai_tool_enrichment_catchup", "inbox_deferred_enrichment", LOCAL_SYNC_KIND):
+        for sid in {entry.get("source_id") for entry in jobs if entry.get("source_id")}:
+            await _run_db(conn_factory, _enqueue_ai_tool_catchup, sid, kind == LOCAL_SYNC_KIND)
     _release_secrets(jobs)
 
 
@@ -750,6 +796,8 @@ async def _worker_loop(
 
     idle_delay = idle_seconds
     next_debt_sweep = 0.0
+    if sweep_debts and _enabled():
+        await _run_db(conn_factory, _enqueue_ai_tool_catchup, None, True)
     while True:
         try:
             if not _enabled():
@@ -791,7 +839,7 @@ async def _worker_loop(
                 if own is None:
                     return None
                 claimed = claim_next_job(
-                    own, lease_owner=_lease_owner, kinds=kinds_fn(), lease_seconds=lease_seconds
+                    own, lease_owner=_lease_owner, kinds=_claimable_kinds(own, kinds_fn()), lease_seconds=lease_seconds
                 )
                 with handoff_lock:
                     late = handoff["cancelled"]
@@ -1000,7 +1048,7 @@ async def process_pending_jobs_once(conn_factory: Callable[[], Any], *, limit: i
         # Both lanes: this helper means "drain what is runnable", and the
         # long-running kinds are runnable — they are merely given their own
         # worker in production so they cannot block the general queue.
-        return claim_next_job(own, lease_owner=_lease_owner, kinds=sorted(EXECUTORS))
+        return claim_next_job(own, lease_owner=_lease_owner, kinds=_claimable_kinds(own, sorted(EXECUTORS)))
 
     for _ in range(max(1, int(limit))):
         job = await asyncio.to_thread(_claim)

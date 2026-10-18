@@ -57,6 +57,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "get_analytics",
     "get_conversation_context",
     "get_conversation_context_llm_config",
+    "get_dashboard_measurements",
     "get_data_explorer_table_prefs",
     "get_database_explorer_summary",
     "get_derivation_packs",

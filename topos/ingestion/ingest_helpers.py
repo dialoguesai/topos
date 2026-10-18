@@ -332,8 +332,20 @@ async def ingest_ui_payload(
 
 
 async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
+    """Keep coding recovery and ordinary coding batches under one graph debounce."""
+    from .ai_tool_sync import AI_TOOL_SOURCE_IDS
+    from ..enrichment.pipeline_activity import derivation_in_flight
+
+    if enrichment_ctx.get("source_id") in AI_TOOL_SOURCE_IDS:
+        with derivation_in_flight():
+            return await _run_ui_payload_enrichment_inner(enrichment_ctx)
+    return await _run_ui_payload_enrichment_inner(enrichment_ctx)
+
+
+async def _run_ui_payload_enrichment_inner(enrichment_ctx: dict) -> dict:
     """Run post-canonical enrichment for a deferred inbox ingest."""
     from ..sources.registry import REGISTRY
+    from .ai_tool_sync import AI_TOOL_SOURCE_IDS
 
     source_id = str(enrichment_ctx.get("source_id") or "").strip()
     source = REGISTRY.get(source_id)
@@ -358,12 +370,29 @@ async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
         source_def=source,
         canonical_records=canonical_records,
         sync_batch_id=sync_batch_id,
+        # Coding batches are background work: coalesce the whole queue's
+        # graph refresh, including the ordinary batches ahead of recovery.
+        fill_graph=source_id not in AI_TOOL_SOURCE_IDS,
     )
     enrich_out = pipeline_outcome.get("canonical_enrichment") or {}
     signal_out = pipeline_outcome.get("signal_derivation") or {}
     signal_errors = list(signal_out.get("errors") or []) if isinstance(signal_out, dict) else []
     enrich_errors = list(enrich_out.get("errors") or []) if isinstance(enrich_out, dict) else []
+    privacy_errors = list((pipeline_outcome.get("privacy_disclosure_layer") or {}).get("errors") or [])
+    privacy_result = pipeline_outcome.get("privacy_disclosure_layer") or {}
+    if any(privacy_result.get(k) for k in ("failed_batches", "failed_records", "nsfw_failed_batches")):
+        privacy_errors.append("Privacy processing has unfinished records")
+    signal_errors.extend(f"Deferred signal job: {j}" for j in signal_out.get("deferred_jobs") or [])
+    enrich_errors.extend(privacy_errors)
     status = "error" if (signal_errors or enrich_errors) else "ok"
+    if status == "ok":
+        from .ai_tool_sync import AI_TOOL_SOURCE_IDS
+        if source_id in AI_TOOL_SOURCE_IDS:
+            from ..core.state import get_db_connection
+            from ..enrichment.record_progress import mark_records_processed_in_a_worker
+            await mark_records_processed_in_a_worker(
+                get_db_connection, source_id, "ai_tool_pipeline", canonical_records, 1
+            )
     result = {
         "status": status,
         "signal_jobs_run": (signal_out.get("jobs_run") if isinstance(signal_out, dict) else 0) or 0,

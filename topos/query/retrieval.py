@@ -1520,6 +1520,13 @@ def _route_canonical_rows(
     surface intent: the inference packet is derived existence signal, not
     content, and the answerer needs candidates — but the rare-token honesty
     check still applies, so unanswerable specifics stay empty."""
+    if table in ("entities", "entity_edges"):
+        from .graph_rows import graph_rows
+
+        return graph_rows(
+            getattr(adapters.signal, "_conn", None), table, query_text,
+            limit=limit, disclosure_tier=disclosure_tier,
+        )
     query_lower = (query_text or "").lower()
     tokens = _query_tokens(query_text)
     residual = _residual_content_tokens(tokens, tables=[table])
@@ -7869,7 +7876,7 @@ class DefaultSignalRetrievalAdapter:
                         .filter_observed_canonical_rows(table_rows, canonical_table=table)
                         if protection_conn is not None else [])
                 table_rows = [_redact_row_for_scope(manifest.scope_id, table, row) for row in table_rows]
-                touched.append("canonical")
+                touched.append("graph" if table in ("entities", "entity_edges") else "canonical")
                 if table == "profile_records" and "certification" in (query_text or "").lower():
                     typed = [
                         row

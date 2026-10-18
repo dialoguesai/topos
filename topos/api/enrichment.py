@@ -859,6 +859,11 @@ async def _find_unprocessed_messages(
                     db_conn,
                     min_spec_version=catalog_spec_version(job_name),
                 )
+                # A successful zero-output run is complete too. Looking only
+                # at output rows repeatedly scans messages with no entities.
+                job_ids |= _processed_record_ids(
+                    db_conn, source_id, job_name, catalog_spec_version(job_name)
+                )
                 # A row this job may not read (an AI reply, for a job kept to what the owner typed) never gets
                 # its output, and is not owed it: counted done here, or every catch-up re-reads it.
                 readable = {id(msg) for msg in rows_for_job(job_name, generic_messages, source_id=source_id)}

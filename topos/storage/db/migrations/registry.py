@@ -344,6 +344,11 @@ def _spec(
     )
 
 
+from .dashboard_measurements_v1 import (
+    MIGRATION_ID as DASHBOARD_MEASUREMENTS_V1_ID,
+    apply_dashboard_measurements_v1_up,
+)
+
 # Append-only. Never rename, reorder, or delete a shipped id — fixes are new entries.
 # ``always_run`` matches the historical ensure_migrations_applied re-run set.
 MIGRATIONS: List[MigrationSpec] = [
@@ -495,6 +500,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(86, HOME_CHAT_TURN_TIMINGS_V1_ID, apply_home_chat_turn_timings_v1_up),
     # Current owner answers for the opt-in Calibrate truth pack; additive and ledger guarded.
     _spec(87, CALIBRATION_ANSWERS_V1_ID, apply_calibration_answers_v1_up),
+    _spec(88, DASHBOARD_MEASUREMENTS_V1_ID, apply_dashboard_measurements_v1_up, always_run=True),
 ]
 
 
