@@ -446,13 +446,19 @@ def _claimable_kinds(conn, kinds: list[str]) -> list[str]:
 
     Incremental assignment still runs in every batch. Rebuilding all clusters
     whenever its candidate pool reaches 100 would repeatedly relabel the whole
-    corpus while thousands of coding records still await vectors.
+    corpus while thousands of coding records still await vectors. A newly
+    collected coding batch also holds consolidation: recovery discovery waits
+    for that ordinary batch to finish before queuing its next chunk.
     """
     if "topic_consolidation" not in kinds or "ai_tool_enrichment_catchup" not in kinds:
         return kinds
+    from ..ingestion.ai_tool_sync import AI_TOOL_SOURCE_IDS
+    marks = ",".join("?" for _ in AI_TOOL_SOURCE_IDS)
     pending = conn.execute(
-        "SELECT 1 FROM pipeline_jobs WHERE kind='ai_tool_enrichment_catchup' "
-        "AND status IN ('queued','running') LIMIT 1"
+        "SELECT 1 FROM pipeline_jobs WHERE status IN ('queued','running') AND "
+        "(kind='ai_tool_enrichment_catchup' OR "
+        f"(kind='inbox_deferred_enrichment' AND source_id IN ({marks}))) LIMIT 1",
+        list(AI_TOOL_SOURCE_IDS),
     ).fetchone()
     return [kind for kind in kinds if kind != "topic_consolidation"] if pending else kinds
 
