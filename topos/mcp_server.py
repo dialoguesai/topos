@@ -25,13 +25,27 @@ through ``POST /api/local/agent/dispatch`` (lane L2) plus the status and owner
 scope doors (L5). Progress notifications tick every ten seconds while a call
 is in flight — Codex's default tool timeout is 60 s, a cold inference turn can
 take longer.
+
+A fourth rule, added after the first live week: **every result fits the
+client.** A raw ``query_scope`` over ``ai_coding_sessions:read`` returned 87
+rows with their full text — 147 KB — and Claude Code, whose tool-result limit
+is far smaller, spilled it to a file the agent could not read. The server now
+keeps a result under :data:`RESULT_BYTE_BUDGET`: rows that do not fit come as
+``content_preview`` pages with a ``next`` cursor, one row is read in full by
+``record_id``, and an oversize row is read in content slices. The node's
+disclosure is unchanged (the agent still gets ``owner_raw``); only how much of
+it travels per call is bounded. Pages are served from this process's memory —
+never a file, never a log line — and the node re-checks the label before any
+cached page is read, so a disconnect still takes effect on the next call.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
+import secrets
 import sys
 import time
 from datetime import datetime, timezone
@@ -77,7 +91,31 @@ REQUEST_TIMEOUT_S = 600.0
 SPECIAL_CLASS_SCOPES = frozenset({"health:read", "facts_sensitive:read"})
 SPECIAL_CLASS_DIMENSIONS = ("Health", "Beliefs")
 
+#: Byte budget for one query_scope result: the serialized wrapper, UTF-8. A
+#: client shows a tool result inline only up to its own limit and Claude Code
+#: spills anything larger to a file the agent then reads in pieces (147 KB of
+#: raw coding-session rows did exactly that on 2026-10-19). 24 KB keeps one
+#: page well inside every client's limit and a few pages inside a context.
+RESULT_BYTE_BUDGET = 24_000
+#: Characters of an item's content kept on a page — the node's own
+#: ``content_preview`` column is ``substr(content, 1, 500)``.
+PREVIEW_CHARS = 500
+#: How long a result stays readable by cursor or record_id.
+RESULT_TTL_S = 900.0
+#: Results kept in memory at once; the oldest goes first.
+RESULT_CACHE_MAX = 16
+#: The public_result lists a page is cut from, in the order they are looked for.
+PAGEABLE_KEYS = ("rows", "summaries", "items")
+RESULT_EXPIRED = "That result has expired — ask the question again."
+RECORD_NOT_FOUND = (
+    "No row with that record_id in a recent result — ask the question again and use a record_id from its rows."
+)
+
 _ERROR_CODE_RE = re.compile(r"^[a-z0-9_]{1,64}$")
+#: ``r_<token>`` names a cached result; ``:<n>`` is an item offset (a page) or a
+#: character offset into one item's content (a record read).
+_CURSOR_RE = re.compile(r"^(r_[A-Za-z0-9_-]{8,})(?::(\d{1,9}))?$")
+_ITEM_ID_KEYS = ("record_id", "message_id", "id")
 
 
 # ------------------------------------------------------------------- errors
@@ -101,6 +139,14 @@ class NodeRefused(RuntimeError):
         super().__init__(f"{code} (HTTP {status})")
         self.status = status
         self.code = code
+
+
+class ResultExpired(RuntimeError):
+    """A cursor this server did not issue, or whose result has been dropped."""
+
+
+class RecordNotFound(RuntimeError):
+    """A record_id that is in no cached result."""
 
 
 # -------------------------------------------------------------------- paths
@@ -368,7 +414,12 @@ async def session_context(sock: NodeSocket, client: str, *, agents_dir: Optional
             "ask": (
                 "call list_scopes, then query_scope(scope_id, intent, access_mode); "
                 "for questions about your recent history use access_mode='raw' first"
-            )
+            ),
+            "paging": (
+                "a query_scope result is kept under a byte budget: read data.page, follow "
+                "page.next (cursor=) for more rows, and pass record_id (with cursor=page.result_id) "
+                "to read one row in full"
+            ),
         },
         "topos_node_version": str(shell.get("version") or _node_version()),
         "mcp_server_version": _node_version(),
@@ -399,6 +450,296 @@ async def _with_progress(ctx: Any, coro: Awaitable[Any]) -> Any:
         raise
 
 
+# ------------------------------------------------------------ result pages
+def _wrapped_bytes(data: Any) -> int:
+    """Bytes of the wrapper exactly as ``_ok`` serializes it."""
+    return len(json.dumps({"notice": NOTICE, "data": data}, ensure_ascii=False, default=str).encode("utf-8"))
+
+
+def _item_bytes(item: Any) -> int:
+    # +2 for the ", " a list puts between items; counting it on every item over-counts by two.
+    return len(json.dumps(item, ensure_ascii=False, default=str).encode("utf-8")) + 2
+
+
+def _item_id(item: Any) -> str:
+    if not isinstance(item, dict):
+        return ""
+    for key in _ITEM_ID_KEYS:
+        value = item.get(key)
+        if value is not None and str(value) != "":
+            return str(value)
+    return ""
+
+
+def _content_text(content: Any) -> str:
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, ensure_ascii=False, default=str)
+
+
+def preview_item(item: Any) -> Any:
+    """One list item as it appears on a page: ``content`` replaced by
+    ``content_preview`` — with ``content_chars`` and ``content_truncated``
+    saying what was cut — and every other string over :data:`PREVIEW_CHARS`
+    cut and named in ``truncated_fields``. Ids, timestamps and flags are
+    untouched, so a row still names what a ``record_id`` read will return."""
+    if isinstance(item, str):
+        return item[:PREVIEW_CHARS]
+    if not isinstance(item, dict):
+        return item
+    out: dict = {}
+    cut: list[str] = []
+    for key, value in item.items():
+        if key == "content":
+            continue
+        if isinstance(value, str) and len(value) > PREVIEW_CHARS:
+            out[key] = value[:PREVIEW_CHARS]
+            if key != "content_preview":
+                cut.append(key)
+        else:
+            out[key] = value
+    if "content" in item:
+        text = _content_text(item["content"])
+        preview = out.get("content_preview")
+        if not isinstance(preview, str) or not preview:
+            preview = text[:PREVIEW_CHARS]
+        out["content_preview"] = preview
+        out["content_chars"] = len(text)
+        out["content_truncated"] = text != preview
+    if cut:
+        out["truncated_fields"] = cut
+    return out
+
+
+def parse_cursor(cursor: str) -> tuple[str, int]:
+    match = _CURSOR_RE.match(str(cursor or "").strip())
+    if not match:
+        raise ResultExpired(RESULT_EXPIRED)
+    return match.group(1), int(match.group(2) or 0)
+
+
+class _CachedResult:
+    __slots__ = ("result_id", "base", "public", "list_key", "items", "expires_at")
+
+    def __init__(self, result_id: str, base: dict, list_key: str, items: list, expires_at: float) -> None:
+        self.result_id = result_id
+        self.base = base
+        self.public = base["public_result"]
+        self.list_key = list_key
+        self.items = items
+        self.expires_at = expires_at
+
+
+class ResultStore:
+    """The last few query results, so a page or one record is read from memory
+    instead of asking the node again — a second dispatch would be a second
+    audited read, and could return a different row set under the same cursor.
+
+    Memory of this process only: never a file, never a log line. An entry is
+    gone after :data:`RESULT_TTL_S`, when :data:`RESULT_CACHE_MAX` newer ones
+    exist, and the moment the node says the agent is disconnected."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._entries: dict[str, _CachedResult] = {}
+
+    def _sweep(self) -> None:
+        now = self._clock()
+        for key in [k for k, entry in self._entries.items() if entry.expires_at <= now]:
+            del self._entries[key]
+        while len(self._entries) > RESULT_CACHE_MAX:
+            del self._entries[next(iter(self._entries))]
+
+    def put(self, base: dict, list_key: str, items: list) -> _CachedResult:
+        result_id = "r_" + secrets.token_urlsafe(9)
+        entry = _CachedResult(result_id, base, list_key, items, self._clock() + RESULT_TTL_S)
+        self._entries[result_id] = entry
+        self._sweep()
+        return entry
+
+    def get(self, result_id: str) -> _CachedResult:
+        self._sweep()
+        entry = self._entries.get(result_id)
+        if entry is None:
+            raise ResultExpired(RESULT_EXPIRED)
+        return entry
+
+    def find_record(self, record_id: str, result_id: str = "") -> tuple[_CachedResult, Any]:
+        """The item with ``record_id`` in the named result, or in the newest
+        result that has it when no cursor was given."""
+        self._sweep()
+        entries = [self.get(result_id)] if result_id else list(reversed(list(self._entries.values())))
+        for entry in entries:
+            for item in entry.items:
+                if _item_id(item) == record_id:
+                    return entry, item
+        raise RecordNotFound(RECORD_NOT_FOUND)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+
+def _node_row_cap(public: dict) -> Optional[int]:
+    truncated = public.get("truncated")
+    if isinstance(truncated, dict):
+        cap = truncated.get("row_cap")
+        if isinstance(cap, int) and not isinstance(cap, bool):
+            return cap
+    return None
+
+
+def _assemble(entry: _CachedResult, items: list, stamp: dict) -> dict:
+    return {**entry.base, "public_result": {**entry.public, entry.list_key: items}, "page": stamp}
+
+
+def _list_stamp(entry: _CachedResult, *, offset: int, returned: int, content: str, nxt: Optional[str], budget: int) -> dict:
+    total = len(entry.items)
+    noun = entry.list_key
+    cap = _node_row_cap(entry.public)
+    if content == "full":
+        note = f"All {total} {noun}, with full content."
+    else:
+        note = (
+            f"{noun} {offset + 1}–{offset + returned} of {total}. Each item's content is cut to content_preview "
+            f"({PREVIEW_CHARS} chars; content_chars and content_truncated say what was cut). "
+            + (f"For the next {noun} call query_scope again with cursor='{nxt}'. " if nxt else "")
+            + f"To read one item in full call it with record_id=<record_id> and cursor='{entry.result_id}'. "
+            f"Cursors expire after {int(RESULT_TTL_S // 60)} minutes."
+        )
+    if cap is not None:
+        note += f" The node itself retrieved at most {cap} {noun}; more may exist (see public_result.truncated)."
+    stamp = {
+        "result_id": entry.result_id,
+        "list_key": noun,
+        "offset": offset,
+        "returned": returned,
+        "total": total,
+        "next": nxt,
+        "content": content,
+        "preview_chars": PREVIEW_CHARS,
+        "byte_budget": budget,
+    }
+    if cap is not None:
+        stamp["node_row_cap"] = cap
+    stamp["note"] = note
+    return stamp
+
+
+def _record_stamp(
+    entry: _CachedResult, record_id: str, *, content: str, rng: Optional[dict], nxt: Optional[str], budget: int
+) -> dict:
+    stamp = {
+        "result_id": entry.result_id,
+        "list_key": entry.list_key,
+        "record_id": record_id,
+        "content": content,
+        "next": nxt,
+        "byte_budget": budget,
+    }
+    if rng is not None:
+        stamp["content_range"] = rng
+    if content == "full":
+        note = "One item in full."
+    elif content == "partial" and rng is not None:
+        note = f"Characters {rng['start']}–{rng['end']} of {rng['total']} of this item's content."
+        if nxt:
+            note += f" For the rest call query_scope again with the same record_id and cursor='{nxt}'."
+    else:
+        note = f"This item's long fields are cut to {PREVIEW_CHARS} chars (truncated_fields); its content is not the bulk."
+    stamp["note"] = note
+    return stamp
+
+
+def _page(entry: _CachedResult, offset: int, budget: int) -> dict:
+    total = len(entry.items)
+    if offset < 0 or offset > total or (offset == total and total > 0):
+        raise ResultExpired(RESULT_EXPIRED)
+    # Room is measured against the widest stamp this page could carry, so the
+    # real one — fewer items, shorter numbers — can only be smaller.
+    worst = _list_stamp(entry, offset=offset, returned=total, content="preview", nxt=f"{entry.result_id}:{total}", budget=budget)
+    room = budget - _wrapped_bytes(_assemble(entry, [], worst))
+    chosen: list = []
+    used = 0
+    for item in entry.items[offset:]:
+        shaped = preview_item(item)
+        size = _item_bytes(shaped)
+        if chosen and used + size > room:
+            break
+        chosen.append(shaped)
+        used += size
+    end = offset + len(chosen)
+    nxt = f"{entry.result_id}:{end}" if end < total else None
+    stamp = _list_stamp(entry, offset=offset, returned=len(chosen), content="preview", nxt=nxt, budget=budget)
+    return _assemble(entry, chosen, stamp)
+
+
+def _fit_text(text: str, start: int, room: int) -> tuple[str, int]:
+    """The longest ``text[start:end]`` whose JSON form fits ``room`` bytes; at
+    least one character, so a read always moves forward."""
+    end = min(len(text), start + max(1, room))
+    while end - start > 1 and len(json.dumps(text[start:end], ensure_ascii=False).encode("utf-8")) - 2 > room:
+        end = start + max(1, int((end - start) * 0.9))
+    return text[start:end], end
+
+
+def shape_query_result(result: Any, store: ResultStore, *, budget: Optional[int] = None) -> Any:
+    """A fresh node result → what the agent gets: the whole thing when it fits
+    the budget, otherwise its first preview page. Denials and list-free
+    results pass through untouched."""
+    budget = RESULT_BYTE_BUDGET if budget is None else budget
+    if not isinstance(result, dict):
+        return result
+    public = result.get("public_result")
+    if not isinstance(public, dict):
+        return result
+    list_key = next((key for key in PAGEABLE_KEYS if isinstance(public.get(key), list)), None)
+    if list_key is None:
+        return result
+    items = list(public[list_key])
+    base = {**result, "public_result": {key: value for key, value in public.items() if key != list_key}}
+    entry = store.put(base, list_key, items)
+    whole = _assemble(entry, items, _list_stamp(entry, offset=0, returned=len(items), content="full", nxt=None, budget=budget))
+    if _wrapped_bytes(whole) <= budget:
+        return whole
+    return _page(entry, 0, budget)
+
+
+def page_result(store: ResultStore, cursor: str, *, budget: Optional[int] = None) -> dict:
+    """The page a ``next`` cursor names."""
+    result_id, offset = parse_cursor(cursor)
+    return _page(store.get(result_id), offset, RESULT_BYTE_BUDGET if budget is None else budget)
+
+
+def read_record(store: ResultStore, cursor: str, record_id: str, *, budget: Optional[int] = None) -> dict:
+    """One item in full — or, when even one item is over the budget, the slice
+    of its content the cursor's offset names, with a ``next`` for the rest."""
+    budget = RESULT_BYTE_BUDGET if budget is None else budget
+    result_id, start = parse_cursor(cursor) if cursor else ("", 0)
+    entry, item = store.find_record(str(record_id), result_id)
+    full = _assemble(entry, [item], _record_stamp(entry, record_id, content="full", rng=None, nxt=None, budget=budget))
+    if start == 0 and _wrapped_bytes(full) <= budget:
+        return full
+    text = _content_text(item.get("content")) if isinstance(item, dict) else ""
+    total = len(text)
+    if not text:
+        # The bulk is somewhere other than content: the preview shape, said so.
+        stamp = _record_stamp(entry, record_id, content="preview", rng=None, nxt=None, budget=budget)
+        return _assemble(entry, [preview_item(item)], stamp)
+    if start < 0 or start >= total:
+        raise ResultExpired(RESULT_EXPIRED)
+    worst = _record_stamp(
+        entry, record_id, content="partial", rng={"start": start, "end": total, "total": total},
+        nxt=f"{entry.result_id}:{total}", budget=budget,
+    )
+    room = budget - _wrapped_bytes(_assemble(entry, [{**item, "content": ""}], worst))
+    piece, end = _fit_text(text, start, room)
+    nxt = f"{entry.result_id}:{end}" if end < total else None
+    stamp = _record_stamp(entry, record_id, content="partial", rng={"start": start, "end": end, "total": total}, nxt=nxt, budget=budget)
+    return _assemble(entry, [{**item, "content": piece}], stamp)
+
+
 # ------------------------------------------------------------------ server
 def build_server(client: str, *, socket_path: Optional[Path] = None, agents_dir: Optional[Path] = None):
     """The FastMCP server for one client. ``socket_path`` and ``agents_dir``
@@ -408,13 +749,12 @@ def build_server(client: str, *, socket_path: Optional[Path] = None, agents_dir:
     client = validate_client(client)
     sock = NodeSocket(socket_path)
     adir = Path(agents_dir) if agents_dir is not None else None
-
-    import json as _json
+    store = ResultStore()
 
     def _ok(data: Any) -> CallToolResult:
         wrapped = {"notice": NOTICE, "data": data}
         return CallToolResult(
-            content=[TextContent(type="text", text=_json.dumps(wrapped, ensure_ascii=False, default=str))],
+            content=[TextContent(type="text", text=json.dumps(wrapped, ensure_ascii=False, default=str))],
             structuredContent=wrapped,
             isError=False,
         )
@@ -428,7 +768,10 @@ def build_server(client: str, *, socket_path: Optional[Path] = None, agents_dir:
     async def _guarded(ctx: Any, make: Callable[[], Awaitable[Any]]) -> CallToolResult:
         try:
             data = await _with_progress(ctx, make())
-        except (NotConnected, NodeDown, AgentDisconnected) as exc:
+        except AgentDisconnected as exc:
+            store.clear()  # nothing cached outlives a disconnect
+            return _error(str(exc))
+        except (NotConnected, NodeDown, ResultExpired, RecordNotFound) as exc:
             return _error(str(exc))
         except NodeRefused as exc:
             return _error(f"Topos refused the request ({exc.code}).")
@@ -475,11 +818,30 @@ def build_server(client: str, *, socket_path: Optional[Path] = None, agents_dir:
         now: str = "",
         retrieval_text: str = "",
         query_session_id: str = "",
+        cursor: str = "",
+        record_id: str = "",
     ) -> CallToolResult:
         """Query the owner's Topos by scope_id and access_mode (raw|summary|inference).
         For questions about recent history use access_mode='raw' first. Returns the
         node's own result: turn_outcome, public_result, query_session_id, and a
-        deny_reason when the turn was denied."""
+        deny_reason when the turn was denied.
+
+        Results are paged to a byte budget. `page` says how many rows this call
+        holds of the total and carries `next`; rows past the budget come with
+        content_preview instead of content. Call again with cursor=<page.next> for
+        the next rows, or with record_id=<row's record_id> (and
+        cursor=<page.result_id>) to read one row in full. A cursor or record_id read
+        answers from the last result and does not re-run the query."""
+        if cursor or record_id:
+
+            async def _cached() -> dict:
+                # The node re-checks the label before anything cached is read.
+                await sock.request("GET", SHELL_STATUS_PATH, label=_label())
+                if record_id:
+                    return read_record(store, cursor, record_id)
+                return page_result(store, cursor)
+
+            return await _guarded(ctx, _cached)
         payload = {
             "scope_id": scope_id,
             "intent": intent,
@@ -489,7 +851,11 @@ def build_server(client: str, *, socket_path: Optional[Path] = None, agents_dir:
             "retrieval_text": retrieval_text,
             "query_session_id": query_session_id,
         }
-        return await _guarded(ctx, lambda: dispatch(sock, _label(), "query", payload))
+
+        async def _fresh() -> Any:
+            return shape_query_result(await dispatch(sock, _label(), "query", payload), store)
+
+        return await _guarded(ctx, _fresh)
 
     @mcp.tool()
     async def aggregate_scope(
