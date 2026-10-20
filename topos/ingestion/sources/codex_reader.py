@@ -47,7 +47,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
-from topos.ingestion.parsers.ai_coding_tool.common import Ledger, make_record, scrub_text, taints
+from topos.ingestion.parsers.ai_coding_tool.common import Ledger, make_record, project_key_from_cwd, scrub_text, taints
 
 if TYPE_CHECKING:  # L4 owns the store; the reader only needs its two methods.
     from topos.ingestion.checkpoints.file_cursors import FileCursorStore
@@ -199,10 +199,8 @@ def _classify_source(value: Any) -> Tuple[str, bool]:
 
 
 def _project_key(cwd: Any) -> Optional[str]:
-    if not isinstance(cwd, str) or not cwd.strip():
-        return None
-    name = Path(cwd.strip()).name
-    return name or None
+    """The §2.6 facet, by the rule every reader shares: the folder's basename, None for the home folder itself."""
+    return project_key_from_cwd(cwd)
 
 
 def _title_from_prompt(text: str) -> str:

@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **`sources preview claude_code_sessions` lists the project folders again.** `[O]` The Claude Code reader now names each session's project folder (the repo folder's basename, read from the transcript's working directory) as the owner-only project facet, the shape the Codex and Cursor readers already give. The preview listed no folders for Claude Code because that facet was never attached. `--skip` on `preview` and `enable` takes the listed basename as well as the stored folder slug. All three readers now derive the name by one rule: the last path segment, only when the home-path scrub leaves it untouched and it is not a login name, so a session run from the home folder itself (under any root, with or without a space in the account name) has no project name and the login name is never listed or stored. No migration, no reprocessing: the facet table only gains rows on the next sync.
+
 ## [1.5.13] — 2026-10-17
 
 - [S1] [P] Owner dashboard counters for new canonical records and logical facts, with transactional retry/update deduplication and explicit unavailable/partial history. Migration 88 baselines existing identities; no historical measurement backfill or reprocessing. Explicit source/record erasure also removes value-bearing fact receipts without discarding surviving shared evidence or retry deduplication.
