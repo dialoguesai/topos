@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **A coding-session backlog is processed in bounded, restartable batches.** `[O]` A full Claude Code backfill queued 17 deferred-processing jobs of about 870 records each, and the runner merged all of them into one 14,823-record derive batch. That batch commits nothing until it ends: it ran about 19 hours, a node restart discarded it, and the next start merged it again, so no record was processed in a day and the coding recovery path never started behind it. Coalescing now stops at 128 records, a coding sync queues its post-canonical work as 128-record jobs, and an oversized coding job already in the queue is split into 128-record jobs before any model work, so an upgraded node resumes such a queue without a migration. A job carrying a write receipt is never split, and other sources keep their own batch size. Small deliveries still coalesce as before.
+
 ## [1.5.13] — 2026-10-17
 
 - [S1] [P] Owner dashboard counters for new canonical records and logical facts, with transactional retry/update deduplication and explicit unavailable/partial history. Migration 88 baselines existing identities; no historical measurement backfill or reprocessing. Explicit source/record erasure also removes value-bearing fact receipts without discarding surviving shared evidence or retry deduplication.
