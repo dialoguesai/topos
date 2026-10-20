@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- [O] Coding-session sources store one assistant row per reply instead of one per API message. Claude Code, Codex and Cursor narration between tool calls is joined into one row under the reply's first message id and time; a typed or injected prompt, a turn edge or the Topos-taint instant still starts a new row, and Codex keeps commentary and its final answer apart. A reply still running when the hourly or hook sync reads it waits for the next run, for at most an hour. Typed Claude Code prompts no longer keep a harness span trailing them, Cursor prompts keep only the `<user_query>` text, and Cursor messages made only of harness spans are dropped. Codex reads `turn_id` from where rollouts actually carry it, so the auto-compact rule applies. Rows already stored are left as they are; no migration or reprocess.
+
 ## [1.5.14] — 2026-10-20
 
 - [S1] [P] Content-free query serve spans and daily owner activity on the dashboard. Migration 89 adds `serve_spans`: one row per query, retrieval and query-inference span with its duration, outcome and, only when a caller observed one, time to first token. No query text, record, or caller identity is stored, and the store refuses anything else. The owner dashboard reads serve p50/p95 from it. The dashboard measurements payload (still schema version 1, so the control plane passes it through unchanged) adds recorded MCP tool-call requests per day, which callers made them, and routine runs, all on the retained-day contract: days outside the retained log are unavailable, never zero. No backfill or reprocessing.

@@ -32,9 +32,12 @@ THREAD_D = "0a1b2c3d-4444-4ddd-8ddd-dddddddd0004"
 THREAD_E = "0a1b2c3d-5555-4eee-8eee-eeeeeeee0005"
 THREAD_F = "0a1b2c3d-6666-4fff-8fff-ffffffff0006"
 THREAD_G = "0a1b2c3d-7777-4777-8777-a7a7a7a70007"
+THREAD_H = "0a1b2c3d-8888-4888-8888-a8a8a8a80008"
+THREAD_I = "0a1b2c3d-9999-4999-8999-a9a9a9a90009"
+OPEN_TURN_ROOT = FIXTURE_ROOT.parent / "codex_open_turn"
 FORK_FILE = DAY / f"rollout-2026-10-15T10-05-00-{THREAD_B}.jsonl"
 
-TOTAL_ROWS = 17  # A 4 + B 2 + C 0 + D 5 + E 3 + F 0 + G 3
+TOTAL_ROWS = 23  # A 4 + B 2 + C 0 + D 4 + E 3 + F 0 + G 3 + H 7
 
 
 @pytest.fixture(scope="module")
@@ -109,9 +112,9 @@ def test_subagent_threads_skipped(reader, codex_root):
 
 def test_rollout_id_filename_variant_accepted(reader, codex_root):
     batch = _read(reader, codex_root)
-    assert batch.scanned_files == 7
+    assert batch.scanned_files == 8
     assert [r["id"] for r in _thread(batch, THREAD_D)] == [
-        "codex:msg_d_u1", "codex:msg_d_a1", "codex:msg_d_a2", "codex:msg_d_a3", "codex:msg_d_u2",
+        "codex:msg_d_u1", "codex:msg_d_a1", "codex:msg_d_a2", "codex:msg_d_u2",
     ]
 
 
@@ -128,12 +131,13 @@ def test_topos_function_call_taints_following_assistant_records_only(reader, cod
         ("codex:msg_d_u1", False),
         ("codex:msg_d_a1", False),
         ("codex:msg_d_a2", True),
-        ("codex:msg_d_a3", True),
         ("codex:msg_d_u2", False),
     ]
-    assert batch.ledger.tainted_turns == 3  # D: 2 (shell topos-node), G: 1 (mcp_attribution)
-    assert batch.ledger.dropped["tool_use"] == 2
-    assert batch.ledger.dropped["tool_result"] == 2
+    # a2 and a3 are one reply after the call; a1 before it keeps its own, shareable row.
+    assert _row(batch, "codex:msg_d_a2")["content"] == "The node is running and paired.\n\nNothing else to do."
+    assert batch.ledger.tainted_turns == 2  # D: 1 (shell topos-node), G: 1 (mcp_attribution)
+    assert batch.ledger.dropped["tool_use"] == 5  # D 1, G 1, H 3
+    assert batch.ledger.dropped["tool_result"] == 5
 
 
 def test_imported_sessions_flagged_cross_tool_import(reader, codex_root):
@@ -152,7 +156,7 @@ def test_commentary_and_final_answer_kept_as_separate_records(reader, codex_root
     assert [r["role"] for r in rows] == ["user", "assistant", "assistant"]
     assert [r["_metadata"]["origin"] for r in rows] == ["vscode", "commentary", "final_answer"]
     assert [r["_metadata"].get("model_slug") for r in rows] == [None, "gpt-5-codex", "gpt-5-codex"]
-    assert batch.ledger.dropped["thinking"] == 1
+    assert batch.ledger.dropped["thinking"] == 2  # E 1, H 1
 
 
 def test_non_keyboard_source_thread_dropped(reader, codex_root):
@@ -167,7 +171,7 @@ def test_spike_a_markers_developer_role_harness_blocks_auto_compact_mcp_attribut
     assert [r["id"] for r in rows] == ["codex:msg_g_u1", "codex:msg_g_a1", "codex:msg_g_a4"]
     assert rows[0]["content"] == "Rename the helper"
     assert batch.ledger.dropped["system"] == 1  # developer role
-    assert batch.ledger.dropped["harness_injected"] == 3  # auto-compact u2 + a2, harness-only u3
+    assert batch.ledger.dropped["harness_injected"] == 5  # G: auto-compact u2 + a2, harness-only u3; H: auto-compact u2 + a5
     assert [r["_metadata"]["share_excluded"] for r in rows] == [False, False, True]
 
 
@@ -193,13 +197,14 @@ def test_byte_offset_cursor_resumes_without_duplicates(reader, codex_root):
         sizes.append(len(batch.rows))
         ids.extend(r["id"] for r in batch.rows)
         d_turns.extend(r["_metadata"]["turn_index"] for r in batch.rows if r["thread_id"] == THREAD_D)
-    assert sizes == [5, 5, 5, 2]
+    # A batch ends only between replies, so a reply is never cut in two by the batch size.
+    assert sizes == [5, 5, 5, 5, 3]
     assert ids == full
-    assert d_turns == [0, 1, 2, 3, 4]
+    assert d_turns == [0, 1, 2, 3]
     final = _read(reader, codex_root, store)
     assert final.rows == []
     assert final.files_touched == 0
-    assert final.scanned_files == 7
+    assert final.scanned_files == 8
 
 
 def test_since_unix_filters_records(reader, codex_root):
@@ -208,8 +213,10 @@ def test_since_unix_filters_records(reader, codex_root):
     assert sorted(r["id"] for r in batch.rows) == sorted([
         "codex:msg_e_u1", "codex:msg_e_a1", "codex:msg_e_a2",
         "codex:msg_g_u1", "codex:msg_g_a1", "codex:msg_g_a4",
+        "codex:msg_h_u1", "codex:msg_h_a1", "codex:msg_h_a4", "codex:msg_h_u3",
+        "codex:msg_h_a6", "codex:msg_h_a7", "codex:msg_h_a8",
     ])
-    assert batch.newest_created_at == "2026-10-15T10:32:05.000Z"
+    assert batch.newest_created_at == "2026-10-15T10:35:23.000Z"
 
 
 def test_project_key_outside_record_and_skip_folders(reader, codex_root):
@@ -238,3 +245,85 @@ def test_a_hooks_session_path_outside_the_codex_root_reads_nothing(reader, codex
     batch = _read(reader, codex_root, session_path=str(outside))
     assert batch.rows == [] and batch.scanned_files == 0
     assert batch.ledger.dropped.get("outside_root") == 1
+
+
+# ---------------------------------------------------------------------------
+# One row per reply: consecutive assistant messages of one turn and one phase
+# ---------------------------------------------------------------------------
+
+
+def test_the_commentary_of_one_turn_is_one_row_and_the_final_answer_another(reader, codex_root):
+    batch = _read(reader, codex_root)
+    rows = _thread(batch, THREAD_H)
+    assert [r["id"] for r in rows] == [
+        "codex:msg_h_u1", "codex:msg_h_a1", "codex:msg_h_a4", "codex:msg_h_u3",
+        "codex:msg_h_a6", "codex:msg_h_a7", "codex:msg_h_a8",
+    ]
+    commentary = _row(batch, "codex:msg_h_a1")
+    assert commentary["content"] == (
+        "Profiling the import first.\n\nMost of the time goes to the YAML parse.\n\nSwitched it to the C loader."
+    )
+    # Id and stamp are the first message's; the tool calls between are not in the text.
+    assert commentary["created_at"] == "2026-10-15T10:35:05.000Z"
+    assert "yaml 0.41s" not in commentary["content"]
+    assert [r["_metadata"]["origin"] for r in rows] == [
+        "vscode", "commentary", "final_answer", "vscode", "commentary", "commentary", "final_answer",
+    ]
+    assert [r["_metadata"]["turn_index"] for r in rows] == [0, 1, 2, 3, 4, 5, 6]
+    assert batch.ledger.merged_blocks == 3  # H: a2 + a3 into a1; D: a3 into a2
+
+
+def test_a_new_turn_id_splits_the_reply_without_a_user_message(reader, codex_root):
+    batch = _read(reader, codex_root)
+    assert _row(batch, "codex:msg_h_a6")["content"] == "Running them now."
+    assert _row(batch, "codex:msg_h_a7")["content"] == "A heartbeat turn picked this up: all 40 pass."
+
+
+def test_an_auto_compact_turn_in_the_real_passthrough_shape_is_harness(reader, codex_root):
+    # Real rollouts carry turn_id in payload.internal_chat_message_metadata_passthrough, nowhere else.
+    batch = _read(reader, codex_root)
+    ids = {r["id"] for r in batch.rows}
+    assert "codex:msg_h_u2" not in ids and "codex:msg_h_a5" not in ids
+    assert not any("Summarize our progress" in r["content"] for r in batch.rows)
+
+
+def _open_turn_root(tmp_path: Path, *, age_seconds: float) -> tuple[Path, Path]:
+    import os
+    import time
+
+    root = tmp_path / "codex_open"
+    shutil.copytree(OPEN_TURN_ROOT, root, ignore=shutil.ignore_patterns("tail.jsonl"))
+    path = next((root / DAY).glob("rollout-*.jsonl"))
+    stamp = time.time() - age_seconds
+    os.utime(path, (stamp, stamp))
+    return root, path
+
+
+def test_a_turn_still_running_is_held_and_merged_on_the_next_run(reader, tmp_path):
+    root, path = _open_turn_root(tmp_path, age_seconds=60)
+    lines = path.read_bytes().splitlines(keepends=True)
+    store = FakeCursorStore()
+    first = _read(reader, root, store)
+    assert [r["id"] for r in first.rows] == ["codex:msg_i_u1"]
+    # The cursor waits at the reply's first message; the tool call after it is not counted yet.
+    assert store.get(reader.SOURCE_ID, str(path)).offset == sum(len(line) for line in lines[:3])
+    assert store.get(reader.SOURCE_ID, str(path)).record_count == 1
+    assert first.ledger.dropped.get("tool_use") is None
+    again = _read(reader, root, store)
+    assert again.rows == [] and again.files_touched == 0
+    with path.open("ab") as handle:
+        handle.write((OPEN_TURN_ROOT / "tail.jsonl").read_bytes())
+    second = _read(reader, root, store)
+    assert [r["id"] for r in second.rows] == ["codex:msg_i_a1", "codex:msg_i_a3"]
+    assert second.rows[0]["content"] == "Starting the slow suite.\n\nAll 12 slow tests passed."
+    assert second.rows[0]["created_at"] == "2026-10-15T10:40:03.000Z"
+    assert [r["_metadata"]["turn_index"] for r in second.rows] == [1, 2]
+    assert second.ledger.dropped["tool_use"] == 1 and second.ledger.dropped["tool_result"] == 1
+
+
+def test_a_running_turn_in_a_rollout_quiet_for_an_hour_is_emitted(reader, tmp_path):
+    root, path = _open_turn_root(tmp_path, age_seconds=2 * 3600)
+    store = FakeCursorStore()
+    batch = _read(reader, root, store)
+    assert [r["id"] for r in batch.rows] == ["codex:msg_i_u1", "codex:msg_i_a1"]
+    assert store.get(reader.SOURCE_ID, str(path)).offset == path.stat().st_size

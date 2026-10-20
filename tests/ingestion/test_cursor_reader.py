@@ -22,6 +22,7 @@ import pytest
 
 from tests.fixtures.ai_coding_tools.common_stub import FakeCursorStore, _iso_ms, stubbed_common
 from tests.fixtures.ai_coding_tools.cursor.build_state_db import (
+    COMPOSER_AGENTIC,
     COMPOSER_DRAFT,
     COMPOSER_EMPTY_WINDOW,
     COMPOSER_JSONL,
@@ -31,11 +32,12 @@ from tests.fixtures.ai_coding_tools.cursor.build_state_db import (
     PROJECT_SLUG,
     append_bubble,
     build_state_db,
+    set_composer_fields,
 )
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "ai_coding_tools" / "cursor"
 
-TOTAL_ROWS = 10  # normal 5 + empty-window 2 + JSONL 3 (its 2 DB bubbles are not emitted)
+TOTAL_ROWS = 16  # normal 5 + empty-window 2 + JSONL 4 (its 2 DB bubbles are not emitted) + agentic 5
 
 
 @pytest.fixture(scope="module")
@@ -122,9 +124,9 @@ def test_composer_whose_bubble_count_grew_without_timestamp_change_is_picked_up(
 def test_tool_former_user_bubbles_are_never_human(reader, env):
     batch = _read(reader, env)
     assert "cursor:bubble-n03" not in {r["id"] for r in batch.rows}
-    assert batch.ledger.dropped["tool_bubble"] == 1
+    assert batch.ledger.dropped["tool_bubble"] == 2  # n03, k06
     assert {r["id"] for r in batch.rows if r["role"] == "user" and r["_metadata"]["origin"] == "composer"} == {
-        "cursor:bubble-n01", "cursor:bubble-n06", "cursor:bubble-e01",
+        "cursor:bubble-n01", "cursor:bubble-n06", "cursor:bubble-e01", "cursor:bubble-k01", "cursor:bubble-k10",
     }
 
 
@@ -152,14 +154,19 @@ def test_timestamp_source_recorded_per_fallback(reader, env):
 def test_agent_transcripts_jsonl_preferred_over_db_bubbles(reader, env):
     batch = _read(reader, env)
     rows = _thread(batch, COMPOSER_JSONL)
-    assert [r["content"] for r in rows] == ["Scaffold the CLI", "Scaffolded the entry point.", "Listed the files."]
+    assert [r["content"] for r in rows] == [
+        "Scaffold the CLI",
+        "Scaffolded the entry point.\n\nListed the files.",
+        "Add a --verbose flag",
+        "Adding the flag to the parser.\n\nThe flag prints each step.",
+    ]
     assert {r["_metadata"]["origin"] for r in rows} == {"agent_transcript"}
-    assert [r["role"] for r in rows] == ["user", "assistant", "assistant"]
+    assert [r["role"] for r in rows] == ["user", "assistant", "user", "assistant"]
     assert {r["_metadata"]["conversation_title"] for r in rows} == {"CLI scaffolding"}
     assert {r["project_key"] for r in rows} == {"beta-project"}
     assert not {"cursor:bubble-j01", "cursor:bubble-j02"} & {r["id"] for r in batch.rows}
     assert batch.composers_jsonl_preferred == 1
-    assert batch.ledger.dropped["tool_use"] == 2  # bubble-n04 + the JSONL tool_use block
+    assert batch.ledger.dropped["tool_use"] == 4  # bubble-n04 + the 2 JSONL tool_use blocks + bubble-k03
 
 
 def test_deleted_jsonl_between_runs_does_not_rewind(reader, env, writer):
@@ -180,7 +187,7 @@ def test_deleted_jsonl_without_prior_db_alignment_does_not_rewind(reader, env, w
     stat = env.db.stat()
     store.put(reader.SOURCE_ID, env.db, size=stat.st_size, mtime=stat.st_mtime, offset=0, record_count=0)
     first = _read(reader, env, store)
-    assert [r["thread_id"] for r in first.rows] == [COMPOSER_JSONL] * 3
+    assert [r["thread_id"] for r in first.rows] == [COMPOSER_JSONL] * 4
     env.jsonl.unlink()
     append_bubble(writer, COMPOSER_JSONL, {
         "bubbleId": "bubble-j03", "type": 2, "text": "Added a --help flag.", "createdAt": "2026-10-15T11:05:00.000Z",
@@ -188,7 +195,7 @@ def test_deleted_jsonl_without_prior_db_alignment_does_not_rewind(reader, env, w
     second = _read(reader, env, store)
     assert _thread(second, COMPOSER_JSONL) == []
     assert second.composers_no_rewind == 1
-    assert len(second.rows) == 7  # the other composers, read for the first time
+    assert len(second.rows) == 12  # the other composers, read for the first time
 
 
 def test_subagent_composers_skipped_by_header_flag_and_subagent_info(reader, env):
@@ -208,7 +215,7 @@ def test_spike_a_bubble_markers(reader, env):
     assert batch.ledger.dropped["non_keyboard_origin:nudge"] == 1
     assert batch.ledger.dropped["non_keyboard_origin:subagent_spawn"] == 1
     assert batch.ledger.dropped["empty"] == 1
-    assert batch.ledger.dropped["thinking"] == 1
+    assert batch.ledger.dropped["thinking"] == 2  # n07, k04
     assert _thread(batch, COMPOSER_DRAFT) == []
 
 
@@ -308,7 +315,7 @@ def test_titles_from_composer_name_else_first_user_bubble(reader, env):
 
 def test_session_path_jsonl_reads_only_that_file(reader, env):
     batch = _read(reader, env, session_path=str(env.jsonl))
-    assert [r["thread_id"] for r in batch.rows] == [COMPOSER_JSONL] * 3
+    assert [r["thread_id"] for r in batch.rows] == [COMPOSER_JSONL] * 4
     assert batch.scanned_files == 1
 
 
@@ -341,3 +348,100 @@ def test_a_hooks_transcript_path_outside_the_cursor_root_reads_nothing(reader, e
     batch = _read(reader, env, session_path=str(outside))
     assert batch.rows == [] and batch.scanned_files == 0
     assert batch.ledger.dropped.get("outside_root") == 1
+
+
+# ---------------------------------------------------------------------------
+# One row per reply, and the harness wrapping of typed text
+# ---------------------------------------------------------------------------
+
+
+def test_one_turn_of_bubbles_is_one_row_across_tool_bubbles_and_thoughts(reader, env):
+    batch = _read(reader, env)
+    rows = _thread(batch, COMPOSER_AGENTIC)
+    assert [r["id"] for r in rows] == [
+        "cursor:bubble-k01", "cursor:bubble-k02", "cursor:bubble-k09", "cursor:bubble-k10", "cursor:bubble-k11",
+    ]
+    reply = _row(batch, "cursor:bubble-k02")
+    assert reply["content"] == (
+        "Profiling the import first.\n\nMost of the time goes to the YAML parse.\n\n"
+        "Switched it to the C loader; the import is four times faster."
+    )
+    assert reply["created_at"] == "2026-10-15T12:00:10.000Z"
+    assert "Weighing the loaders" not in reply["content"]
+    assert [r["_metadata"]["turn_index"] for r in rows] == [0, 1, 2, 3, 4]
+    assert batch.ledger.merged_blocks == 4  # k05 + k07 into k02; two JSONL replies of two lines each
+
+
+def test_a_harness_only_user_bubble_or_line_is_dropped_and_still_ends_the_reply(reader, env):
+    batch = _read(reader, env)
+    assert _row(batch, "cursor:bubble-k09")["content"] == "The background job was the cache warm-up; nothing to do."
+    assert "cursor:bubble-k08" not in {r["id"] for r in batch.rows}
+    assert not any("<timestamp>" in r["content"] or "system_notification" in r["content"] for r in batch.rows)
+    assert batch.ledger.dropped["harness_injected"] == 2  # k08 + the timestamp-only JSONL line
+
+
+def test_the_typed_text_is_the_user_query_and_an_inline_tag_is_the_persons_own(reader, env):
+    batch = _read(reader, env)
+    assert _row(batch, "cursor:bubble-k01")["content"] == "Speed up the config import"
+    assert _row(batch, "cursor:bubble-k10")["content"] == "Why did `<user_query>` show up in my old rows?"
+    jsonl_users = [r["content"] for r in _thread(batch, COMPOSER_JSONL) if r["role"] == "user"]
+    assert jsonl_users == ["Scaffold the CLI", "Add a --verbose flag"]
+    assert batch.ledger.harness_spans_stripped == 2  # the two <timestamp> spans beside a query
+
+
+def test_a_generating_composers_last_reply_is_held_until_it_completes(reader, env, writer):
+    set_composer_fields(writer, COMPOSER_AGENTIC, status="generating", generatingBubbleIds=["bubble-k11"])
+    store = FakeCursorStore()
+    first = _read(reader, env, store)
+    assert "cursor:bubble-k11" not in {r["id"] for r in first.rows}
+    assert [r["id"] for r in _thread(first, COMPOSER_AGENTIC)][-1] == "cursor:bubble-k10"
+    again = _read(reader, env, store)
+    assert again.rows == [] and again.files_touched == 0
+    set_composer_fields(writer, COMPOSER_AGENTIC, status="completed", generatingBubbleIds=[])
+    done = _read(reader, env, store)
+    assert [r["id"] for r in done.rows] == ["cursor:bubble-k11"]
+    assert done.rows[0]["_metadata"]["turn_index"] == 4
+
+
+def _append_jsonl(env, lines, *, age_seconds: float) -> None:
+    import json
+    import time
+
+    with env.jsonl.open("a", encoding="utf-8") as handle:
+        for line in lines:
+            handle.write(json.dumps(line) + "\n")
+    stamp = time.time() - age_seconds
+    os.utime(env.jsonl, (stamp, stamp))
+
+
+RUNNING_TURN = [
+    {"role": "user", "message": {"content": [{"type": "text", "text": "<user_query>\nRun the slow suite\n</user_query>"}]}},
+    {"role": "assistant", "message": {"content": [{"type": "text", "text": "Starting the slow suite."}]}},
+    {"role": "assistant", "message": {"content": [{"type": "tool_use", "name": "Shell", "input": {"command": "pytest -m slow"}}]}},
+]
+
+
+def test_a_transcript_turn_still_running_is_held_and_merged_on_the_next_run(reader, env):
+    store = FakeCursorStore()
+    assert len(_read(reader, env, store, session_path=str(env.jsonl)).rows) == 4
+    _append_jsonl(env, RUNNING_TURN, age_seconds=5)
+    first = _read(reader, env, store, session_path=str(env.jsonl))
+    assert [r["content"] for r in first.rows] == ["Run the slow suite"]
+    again = _read(reader, env, store, session_path=str(env.jsonl))
+    assert again.rows == [] and again.files_touched == 0
+    _append_jsonl(env, [
+        {"role": "assistant", "message": {"content": [{"type": "text", "text": "All 12 slow tests passed."}]}},
+        {"type": "turn_ended", "status": "completed"},
+    ], age_seconds=5)
+    second = _read(reader, env, store, session_path=str(env.jsonl))
+    assert [r["content"] for r in second.rows] == ["Starting the slow suite.\n\nAll 12 slow tests passed."]
+    assert second.rows[0]["_metadata"]["turn_index"] == 5
+    assert second.ledger.dropped["tool_use"] == 1
+
+
+def test_a_running_transcript_turn_quiet_for_an_hour_is_emitted(reader, env):
+    store = FakeCursorStore()
+    _read(reader, env, store, session_path=str(env.jsonl))
+    _append_jsonl(env, RUNNING_TURN, age_seconds=2 * 3600)
+    batch = _read(reader, env, store, session_path=str(env.jsonl))
+    assert [r["content"] for r in batch.rows] == ["Run the slow suite", "Starting the slow suite."]

@@ -34,6 +34,20 @@ kept (typed mid-run). An assistant record is ``type == 2`` without
 non-blank text. Timestamps: bubble ``createdAt`` → header ``createdAt`` →
 ``composerData.createdAt`` → DB mtime, recorded in ``timestamp_source``.
 
+Typed text is what the person wrote, not the wrapping Cursor adds: when a
+user text holds ``<user_query>…</user_query>`` the query is the text and the
+spans beside it (``<timestamp>``, ``<system_notification>``, …) are counted in
+``harness_spans_stripped``; a user text made only of ``CURSOR_HARNESS_TAGS``
+spans is dropped ``harness_injected``.
+
+Assistant rows are per reply: consecutive assistant text (lines or bubbles)
+joined across the tool calls, tool bubbles and thoughts between them, under
+the first one's id and stamp. Any user text (typed or injected), a
+``turn_ended`` line or the taint instant ends a reply. A reply still running
+when read is left for the next run: in a transcript younger than
+``OPEN_REPLY_HOLD_SECONDS`` whose last assistant line ends in a tool call, or
+in a composer Cursor marks as generating while the DB is that young.
+
 Cursors (``FileCursorStore``, L4): one per JSONL path (byte offset), one for the
 DB file (its signature), one per composer (``offset`` = headers consumed), and a
 ``covered`` marker per JSONL-served composer so a JSONL deleted between runs
@@ -45,6 +59,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -91,6 +106,28 @@ COMPOSER_ACTIVITY_KEYS = ("createdAt", "lastUpdatedAt", "conversationCheckpointL
 
 _RECORD_NAMESPACE = uuid.UUID("5d2c7b1e-9a4f-4c3e-8e6b-2f1a0c9d7e55")
 SETTLE_SECONDS = 30.0
+# A reply still running when read waits this long at most for the rest of its turn (see the docstring).
+OPEN_REPLY_HOLD_SECONDS = 3600.0
+# Spans Cursor puts around typed text or sends as a user message of its own (measured 20 Oct, counts only:
+# transcripts wrap the query in <timestamp> + <user_query>; DB bubbles add <system_notification>).
+CURSOR_HARNESS_TAGS = (
+    "timestamp",
+    "system_notification",
+    "image_files",
+    "available_subagent_types",
+    "available_subagent_models",
+    "dynamic_tools",
+)
+_USER_QUERY_RE = re.compile(r"<user_query>(.*?)</user_query>", re.DOTALL)
+_ANY_SPAN_RE = re.compile(r"<([A-Za-z_][\w-]*)(?:\s[^>]*)?>.*?</\1>", re.DOTALL)
+_HARNESS_ALTERNATION = "|".join(re.escape(tag) for tag in CURSOR_HARNESS_TAGS)
+_LEADING_HARNESS_SPAN_RE = re.compile(
+    r"\A\s*<(" + _HARNESS_ALTERNATION + r")(?:\s[^>]*)?>.*?</\1>", re.DOTALL,
+)
+_TRAILING_HARNESS_SPAN_RE = re.compile(
+    r"<(" + _HARNESS_ALTERNATION + r")(?:\s[^>]*)?>(?:(?!</?\1[\s>]).)*</\1>\s*\Z", re.DOTALL,
+)
+STATUS_GENERATING = "generating"
 TITLE_MAX = 120
 
 
@@ -261,6 +298,56 @@ def _parse_time(value: Any) -> Optional[datetime]:
             parsed = parsed.replace(tzinfo=timezone.utc)
         return parsed.astimezone(timezone.utc)
     return None
+
+
+def _typed_text(text: str) -> Tuple[str, int]:
+    """``(typed text, harness spans removed)``; empty typed text with spans removed means harness only.
+
+    The ``<user_query>`` contents when there are any; else the text less the complete
+    ``CURSOR_HARNESS_TAGS`` spans at its start and end. A tag named inline stays: it is the person's.
+    """
+    queries = _USER_QUERY_RE.findall(text or "")
+    if queries:
+        outside = _USER_QUERY_RE.sub("", text)
+        typed = "\n\n".join(query.strip() for query in queries if query.strip())
+        return typed, len(_ANY_SPAN_RE.findall(outside))
+    kept = (text or "").strip()
+    removed = 0
+    while True:
+        match = _LEADING_HARNESS_SPAN_RE.match(kept)
+        if match is None:
+            break
+        kept, removed = kept[match.end():].strip(), removed + 1
+    while True:
+        match = _TRAILING_HARNESS_SPAN_RE.search(kept)
+        if match is None:
+            break
+        kept, removed = kept[:match.start()].strip(), removed + 1
+    return kept, removed
+
+
+@dataclass
+class _Reply:
+    """An assistant reply being assembled from consecutive text lines or bubbles."""
+
+    record_uuid: str
+    created_at: datetime
+    timestamp_source: str
+    share_excluded: bool
+    texts: List[str] = field(default_factory=list)
+
+
+def _flush_reply(reply: Optional[_Reply], *, state: "_ComposerState", ledger: Ledger, origin: str,
+                 secrets: Sequence[str], rows: List[Dict[str, Any]]) -> None:
+    if reply is None:
+        return
+    record = _emit(
+        state=state, ledger=ledger, record_uuid=reply.record_uuid, role="assistant", text="\n\n".join(reply.texts),
+        created_at=reply.created_at, timestamp_source=reply.timestamp_source, origin=origin,
+        share_excluded=reply.share_excluded, secrets=secrets,
+    )
+    if record is not None:
+        rows.append(record)
 
 
 def _title_from_prompt(text: str) -> str:
@@ -574,8 +661,34 @@ def _prescan_transcript(path: Path, end: int, state: _ComposerState) -> None:
                 state.tainted = True
             elif kind == "text" and line.get("role") == "user" and state.first_prompt is None:
                 text = block.get("text")
-                if isinstance(text, str) and text.strip():
-                    state.first_prompt = text.strip()
+                typed = _typed_text(text)[0] if isinstance(text, str) else ""
+                if typed:
+                    state.first_prompt = typed
+
+
+def _open_transcript_reply(entries: Sequence[Tuple[int, int, Optional[Dict[str, Any]]]]) -> Optional[int]:
+    """Index of the line that starts a reply whose last assistant line ends in a tool call, else None."""
+    start: Optional[int] = None
+    awaiting = False
+    for index, (_begin, _end, line) in enumerate(entries):
+        if not line:
+            continue
+        if "role" not in line:
+            if line.get("type") == "turn_ended":
+                start, awaiting = None, False
+            continue
+        blocks = _transcript_blocks(line)
+        if line.get("role") == "user":
+            if any(block.get("type") == "text" for block in blocks):
+                start, awaiting = None, False
+            elif any(block.get("type") == "tool_result" for block in blocks):
+                awaiting = True
+        elif line.get("role") == "assistant":
+            if start is None and any(block.get("type") == "text" and isinstance(block.get("text"), str)
+                                     for block in blocks):
+                start = index
+            awaiting = bool(blocks) and blocks[-1].get("type") == "tool_use"
+    return start if awaiting else None
 
 
 def _read_transcript(
@@ -607,12 +720,31 @@ def _read_transcript(
     created_at = datetime.fromtimestamp(file_mtime, tz=timezone.utc)
     rows: List[Dict[str, Any]] = []
     consumed = start
-    for begin, end, line in _iter_complete_lines(path, start, settled=settled):
+    entries = list(_iter_complete_lines(path, start, settled=settled))
+    if time.time() - file_mtime < OPEN_REPLY_HOLD_SECONDS:
+        hold = _open_transcript_reply(entries)
+        if hold is not None:
+            entries = entries[:hold]
+    reply: Optional[_Reply] = None
+
+    def flush() -> None:
+        nonlocal reply
+        _flush_reply(reply, state=state, ledger=ledger, origin=ORIGIN_AGENT_TRANSCRIPT, secrets=secrets, rows=rows)
+        reply = None
+
+    for begin, end, line in entries:
         consumed = end
+        if reply is None and len(rows) >= limit:
+            consumed = begin
+            break
         if line is None:
             ledger.drop("unparseable")
             continue
-        if not line or "role" not in line:
+        if not line:
+            continue
+        if "role" not in line:
+            if line.get("type") == "turn_ended":
+                flush()
             continue
         ledger.message_nodes += 1
         role = line.get("role")
@@ -622,12 +754,19 @@ def _read_transcript(
             for block in blocks:
                 if block.get("type") == "tool_result":
                     ledger.drop("tool_result")
+            if any(block.get("type") == "text" for block in blocks):
+                flush()  # typed or injected, what follows answers it
             text = "\n".join(texts).strip()
             if not text:
                 if not texts:
                     continue
                 ledger.drop("empty")
                 continue
+            text, removed = _typed_text(text)
+            if not text:
+                ledger.drop("harness_injected" if removed else "empty")
+                continue
+            ledger.harness_spans_stripped += removed
             origin = ORIGIN_AGENT_TRANSCRIPT
             share_excluded = False
         elif role == "assistant":
@@ -653,8 +792,15 @@ def _read_transcript(
             text = "\n".join(texts).strip()
             if not text:
                 continue
-            origin = ORIGIN_AGENT_TRANSCRIPT
-            share_excluded = excluded
+            if reply is not None and reply.share_excluded != excluded:
+                flush()  # the taint instant falls between this text and the reply so far
+            if reply is None:
+                reply = _Reply(record_uuid=str(uuid.uuid5(_RECORD_NAMESPACE, f"{TOOL}:{composer_id}:{begin}")),
+                               created_at=created_at, timestamp_source="file_mtime", share_excluded=excluded)
+            else:
+                ledger.merged_blocks += 1
+            reply.texts.append(text)
+            continue
         else:
             ledger.drop("system")
             continue
@@ -666,8 +812,7 @@ def _read_transcript(
         )
         if record is not None:
             rows.append(record)
-            if len(rows) >= limit:
-                break
+    flush()
     title = state.display_title()
     for row in rows:
         row["_metadata"]["conversation_title"] = title
@@ -694,7 +839,12 @@ def _classify_bubble(bubble: Dict[str, Any], ledger: Ledger) -> Optional[Tuple[s
         if not text:
             ledger.drop("empty")
             return None
-        return "user", text
+        typed, removed = _typed_text(text)
+        if not typed:
+            ledger.drop("harness_injected" if removed else "empty")
+            return None
+        ledger.harness_spans_stripped += removed
+        return "user", typed
     if kind == BUBBLE_ASSISTANT:
         if bubble.get("toolFormerData") is not None:
             ledger.drop("tool_use")
@@ -723,9 +873,32 @@ def _prescan_composer(db: _StateDb, composer_id: str, entries: List[Dict[str, An
         elif (
             bubble.get("type") == BUBBLE_USER and state.first_prompt is None
             and bubble.get("toolFormerData") is None and isinstance(bubble.get("text"), str)
-            and bubble["text"].strip()
+            and _typed_text(bubble["text"])[0]
         ):
-            state.first_prompt = bubble["text"].strip()
+            state.first_prompt = _typed_text(bubble["text"])[0]
+
+
+def _ends_bubble_reply(bubble: Dict[str, Any]) -> bool:
+    """A user bubble that is not a tool bubble ends the reply, typed or injected alike."""
+    return bubble.get("type") == BUBBLE_USER and bubble.get("toolFormerData") is None
+
+
+def _composer_running(data: Dict[str, Any]) -> bool:
+    return data.get("status") == STATUS_GENERATING or bool(data.get("generatingBubbleIds"))
+
+
+def _open_composer_reply(items: Sequence[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]]) -> Optional[int]:
+    """Index of the bubble that starts the last reply (after the last user bubble), else None."""
+    start: Optional[int] = None
+    for index, (_entry, bubble) in enumerate(items):
+        if bubble is None:
+            continue
+        if _ends_bubble_reply(bubble):
+            start = None
+        elif start is None and bubble.get("type") == BUBBLE_ASSISTANT and bubble.get("toolFormerData") is None \
+                and bubble.get("isThought") is not True and isinstance(bubble.get("text"), str) and bubble["text"].strip():
+            start = index
+    return start
 
 
 def _read_composer(
@@ -756,20 +929,42 @@ def _read_composer(
     if offset > 0:
         _prescan_composer(db, composer_id, entries[:offset], state)
 
-    rows: List[Dict[str, Any]] = []
-    consumed = offset
+    items: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]] = []
     for entry in entries[offset:]:
         bubble_id = entry.get("bubbleId") if isinstance(entry, dict) else None
         if not isinstance(bubble_id, str) or not bubble_id:
-            consumed += 1
+            items.append((entry, None))
             continue
         bubble = db.bubble(composer_id, bubble_id)
         if bubble is None:
             break  # header written before its bubble: a writer mid-turn; retry next run
+        items.append((entry, bubble))
+    hold = None
+    if _composer_running(data) and time.time() - db_mtime < OPEN_REPLY_HOLD_SECONDS:
+        hold = _open_composer_reply(items)
+        if hold is not None:
+            items = items[:hold]
+
+    rows: List[Dict[str, Any]] = []
+    reply: Optional[_Reply] = None
+
+    def flush() -> None:
+        nonlocal reply
+        _flush_reply(reply, state=state, ledger=ledger, origin=ORIGIN_ASSISTANT, secrets=secrets, rows=rows)
+        reply = None
+
+    consumed = offset
+    for entry, bubble in items:
+        if reply is None and len(rows) >= limit:
+            break
         consumed += 1
+        if bubble is None:
+            continue
         ledger.message_nodes += 1
         if bubble.get("type") == BUBBLE_ASSISTANT and _tool_former_taints(bubble.get("toolFormerData")):
             state.tainted = True
+        if _ends_bubble_reply(bubble):
+            flush()
         classified = _classify_bubble(bubble, ledger)
         if classified is None:
             continue
@@ -778,17 +973,24 @@ def _read_composer(
         if since_unix is not None and created_at.timestamp() < since_unix:
             ledger.drop("before_since")
             continue
+        if role == "assistant":
+            if reply is not None and reply.share_excluded != state.tainted:
+                flush()  # the taint instant falls between this text and the reply so far
+            if reply is None:
+                reply = _Reply(record_uuid=str(entry["bubbleId"]), created_at=created_at,
+                               timestamp_source=timestamp_source, share_excluded=state.tainted)
+            else:
+                ledger.merged_blocks += 1
+            reply.texts.append(text)
+            continue
         record = _emit(
-            state=state, ledger=ledger, record_uuid=bubble_id, role=role, text=text,
-            created_at=created_at, timestamp_source=timestamp_source,
-            origin=ORIGIN_COMPOSER if role == "user" else ORIGIN_ASSISTANT,
-            share_excluded=state.tainted if role == "assistant" else False,
-            secrets=secrets,
+            state=state, ledger=ledger, record_uuid=str(entry["bubbleId"]), role=role, text=text,
+            created_at=created_at, timestamp_source=timestamp_source, origin=ORIGIN_COMPOSER,
+            share_excluded=False, secrets=secrets,
         )
         if record is not None:
             rows.append(record)
-            if len(rows) >= limit:
-                break
+    flush()
     title = state.display_title()
     for row in rows:
         row["_metadata"]["conversation_title"] = title
@@ -878,13 +1080,15 @@ def read_cursor_batch(
                     if cursor.offset >= stat.st_size and cursor.size == stat.st_size and cursor.mtime == stat.st_mtime:
                         continue
                     start, base_count = cursor.offset, cursor.record_count
-            touched += 1
             ledger.conversations_seen += 1
             file_rows, consumed = _read_transcript(
                 path, composer_id=composer_id, start=start, base_count=base_count, ledger=ledger, db=db,
                 skip=skip, secrets=secrets, limit=batch_size - len(rows),
                 settled=(now - stat.st_mtime) >= SETTLE_SECONDS, file_mtime=stat.st_mtime,
             )
+            if file_rows or consumed != start or cursor is None:
+                # A transcript whose only new lines are a held reply moved nothing: the runner stops asking.
+                touched += 1
             if file_rows:
                 ledger.conversations_kept += 1
             rows.extend(file_rows)
@@ -968,11 +1172,12 @@ def read_cursor_batch(
                     and activity.timestamp() < since_unix:
                 continue
             ledger.conversations_seen += 1
-            db_read = True
             composer_rows, consumed = _read_composer(
                 db, composer_id, data, header, entries, offset=offset, base_count=base_count, ledger=ledger,
                 skip=skip, since_unix=since_unix, secrets=secrets, limit=batch_size - len(rows), db_mtime=db_mtime,
             )
+            if composer_rows or consumed != offset:
+                db_read = True  # a composer whose only new bubbles are a held reply moved nothing
             if composer_rows:
                 ledger.conversations_kept += 1
             rows.extend(composer_rows)

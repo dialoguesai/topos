@@ -11,12 +11,27 @@ transcripts under ``<session>/subagents/``; files deleted after 30 days.
 What this reader does with it (CONTRACTS §2.3, §2.4, §2.7):
 
 * emits a ``user`` row only for text the person typed (the keyboard-origin
-  table in ``common``), an ``assistant`` row per ``message.id`` with its text
-  blocks joined in order, and counts every other record in the ledger by reason;
+  table in ``common``), one ``assistant`` row per reply, and counts every other
+  record in the ledger by reason;
 * scrubs secrets, home paths and hostnames before a row leaves here;
 * taints a session from the first Topos touch in it or in any of its sub-agent
   files, and marks every later assistant row ``share_excluded``;
 * reads each file from its byte cursor, so an hourly run costs the new bytes.
+
+A reply is the text blocks from the first assistant text after a turn
+boundary up to the next one, joined in order: one agentic turn writes a record
+per content block and a new ``message.id`` per API call, so the narration
+between its tool calls would otherwise be ten short rows. Tool calls, their
+results, thinking and meta records (attachments, titles, snapshots) sit inside
+a reply and are dropped from it as before. A boundary is any user record that
+is not a tool result (typed, injected or an interrupt), a ``system`` record, a
+prompt queued mid-turn (``queued_command`` attachment), or the taint instant,
+so no row mixes shareable and excluded text. The row takes the reply's first
+text record's uuid and stamp; a fork or resume copy of a whole reply therefore
+collapses onto the stored row (first writer wins). A reply still running at
+the end of the bytes read (the last record asked for a tool, or a tool result
+came after it) is left unread for the next run, unless the file has been quiet
+for ``OPEN_REPLY_HOLD_SECONDS``.
 
 It never reads anything but the files under the root it is given, and the
 default root is only a default: tests point it at fixture trees.
@@ -27,6 +42,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,6 +97,11 @@ TAINT_MARKER_SUFFIX = "#taint"
 TAIL_PROBE_BYTES = 64 * 1024
 # Lines read from the top of a file to find the first typed prompt for a title.
 TITLE_PROBE_LINES = 400
+# A reply still running at the end of a file is held for the next run; after this long without a write
+# the session is taken as closed or crashed mid-tool, and the reply is emitted as it stands.
+OPEN_REPLY_HOLD_SECONDS = 3600.0
+# Attachment types that deliver a prompt into a running turn: what the agent writes next answers it.
+QUEUED_PROMPT_ATTACHMENTS = frozenset({"queued_command"})
 DROP_UNPARSEABLE = "unparseable"
 DROP_OTHER_BLOCK = "other_block"
 DROP_OUTSIDE_ROOT = "outside_root"
@@ -111,14 +132,14 @@ class _Session:
 
 @dataclass
 class _Pending:
-    """One assistant reply being assembled across the records that share its message.id."""
+    """One assistant reply being assembled: the text blocks up to the next turn boundary."""
 
-    message_id: str
     uuid: str
     epoch: float
     stamp: datetime
     ts_source: str
     model: Optional[str]
+    last_epoch: float
     texts: List[str] = field(default_factory=list)
 
 
@@ -312,6 +333,14 @@ def _read_session_file(
         ledger.drop(DROP_FILE_GONE)
         return [], False
     lines, consumed = _complete_lines(data)
+    records = [_parse_line(line) for line in lines]
+    hold = None
+    if time.time() - float(stat.st_mtime) < OPEN_REPLY_HOLD_SECONDS:
+        hold = _open_reply_start(records)
+    if hold is not None:
+        # Whole lines before the open reply; the reply and everything after it wait for the next run.
+        consumed = sum(len(line) + 1 for line in lines[:hold])
+        lines, records = lines[:hold], records[:hold]
 
     ledger.conversations_seen += 1
     session_id = path.stem
@@ -325,7 +354,7 @@ def _read_session_file(
         taint_at=taint_at,
         file_mtime=float(stat.st_mtime),
     )
-    rows = _classify(lines, state, ledger, seen_uuids, secrets, hostnames, usernames)
+    rows = _classify(zip(lines, records), state, ledger, seen_uuids, secrets, hostnames, usernames)
 
     if state.taint_at is not None and (marker is None or state.taint_at < marker):
         _put_taint_marker(cursors, key, state.taint_at)
@@ -339,7 +368,8 @@ def _read_session_file(
     )
     if rows:
         ledger.conversations_kept += 1
-    return rows, True
+    # A file whose only new bytes are a held reply moved nothing: the runner stops asking for it.
+    return rows, bool(rows) or consumed > 0 or cursor is None
 
 
 def _read_from(path: Path, offset: int) -> bytes:
@@ -623,8 +653,63 @@ def _user_text(record: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     return "\n\n".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text"), None
 
 
+def _message(record: Dict[str, Any]) -> Dict[str, Any]:
+    message = record.get("message")
+    return message if isinstance(message, dict) else {}
+
+
+def _carries_tool_result(record: Dict[str, Any]) -> bool:
+    return any(block.get("type") == "tool_result" for block in content_blocks(_message(record).get("content")))
+
+
+def _ends_reply(record: Dict[str, Any]) -> bool:
+    """Whether this record closes the reply being assembled (a turn boundary, see the module docstring).
+
+    Sub-agent records written into the main file belong to the sub-agent, not to the reply around them.
+    """
+    record_type = record.get("type")
+    if record.get("isSidechain") is True:
+        return False
+    if record_type == "user":
+        return not _carries_tool_result(record)
+    if record_type == "system":
+        return True
+    if record_type == "attachment":
+        attachment = record.get("attachment")
+        return isinstance(attachment, dict) and attachment.get("type") in QUEUED_PROMPT_ATTACHMENTS
+    return False
+
+
+def _has_text(record: Dict[str, Any]) -> bool:
+    return any(block.get("type") == "text" for block in content_blocks(_message(record).get("content")))
+
+
+def _open_reply_start(records: Sequence[Optional[Dict[str, Any]]]) -> Optional[int]:
+    """Index of the record that starts a reply still running at the end of ``records``, else None.
+
+    Running = after its first text the last word is a tool call (``stop_reason`` ``tool_use``) or a tool
+    result, so another API call is coming. An end_turn, a missing stop_reason or a boundary closes it.
+    """
+    start: Optional[int] = None
+    awaiting = False
+    for index, record in enumerate(records):
+        if record is None:
+            continue
+        if _ends_reply(record):
+            start, awaiting = None, False
+        elif record.get("isSidechain") is True:
+            continue
+        elif record.get("type") == "assistant":
+            if start is None and _has_text(record):
+                start = index
+            awaiting = _message(record).get("stop_reason") == "tool_use"
+        elif record.get("type") == "user":
+            awaiting = True
+    return start if awaiting else None
+
+
 def _classify(
-    lines: Iterable[bytes],
+    entries: Iterable[Tuple[bytes, Optional[Dict[str, Any]]]],
     state: _Session,
     ledger: Ledger,
     seen_uuids: Set[str],
@@ -657,6 +742,9 @@ def _classify(
             ledger.tainted(1)
         rows.append(row)
 
+    def excluded_at(epoch: float) -> bool:
+        return state.taint_at is not None and epoch >= state.taint_at
+
     def flush() -> None:
         nonlocal pending
         if pending is None:
@@ -670,18 +758,15 @@ def _classify(
         if not content.strip():
             ledger.drop(DROP_EMPTY)
             return
-        excluded = state.taint_at is not None and reply.epoch >= state.taint_at
+        # Judged by the LAST text's stamp: a Topos call in the same record as that text taints the reply.
+        excluded = excluded_at(reply.last_epoch)
         emit("assistant", uuid=reply.uuid, content=content, stamp=reply.stamp, ts_source=reply.ts_source,
              origin="assistant", share_excluded=excluded, model=reply.model)
 
     def assistant(record: Dict[str, Any]) -> None:
         nonlocal pending
-        message = record.get("message") if isinstance(record.get("message"), dict) else {}
-        message_id = str(message.get("id") or record.get("uuid") or "")
-        if pending is not None and pending.message_id != message_id:
-            flush()
+        message = _message(record)
         if record.get("isSidechain") is True:
-            flush()
             ledger.drop(DROP_SUBAGENT)
             return
         uuid = record.get("uuid")
@@ -701,12 +786,16 @@ def _classify(
         for block in blocks:
             block_type = block.get("type")
             if block_type == "text":
-                if pending is None or pending.message_id != message_id:
-                    pending = _Pending(message_id, uuid, epoch, stamp, ts_source,
-                                       model=message.get("model") if isinstance(message.get("model"), str) else None)
+                if pending is not None and first_text_here and excluded_at(pending.last_epoch) != excluded_at(epoch):
+                    flush()  # the taint instant falls between this text and the reply so far
+                if pending is None:
+                    pending = _Pending(uuid, epoch, stamp, ts_source,
+                                       model=message.get("model") if isinstance(message.get("model"), str) else None,
+                                       last_epoch=epoch)
                 elif first_text_here:
                     ledger.merged_blocks += 1
                 first_text_here = False
+                pending.last_epoch = epoch
                 pending.texts.append(str(block.get("text") or ""))
             elif block_type == "tool_use":
                 ledger.drop(DROP_TOOL_USE)
@@ -751,25 +840,23 @@ def _classify(
         emit("user", uuid=uuid, content=kept, stamp=stamp, ts_source=ts_source,
              origin="keyboard", share_excluded=False, model=None)
 
-    for line in lines:
-        record = _parse_line(line)
+    for line, record in entries:
         if record is None:
             if line.strip():
                 ledger.drop(DROP_UNPARSEABLE)
             continue
         ledger.message_nodes += 1
+        if _ends_reply(record):
+            flush()
         record_type = record.get("type")
         if record_type == "assistant":
             assistant(record)
         elif record_type == "user":
-            flush()
             user(record)
         elif record_type == "system":
-            flush()
             ledger.drop(DROP_SYSTEM)
         else:
-            # Titles, summaries, snapshots, progress: not turns, not drops.
-            flush()
+            # Titles, summaries, snapshots, attachments, progress: not turns, not drops.
             ledger.meta_records += 1
     flush()
     return rows
