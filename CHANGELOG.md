@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **Agent tool results fit the client.** `[P]` `topos-node mcp`'s `query_scope` keeps every result under a 24 KB byte budget. A raw `ai_coding_sessions:read` turn had returned 87 rows with their full text (147 KB), which Claude Code spilled to a file the agent could not read. A result that fits is returned whole with a `page` stamp; a larger one comes as pages of `content_preview` rows (500 chars, with `content_chars` and `content_truncated` saying what was cut) and a `next` cursor, served from the server's memory without re-running the query; `record_id` (with `cursor=page.result_id`) reads one row in full, in content slices when the row alone is over the budget. The node's own `truncated` note rides on every page and `page.node_row_cap` repeats its cap. Pages expire after 15 minutes, at most 16 results are kept, the node re-checks the agent's label before any cached page is read, and a disconnect empties the cache. Disclosure is unchanged: the agent still reads at `owner_raw`; only how much travels per call is bounded.
+
 ## [1.5.13] — 2026-10-17
 
 - [S1] [P] Owner dashboard counters for new canonical records and logical facts, with transactional retry/update deduplication and explicit unavailable/partial history. Migration 88 baselines existing identities; no historical measurement backfill or reprocessing. Explicit source/record erasure also removes value-bearing fact receipts without discarding surviving shared evidence or retry deduplication.
