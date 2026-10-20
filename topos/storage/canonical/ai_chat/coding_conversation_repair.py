@@ -8,21 +8,30 @@ messages written by 1.5.13 sat under ``codex_sessions:<session>`` and the next b
 The install is fixed for new writes; this sweep puts the rows on disk right.
 
 Every coding-source message and conversation is renamed to ``<tool>:<session>``
-(``coding_tool_mapper.canonical_coding_conversation_id``), the tool taken from the row's own ``source_id``. Rows that
-then share an id merge into one: earliest ``created_at``, latest ``updated_at``; ``title`` is the earliest row's (the
-first record's title never moves), ``latest_title`` the newest row's that has one, and the bookkeeping the newest
-row's, as the upsert would have left a single row. A merged chat's messages are renumbered by event time. The derived
-rows that copied the old id follow it: embedding and cluster-member provenance, the relationship graph's
-``conversation:`` nodes and the edges to them, and the payloads of deferred jobs not yet done (so a job owed from
-before the repair cannot write the old id back). A finished job's record of what it did is left alone.
+(``coding_tool_mapper.canonical_coding_conversation_id``), the tool taken from the row's own ``source_id``: renames are
+keyed by ``(source_id, stored id)``, because the shim's no-thread fallback could give a Claude Code and a Codex row
+one id. Rows that then share an id merge into one: earliest ``created_at``, latest ``updated_at``; ``title`` is the
+earliest row's (the first record's title never moves), ``latest_title`` the newest row's that has one, and every other
+column the newest row's, as the upsert would have left a single row. A merged chat's messages are renumbered by event
+time (message id breaks a tie). The derived rows that copied an old id follow it: embedding and cluster-member
+provenance, the relationship graph's ``conversation:`` nodes and the edges to them, and the payloads of deferred jobs
+not yet done. A finished job's record of what it did is left alone.
+
+The derived sweep finds its own work: any coding-source derived row whose id is not canonical, whether or not a
+message moved in this run. A deferred job already running when the repair commits holds its payload in memory and can
+still write an old id; the next run of the sweep (the CLI door below, or a later step) puts it right.
+
+Everything, the reads that decide the plan included, happens under one write-gate hold and one transaction, rolled
+back on any exception, so a crash or a concurrent lane write cannot leave a chat half-renamed, half-merged or
+half-renumbered.
 
 Review surface: ``conversation_id`` stays in it (``permissions_v2.evidence.REVIEW_SURFACE_EXCLUSIONS``). It is the
 row's identity, and a review should re-ask after the row moved to another conversation. So a review pinning a
 rewritten coding row reads stale until its next pass; no other row's revision moves. On the first live node no
 review, grant or share index named a coding-session message.
 
-A group whose rows name two owners is left alone and counted. A stored id of no shape a coding writer produced is left
-alone. Re-running finds nothing to do: a renamed row no longer differs from its canonical id.
+A group whose rows name two owners is left alone, its derived copies with it, and counted. A stored id of no shape a
+coding writer produced is left alone and counted. Re-running finds nothing to do.
 """
 
 from __future__ import annotations
@@ -31,7 +40,7 @@ import json
 import logging
 import sqlite3
 from collections import defaultdict
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 from .coding_tool_mapper import TOOL_BY_SOURCE_ID, canonical_coding_conversation_id
 
@@ -41,35 +50,97 @@ CODING_SOURCE_IDS: Tuple[str, ...] = tuple(TOOL_BY_SOURCE_ID)
 _SOURCES_SQL = ",".join("?" * len(CODING_SOURCE_IDS))
 #: Deferred jobs whose payload may still be run; a ``done`` job's payload is its history.
 _OWED_JOB_STATUSES = ("queued", "running", "failed")
-_CONVERSATION_COLUMNS = ("conversation_id", "owner_user_id", "title", "latest_title", "source_id", "created_at",
-                         "updated_at", "source_record_id", "ingested_at", "sync_batch_id")
+_NODE_PREFIX = "conversation:"
+_RENAMES = "temp._coding_conversation_renames"
+
+Key = Tuple[str, str]   # (source_id, conversation id)
 
 
-def _table_columns(conn: sqlite3.Connection, table: str) -> set:
-    return {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+def _table_columns(conn: sqlite3.Connection, table: str) -> List[str]:
+    return [row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()]
 
 
-def _rename_plan(conn: sqlite3.Connection) -> Tuple[Dict[Tuple[str, str], str], int]:
-    """``{(source_id, stored_id): canonical_id}`` for every stored id that differs, and the count left alone."""
-    stored = set()
-    for table in ("ai_chat_messages", "ai_chat_conversations"):
-        stored.update(
-            (str(source_id), str(conversation_id))
-            for source_id, conversation_id in conn.execute(
+def _marks(items: Iterable[Any]) -> str:
+    return ",".join("?" * len(list(items)))
+
+
+class _Plan:
+    """What the repair would do, read from the database as it is now."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        stored: Set[Key] = set()
+        message_ids: Set[Key] = set()
+        for table in ("ai_chat_messages", "ai_chat_conversations"):
+            rows = conn.execute(
                 f"SELECT DISTINCT source_id, conversation_id FROM {table} WHERE source_id IN ({_SOURCES_SQL})",
                 CODING_SOURCE_IDS,
             ).fetchall()
-            if conversation_id is not None
+            keys = {(str(s), str(c)) for s, c in rows if c is not None}
+            stored |= keys
+            if table == "ai_chat_messages":
+                message_ids = keys
+        self.left_alone = 0
+        renames: Dict[Key, str] = {}
+        for source_id, conversation_id in stored:
+            canonical = canonical_coding_conversation_id(source_id, conversation_id)
+            if canonical is None:
+                self.left_alone += 1
+            elif canonical != conversation_id:
+                renames[(source_id, conversation_id)] = canonical
+        # Group every stored id by the canonical id it becomes, the canonical row itself included when it exists.
+        groups: Dict[Key, List[str]] = defaultdict(list)
+        for (source_id, old), new in renames.items():
+            groups[(source_id, new)].append(old)
+        self.columns = _table_columns(conn, "ai_chat_conversations")
+        self.rows: Dict[Key, List[Dict[str, Any]]] = {}
+        for (source_id, new), olds in groups.items():
+            ids = [*olds, new]
+            self.rows[(source_id, new)] = [
+                dict(zip(self.columns, r)) for r in conn.execute(
+                    f"SELECT {', '.join(self.columns)} FROM ai_chat_conversations"
+                    f" WHERE source_id = ? AND conversation_id IN ({_marks(ids)})",
+                    (source_id, *ids),
+                ).fetchall()
+            ]
+        self.merged: Dict[Key, Optional[Dict[str, Any]]] = {
+            key: _merged_conversation(rows, key[1]) if rows else None for key, rows in self.rows.items()
+        }
+        self.conflicts: Set[Key] = {key for key, rows in self.rows.items() if rows and self.merged[key] is None}
+        self.groups: Dict[Key, List[str]] = {k: v for k, v in groups.items() if k not in self.conflicts}
+        #: Old ids held back with a conflicted group: their derived copies stay with them.
+        self.held: Set[Key] = {(s, old) for (s, _new), olds in groups.items() if (s, _new) in self.conflicts
+                               for old in olds}
+        #: Groups whose messages came from more than one stored id, and so from more than one numbering.
+        self.renumber: List[Key] = sorted(
+            key for key, olds in self.groups.items()
+            if sum(1 for i in (*olds, key[1]) if (key[0], i) in message_ids) > 1
         )
-    plan: Dict[Tuple[str, str], str] = {}
-    left_alone = 0
-    for source_id, conversation_id in stored:
+        self.messages = sum(
+            int(conn.execute(
+                f"SELECT count(*) FROM ai_chat_messages WHERE source_id = ? AND conversation_id IN ({_marks(olds)})",
+                (source_id, *olds),
+            ).fetchone()[0])
+            for (source_id, _new), olds in self.groups.items()
+        )
+
+    def rename(self, source_id: Optional[str], conversation_id: Any) -> Optional[str]:
+        """The new id for a derived copy, or None when it stays as it is."""
+        if not isinstance(conversation_id, str) or not source_id or (source_id, conversation_id) in self.held:
+            return None
         canonical = canonical_coding_conversation_id(source_id, conversation_id)
-        if canonical is None:
-            left_alone += 1
-        elif canonical != conversation_id:
-            plan[(source_id, conversation_id)] = canonical
-    return plan, left_alone
+        return canonical if canonical and canonical != conversation_id else None
+
+    def report(self, status: str) -> Dict[str, Any]:
+        return {
+            "status": status,
+            "messages_rewritten": self.messages,
+            # Conversations after the repair that were stored under another id; ``merged`` came from two rows or more.
+            "conversations_renamed": sum(1 for key in self.groups if self.rows[key]),
+            "conversations_merged": sum(1 for key in self.groups if len(self.rows[key]) > 1),
+            "owner_conflicts": len(self.conflicts),
+            "left_alone": self.left_alone,
+            "by_source": {s: sum(1 for (src, _new) in self.groups if src == s) for s in CODING_SOURCE_IDS},
+        }
 
 
 def _merged_conversation(rows: List[Dict[str, Any]], canonical: str) -> Optional[Dict[str, Any]]:
@@ -79,122 +150,178 @@ def _merged_conversation(rows: List[Dict[str, Any]], canonical: str) -> Optional
         return None
     by_created = sorted(rows, key=lambda r: (r["created_at"] or "￿", r["conversation_id"]))
     by_updated = sorted(rows, key=lambda r: (r["updated_at"] or "", r["ingested_at"] or "", r["conversation_id"]))
-    newest = by_updated[-1]
     created = [r["created_at"] for r in rows if r["created_at"]]
     updated = [r["updated_at"] for r in rows if r["updated_at"]]
-    return {
+    # Every column the rules below do not name is the newest row's, a column a later migration adds included.
+    merged = dict(by_updated[-1])
+    merged.update({
         "conversation_id": canonical,
-        "owner_user_id": next(iter(owners), newest["owner_user_id"]),
+        "owner_user_id": next(iter(owners), merged["owner_user_id"]),
         "title": next((r["title"] for r in by_created if r["title"]), None),
         "latest_title": next((r["latest_title"] for r in reversed(by_updated) if r["latest_title"]), None),
-        "source_id": newest["source_id"],
         "created_at": min(created) if created else None,
         "updated_at": max(updated) if updated else None,
         "source_record_id": canonical,
-        "ingested_at": newest["ingested_at"],
-        "sync_batch_id": newest["sync_batch_id"],
-    }
+    })
+    return merged
 
 
-def _rewrite_ids(value: Any, renames: Dict[str, str]) -> Tuple[Any, int]:
-    """Replace every ``conversation_id`` value naming an old id, at any depth of a job payload."""
+def _rewrite_ids(value: Any, rename: Callable[[Any], Optional[str]]) -> Tuple[Any, int]:
+    """Replace every ``conversation_id`` value ``rename`` maps, at any depth of a job payload."""
     if isinstance(value, dict):
         changed = 0
         out = {}
         for key, item in value.items():
-            if key == "conversation_id" and isinstance(item, str) and item in renames:
-                out[key] = renames[item]
+            new = rename(item) if key == "conversation_id" else None
+            if new is not None:
+                out[key] = new
                 changed += 1
             else:
-                out[key], n = _rewrite_ids(item, renames)
+                out[key], n = _rewrite_ids(item, rename)
                 changed += n
         return out, changed
     if isinstance(value, list):
         changed = 0
         out_list = []
         for item in value:
-            rewritten, n = _rewrite_ids(item, renames)
+            rewritten, n = _rewrite_ids(item, rename)
             out_list.append(rewritten)
             changed += n
         return out_list, changed
     return value, 0
 
 
-def _repair_derived(conn: sqlite3.Connection, renames: Dict[str, str]) -> Dict[str, int]:
-    """Carry each old id into the derived rows that copied it. ``renames`` is old id → new id (coding sources only)."""
+def _renumber(conn: sqlite3.Connection, conversation_ids: List[str]) -> None:
+    """Sequence by event time inside the open transaction, as every batch write ends (``update_message_sequences``)."""
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _coding_sequences (message_id TEXT PRIMARY KEY, seq INTEGER NOT NULL)")
+    conn.execute("DELETE FROM temp._coding_sequences")
+    for start in range(0, len(conversation_ids), 400):
+        chunk = conversation_ids[start:start + 400]
+        conn.execute(
+            "INSERT INTO temp._coding_sequences SELECT message_id,"
+            " ROW_NUMBER() OVER (PARTITION BY conversation_id ORDER BY event_at, message_id) - 1"
+            f" FROM ai_chat_messages WHERE conversation_id IN ({_marks(chunk)})",
+            chunk,
+        )
+    conn.execute(
+        "UPDATE ai_chat_messages SET sequence = (SELECT seq FROM temp._coding_sequences s"
+        " WHERE s.message_id = ai_chat_messages.message_id)"
+        " WHERE message_id IN (SELECT message_id FROM temp._coding_sequences)"
+    )
+    conn.execute("DROP TABLE IF EXISTS temp._coding_sequences")
+
+
+def _derived_keys(conn: sqlite3.Connection) -> Set[Key]:
+    """Every ``(source_id, conversation id)`` a coding-source derived row holds."""
+    keys: Set[Key] = set()
+
+    def add(sql: str, strip: str = "") -> None:
+        for source_id, value in conn.execute(sql, CODING_SOURCE_IDS).fetchall():
+            if isinstance(value, str) and value.startswith(strip):
+                keys.add((str(source_id), value[len(strip):]))
+
+    embeddings = set(_table_columns(conn, "signal_embeddings"))
+    if {"conversation_id", "source_id"} <= embeddings:
+        add(f"SELECT DISTINCT source_id, conversation_id FROM signal_embeddings WHERE source_id IN ({_SOURCES_SQL})")
+    if {"provenance_json", "source_id"} <= embeddings:
+        add("SELECT DISTINCT source_id, json_extract(provenance_json, '$.conversation_id') FROM signal_embeddings"
+            f" WHERE source_id IN ({_SOURCES_SQL}) AND json_valid(provenance_json)")
+    if {"metadata_json", "source_id"} <= set(_table_columns(conn, "topic_cluster_members")):
+        add("SELECT DISTINCT source_id, json_extract(metadata_json, '$.conversation_id') FROM topic_cluster_members"
+            f" WHERE source_id IN ({_SOURCES_SQL}) AND json_valid(metadata_json)")
+    if {"node_id", "source_id"} <= set(_table_columns(conn, "graph_nodes")):
+        add(f"SELECT DISTINCT source_id, node_id FROM graph_nodes WHERE source_id IN ({_SOURCES_SQL})"
+            f" AND node_id LIKE '{_NODE_PREFIX}%'", _NODE_PREFIX)
+    if {"src_node_id", "dst_node_id", "source_id"} <= set(_table_columns(conn, "graph_edges")):
+        for end in ("src_node_id", "dst_node_id"):
+            add(f"SELECT DISTINCT source_id, {end} FROM graph_edges WHERE source_id IN ({_SOURCES_SQL})"
+                f" AND {end} LIKE '{_NODE_PREFIX}%'", _NODE_PREFIX)
+    return keys
+
+
+def _repair_derived(conn: sqlite3.Connection, plan: _Plan) -> Dict[str, int]:
+    """Carry every non-canonical coding id into canonical form in the derived rows that copied it."""
     counts = {"signal_embeddings": 0, "topic_cluster_members": 0, "graph_nodes": 0, "graph_edges": 0,
               "pipeline_jobs": 0}
-    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _coding_conversation_renames (old TEXT PRIMARY KEY, new TEXT NOT NULL)")
-    conn.execute("DELETE FROM _coding_conversation_renames")
-    conn.executemany("INSERT INTO _coding_conversation_renames VALUES (?, ?)", sorted(renames.items()))
-    lookup = "(SELECT new FROM temp._coding_conversation_renames WHERE old = {})"
+    renames = {key: new for key in _derived_keys(conn) if (new := plan.rename(*key)) is not None}
+    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _coding_conversation_renames"
+                 " (source_id TEXT NOT NULL, old TEXT NOT NULL, new TEXT NOT NULL, PRIMARY KEY (source_id, old))")
+    conn.execute(f"DELETE FROM {_RENAMES}")
+    conn.executemany(f"INSERT INTO {_RENAMES} VALUES (?, ?, ?)", sorted((s, o, n) for (s, o), n in renames.items()))
 
-    embeddings = _table_columns(conn, "signal_embeddings")
-    if {"conversation_id", "provenance_json", "source_id"} <= embeddings:
-        counts["signal_embeddings"] = conn.execute(
-            f"""UPDATE signal_embeddings SET
-                    conversation_id = COALESCE({lookup.format('signal_embeddings.conversation_id')}, conversation_id),
-                    provenance_json = CASE
-                        WHEN json_valid(provenance_json)
-                             AND json_extract(provenance_json, '$.conversation_id') IN
-                                 (SELECT old FROM temp._coding_conversation_renames)
-                        THEN json_set(provenance_json, '$.conversation_id',
-                                      {lookup.format("json_extract(provenance_json, '$.conversation_id')")})
-                        ELSE provenance_json END
-                WHERE source_id IN ({_SOURCES_SQL})
-                  AND (conversation_id IN (SELECT old FROM temp._coding_conversation_renames)
-                       OR (json_valid(provenance_json) AND json_extract(provenance_json, '$.conversation_id') IN
-                           (SELECT old FROM temp._coding_conversation_renames)))""",
-            CODING_SOURCE_IDS,
-        ).rowcount
+    def lookup(table: str, expr: str, prefix: str = "") -> str:
+        return (f"(SELECT '{prefix}' || r.new FROM {_RENAMES} r WHERE r.source_id = {table}.source_id"
+                f" AND '{prefix}' || r.old = {expr})")
 
-    if {"metadata_json", "source_id"} <= _table_columns(conn, "topic_cluster_members"):
-        counts["topic_cluster_members"] = conn.execute(
-            f"""UPDATE topic_cluster_members SET metadata_json = json_set(metadata_json, '$.conversation_id',
-                    {lookup.format("json_extract(metadata_json, '$.conversation_id')")})
-                WHERE source_id IN ({_SOURCES_SQL}) AND json_valid(metadata_json)
-                  AND json_extract(metadata_json, '$.conversation_id') IN
-                      (SELECT old FROM temp._coding_conversation_renames)""",
-            CODING_SOURCE_IDS,
-        ).rowcount
+    def named(table: str, expr: str, prefix: str = "") -> str:
+        return (f"EXISTS (SELECT 1 FROM {_RENAMES} r WHERE r.source_id = {table}.source_id"
+                f" AND '{prefix}' || r.old = {expr})")
 
-    if _table_columns(conn, "graph_nodes") and _table_columns(conn, "graph_edges"):
-        conn.execute("CREATE TEMP TABLE IF NOT EXISTS _coding_node_renames (old TEXT PRIMARY KEY, new TEXT NOT NULL)")
-        conn.execute("DELETE FROM _coding_node_renames")
-        conn.execute("INSERT INTO _coding_node_renames SELECT 'conversation:' || old, 'conversation:' || new"
-                     " FROM temp._coding_conversation_renames")
-        present = conn.execute(
-            "SELECT n.node_id, r.new FROM graph_nodes n JOIN temp._coding_node_renames r ON r.old = n.node_id"
-            " ORDER BY n.node_id"
-        ).fetchall()
-        for old_node, new_node in present:
-            # The writer's label rule (job_writer, relationship_edges): the id after its first colon, 48 characters.
-            label = new_node.split(":", 1)[-1][:48]
-            if conn.execute("SELECT 1 FROM graph_nodes WHERE node_id = ?", (new_node,)).fetchone():
-                moved = conn.execute("DELETE FROM graph_nodes WHERE node_id = ?", (old_node,)).rowcount
-            else:
-                moved = conn.execute(
-                    """UPDATE graph_nodes SET node_id = ?, label = ?,
-                           metadata_json = CASE WHEN json_valid(metadata_json)
-                               THEN json_set(metadata_json, '$.node_id', ?, '$.label', ?) ELSE metadata_json END
-                       WHERE node_id = ?""",
-                    (new_node, label, new_node, label, old_node),
-                ).rowcount
-            counts["graph_nodes"] += moved
-        node_lookup = "(SELECT new FROM temp._coding_node_renames WHERE old = graph_edges.{})"
-        for end in ("src_node_id", "dst_node_id"):
-            counts["graph_edges"] += conn.execute(
-                f"""UPDATE graph_edges SET {end} = {node_lookup.format(end)},
-                        metadata_json = CASE WHEN json_valid(metadata_json)
-                            THEN json_set(metadata_json, '$.{end}', {node_lookup.format(end)}) ELSE metadata_json END
-                    WHERE {end} IN (SELECT old FROM temp._coding_node_renames)"""
+    if renames:
+        embeddings = set(_table_columns(conn, "signal_embeddings"))
+        if {"conversation_id", "provenance_json", "source_id"} <= embeddings:
+            prov = "json_extract(provenance_json, '$.conversation_id')"
+            counts["signal_embeddings"] = conn.execute(
+                f"""UPDATE signal_embeddings SET
+                        conversation_id = COALESCE({lookup('signal_embeddings', 'signal_embeddings.conversation_id')},
+                                                   conversation_id),
+                        provenance_json = CASE WHEN json_valid(provenance_json) AND {named('signal_embeddings', prov)}
+                            THEN json_set(provenance_json, '$.conversation_id', {lookup('signal_embeddings', prov)})
+                            ELSE provenance_json END
+                    WHERE source_id IN ({_SOURCES_SQL})
+                      AND ({named('signal_embeddings', 'signal_embeddings.conversation_id')}
+                           OR (json_valid(provenance_json) AND {named('signal_embeddings', prov)}))""",
+                CODING_SOURCE_IDS,
             ).rowcount
-        conn.execute("DROP TABLE IF EXISTS temp._coding_node_renames")
 
-    if {"payload_json", "status", "source_id"} <= _table_columns(conn, "pipeline_jobs"):
-        statuses = ",".join("?" * len(_OWED_JOB_STATUSES))
-        for job_id, payload_json in conn.execute(
-            f"SELECT job_id, payload_json FROM pipeline_jobs WHERE status IN ({statuses})"
+        if {"metadata_json", "source_id"} <= set(_table_columns(conn, "topic_cluster_members")):
+            meta = "json_extract(metadata_json, '$.conversation_id')"
+            counts["topic_cluster_members"] = conn.execute(
+                f"""UPDATE topic_cluster_members
+                    SET metadata_json = json_set(metadata_json, '$.conversation_id',
+                                                 {lookup('topic_cluster_members', meta)})
+                    WHERE source_id IN ({_SOURCES_SQL}) AND json_valid(metadata_json)
+                      AND {named('topic_cluster_members', meta)}""",
+                CODING_SOURCE_IDS,
+            ).rowcount
+
+        if {"node_id", "source_id"} <= set(_table_columns(conn, "graph_nodes")):
+            present = conn.execute(
+                f"SELECT n.node_id, '{_NODE_PREFIX}' || r.new FROM graph_nodes n JOIN {_RENAMES} r"
+                f" ON r.source_id = n.source_id AND '{_NODE_PREFIX}' || r.old = n.node_id ORDER BY n.node_id"
+            ).fetchall()
+            for old_node, new_node in present:
+                # The writer's label rule (job_writer, relationship_edges): the id after its first colon, 48 characters.
+                label = new_node.split(":", 1)[-1][:48]
+                if conn.execute("SELECT 1 FROM graph_nodes WHERE node_id = ?", (new_node,)).fetchone():
+                    moved = conn.execute("DELETE FROM graph_nodes WHERE node_id = ?", (old_node,)).rowcount
+                else:
+                    moved = conn.execute(
+                        """UPDATE graph_nodes SET node_id = ?, label = ?,
+                               metadata_json = CASE WHEN json_valid(metadata_json)
+                                   THEN json_set(metadata_json, '$.node_id', ?, '$.label', ?) ELSE metadata_json END
+                           WHERE node_id = ?""",
+                        (new_node, label, new_node, label, old_node),
+                    ).rowcount
+                counts["graph_nodes"] += moved
+
+        if {"src_node_id", "dst_node_id", "source_id"} <= set(_table_columns(conn, "graph_edges")):
+            for end in ("src_node_id", "dst_node_id"):
+                new_end = lookup("graph_edges", f"graph_edges.{end}", _NODE_PREFIX)
+                counts["graph_edges"] += conn.execute(
+                    f"""UPDATE graph_edges SET {end} = {new_end},
+                            metadata_json = CASE WHEN json_valid(metadata_json)
+                                THEN json_set(metadata_json, '$.{end}', {new_end}) ELSE metadata_json END
+                        WHERE source_id IN ({_SOURCES_SQL})
+                          AND {named('graph_edges', f'graph_edges.{end}', _NODE_PREFIX)}""",
+                    CODING_SOURCE_IDS,
+                ).rowcount
+    conn.execute(f"DROP TABLE IF EXISTS {_RENAMES}")
+
+    if {"payload_json", "status", "source_id"} <= set(_table_columns(conn, "pipeline_jobs")):
+        statuses = _marks(_OWED_JOB_STATUSES)
+        for job_id, job_source, payload_json in conn.execute(
+            f"SELECT job_id, source_id, payload_json FROM pipeline_jobs WHERE status IN ({statuses})"
             f" AND source_id IN ({_SOURCES_SQL}) AND payload_json LIKE '%conversation_id%'",
             (*_OWED_JOB_STATUSES, *CODING_SOURCE_IDS),
         ).fetchall():
@@ -202,13 +329,35 @@ def _repair_derived(conn: sqlite3.Connection, renames: Dict[str, str]) -> Dict[s
                 payload = json.loads(payload_json)
             except (TypeError, ValueError):
                 continue
-            rewritten, changed = _rewrite_ids(payload, renames)
+            rewritten, changed = _rewrite_ids(payload, lambda value: plan.rename(job_source, value))
             if changed:
                 conn.execute("UPDATE pipeline_jobs SET payload_json = ? WHERE job_id = ?",
                              (json.dumps(rewritten), job_id))
                 counts["pipeline_jobs"] += 1
-    conn.execute("DROP TABLE IF EXISTS temp._coding_conversation_renames")
     return counts
+
+
+def _apply(conn: sqlite3.Connection, plan: _Plan) -> Dict[str, int]:
+    for (source_id, new), olds in sorted(plan.groups.items()):
+        conn.execute(
+            f"UPDATE ai_chat_messages SET conversation_id = ?"
+            f" WHERE source_id = ? AND conversation_id IN ({_marks(olds)})",
+            (new, source_id, *olds),
+        )
+        row = plan.merged[(source_id, new)]
+        if row is None:
+            continue   # messages with no conversation row: renamed, nothing to merge
+        ids = [*olds, new]
+        conn.execute(
+            f"DELETE FROM ai_chat_conversations WHERE source_id = ? AND conversation_id IN ({_marks(ids)})",
+            (source_id, *ids),
+        )
+        conn.execute(
+            f"INSERT INTO ai_chat_conversations ({', '.join(plan.columns)}) VALUES ({_marks(plan.columns)})",
+            tuple(row.get(c) for c in plan.columns),
+        )
+    _renumber(conn, [new for _source, new in plan.renumber])
+    return _repair_derived(conn, plan)
 
 
 def repair_coding_conversation_ids(conn: sqlite3.Connection, *, dry_run: bool = False) -> Dict[str, Any]:
@@ -216,102 +365,31 @@ def repair_coding_conversation_ids(conn: sqlite3.Connection, *, dry_run: bool = 
     try:
         if not (_table_columns(conn, "ai_chat_messages") and _table_columns(conn, "ai_chat_conversations")):
             return {"status": "skipped", "reason": "no ai_chat tables", "messages_rewritten": 0}
-        plan, left_alone = _rename_plan(conn)
+        if dry_run:
+            return _Plan(conn).report("dry_run")
     except sqlite3.Error as exc:
         logger.warning("coding conversation repair could not read the ai_chat tables: %s", exc)
         return {"status": "skipped", "error": str(exc), "messages_rewritten": 0}
 
-    # Group every stored id by the canonical id it becomes, the canonical row itself included when it exists.
-    groups: Dict[Tuple[str, str], List[str]] = defaultdict(list)
-    for (source_id, old), new in plan.items():
-        groups[(source_id, new)].append(old)
-    previous_factory = conn.row_factory
-    conn.row_factory = sqlite3.Row
-    try:
-        group_rows: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
-        for (source_id, new), olds in groups.items():
-            ids = [*olds, new]
-            group_rows[(source_id, new)] = [
-                dict(r) for r in conn.execute(
-                    f"SELECT {', '.join(_CONVERSATION_COLUMNS)} FROM ai_chat_conversations"
-                    f" WHERE source_id = ? AND conversation_id IN ({','.join('?' * len(ids))})",
-                    (source_id, *ids),
-                ).fetchall()
-            ]
-    finally:
-        conn.row_factory = previous_factory
-
-    merged: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {
-        key: _merged_conversation(rows, key[1]) if rows else None for key, rows in group_rows.items()
-    }
-    conflicts = {key for key, rows in group_rows.items() if rows and merged[key] is None}
-    applied = {key: olds for key, olds in groups.items() if key not in conflicts}
-    renames = {old: new for (source_id, new), olds in applied.items() for old in olds}
-    messages = sum(
-        int(conn.execute(
-            f"SELECT count(*) FROM ai_chat_messages WHERE source_id = ? AND conversation_id IN ({','.join('?' * len(olds))})",
-            (source_id, *olds),
-        ).fetchone()[0])
-        for (source_id, _new), olds in applied.items()
-    )
-    # Conversations after the repair that were stored under another id; ``merged`` of them came from two rows or more.
-    renamed = sum(1 for key in applied if group_rows[key])
-    merged_count = sum(1 for key in applied if len(group_rows[key]) > 1)
-    report: Dict[str, Any] = {
-        "status": "dry_run" if dry_run else "ok",
-        "messages_rewritten": messages,
-        "conversations_renamed": renamed,
-        "conversations_merged": merged_count,
-        "owner_conflicts": len(conflicts),
-        "left_alone": left_alone,
-        "by_source": {
-            source_id: sum(1 for (s, _new) in applied if s == source_id) for source_id in CODING_SOURCE_IDS
-        },
-    }
-    if dry_run or not applied:
-        if not dry_run:
-            report["derived"] = {}
-        return report
-
     from ...db.write_gate import commit_connection, with_db_write
-    from .tables import CanonicalTablesManager
 
     with with_db_write():
         try:
-            for (source_id, new), olds in sorted(applied.items()):
-                conn.execute(
-                    f"UPDATE ai_chat_messages SET conversation_id = ?"
-                    f" WHERE source_id = ? AND conversation_id IN ({','.join('?' * len(olds))})",
-                    (new, source_id, *olds),
-                )
-                row = merged[(source_id, new)]
-                if row is None:
-                    continue   # messages with no conversation row: renamed, nothing to merge
-                ids = [*olds, new]
-                conn.execute(
-                    f"DELETE FROM ai_chat_conversations WHERE source_id = ? AND conversation_id IN ({','.join('?' * len(ids))})",
-                    (source_id, *ids),
-                )
-                conn.execute(
-                    f"INSERT INTO ai_chat_conversations ({', '.join(_CONVERSATION_COLUMNS)})"
-                    f" VALUES ({','.join('?' * len(_CONVERSATION_COLUMNS))})",
-                    tuple(row[c] for c in _CONVERSATION_COLUMNS),
-                )
-            report["derived"] = _repair_derived(conn, renames)
+            # The plan is read under the gate: a lane write between reading and writing would otherwise be
+            # overwritten by a merged row built from older reads.
+            plan = _Plan(conn)
+            report = plan.report("ok")
+            report["derived"] = _apply(conn, plan)
             commit_connection(conn)
-        except Exception:
+        except BaseException:
             conn.rollback()
             raise
 
-    # A merged chat's messages came from two numberings; one pass by event time, as every batch write ends.
-    tables = CanonicalTablesManager(conn)
-    for key in sorted(applied):
-        if len(group_rows[key]) > 1:
-            tables.update_message_sequences(key[1])
-
     logger.info(
-        "coding conversation repair: %d message(s), %d conversation(s) renamed, %d merged, %d owner conflict(s)",
-        messages, renamed, merged_count, len(conflicts),
+        "coding conversation repair: %d message(s), %d conversation(s) renamed, %d merged, %d owner conflict(s),"
+        " derived %s",
+        report["messages_rewritten"], report["conversations_renamed"], report["conversations_merged"],
+        report["owner_conflicts"], report["derived"],
     )
     return report
 

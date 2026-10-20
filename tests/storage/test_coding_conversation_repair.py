@@ -243,6 +243,9 @@ def test_rows_that_name_two_owners_are_left_alone_and_counted(node) -> None:
     assert held == [f"codex_sessions:{S1}", f"codex_sessions:{S1}", f"claude_code_sessions:{S1}"]
     assert node.execute("SELECT count(*) FROM ai_chat_conversations WHERE conversation_id LIKE ?",
                         (f"%{S1}",)).fetchone()[0] == 2
+    # Its derived copies stay with it.
+    assert node.execute("SELECT conversation_id FROM signal_embeddings WHERE embedding_id='e1'").fetchone()[0] \
+        == f"codex_sessions:{S1}"
     # The other sessions are still repaired.
     assert node.execute("SELECT conversation_id FROM ai_chat_messages WHERE message_id='claude_code:b1'").fetchone()[0] \
         == f"claude_code:{S2}"
@@ -278,3 +281,178 @@ def test_the_engine_endpoint_dispatch_repairs_the_node(node) -> None:
     assert detail["messages_rewritten"] == 5
     assert node.execute("SELECT count(*) FROM ai_chat_messages WHERE conversation_id LIKE '%_sessions:%'"
                         ).fetchone()[0] == 0
+
+
+# --- review round (verifier, 20 Oct): states the first fixture did not have --------------------------------
+
+
+def _path(conn) -> str:
+    return conn.execute("PRAGMA database_list").fetchone()[2]
+
+
+def test_a_lane_write_already_under_the_canonical_id_merges_with_the_old_rows(node) -> None:
+    """The step runs after the UI grace window, so the fixed lane may already have filed new turns under the new id."""
+    _message(node, "claude_code:a4", f"claude_code:{S1}", "claude_code_sessions", "2026-10-20T17:00:00Z", 0)
+    _conversation(node, f"claude_code:{S1}", "claude_code_sessions", "2026-10-20T17:00:00Z", "2026-10-20T17:00:00Z",
+                  "Lantern wiring, part three", "Lantern wiring, part three",
+                  ingested_at="2026-10-20T17:01:00Z", sync_batch_id="claude_code_sessions:fixed")
+    node.commit()
+
+    result = _repair(node)
+
+    assert result["conversations_merged"] == 1
+    assert [r for r in _messages(node) if r[0].startswith("claude_code:a")] == [
+        ("claude_code:a1", f"claude_code:{S1}", 0),
+        ("claude_code:a2", f"claude_code:{S1}", 1),
+        ("claude_code:a3", f"claude_code:{S1}", 2),
+        ("claude_code:a4", f"claude_code:{S1}", 3),
+    ]
+    assert [r for r in _conversations(node) if r[0] == f"claude_code:{S1}"] == [
+        (f"claude_code:{S1}", "claude_code_sessions", OWNER, "Lantern wiring", "Lantern wiring, part three",
+         "2026-10-20T10:00:00Z", "2026-10-20T17:00:00Z", f"claude_code:{S1}", "2026-10-20T17:01:00Z",
+         "claude_code_sessions:fixed"),
+    ]
+
+
+def test_the_repair_is_committed_for_other_connections(node) -> None:
+    _repair(node)
+
+    other = sqlite3.connect(_path(node))
+    try:
+        assert other.execute("SELECT count(*) FROM ai_chat_messages WHERE conversation_id LIKE '%_sessions:%'"
+                             ).fetchone()[0] == 0
+        assert other.execute("SELECT sequence FROM ai_chat_messages WHERE message_id='claude_code:a3'").fetchone()[0] == 2
+    finally:
+        other.close()
+
+
+@pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
+def test_a_failure_part_way_leaves_every_row_as_it_was(node, monkeypatch, error) -> None:
+    from topos.storage.canonical.ai_chat import coding_conversation_repair as repair
+
+    before = _dump(node)
+
+    def boom(*args, **kwargs):
+        raise error("synthetic failure after the canonical rename")
+
+    monkeypatch.setattr(repair, "_repair_derived", boom)
+    with pytest.raises(error):
+        _repair(node)
+
+    assert node.in_transaction is False
+    assert _dump(node) == before
+    other = sqlite3.connect(_path(node))
+    try:
+        assert other.execute("SELECT count(*) FROM ai_chat_messages WHERE conversation_id LIKE '%_sessions:%'"
+                             ).fetchone()[0] == 5
+    finally:
+        other.close()
+
+
+def test_failed_and_running_jobs_are_owed_and_rewritten(node) -> None:
+    for job_id, status in (("j-failed", "failed"), ("j-running", "running")):
+        node.execute(
+            "INSERT INTO pipeline_jobs (job_id, kind, status, payload_json, source_id, created_at, updated_at)"
+            " VALUES (?, 'inbox_deferred_enrichment', ?, ?, 'claude_code_sessions', '2026-10-20', '2026-10-20')",
+            (job_id, status, json.dumps({"canonical_records": [{"conversation_id": f"codex_sessions:{S1}"}]})),
+        )
+    node.commit()
+
+    _repair(node)
+
+    jobs = {r[0]: json.loads(r[1]) for r in node.execute("SELECT job_id, payload_json FROM pipeline_jobs")}
+    assert jobs["j-failed"]["canonical_records"][0]["conversation_id"] == f"claude_code:{S1}"
+    assert jobs["j-running"]["canonical_records"][0]["conversation_id"] == f"claude_code:{S1}"
+
+
+def test_unknown_shapes_and_other_sources_are_left_alone_and_counted(node) -> None:
+    _message(node, "claude_code:x9", "chatgpt:x", "claude_code_sessions", "2026-10-20T09:00:00Z", 0)
+    # A non-coding row whose id merely looks like a coding one.
+    _message(node, "chatgpt:m2", "codex_sessions:not-a-session", "chatgpt_export", "2026-10-02T09:00:00Z", 0)
+    node.commit()
+
+    result = _repair(node)
+
+    held = dict(node.execute("SELECT message_id, conversation_id FROM ai_chat_messages"
+                             " WHERE message_id IN ('claude_code:x9', 'chatgpt:m2')").fetchall())
+    assert held == {"claude_code:x9": "chatgpt:x", "chatgpt:m2": "codex_sessions:not-a-session"}
+    assert result["left_alone"] == 1
+    assert result["by_source"] == {"claude_code_sessions": 2, "codex_sessions": 1, "cursor_sessions": 0}
+
+
+def test_the_connection_row_factory_is_put_back(node) -> None:
+    node.row_factory = None
+
+    _repair(node)
+
+    assert node.row_factory is None
+
+
+def test_derived_rows_written_with_an_old_id_after_the_repair_are_fixed_by_the_next_run(node) -> None:
+    """A deferred job already running when the repair committed holds its payload in memory and writes the old id."""
+    _repair(node)
+    old = f"codex_sessions:{S1}"
+    node.execute(
+        "INSERT INTO signal_embeddings (embedding_id, record_id, source_id, signal_dimension, model, provenance_json,"
+        " conversation_id) VALUES ('e2', 'claude_code:a2', 'claude_code_sessions', 'memory', 'm', ?, ?)",
+        (json.dumps({"conversation_id": old}), old),
+    )
+    node.execute(
+        "INSERT INTO graph_nodes (node_id, node_type, label, metadata_json, source_id)"
+        " VALUES (?, 'conversation', ?, '{}', 'claude_code_sessions')", (f"conversation:{old}", old[:48]),
+    )
+    node.execute(
+        "INSERT INTO graph_edges (edge_id, src_node_id, dst_node_id, edge_type, weight, metadata_json, source_id)"
+        " VALUES ('edge-late', 'contact:human:5d9c', ?, 'message_frequency', 1.0, '{}', 'claude_code_sessions')",
+        (f"conversation:{old}",),
+    )
+    node.commit()
+
+    again = _repair(node)
+
+    new = f"claude_code:{S1}"
+    assert again["messages_rewritten"] == 0
+    assert again["derived"]["signal_embeddings"] == 1
+    assert tuple(node.execute("SELECT conversation_id, json_extract(provenance_json, '$.conversation_id')"
+                              " FROM signal_embeddings WHERE embedding_id='e2'").fetchone()) == (new, new)
+    assert [r[0] for r in node.execute("SELECT node_id FROM graph_nodes")] == [f"conversation:{new}"]
+    assert node.execute("SELECT dst_node_id FROM graph_edges WHERE edge_id='edge-late'").fetchone()[0] \
+        == f"conversation:{new}"
+
+
+def test_two_sources_sharing_one_stored_id_each_get_their_own_tool(node) -> None:
+    """The shim's no-thread fallback named the dataset, so a Claude Code and a Codex row could share one id."""
+    shared = "codex_sessions:owner:topos:t1"
+    _message(node, "claude_code:d1", shared, "claude_code_sessions", "2026-10-17T09:00:00Z", 0)
+    _message(node, "codex:d2", shared, "codex_sessions", "2026-10-17T09:00:01Z", 0)
+    for embedding_id, record_id, source_id in (("ed1", "claude_code:d1", "claude_code_sessions"),
+                                               ("ed2", "codex:d2", "codex_sessions")):
+        node.execute(
+            "INSERT INTO signal_embeddings (embedding_id, record_id, source_id, signal_dimension, model,"
+            " provenance_json, conversation_id) VALUES (?, ?, ?, 'memory', 'm', ?, ?)",
+            (embedding_id, record_id, source_id, json.dumps({"conversation_id": shared}), shared),
+        )
+    node.commit()
+
+    _repair(node)
+
+    assert dict(node.execute("SELECT message_id, conversation_id FROM ai_chat_messages"
+                             " WHERE message_id IN ('claude_code:d1', 'codex:d2')").fetchall()) == {
+        "claude_code:d1": "claude_code:owner:topos:t1", "codex:d2": "codex:owner:topos:t1",
+    }
+    assert dict(node.execute("SELECT embedding_id, conversation_id FROM signal_embeddings"
+                             " WHERE embedding_id IN ('ed1', 'ed2')").fetchall()) == {
+        "ed1": "claude_code:owner:topos:t1", "ed2": "codex:owner:topos:t1",
+    }
+
+
+def test_a_column_a_later_migration_adds_survives_a_merge(node) -> None:
+    node.execute("ALTER TABLE ai_chat_conversations ADD COLUMN later_column TEXT")
+    node.execute("UPDATE ai_chat_conversations SET later_column='kept' WHERE conversation_id=?",
+                 (f"claude_code_sessions:{S1}",))
+    node.commit()
+
+    _repair(node)
+
+    assert node.execute("SELECT later_column FROM ai_chat_conversations WHERE conversation_id=?",
+                        (f"claude_code:{S1}",)).fetchone()[0] == "kept"

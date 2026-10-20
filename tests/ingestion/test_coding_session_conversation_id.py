@@ -169,6 +169,9 @@ def test_a_runtime_mapper_two_sources_share_names_each_row_after_its_own_source(
         ({"source_id": "claude_code_sessions", "thread_id": "s-1", "message_id": "claude_code:m"}, "claude_code:s-1"),
         ({"source_id": "codex_sessions", "thread_id": "s-1", "message_id": "codex:m", "_metadata": {}}, "codex:s-1"),
         ({"source_id": "cursor_sessions", "thread_id": "s-1", "_metadata": {"tool": "cursor"}}, "cursor:s-1"),
+        # The source wins over a record that names another tool.
+        ({"source_id": "claude_code_sessions", "thread_id": "s-1", "_metadata": {"tool": "codex"}, "message_id": "codex:m"},
+         "claude_code:s-1"),
         # No source on the record (a direct mapper call): the record's own tool, as before.
         ({"thread_id": "s-1", "_metadata": {"tool": "codex"}}, "codex:s-1"),
     ],
