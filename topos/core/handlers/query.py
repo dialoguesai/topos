@@ -161,6 +161,10 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
         return None
+    from ...serve.spans import finish_request, start_request
+
+    started, span_token = start_request()
+    outcome = "error"
     payload = message.get("payload") or {}
     # Phase 4: the older person-to-person query lane is retired. A delayed or
     # direct relay must not re-enter it after the control plane removes its tool.
@@ -170,6 +174,7 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # query, so a grantee's request must never get past this line.
     caller = message.get("caller") if isinstance(message.get("caller"), dict) else {}
     if not isinstance(payload, dict) or payload.get("is_grantee_request") or caller.get("is_grantee_request"):
+        finish_request(started, outcome, span_token)
         return {"id": req_id, "status": "error", "error": "retired_grantee_query"}
     raw_manifest = payload.get("manifest") or {}
     scope_id = str(payload.get("scope_id") or raw_manifest.get("scope_id") or "")
@@ -234,6 +239,7 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             # `exc.code` is a closed-set slug (`missing_scope`, `unknown_scope`,
             # `scope_mismatch`, ...) and `record` re-slugs it regardless.
             ledger.empty(CAUSE_SCOPE_DENIED, stage=STAGE_GRANT, reason=exc.code)
+            outcome = "ok"
             return {
                 "id": req_id,
                 "status": "ok",
@@ -293,8 +299,11 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             # and empty_cause: a turn says what was done to it.
             result["scope_substituted_from"] = scope_substituted_from
         await _record_query_request(message, payload)
+        outcome = "ok"
         return {"id": req_id, "status": "ok", "payload": result}
     except KeyError as exc:
         return {"id": req_id, "status": "error", "error": f"Missing field: {exc}"}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+    finally:
+        finish_request(started, outcome, span_token)
