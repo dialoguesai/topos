@@ -767,6 +767,11 @@ class ControlPlaneClient:
             from .permissions_v2.truth_release import dispatch_verify_claim
             await dispatch_verify_claim(ws, data)
             return
+        if msg_type in ("permissions_v2_verify_claim_statement", "permissions_v2_interpret_claim"):
+            # verify-claim effort high: a free statement read by the pinned local model, then checked or shown.
+            from .permissions_v2.truth_statement import dispatch_statement
+            await dispatch_statement(ws, data)
+            return
         if msg_type == "permissions_v2_message_search":
             # p2c-v1: checkpoints and signs under the node gates, then sends with them released.
             from .permissions_v2.search_transport import dispatch_message_search
