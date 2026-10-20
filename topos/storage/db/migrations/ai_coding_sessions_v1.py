@@ -24,6 +24,10 @@ MIGRATION_ID = "ai_coding_sessions_v1"
 MESSAGES_TABLE = "ai_chat_messages"
 COLUMN = "share_excluded"
 FACETS_TABLE = "ai_chat_message_facets"
+#: Owner-only record of every time a coding session touched Topos (owner ruling 20 Oct 2026): ``kind`` is
+#: ``read`` (the session's later replies are share_excluded) or ``system`` (status, health, setup — recorded,
+#: never excluding). ``surface`` is a coarse label; no command text, path or argument is ever stored.
+TOUCHES_TABLE = "ai_coding_topos_touches"
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -100,6 +104,23 @@ def ensure_facets_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def ensure_touches_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS {TOUCHES_TABLE} (
+            touch_id TEXT PRIMARY KEY,
+            tool TEXT NOT NULL,
+            session_id TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK (kind IN ('read', 'system')),
+            surface TEXT NOT NULL,
+            touched_at TEXT,
+            recorded_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{TOUCHES_TABLE}_session ON {TOUCHES_TABLE}(tool, session_id)")
+
+
 def apply_ai_coding_sessions_v1_up(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
@@ -115,5 +136,6 @@ def apply_ai_coding_sessions_v1_up(conn: sqlite3.Connection) -> None:
     # first write (ai_tool_sync._ensure_storage), after the canonical tables exist.
     if _table_exists(conn, MESSAGES_TABLE):
         ensure_facets_table(conn)
+        ensure_touches_table(conn)
     conn.execute("INSERT OR IGNORE INTO wiki_schema_migrations (migration_id) VALUES (?)", (MIGRATION_ID,))
     conn.commit()

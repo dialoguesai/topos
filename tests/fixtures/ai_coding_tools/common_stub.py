@@ -8,7 +8,9 @@ import paths; these doubles let their extraction guards run before L4 lands.
 
 ``scrub_text`` returns its input unchanged with no counts (the readers' guards
 test extraction, never scrubbing). ``make_record`` builds the §2.2 dict and
-raises ``ValueError("empty")`` on blank content. ``taints`` follows §2.7.
+raises ``ValueError("empty")`` on blank content. The Topos-touch rule (``topos_touch``, ``taints``) and
+the ledger's touch record are the REAL ones (owner ruling 20 Oct 2026: read vs system touch), so the
+readers' guards test the rule that ships.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, Optional, Sequence
 
+from topos.ingestion.parsers.ai_coding_tool import common as _real_common
 from topos.ingestion.parsers.chatgpt_export import DropLedger
 
 PACKAGE_NAME = "topos.ingestion.parsers.ai_coding_tool"
@@ -38,6 +41,10 @@ class Ledger(DropLedger):
 
     scrubbed_counts: Dict[str, int] = field(default_factory=dict)
     tainted_turns: int = 0
+    touches: list = field(default_factory=list)
+    _touch_ids: set = field(default_factory=set, repr=False, compare=False)
+
+    note_touch = _real_common.Ledger.note_touch
 
     def scrubbed(self, name: str, n: int = 1) -> None:
         self.scrubbed_counts[name] = self.scrubbed_counts.get(name, 0) + n
@@ -71,16 +78,10 @@ def is_harness_text(text: str) -> bool:
     return bool(_LEADING_TAG.match(text or ""))
 
 
-_TAINT_NAME = re.compile(r"topos", re.IGNORECASE)
-_TAINT_COMMAND_NEEDLES = (".topos", "engine.sock", "topos-node")
-
-
-def taints(tool_or_server_name: Optional[str], command_text: Optional[str]) -> bool:
-    name = tool_or_server_name or ""
-    if _TAINT_NAME.search(name) or "remote__" in name:
-        return True
-    command = command_text or ""
-    return any(needle in command for needle in _TAINT_COMMAND_NEEDLES)
+TOUCH_READ = _real_common.TOUCH_READ
+TOUCH_SYSTEM = _real_common.TOUCH_SYSTEM
+topos_touch = _real_common.topos_touch
+taints = _real_common.taints
 
 
 def _iso_ms(value: datetime) -> str:
@@ -159,6 +160,9 @@ def _build_stub_module() -> types.ModuleType:
     common.project_key_from_cwd = project_key_from_cwd
     common.is_harness_text = is_harness_text
     common.taints = taints
+    common.topos_touch = topos_touch
+    common.TOUCH_READ = TOUCH_READ
+    common.TOUCH_SYSTEM = TOUCH_SYSTEM
     common.make_record = make_record
     return common
 

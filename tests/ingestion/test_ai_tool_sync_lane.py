@@ -336,6 +336,41 @@ def test_the_project_facet_is_stored_owner_only_and_never_in_metadata_json(node,
     assert raw and all("glowworks" not in r[0] and "_facets" not in r[0] for r in raw)
 
 
+def _touches():
+    from topos.ingestion.parsers.ai_coding_tool.common import Ledger, TOUCH_READ, TOUCH_SYSTEM
+
+    ledger = Ledger()
+    ledger.note_touch(tool="claude_code", session_id=SESSION, touch=(TOUCH_SYSTEM, "topos_cli_admin"),
+                      at=1_791_972_000.5, anchor="toolu_status")
+    ledger.note_touch(tool="claude_code", session_id=SESSION, touch=(TOUCH_READ, "topos_data_tool"),
+                      at=1_791_972_002.5, anchor="toolu_query")
+    return ledger.touches
+
+
+def test_every_topos_touch_is_recorded_owner_only_once_with_no_command_text(node, monkeypatch) -> None:
+    """Owner ruling 20 Oct 2026: read AND system touches are kept in the owner-only touch table; a second read
+    of the same transcript (a resume, a cursor reset) records nothing twice."""
+    from topos.data_explorer_tables import OWNER_ONLY_TABLES
+
+    arm(monkeypatch, node, reader=FakeReader(_batch(), _batch(), touches=_touches()))
+    enable(node, SOURCE)
+    first = _run()
+    assert first["status"] == "ok" and first["topos_touches_recorded"] == 2
+    rows = node.execute(
+        "SELECT tool, session_id, kind, surface, touched_at FROM ai_coding_topos_touches ORDER BY touched_at"
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [
+        ("claude_code", SESSION, "system", "topos_cli_admin", "2026-10-14T10:00:00.500000+00:00"),
+        ("claude_code", SESSION, "read", "topos_data_tool", "2026-10-14T10:00:02.500000+00:00"),
+    ]
+    columns = {c[1] for c in node.execute("PRAGMA table_info(ai_coding_topos_touches)").fetchall()}
+    assert columns == {"touch_id", "tool", "session_id", "kind", "surface", "touched_at", "recorded_at"}
+    assert "ai_coding_topos_touches" in OWNER_ONLY_TABLES
+    second = _run()
+    assert second["topos_touches_recorded"] == 0
+    assert node.execute("SELECT COUNT(*) FROM ai_coding_topos_touches").fetchone()[0] == 2
+
+
 def test_the_result_carries_the_ledger_and_the_checkpoint_is_the_newest_created_at(node, monkeypatch) -> None:
     reader = arm(monkeypatch, node, reader=FakeReader(_batch()))
     enable(node, SOURCE)

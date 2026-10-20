@@ -493,8 +493,34 @@ def test_a_taint_instant_known_up_front_still_spares_the_assistant_turns_before_
     assert batch.ledger.as_dict()["tainted_turns"] == 3
 
 
-def test_bash_touching_topos_home_taints_the_session(cursors) -> None:
+def test_a_health_check_on_the_socket_is_a_system_touch_recorded_without_excluding(cursors) -> None:
+    """Owner ruling 20 Oct 2026: the fixture's ``curl --unix-socket ~/.topos/engine.sock …/healthcheck`` reads no
+    owner data, so nothing after it is excluded — but the touch is recorded and counted."""
     batch = read("bash_touches_topos", cursors)
+    excluded = {row["id"]: row["_metadata"]["share_excluded"] for row in batch.rows}
+    assert excluded == {
+        f"claude_code:{uid(0xB1)}": False,
+        f"claude_code:{uid(0xB2)}": False,
+        f"claude_code:{uid(0xB5)}": False,
+        f"claude_code:{uid(0xB6)}": False,
+    }
+    ledger = batch.ledger.as_dict()
+    assert ledger["tainted_turns"] == 0
+    assert ledger["topos_system_touches"] == 1 and ledger["topos_reads"] == 0
+    [touch] = batch.ledger.touches
+    assert (touch["tool"], touch["session_id"], touch["kind"], touch["surface"]) == (
+        "claude_code", uid(0x10B), "system", "topos_socket_admin")
+    assert touch["touched_at"].startswith("2026-")
+
+
+def test_bash_reading_the_topos_database_taints_the_session(cursors, tmp_path) -> None:
+    root = tmp_path / "bash_reads_topos"
+    shutil.copytree(FIXTURES / "bash_touches_topos", root)
+    transcript = root / SLUG / f"{uid(0x10B)}.jsonl"
+    text = transcript.read_text()
+    assert "http://localhost/healthcheck" in text
+    transcript.write_text(text.replace("http://localhost/healthcheck", "http://localhost/api/local/owner/query"))
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=("fakebox-7",), usernames=("fake",))
     excluded = {row["id"]: row["_metadata"]["share_excluded"] for row in batch.rows}
     assert excluded == {
         f"claude_code:{uid(0xB1)}": False,
@@ -502,7 +528,10 @@ def test_bash_touching_topos_home_taints_the_session(cursors) -> None:
         f"claude_code:{uid(0xB5)}": True,
         f"claude_code:{uid(0xB6)}": True,
     }
-    assert batch.ledger.as_dict()["tainted_turns"] == 2
+    ledger = batch.ledger.as_dict()
+    assert ledger["tainted_turns"] == 2
+    assert ledger["topos_reads"] == 1 and ledger["topos_system_touches"] == 0
+    assert [t["surface"] for t in batch.ledger.touches] == ["topos_socket_data"]
 
 
 def test_subagent_only_taint_marks_the_parent_session(cursors) -> None:
@@ -711,13 +740,19 @@ def test_a_tool_call_taints_by_any_input_that_names_a_topos_surface_not_only_a_s
 
     assert _tool_use_taint({"type": "tool_use", "name": "Read", "input": {"file_path": "/Users/someone/.topos/database.db"}})
     assert _tool_use_taint({"type": "tool_use", "name": "Grep", "input": {"pattern": "key", "path": "/Users/someone/.topos/"}})
-    assert _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "topos-node status --json"}})
+    # `topos-node status` administers the node and returns no owner data: a system touch (owner ruling 20 Oct 2026).
+    assert not _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "topos-node status --json"}})
+    assert _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "topos-node mcp --stdio"}})
     assert _tool_use_taint({"type": "tool_use", "name": "mcp__plugin_topos__query_scope", "input": {"scope_id": "messages:read"}})
     assert not _tool_use_taint({"type": "tool_use", "name": "Read", "input": {"file_path": "/Users/someone/project/README.md"}})
     assert not _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "ls -la"}})
     assert not _tool_use_taint({"type": "tool_use", "name": "Edit", "input": None})
-    # an absolute ~/.topos path with no trailing slash is the same surface (security re-check N6)
-    assert _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "ls /Users/someone/.topos"}})
+    # an absolute ~/.topos path with no trailing slash is the same surface (security re-check N6); listing it
+    # is a system touch, reading through it is a read
+    assert not _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "ls /Users/someone/.topos"}})
+    assert _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "cat /Users/someone/.topos/.env"}})
+    assert _tool_use_taint({"type": "tool_use", "name": "Bash",
+                            "input": {"command": "grep -r token /Users/someone/.topos"}})
 
 
 def test_a_hooks_session_path_outside_the_tools_root_reads_nothing(cursors, tmp_path) -> None:
@@ -730,3 +765,27 @@ def test_a_hooks_session_path_outside_the_tools_root_reads_nothing(cursors, tmp_
                                    hostnames=(), usernames=())
     assert batch.rows == [] and batch.scanned_files == 0
     assert batch.ledger.as_dict()["dropped_files"] == {"outside_root": 1}
+
+
+def test_output_only_tools_are_judged_by_their_target_path_not_their_text() -> None:
+    """Writing a note that mentions ~/.topos/.env, or briefing a sub-agent about the database, reads nothing of
+    Topos (the sub-agent's own calls are scanned from its transcript). The target path still counts (F6)."""
+    from topos.ingestion.sources.claude_code_reader import _tool_use_touch
+
+    def touch(name, inputs):
+        return _tool_use_touch({"type": "tool_use", "name": name, "input": inputs})
+
+    assert touch("Write", {"file_path": "/Users/someone/dev/NOTES.md",
+                           "content": "never cat ~/.topos/.env or open ~/.topos/database.db"}) is None
+    assert touch("Edit", {"file_path": "/Users/someone/dev/a.py", "old_string": "x",
+                          "new_string": "DB = '~/.topos/database.db'"}) is None
+    assert touch("Agent", {"prompt": "count rows in ~/.topos/database.db with sqlite3"}) is None
+    assert touch("SendMessage", {"to": "peer", "message": "topos-node mcp is down"}) is None
+    assert touch("Bash", {"command": "git status", "description": "Unlike ~/.topos/.env this is safe"}) is None
+    # the target path still decides
+    assert touch("Edit", {"file_path": "/Users/someone/.topos/.env", "old_string": "a", "new_string": "b"})[0] == "read"
+    assert touch("Write", {"file_path": "/Users/someone/.topos/config.yaml", "content": "x"})[0] == "system"
+    # a tool this build does not know keeps the all-inputs rule (fail closed)
+    assert touch("SomeNewTool", {"note": "/Users/someone/.topos/database.db"})[0] == "read"
+    # the command itself still decides for Bash
+    assert touch("Bash", {"command": "sqlite3 ~/.topos/database.db .tables", "description": "count"})[0] == "read"

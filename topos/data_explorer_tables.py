@@ -31,7 +31,9 @@ def is_permission_state_table(table_name: str) -> bool:
 #   was the way around them.
 #
 # Unlike the permission-state tables, the owner can still inspect these.
-OWNER_ONLY_TABLES: frozenset[str] = frozenset({"pipeline_jobs", "mcp_clients", "ai_chat_message_facets"})
+OWNER_ONLY_TABLES: frozenset[str] = frozenset(
+    {"pipeline_jobs", "mcp_clients", "ai_chat_message_facets", "ai_coding_topos_touches"}
+)
 
 
 def is_owner_only_table(table_name: str) -> bool:

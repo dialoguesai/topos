@@ -19,8 +19,9 @@ What this reader does with it (CONTRACTS §2.3, §2.4, §2.7):
   ``-Users-…`` slug the folder is stored under), riding top-level outside the
   record so L5 lifts it into the owner-only facets table and the preview can
   list it as a name ``--skip`` takes;
-* taints a session from the first Topos touch in it or in any of its sub-agent
-  files, and marks every later assistant row ``share_excluded``;
+* taints a session from the first READ of Topos in it or in any of its sub-agent
+  files, and marks every later assistant row ``share_excluded``; a system touch
+  (status, health check, setup) is recorded on the ledger and excludes nothing;
 * reads each file from its byte cursor, so an hourly run costs the new bytes.
 
 It never reads anything but the files under the root it is given, and the
@@ -60,7 +61,8 @@ from ..parsers.ai_coding_tool.common import (
     origin_violation,
     project_key_from_cwd,
     scrub_text,
-    taints,
+    TOUCH_READ,
+    topos_touch,
 )
 
 logger = logging.getLogger("topos.ingestion.sources.claude_code_reader")
@@ -516,9 +518,40 @@ def _put_taint_marker(cursors: Any, key: str, epoch: float) -> None:
 
 
 def _tool_use_taint(block: Dict[str, Any]) -> bool:
-    """A tool call touches a Topos surface by its name or by ANY of its inputs — the shell command, but also the
-    path a Read/Grep/Edit names (security review F6: ``~/.topos/database.db`` read through a file tool)."""
+    """True when the call READS Topos (a system touch is recorded, never excluding)."""
+    touch = _tool_use_touch(block)
+    return touch is not None and touch[0] == TOUCH_READ
+
+
+def _note_touch(ledger: Ledger, session_id: str, block: Dict[str, Any], touch: Tuple[str, str],
+                epoch: Optional[float]) -> None:
+    anchor = block.get("id") if isinstance(block.get("id"), str) and block.get("id") else None
+    ledger.note_touch(tool=TOOL, session_id=session_id, touch=touch, at=epoch, anchor=anchor)
+
+
+#: Tools whose text is OUTPUT — a file being written, a brief for a sub-agent, a message to a peer, a structured
+#: answer: their words bring nothing of Topos into the session (a sub-agent's own calls are scanned from its
+#: transcript), so only the path they act on is judged.
+_OUTPUT_ONLY_TOOLS = frozenset({
+    "Write", "Edit", "MultiEdit", "NotebookEdit", "TodoWrite", "Agent", "Task", "SendMessage", "StructuredOutput",
+    "SubagentHandoff", "mcp__ccd_session__spawn_task", "mcp__ccd_session__mark_chapter",
+})
+_TARGET_KEYS = ("file_path", "path", "notebook_path")
+
+
+def _tool_use_touch(block: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """A tool call touches a Topos surface by its name or by its inputs — the shell command, but also the path a
+    Read/Grep/Edit names (security review F6: ``~/.topos/database.db`` read through a file tool). A Bash call is
+    judged by its command (not its description); an output-only tool by the path it acts on; any other tool by
+    ALL of its inputs (fail closed)."""
     inputs = block.get("input")
+    name = block.get("name")
+    if isinstance(inputs, dict) and name == "Bash" and isinstance(inputs.get("command"), str):
+        inputs = {"command": inputs["command"]}
+    elif isinstance(inputs, dict) and name in _OUTPUT_ONLY_TOOLS:
+        inputs = {key: inputs[key] for key in _TARGET_KEYS if isinstance(inputs.get(key), str)}
+        if not inputs:
+            return topos_touch(name, None)
     text: Optional[str] = None
     if isinstance(inputs, str):
         text = inputs
@@ -527,7 +560,7 @@ def _tool_use_taint(block: Dict[str, Any]) -> bool:
             text = json.dumps(inputs, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
             text = str(inputs)
-    return taints(block.get("name"), text)
+    return topos_touch(block.get("name"), text)
 
 
 def _scan_subagents(session_dir: Path, cursors: Any, ledger: Ledger) -> Optional[float]:
@@ -564,8 +597,15 @@ def _scan_subagents(session_dir: Path, cursors: Any, ledger: Ledger) -> Optional
                 continue
             message = record.get("message") if isinstance(record.get("message"), dict) else {}
             for block in content_blocks(message.get("content")):
-                if block.get("type") == "tool_use" and _tool_use_taint(block):
-                    earliest = _min_epoch(earliest, _record_epoch(record) or float(stat.st_mtime))
+                if block.get("type") != "tool_use":
+                    continue
+                touch = _tool_use_touch(block)
+                if touch is None:
+                    continue
+                epoch = _record_epoch(record) or float(stat.st_mtime)
+                _note_touch(ledger, session_dir.name, block, touch, epoch)
+                if touch[0] == TOUCH_READ:
+                    earliest = _min_epoch(earliest, epoch)
         cursors.put(SOURCE_ID, key, size=int(stat.st_size), mtime=float(stat.st_mtime),
                     offset=offset + consumed, record_count=0)
     return earliest
@@ -768,8 +808,11 @@ def _classify(
                 pending.texts.append(str(block.get("text") or ""))
             elif block_type == "tool_use":
                 ledger.drop(DROP_TOOL_USE)
-                if _tool_use_taint(block):
-                    state.taint_at = _min_epoch(state.taint_at, epoch)
+                touch = _tool_use_touch(block)
+                if touch is not None:
+                    _note_touch(ledger, state.session_id, block, touch, epoch)
+                    if touch[0] == TOUCH_READ:
+                        state.taint_at = _min_epoch(state.taint_at, epoch)
             elif block_type in ("thinking", "redacted_thinking"):
                 ledger.drop(DROP_THINKING)
             else:
