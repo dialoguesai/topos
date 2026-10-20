@@ -38,6 +38,7 @@
     "remediation_person_model_v1": "c3dbd27c3ca732b11b3c96c4486b4369f3ef624c04dee35e0ff96ba131050693",
     "retire_url_classification_v1": "80862b0bf6cd5c2e26686e0b707b7de7e363bddd82703bef60d6dc3f946ab005",
     "scope_source_generation_v1": "dfa82ad66d2a574e765c53728635ceb901b6f62f30a4973f03f118cac700292b",
+    "serve_spans_v1": "462f2859a70fa5b9b488465cc4b876e1af35c9f15cad1950eab3f9d69cbe5db3",
     "signal_dimension_backfill_v1": "274912dbbedcc07670e4c4d33f0bd2d4e10e5192f559c67e3d912efe2afbda24",
     "signal_dimension_harness": "9682f1ebdf30245ac2c0b2bebcf64cd478883018497ce1399cca52930a1dc6c4",
     "signal_summaries_drop_v1": "266951348a680caf312663fafe9e94a823ef14063a0713bd94761e7e2ea28ed9",
