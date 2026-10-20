@@ -445,3 +445,60 @@ def test_a_running_transcript_turn_quiet_for_an_hour_is_emitted(reader, env):
     _append_jsonl(env, RUNNING_TURN, age_seconds=2 * 3600)
     batch = _read(reader, env, store, session_path=str(env.jsonl))
     assert [r["content"] for r in batch.rows] == ["Run the slow suite", "Starting the slow suite."]
+
+
+EDGES = FIXTURES.parent / "cursor_edges"
+
+
+def _edge(reader, env, tmp_path, composer_id: str, *, age_seconds: float):
+    import time
+
+    root = tmp_path / "cursor_edges"
+    if not root.exists():
+        shutil.copytree(EDGES, root)
+    path = next(root.glob(f"projects/*/agent-transcripts/{composer_id}/{composer_id}.jsonl"))
+    stamp = time.time() - age_seconds
+    os.utime(path, (stamp, stamp))
+    return reader.read_cursor_batch(root_path=root, state_db_path=env.db, cursors=FakeCursorStore(),
+                                    session_path=str(path))
+
+
+def test_turn_ended_a_user_line_and_the_taint_instant_each_end_a_transcript_reply(reader, env, tmp_path):
+    batch = _edge(reader, env, tmp_path, "c0c0c0c0-0008-4a0a-8a0a-a0a0a0a0a008", age_seconds=2 * 3600)
+    assert [(r["content"], r["_metadata"]["share_excluded"]) for r in batch.rows] == [
+        ("First ask", False), ("E1.", False), ("E2 after the turn ended.", False),
+        ("Second ask", False), ("E3.", False), ("E4 after the call.", True),
+    ]
+
+
+def test_text_after_a_topos_call_in_the_same_line_is_excluded_and_the_text_before_is_not(reader, env, tmp_path):
+    batch = _edge(reader, env, tmp_path, "c0c0c0c0-0009-4a0a-8a0a-a0a0a0a0a009", age_seconds=2 * 3600)
+    assert [(r["content"], r["_metadata"]["share_excluded"]) for r in batch.rows] == [
+        ("Look it up", False), ("Before the call.", False), ("After the call.", True),
+    ]
+    assert len({r["id"] for r in batch.rows}) == 3
+
+
+def test_a_trailing_tool_result_keeps_a_transcript_reply_open(reader, env, tmp_path):
+    batch = _edge(reader, env, tmp_path, "c0c0c0c0-000a-4a0a-8a0a-a0a0a0a0a00a", age_seconds=5)
+    assert [r["content"] for r in batch.rows] == ["Run it"]
+
+
+def test_harness_spans_go_from_either_end_of_typed_text_but_an_inline_tag_stays(reader):
+    assert reader._typed_text("<system_notification>\nJob done\n</system_notification>\nTyped words") == ("Typed words", 1)
+    assert reader._typed_text("Typed words\n<timestamp>Wednesday</timestamp>") == ("Typed words", 1)
+    assert reader._typed_text("Ends with <timestamp>Wednesday</timestamp>") == ("Ends with <timestamp>Wednesday</timestamp>", 0)
+
+
+def test_a_batch_of_one_never_cuts_a_reply_in_two(reader, env):
+    store = FakeCursorStore()
+    rows = []
+    for _ in range(40):
+        batch = _read(reader, env, store, batch_size=1)
+        if not batch.rows and not batch.files_touched:
+            break
+        rows.extend(batch.rows)
+    contents = [r["content"] for r in rows]
+    assert "Scaffolded the entry point.\n\nListed the files." in contents
+    assert [r for r in rows if r["id"] == "cursor:bubble-k02"][0]["content"].count("\n\n") == 2
+    assert len(rows) == TOTAL_ROWS

@@ -35,6 +35,9 @@ THREAD_G = "0a1b2c3d-7777-4777-8777-a7a7a7a70007"
 THREAD_H = "0a1b2c3d-8888-4888-8888-a8a8a8a80008"
 THREAD_I = "0a1b2c3d-9999-4999-8999-a9a9a9a90009"
 OPEN_TURN_ROOT = FIXTURE_ROOT.parent / "codex_open_turn"
+EDGES_ROOT = FIXTURE_ROOT.parent / "codex_edges"
+THREAD_J = "0a1b2c3d-aaaa-4aaa-8aaa-aaaaaaaa000a"
+THREAD_K = "0a1b2c3d-bbbb-4bbb-8bbb-bbbbbbbb000b"
 FORK_FILE = DAY / f"rollout-2026-10-15T10-05-00-{THREAD_B}.jsonl"
 
 TOTAL_ROWS = 23  # A 4 + B 2 + C 0 + D 4 + E 3 + F 0 + G 3 + H 7
@@ -327,3 +330,54 @@ def test_a_running_turn_in_a_rollout_quiet_for_an_hour_is_emitted(reader, tmp_pa
     batch = _read(reader, root, store)
     assert [r["id"] for r in batch.rows] == ["codex:msg_i_u1", "codex:msg_i_a1"]
     assert store.get(reader.SOURCE_ID, str(path)).offset == path.stat().st_size
+
+
+def _edges_root(tmp_path: Path, *, age_seconds: float) -> Path:
+    import os
+    import time
+
+    root = tmp_path / "codex_edges"
+    shutil.copytree(EDGES_ROOT, root)
+    stamp = time.time() - age_seconds
+    for path in (root / DAY).glob("rollout-*.jsonl"):
+        os.utime(path, (stamp, stamp))
+    return root
+
+
+def test_turn_edge_events_taint_and_compaction_each_end_a_reply(reader, tmp_path):
+    batch = _read(reader, _edges_root(tmp_path, age_seconds=2 * 3600))
+    rows = _thread(batch, THREAD_J)
+    assert [(r["id"], r["content"], r["_metadata"]["share_excluded"]) for r in rows] == [
+        ("codex:msg_j_u1", "Tidy the logging", False),
+        ("codex:msg_j_a1", "Starting with the formatter.", False),
+        ("codex:msg_j_a2", "Now the handlers.", False),
+        ("codex:msg_j_a3", "The node is up; the handlers are next.", True),
+        ("codex:msg_j_a4", "The handlers are quieter now.", True),
+        ("codex:msg_j_a5", "Logging is tidy.", True),
+    ]
+
+
+def test_only_the_running_turn_is_held_when_the_turn_id_changes_without_an_event(reader, tmp_path):
+    root = _edges_root(tmp_path, age_seconds=60)
+    store = FakeCursorStore()
+    batch = _read(reader, root, store)
+    assert [r["id"] for r in _thread(batch, THREAD_K)] == ["codex:msg_k_u1", "codex:msg_k_a1"]
+    path = next((root / DAY).glob(f"*{THREAD_K}.jsonl"))
+    lines = path.read_bytes().splitlines(keepends=True)
+    assert store.get(reader.SOURCE_ID, str(path)).offset == sum(len(line) for line in lines[:5])
+
+
+def test_a_batch_of_one_never_cuts_a_reply_in_two(reader, codex_root):
+    path = codex_root / DAY / f"rollout-2026-10-15T10-35-00-{THREAD_H}.jsonl"
+    store = FakeCursorStore()
+    rows = []
+    for _ in range(20):
+        batch = _read(reader, codex_root, store, batch_size=1, session_path=str(path))
+        if not batch.rows:
+            break
+        rows.extend(batch.rows)
+    assert [r["id"] for r in rows] == [
+        "codex:msg_h_u1", "codex:msg_h_a1", "codex:msg_h_a4", "codex:msg_h_u3",
+        "codex:msg_h_a6", "codex:msg_h_a7", "codex:msg_h_a8",
+    ]
+    assert rows[1]["content"].count("\n\n") == 2

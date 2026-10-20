@@ -131,16 +131,22 @@ class _Session:
 
 
 @dataclass
-class _Pending:
-    """One assistant reply being assembled: the text blocks up to the next turn boundary."""
+class _Piece:
+    """The text blocks of one assistant record, with the record's id and stamp."""
 
     uuid: str
     epoch: float
     stamp: datetime
     ts_source: str
     model: Optional[str]
-    last_epoch: float
     texts: List[str] = field(default_factory=list)
+
+
+@dataclass
+class _Pending:
+    """One assistant reply being assembled: one piece per text-bearing record, up to the next turn boundary."""
+
+    pieces: List[_Piece] = field(default_factory=list)
 
 
 def read_claude_code_batch(
@@ -750,18 +756,26 @@ def _classify(
         if pending is None:
             return
         reply, pending = pending, None
-        if not reply.texts:
-            return
-        content = "\n\n".join(text.strip() for text in reply.texts if text and text.strip())
-        content, counts = scrub_text(content, secrets=secrets, hostnames=hostnames, usernames=usernames)
-        ledger.record_scrubs(counts, session_id=state.session_id)
-        if not content.strip():
-            ledger.drop(DROP_EMPTY)
-            return
-        # Judged by the LAST text's stamp: a Topos call in the same record as that text taints the reply.
-        excluded = excluded_at(reply.last_epoch)
-        emit("assistant", uuid=reply.uuid, content=content, stamp=reply.stamp, ts_source=reply.ts_source,
-             origin="assistant", share_excluded=excluded, model=reply.model)
+        # One row per run of pieces on the same side of the taint instant, judged with the instant as it
+        # stands now: a Topos call in the same record as a text taints that record's text, never the
+        # narration before it, and no row mixes shareable and excluded text.
+        runs: List[List[_Piece]] = []
+        for piece in reply.pieces:
+            if runs and excluded_at(runs[-1][0].epoch) == excluded_at(piece.epoch):
+                runs[-1].append(piece)
+            else:
+                runs.append([piece])
+        for run in runs:
+            ledger.merged_blocks += len(run) - 1
+            first = run[0]
+            content = "\n\n".join(text.strip() for piece in run for text in piece.texts if text and text.strip())
+            content, counts = scrub_text(content, secrets=secrets, hostnames=hostnames, usernames=usernames)
+            ledger.record_scrubs(counts, session_id=state.session_id)
+            if not content.strip():
+                ledger.drop(DROP_EMPTY)
+                continue
+            emit("assistant", uuid=first.uuid, content=content, stamp=first.stamp, ts_source=first.ts_source,
+                 origin="assistant", share_excluded=excluded_at(first.epoch), model=first.model)
 
     def assistant(record: Dict[str, Any]) -> None:
         nonlocal pending
@@ -782,21 +796,12 @@ def _classify(
         if not blocks:
             ledger.drop(DROP_EMPTY)
             return
-        first_text_here = True
+        piece = _Piece(uuid, epoch, stamp, ts_source,
+                       model=message.get("model") if isinstance(message.get("model"), str) else None)
         for block in blocks:
             block_type = block.get("type")
             if block_type == "text":
-                if pending is not None and first_text_here and excluded_at(pending.last_epoch) != excluded_at(epoch):
-                    flush()  # the taint instant falls between this text and the reply so far
-                if pending is None:
-                    pending = _Pending(uuid, epoch, stamp, ts_source,
-                                       model=message.get("model") if isinstance(message.get("model"), str) else None,
-                                       last_epoch=epoch)
-                elif first_text_here:
-                    ledger.merged_blocks += 1
-                first_text_here = False
-                pending.last_epoch = epoch
-                pending.texts.append(str(block.get("text") or ""))
+                piece.texts.append(str(block.get("text") or ""))
             elif block_type == "tool_use":
                 ledger.drop(DROP_TOOL_USE)
                 if _tool_use_taint(block):
@@ -805,6 +810,10 @@ def _classify(
                 ledger.drop(DROP_THINKING)
             else:
                 ledger.drop(f"{DROP_OTHER_BLOCK}:{block_type}")
+        if piece.texts:
+            if pending is None:
+                pending = _Pending()
+            pending.pieces.append(piece)
 
     def user(record: Dict[str, Any]) -> None:
         uuid = record.get("uuid")

@@ -508,6 +508,38 @@ def case_harness_trailing() -> None:
         user(0x1E5, uid(0x1E4), s, 4, [text("Ship it"), text("<system-reminder>\nThe todo list is empty.\n</system-reminder>")]),
         user(0x1E6, uid(0x1E5), s, 5, "Two notes\n<system-reminder>a</system-reminder>\n<local-command-stdout>b</local-command-stdout>\n"),
         user(0x1E7, uid(0x1E6), s, 6, 'Look here\n<ide_selection path="app.py">\nline 3\n</ide_selection>'),
+        user(0x1E8, uid(0x1E7), s, 7, "Is it fine to end a note with <system-reminder>x</system-reminder>"),
+        user(0x1E9, uid(0x1E8), s, 8, "a\n<system-reminder>1</system-reminder>\nkeep me\n<system-reminder>2</system-reminder>"),
+    ])
+
+
+def case_reply_edges() -> None:
+    # Where a reply must end and where it must not: a system record ends it; sub-agent records inside the
+    # main file do not; a record holding text AND a Topos call starts an excluded row of its own, so the
+    # narration before it stays shareable.
+    s = uid(0x11A)
+    sub = {"isSidechain": True, "agentId": "e1f2"}
+    write_jsonl(session_file("reply_edges", s), [
+        user(0x201, None, s, 0, "Check the deploy"),
+        assistant(0x202, uid(0x201), s, 1, [text("Looking at the deploy log.")], "msg_re1", stop="tool_use"),
+        system(0x203, uid(0x202), s, 2, "api_error"),
+        assistant(0x204, uid(0x203), s, 3, [text("Retried: the deploy is green.")], "msg_re2", stop="end_turn"),
+        user(0x205, uid(0x204), s, 4, "Now the release notes"),
+        assistant(0x206, uid(0x205), s, 5, [text("Drafting them with a helper.")], "msg_re3", stop="tool_use"),
+        assistant(0x207, uid(0x206), s, 6, [tool_use("Agent", {"prompt": "draft notes"}, "toolu_re1")], "msg_re3",
+                  stop="tool_use"),
+        user(0x208, uid(0x207), s, 7, "draft notes", **sub),
+        assistant(0x209, uid(0x208), s, 8, [text("Helper draft ready.")], "msg_re4", stop="end_turn", **sub),
+        user(0x20A, uid(0x209), s, 9, tool_result("Notes drafted.", "toolu_re1")),
+        assistant(0x20B, uid(0x20A), s, 10, [text("The notes are in RELEASE.md.")], "msg_re5", stop="end_turn"),
+        user(0x20C, uid(0x20B), s, 11, "What did I ship last week?"),
+        assistant(0x20D, uid(0x20C), s, 12, [text("Let me check.")], "msg_re6", stop="tool_use"),
+        assistant(0x20E, uid(0x20D), s, 13,
+                  [text("Asking your Topos now."),
+                   tool_use("mcp__plugin_topos_topos__query_scope", {"scope_id": "work_context:read"}, "toolu_re2")],
+                  "msg_re7", stop="tool_use"),
+        user(0x20F, uid(0x20E), s, 14, tool_result('{"data": {}}', "toolu_re2")),
+        assistant(0x210, uid(0x20F), s, 15, [text("You shipped the uploader.")], "msg_re8", stop="end_turn"),
     ])
 
 
@@ -534,6 +566,7 @@ def main() -> None:
         case_agentic_reply,
         case_open_reply,
         case_harness_trailing,
+        case_reply_edges,
     ):
         build()
     print(f"wrote {sum(1 for _ in ROOT.rglob('*') if _.is_file())} files under {ROOT}")

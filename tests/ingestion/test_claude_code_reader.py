@@ -672,11 +672,32 @@ def test_a_reply_still_running_is_held_back_and_merged_on_the_next_run(cursors, 
     assert cursors.get(SOURCE_ID, str(path)).offset == path.stat().st_size
 
 
+def test_a_held_reply_with_nothing_new_reports_the_file_untouched(cursors, tmp_path) -> None:
+    # The runner loops while a batch reports touched files: a held reply must not keep it spinning.
+    root, path = _open_reply_root(tmp_path, age_seconds=5)
+    read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    again = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert again.rows == [] and again.files_touched == 0
+
+
 def test_a_reply_waiting_on_a_tool_result_just_written_is_still_held(cursors, tmp_path) -> None:
     root, path = _open_reply_root(tmp_path, age_seconds=5, tail_lines=1)
     batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
     assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(0x1D1)}"]
     assert cursors.get(SOURCE_ID, str(path)).offset == len(path.read_bytes().splitlines(keepends=True)[0])
+
+
+def test_a_trailing_tool_result_alone_keeps_the_reply_open(cursors, tmp_path) -> None:
+    # The last assistant record carries no stop_reason; only the tool result after it says a call is pending.
+    root, path = _open_reply_root(tmp_path, age_seconds=5, tail_lines=1)
+    lines = path.read_bytes().splitlines(keepends=True)
+    record = json.loads(lines[2])
+    record["message"].pop("stop_reason")
+    lines[2] = (json.dumps(record) + "\n").encode()
+    path.write_bytes(b"".join(lines))
+    os.utime(path, None)
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(0x1D1)}"]
 
 
 def test_an_open_reply_in_a_file_quiet_for_an_hour_is_emitted(cursors, tmp_path) -> None:
@@ -698,7 +719,9 @@ def test_trailing_harness_spans_are_stripped_and_counted_but_the_persons_own_tex
     batch = read("harness_trailing", cursors)
     assert_record_shape(batch.rows)
     users = [row for row in batch.rows if row["role"] == "user"]
-    assert [row["id"] for row in users] == [f"claude_code:{uid(n)}" for n in (0x1E1, 0x1E3, 0x1E4, 0x1E5, 0x1E6, 0x1E7)]
+    assert [row["id"] for row in users] == [
+        f"claude_code:{uid(n)}" for n in (0x1E1, 0x1E3, 0x1E4, 0x1E5, 0x1E6, 0x1E7, 0x1E8, 0x1E9)
+    ]
     assert [row["content"] for row in users] == [
         "Fix the flaky test",
         "Why does `<command-name>` show up in my rows?",
@@ -706,9 +729,39 @@ def test_trailing_harness_spans_are_stripped_and_counted_but_the_persons_own_tex
         "Ship it",
         "Two notes",
         "Look here",
+        # A span named inline at the end is not on a line of its own: the person's words.
+        "Is it fine to end a note with <system-reminder>x</system-reminder>",
+        # Only the span that ends the text goes; typed text between two spans is never swallowed.
+        "a\n<system-reminder>1</system-reminder>\nkeep me",
     ]
     assert {row["_metadata"]["conversation_title"] for row in batch.rows} == {"Fix the flaky test"}
     ledger = batch.ledger.as_dict()
-    assert ledger["harness_spans_stripped"] == 5
+    assert ledger["harness_spans_stripped"] == 6
     assert ledger["dropped"] == {}
-    assert ledger["turns_emitted"] == 7
+    assert ledger["turns_emitted"] == 9
+
+
+def test_a_system_record_ends_a_reply_and_sub_agent_records_do_not(cursors) -> None:
+    batch = read("reply_edges", cursors)
+    assert_record_shape(batch.rows)
+    assert [row["id"] for row in batch.rows] == [
+        f"claude_code:{uid(n)}" for n in (0x201, 0x202, 0x204, 0x205, 0x206, 0x20C, 0x20D, 0x20E)
+    ]
+    assert by_uuid(batch.rows, 0x202)["content"] == "Looking at the deploy log."
+    assert by_uuid(batch.rows, 0x204)["content"] == "Retried: the deploy is green."
+    assert by_uuid(batch.rows, 0x206)["content"] == "Drafting them with a helper.\n\nThe notes are in RELEASE.md."
+    assert not any("Helper draft" in row["content"] for row in batch.rows)
+
+
+def test_text_beside_a_topos_call_never_drags_earlier_narration_out_of_sharing(cursors) -> None:
+    # The record holding the call's own text is excluded (its stamp is the taint instant); the reply text
+    # before it keeps a shareable row of its own, and no row mixes the two.
+    batch = read("reply_edges", cursors)
+    before = by_uuid(batch.rows, 0x20D)
+    after = by_uuid(batch.rows, 0x20E)
+    assert (before["content"], before["_metadata"]["share_excluded"]) == ("Let me check.", False)
+    assert (after["content"], after["_metadata"]["share_excluded"]) == (
+        "Asking your Topos now.\n\nYou shipped the uploader.", True,
+    )
+    assert after["created_at"] == "2026-10-01T09:00:03.250Z"
+    assert batch.ledger.as_dict()["tainted_turns"] == 1

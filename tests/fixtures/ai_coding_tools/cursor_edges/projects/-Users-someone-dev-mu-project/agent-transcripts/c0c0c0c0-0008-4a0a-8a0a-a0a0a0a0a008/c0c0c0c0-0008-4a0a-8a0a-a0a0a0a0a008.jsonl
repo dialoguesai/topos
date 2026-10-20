@@ -1,0 +1,8 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nFirst ask\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"E1."}]}}
+{"type":"turn_ended","status":"completed"}
+{"role":"assistant","message":{"content":[{"type":"text","text":"E2 after the turn ended."}]}}
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nSecond ask\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"E3."}]}}
+{"role":"assistant","message":{"content":[{"type":"tool_use","name":"mcp__topos__query_scope","input":{"scope":"work_context:read"}}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"E4 after the call."}]}}

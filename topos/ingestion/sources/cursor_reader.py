@@ -125,7 +125,7 @@ _LEADING_HARNESS_SPAN_RE = re.compile(
     r"\A\s*<(" + _HARNESS_ALTERNATION + r")(?:\s[^>]*)?>.*?</\1>", re.DOTALL,
 )
 _TRAILING_HARNESS_SPAN_RE = re.compile(
-    r"<(" + _HARNESS_ALTERNATION + r")(?:\s[^>]*)?>(?:(?!</?\1[\s>]).)*</\1>\s*\Z", re.DOTALL,
+    r"(?:\A|\n)[ \t]*<(" + _HARNESS_ALTERNATION + r")(?:\s[^>]*)?>(?:(?!</?\1[\s>]).)*</\1>\s*\Z", re.DOTALL,
 )
 STATUS_GENERATING = "generating"
 TITLE_MAX = 120
@@ -770,12 +770,13 @@ def _read_transcript(
             origin = ORIGIN_AGENT_TRANSCRIPT
             share_excluded = False
         elif role == "assistant":
-            texts = []
-            excluded = state.tainted
+            # Text on each side of a Topos call in this line is judged on its own side: before it, the
+            # session's state so far; after it, excluded.
+            segments: List[Tuple[bool, List[str]]] = [(state.tainted, [])]
             for block in blocks:
                 kind = block.get("type")
                 if kind == "text" and isinstance(block.get("text"), str):
-                    texts.append(block["text"])
+                    segments[-1][1].append(block["text"])
                 elif kind == "tool_use":
                     ledger.drop("tool_use")
                     name = block.get("name")
@@ -785,21 +786,24 @@ def _read_transcript(
                         json.dumps(payload, default=str) if payload is not None else None,
                     ):
                         state.tainted = True
-                        if not texts:
-                            excluded = True
+                        segments.append((True, []))
                 elif kind == "thinking":
                     ledger.drop("thinking")
-            text = "\n".join(texts).strip()
-            if not text:
-                continue
-            if reply is not None and reply.share_excluded != excluded:
-                flush()  # the taint instant falls between this text and the reply so far
-            if reply is None:
-                reply = _Reply(record_uuid=str(uuid.uuid5(_RECORD_NAMESPACE, f"{TOOL}:{composer_id}:{begin}")),
-                               created_at=created_at, timestamp_source="file_mtime", share_excluded=excluded)
-            else:
-                ledger.merged_blocks += 1
-            reply.texts.append(text)
+            first_piece = True
+            for index, (excluded, texts) in enumerate(segments):
+                text = "\n".join(texts).strip()
+                if not text:
+                    continue
+                if reply is not None and reply.share_excluded != excluded:
+                    flush()  # the taint instant falls between this text and the reply so far
+                if reply is None:
+                    key = f"{TOOL}:{composer_id}:{begin}" + (f":{index}" if index else "")
+                    reply = _Reply(record_uuid=str(uuid.uuid5(_RECORD_NAMESPACE, key)),
+                                   created_at=created_at, timestamp_source="file_mtime", share_excluded=excluded)
+                elif first_piece:
+                    ledger.merged_blocks += 1
+                first_piece = False
+                reply.texts.append(text)
             continue
         else:
             ledger.drop("system")
