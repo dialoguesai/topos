@@ -9,6 +9,10 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.14] — 2026-10-20
+
+- [S1] [P] Content-free query serve spans and daily owner activity on the dashboard. Migration 89 adds `serve_spans`: one row per query, retrieval and query-inference span with its duration, outcome and, only when a caller observed one, time to first token. No query text, record, or caller identity is stored, and the store refuses anything else. The owner dashboard reads serve p50/p95 from it. The dashboard measurements payload (still schema version 1, so the control plane passes it through unchanged) adds recorded MCP tool-call requests per day, which callers made them, and routine runs, all on the retained-day contract: days outside the retained log are unavailable, never zero. No backfill or reprocessing.
+
 ## [1.5.13] — 2026-10-17
 
 - [S1] [P] Owner dashboard counters for new canonical records and logical facts, with transactional retry/update deduplication and explicit unavailable/partial history. Migration 88 baselines existing identities; no historical measurement backfill or reprocessing. Explicit source/record erasure also removes value-bearing fact receipts without discarding surviving shared evidence or retry deduplication.
