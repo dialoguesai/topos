@@ -288,6 +288,10 @@ class QueryPipelineOrchestrator:
             # An unknown keyword is the caller's bug, not the ledger's: re-raise it
             # from the real signature rather than from this wrapper.
             raise
+        finally:
+            from ..serve.spans import flush_stages
+
+            flush_stages()
         return _attach_narrowing(result, ledger)
 
     async def _execute_turn(
@@ -669,6 +673,9 @@ class QueryPipelineOrchestrator:
                 "audit": audit,
             }
         timings.retrieval_ms = now_ms() - _t0
+        from ..serve.spans import publish_stages
+
+        publish_stages(timings.retrieval_ms, None, "ok")
 
         _t0 = now_ms()
         filtered = self._disclosure.apply(
@@ -779,6 +786,12 @@ class QueryPipelineOrchestrator:
             )
             public.payload.update(inf)
             timings.inference_ms = now_ms() - _t0
+            llm_outcome = "ok"
+            if isinstance(inf, dict) and inf.get("error") == "inference_timeout":
+                llm_outcome = "timeout"
+            elif isinstance(inf, dict) and inf.get("error"):
+                llm_outcome = "error"
+            publish_stages(timings.retrieval_ms, timings.inference_ms, llm_outcome)
         if availability_final:
             # Closed-set egress scrub, applied even though the lanes above are
             # gated off: the payload has one last owner before serialization,

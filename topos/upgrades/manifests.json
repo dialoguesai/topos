@@ -1114,6 +1114,14 @@
       ]
     },
     {
+      "version": "1.5.14",
+      "summary": "Content-free query serve spans and daily MCP request, caller and routine activity on the owner dashboard.",
+      "steps": [],
+      "notes": [
+        "Additive schema only: migration 89 creates serve_spans and its recorded_at index. No reprocessing, backfill or consent step."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
