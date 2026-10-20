@@ -21,6 +21,10 @@ from .home_chat_turn_timings_v1 import (
     MIGRATION_ID as HOME_CHAT_TURN_TIMINGS_V1_ID,
     apply_home_chat_turn_timings_v1_up,
 )
+from .serve_spans_v1 import (
+    MIGRATION_ID as SERVE_SPANS_V1_ID,
+    apply_serve_spans_v1_up,
+)
 from .wiki_mvp_phase0 import MIGRATION_ID as PHASE0_ID, apply_wiki_mvp_phase0_up
 from .owner_only_records_v1 import MIGRATION_ID as OWNER_ONLY_RECORDS_V1_ID, apply_owner_only_records_v1_up
 from .temporal_fields_v1 import MIGRATION_ID as TEMPORAL_FIELDS_V1_ID, apply_temporal_fields_v1_up
@@ -501,6 +505,7 @@ MIGRATIONS: List[MigrationSpec] = [
     # Current owner answers for the opt-in Calibrate truth pack; additive and ledger guarded.
     _spec(87, CALIBRATION_ANSWERS_V1_ID, apply_calibration_answers_v1_up),
     _spec(88, DASHBOARD_MEASUREMENTS_V1_ID, apply_dashboard_measurements_v1_up, always_run=True),
+    _spec(89, SERVE_SPANS_V1_ID, apply_serve_spans_v1_up),
 ]
 
 
