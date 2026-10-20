@@ -229,6 +229,128 @@ def test_fact_receipt_erasure_supports_databases_without_measurements():
         assert forget_erased_fact_measurements(conn, ["fact:synthetic:value"]) == 0
 
 
+def test_mcp_requests_use_retained_tool_calls_and_leave_other_activity_out(db):
+    from topos.dashboard.measurements import mcp_request_activity
+
+    now = datetime(2026, 10, 18, 12, 30, tzinfo=timezone.utc)
+    empty = mcp_request_activity(None, [], "2026-10-16", "2026-10-19", now=now)
+    assert empty["measured_since"] is None
+    assert [bucket["count"] for bucket in empty["buckets"]] == [None, None, None]
+    # Ingestion writes and model calls are not requests. Only these tool-call timestamps count.
+    earliest = "2026-10-17T15:00:00+00:00"
+    stamps = [
+        "2026-10-17T15:04:00+00:00",
+        "2026-10-18T00:10:00Z",
+        "2026-10-18T02:00:00+00:00",
+        "2026-10-18T03:30:00+00:00",
+        "2026-10-18T05:00:00+00:00",
+        "2026-10-18T11:47:00.726466+00:00",
+        "2026-10-18T18:00:00+00:00",  # after the read clock; not yet counted
+        "not-a-timestamp",
+    ]
+    assert mcp_request_activity(earliest, stamps, "2026-10-16", "2026-10-19", now=now)["measured_since"] is None
+    stamps = stamps[:-2]
+    result = mcp_request_activity(earliest, stamps, "2026-10-16", "2026-10-19", now=now)
+    assert [(b["count"], b["coverage"], b["blocks"]) for b in result["buckets"]] == [
+        (None, "unavailable", None),
+        (1, "partial", [0, 0, 0, 1, 0, 0]),
+        (5, "partial", [3, 1, 1, 0, 0, 0]),
+    ]
+    assert sum(result["buckets"][-1]["blocks"]) == 5
+    db.execute("""CREATE TABLE mcp_request_log(
+        id INTEGER PRIMARY KEY, tool_name TEXT NOT NULL, requested_at TEXT NOT NULL)""")
+    db.executemany("INSERT INTO mcp_request_log(tool_name, requested_at) VALUES('query', ?)", [(stamp,) for stamp in stamps])
+    db.commit()
+    live = daily_measurements(db, "2026-10-16", "2026-10-19", now=now)["requests"]
+    assert live["population"] == "mcp_tool_calls"
+    assert live["buckets"][0]["count"] is None
+    assert live["buckets"][1]["count"] == 1
+    assert live["buckets"][2]["blocks"] == [3, 1, 1, 0, 0, 0]
+    # A day inside the retained log with no tool call is a measured zero.
+    quiet = mcp_request_activity("2026-10-15T01:00:00Z", ["2026-10-15T01:00:00Z"], "2026-10-15", "2026-10-18",
+                                 now=datetime(2026, 10, 17, 12, tzinfo=timezone.utc))
+    assert [(bucket["count"], bucket["coverage"]) for bucket in quiet["buckets"]] == [
+        (1, "partial"), (0, "complete"), (0, "partial")]
+
+
+def test_callers_and_routine_runs_follow_retained_days(db):
+    from topos.dashboard.measurements import mcp_caller_activity, routine_run_activity
+
+    now = datetime(2026, 10, 18, 12, 30, tzinfo=timezone.utc)
+    calls = [
+        ("2026-10-17T15:04:00+00:00", "query", "codex", "owner_self"),
+        ("2026-10-18T11:47:00+00:00", "query", "codex", "owner_self"),
+        ("2026-10-18T11:50:00+00:00", "list_database_tables", "", "owner_self"),
+    ]
+    callers = mcp_caller_activity(calls[0][0], calls, "2026-10-16", "2026-10-19", now=now)
+    assert callers["buckets"][0]["callers"] is None
+    assert callers["buckets"][2]["count"] == 2
+    assert callers["buckets"][2]["callers"] == [
+        {"source": "codex", "access_context": "owner_self", "count": 1},
+        {"source": "unknown", "access_context": "owner_self", "count": 1},
+    ]
+    assert [call["tool"] for call in callers["buckets"][2]["calls"]] == ["query", "list_database_tables"]
+    assert mcp_caller_activity(calls[0][0], [("not-a-time", "query", "codex", "owner_self")], "2026-10-18", "2026-10-19", now=now)["measured_since"] is None
+
+    runs = [("2026-10-18T12:05:59+00:00", "completed"), ("2026-10-18T01:00:00Z", "completed"), ("2026-10-16T00:00:00Z", "failed")]
+    routines = routine_run_activity("2026-06-18T22:38:48+00:00", runs, "2026-10-16", "2026-10-19", now=now)
+    assert [(bucket["count"], bucket["coverage"]) for bucket in routines["buckets"]] == [
+        (1, "complete"), (0, "complete"), (2, "partial")]
+    assert routines["buckets"][2]["statuses"] == [{"status": "completed", "count": 2}]
+    assert routine_run_activity("2026-06-18T22:38:48+00:00", [("2026-10-18T01:00:00Z", "weird")], "2026-10-18", "2026-10-19", now=now)["buckets"][0]["statuses"] == [{"status": "unknown", "count": 1}]
+
+    db.execute("""CREATE TABLE mcp_request_log(
+        id INTEGER PRIMARY KEY, tool_name TEXT, requested_at TEXT, source TEXT, access_context TEXT)""")
+    db.execute("INSERT INTO mcp_request_log(tool_name, requested_at, source, access_context) VALUES('query', ?, 'codex', 'owner_self')", (calls[1][0],))
+    db.execute("""CREATE TABLE routine_runs(id TEXT PRIMARY KEY, updated_at TEXT, status TEXT, payload_json TEXT)""")
+    db.execute("INSERT INTO routine_runs VALUES('run-1', ?, 'completed', '{\"prompt\":\"secret\"}')", (runs[0][0],))
+    db.commit()
+    live = daily_measurements(db, "2026-10-18", "2026-10-19", now=now)
+    assert live["callers"]["buckets"][0]["count"] == 1
+    assert "secret" not in str(live)
+    assert live["routine_runs"]["buckets"][0]["statuses"] == [{"status": "completed", "count": 1}]
+
+
+def test_serve_percentiles_follow_retained_days(db):
+    from topos.dashboard.measurements import serve_activity
+    from topos.storage.db.migrations.serve_spans_v1 import create_serve_spans
+
+    now = datetime(2026, 10, 18, 12, 30, tzinfo=timezone.utc)
+    rows = [
+        ("2026-10-17T15:00:00+00:00", "request", 10, None),
+        ("2026-10-17T16:00:00+00:00", "request", 30, None),
+        ("2026-10-17T15:00:01+00:00", "db", 40, None),
+        ("2026-10-17T15:00:02+00:00", "llm", 80, None),
+        ("2026-10-17T15:00:03+00:00", "llm", 120, None),
+    ]
+    serve = serve_activity(rows[0][0], rows, "2026-10-16", "2026-10-19", now=now)
+    assert serve["population"] == "query_serve"
+    assert serve["buckets"][0]["coverage"] == "unavailable"
+    assert serve["buckets"][0]["request_n"] is None
+    day = serve["buckets"][1]
+    assert day["coverage"] == "partial"
+    assert day["request_p50_ms"] == 10 and day["request_n"] == 2
+    assert day["db_p50_ms"] == 40 and day["db_n"] == 1
+    assert day["llm_p50_ms"] == 80 and day["llm_n"] == 2
+    assert day["ttfb_p50_ms"] is None
+    empty = serve_activity("2026-10-16T00:00:00+00:00", [], "2026-10-16", "2026-10-19", now=now)
+    assert empty["buckets"][1]["request_n"] == 0 and empty["buckets"][1]["request_p50_ms"] is None
+    assert serve_activity("not-a-time", rows, "2026-10-17", "2026-10-18", now=now)["measured_since"] is None
+    assert serve_activity(rows[0][0], [("not-a-time", "request", 10, None)], "2026-10-17", "2026-10-18", now=now)["measured_since"] is None
+
+    create_serve_spans(db)
+    db.execute(
+        "INSERT INTO serve_spans(span_id, parent_span_id, recorded_at, kind, name, duration_ms, ttfb_ms, outcome) VALUES(?,?,?,?,?,?,?,?)",
+        ("span-1", None, rows[0][0], "request", "query", 10, None, "ok"),
+    )
+    db.commit()
+    live = daily_measurements(db, "2026-10-16", "2026-10-19", now=now)
+    assert live["serve"]["buckets"][0]["coverage"] == "unavailable"
+    assert live["serve"]["buckets"][1]["request_p50_ms"] == 10
+    assert live["serve"]["buckets"][1]["ttfb_p50_ms"] is None
+    assert "clinic" not in str(live["serve"])
+
+
 def test_fact_receipt_erasure_and_coverage_roll_back_together_across_chunks(db):
     from topos.dashboard.measurements import forget_erased_fact_measurements
     keys = [f"fact:synthetic:erased-{i}" for i in range(130)]
