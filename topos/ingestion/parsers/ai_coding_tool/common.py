@@ -330,6 +330,36 @@ def scrub_text(
     return text, counts
 
 
+def project_key_from_cwd(cwd: Any, *, usernames: Optional[Sequence[str]] = None) -> Optional[str]:
+    """The §2.6 project facet for a working directory: its last path segment, on either separator, and only
+    when the §2.4 path scrub leaves that segment as it was.
+
+    None otherwise: the home folder itself (the scrub turns it into the placeholder, or into a fragment of
+    it when the login name has a space), a folder named like a ``.local`` host, a path-slug folder, a drive
+    or the root, anything that is not a string, and a segment equal to a login name (a home under a root the
+    scrub does not know, such as ``/mnt/c/Users/x``). ``usernames`` default to this machine's.
+    """
+    if not isinstance(cwd, str) or not cwd.strip():
+        return None
+    raw = cwd.strip()
+    scrubbed, _ = scrub_text(raw, hostnames=(), usernames=())
+    raw_segments = _path_segments(raw)
+    segments = _path_segments(scrubbed)
+    if not raw_segments or not segments:
+        return None
+    name = segments[-1]
+    if name != raw_segments[-1] or name == HOME_PLACEHOLDER or name.endswith(":"):
+        return None
+    users = machine_usernames() if usernames is None else tuple(usernames)
+    if any(user and name.casefold() == user.casefold() for user in users):
+        return None
+    return name
+
+
+def _path_segments(path: str) -> List[str]:
+    return [part for part in re.split(r"[\\/]+", path) if part]
+
+
 # ---------------------------------------------------------------------------
 # §2.3 harness text
 # ---------------------------------------------------------------------------

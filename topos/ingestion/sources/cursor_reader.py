@@ -58,7 +58,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 from urllib.parse import unquote, urlparse
 
-from topos.ingestion.parsers.ai_coding_tool.common import Ledger, make_record, scrub_text, taints
+from topos.ingestion.parsers.ai_coding_tool.common import Ledger, make_record, project_key_from_cwd, scrub_text, taints
 
 if TYPE_CHECKING:  # L4 owns the store; the reader only needs its two methods.
     from topos.ingestion.checkpoints.file_cursors import FileCursorStore
@@ -448,11 +448,11 @@ class _StateDb:
         if isinstance(spec, dict):
             target = spec.get("folder") or spec.get("workspace")
             if isinstance(target, str) and target:
-                local = unquote(urlparse(target).path) if "://" in target else target
-                name = Path(local.rstrip("/")).name
-                if spec.get("folder") is None and name.endswith(".code-workspace"):
-                    name = name[: -len(".code-workspace")]
-                result = name or None
+                local = (unquote(urlparse(target).path) if "://" in target else target).rstrip("/")
+                if spec.get("folder") is None and local.endswith(".code-workspace"):
+                    local = local[: -len(".code-workspace")]
+                # The rule every reader shares: the basename, None for the home folder itself.
+                result = project_key_from_cwd(local)
         self._workspaces[workspace_id] = result
         return result
 

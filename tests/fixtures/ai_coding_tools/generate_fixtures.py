@@ -361,9 +361,11 @@ def case_two_folders() -> None:
         user(0xD1, None, a, 0, "Widget work"),
         assistant(0xD2, uid(0xD1), a, 1, [text("Sure.")], "msg_md1"),
     ])
+    # A folder's slug is its working directory, so this session's records name the secretproj path.
+    secret_cwd = "/Users/fake/dev/secretproj"
     write_jsonl(session_file("two_folders", b, "-Users-fake-dev-secretproj"), [
-        user(0xD3, None, b, 2, "Secret work"),
-        assistant(0xD4, uid(0xD3), b, 3, [text("Quietly.")], "msg_md2"),
+        user(0xD3, None, b, 2, "Secret work", cwd=secret_cwd),
+        assistant(0xD4, uid(0xD3), b, 3, [text("Quietly.")], "msg_md2", cwd=secret_cwd),
     ])
 
 
