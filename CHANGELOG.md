@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **`topos-node setup --client claude-code|codex|cursor`: the on-ramp in one re-runnable command.** `[O]` Each run reads where the computer stands and does the next steps it can do alone: device pairing when there is no key (before starting the node, which cannot run without one), the person's "is that you?" confirmation of the approving account, starting the node (Topos.app when installed, else the login service; `--no-service` for a background start; `--port` for a second node beside an existing one), connecting the tool (the browser approval it was paired with, else the human-only Terminal prompt on macOS, opened once per ten minutes, else an add-agent code), and enabling the tool's own session history with the chosen backfill. It stops only where a person must act, with exit 2 and the exact sentence to show them; exit 0 when everything is set up. `--plan` changes nothing and reports the remaining steps with the preview counts. No key, label or device code is ever printed.
+
 ### Fixed
 - **A coding-session backlog is processed in bounded, restartable batches.** `[O]` A full Claude Code backfill queued 17 deferred-processing jobs of about 870 records each, and the runner merged all of them into one 14,823-record derive batch. That batch commits nothing until it ends: it ran about 19 hours, a node restart discarded it, and the next start merged it again, so no record was processed in a day and the coding recovery path never started behind it. Coalescing now stops at 128 records, a coding sync queues its post-canonical work as 128-record jobs, and an oversized coding job already in the queue is split into 128-record jobs before any model work, so an upgraded node resumes such a queue without a migration. A job carrying a write receipt is never split, and other sources keep their own batch size. Small deliveries still coalesce as before.
 

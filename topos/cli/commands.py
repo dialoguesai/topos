@@ -371,7 +371,7 @@ def main(
         # These commands import Settings outside the server startup path. Load
         # the existing install's configuration first, without prompting for or
         # exposing a key. Pair must also work on a machine with no key yet.
-        if ctx.invoked_subcommand in {"agents", "pair", "mcp", "status", "doctor"}:
+        if ctx.invoked_subcommand in {"agents", "pair", "mcp", "status", "doctor", "setup"}:
             env_path = _user_env_path()
             warning = _apply_env_file_key_policy(env_path)
             if warning:
@@ -767,6 +767,7 @@ from topos.cli.status_cmd import doctor_command, status_command  # noqa: E402
 from topos.mcp_server import mcp_command  # noqa: E402
 from topos.cli.pair_cmd import pair_command  # noqa: E402
 from topos.cli.service_cmd import service_group  # noqa: E402
+from topos.cli.setup_cmd import setup_command  # noqa: E402
 
 main.add_command(reprocess_command)
 main.add_command(profile_group)
@@ -779,6 +780,7 @@ main.add_command(mcp_command)
 main.add_command(start_command)
 main.add_command(pair_command)
 main.add_command(service_group)
+main.add_command(setup_command)
 
 
 if __name__ == "__main__":
