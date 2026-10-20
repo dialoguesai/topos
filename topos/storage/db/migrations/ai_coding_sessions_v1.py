@@ -42,34 +42,60 @@ TRIGGER_ON_METADATA = f"{MESSAGES_TABLE}_{COLUMN}_on_metadata"
 #: the INSERT (or a later rewrite of the metadata), so no window and no later UPDATE separates a stored tainted
 #: row from its flag. The column only ever goes 0 → 1 here; nothing clears it. JSON1 is part of every SQLite the
 #: node ships with (``json_extract`` is already read by signal_features).
+#:
+#: Two places, because two mappers write the row. The bundled ``ai_coding_tool`` mapper merges the reader's
+#: ``_metadata`` flat (``$.share_excluded``). A runtime install of the source registers
+#: ``RuntimeInstalledStorageMapper`` over it (``sources/runtime_install.py``), which keeps it nested
+#: (``$._metadata.share_excluded``), and that is what a live node stores. Read only the first and the triggers
+#: never fire there.
+_FLAG_PATHS = ("$.share_excluded", "$._metadata.share_excluded")
 _TRIGGER_WHEN = (
-    "NEW.metadata_json IS NOT NULL AND json_valid(NEW.metadata_json) "
-    "AND json_extract(NEW.metadata_json, '$.share_excluded') IN (1, 'true')"
+    "NEW.metadata_json IS NOT NULL AND json_valid(NEW.metadata_json) AND ("
+    + " OR ".join(f"json_extract(NEW.metadata_json, '{path}') IN (1, 'true')" for path in _FLAG_PATHS)
+    + ")"
 )
+_TRIGGER_BODY = f"""
+        WHEN {_TRIGGER_WHEN}
+        BEGIN
+            UPDATE {MESSAGES_TABLE} SET {COLUMN} = 1 WHERE message_id = NEW.message_id AND {COLUMN} = 0;
+        END"""
+_TRIGGERS = {
+    TRIGGER_ON_INSERT: f"CREATE TRIGGER {TRIGGER_ON_INSERT} AFTER INSERT ON {MESSAGES_TABLE}{_TRIGGER_BODY}",
+    TRIGGER_ON_METADATA: (
+        f"CREATE TRIGGER {TRIGGER_ON_METADATA} AFTER UPDATE OF metadata_json ON {MESSAGES_TABLE}{_TRIGGER_BODY}"
+    ),
+}
+
+
+def _same_sql(a: str, b: str) -> bool:
+    return " ".join(a.split()) == " ".join(b.split())
 
 
 def ensure_share_excluded_triggers(conn: sqlite3.Connection) -> bool:
-    """Create the two triggers when the table and the column exist. True when they are in place."""
+    """Create the two triggers when the table and the column exist. True when they are in place.
+
+    A trigger stored with another definition (the one that read ``$.share_excluded`` only) is dropped and created
+    again in one savepoint, so no write lands between the two without a trigger. One that matches is left alone."""
     if not _table_exists(conn, MESSAGES_TABLE) or COLUMN not in _columns(conn, MESSAGES_TABLE):
         return False
-    conn.execute(
-        f"""
-        CREATE TRIGGER IF NOT EXISTS {TRIGGER_ON_INSERT} AFTER INSERT ON {MESSAGES_TABLE}
-        WHEN {_TRIGGER_WHEN}
-        BEGIN
-            UPDATE {MESSAGES_TABLE} SET {COLUMN} = 1 WHERE message_id = NEW.message_id AND {COLUMN} = 0;
-        END
-        """
+    stored = dict(
+        conn.execute(
+            "SELECT name, sql FROM sqlite_master WHERE type='trigger' AND tbl_name=?", (MESSAGES_TABLE,)
+        ).fetchall()
     )
-    conn.execute(
-        f"""
-        CREATE TRIGGER IF NOT EXISTS {TRIGGER_ON_METADATA} AFTER UPDATE OF metadata_json ON {MESSAGES_TABLE}
-        WHEN {_TRIGGER_WHEN}
-        BEGIN
-            UPDATE {MESSAGES_TABLE} SET {COLUMN} = 1 WHERE message_id = NEW.message_id AND {COLUMN} = 0;
-        END
-        """
-    )
+    stale = [name for name, sql in _TRIGGERS.items() if not _same_sql(str(stored.get(name) or ""), sql)]
+    if not stale:
+        return True
+    conn.execute("SAVEPOINT share_excluded_triggers")
+    try:
+        for name in stale:
+            conn.execute(f"DROP TRIGGER IF EXISTS {name}")
+            conn.execute(_TRIGGERS[name])
+    except BaseException:
+        conn.execute("ROLLBACK TO share_excluded_triggers")
+        conn.execute("RELEASE share_excluded_triggers")
+        raise
+    conn.execute("RELEASE share_excluded_triggers")
     return True
 
 

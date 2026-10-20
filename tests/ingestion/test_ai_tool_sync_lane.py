@@ -250,6 +250,51 @@ def test_a_flagged_row_is_excluded_the_moment_it_is_written(node, monkeypatch) -
     assert flags["claude_code:u4"] == 1, flags
 
 
+@pytest.mark.parametrize("mapper", ["runtime_installed", "bundled"])
+def test_the_real_write_path_flags_the_row_without_the_post_write_mark(node, monkeypatch, mapper) -> None:
+    """The test above runs the fakes, whose metadata is flat. The real parser keeps the reader's ``_metadata``
+    and the canonical writer stores whatever the registered ``ai_coding_tool`` mapper makes of it. The bundled
+    mapper merges it flat (``$.share_excluded``). Enabling the source runs a runtime install, which registers
+    ``RuntimeInstalledStorageMapper`` over the bundled one because the legacy registry has no ``ai_coding_tool``. That
+    mapper nests the reader's metadata (``$._metadata.share_excluded``), which is the shape a live node stores.
+    With the post-write mark gone, the triggers and the pipeline's projection filter are all that stand
+    between that row and a share."""
+    import topos.ingestion.ai_tool_sync as lane
+    from topos.canonicalization.mappers import MAPPER_REGISTRY as LEGACY_MAPPERS
+    from topos.ingestion.parsers import PARSER_REGISTRY
+    from topos.ingestion.parsers.ai_coding_tool.claude_code import ClaudeCodeTranscriptParser
+    from topos.storage.canonical.ai_chat import mapper as ai_chat_mapper
+    from topos.storage.canonical.ai_chat.coding_tool_mapper import CodingToolToAIChatMapper
+
+    real_parser_for = lane._parser_for
+    arm(monkeypatch, node, reader=FakeReader(_batch()))
+    # Undo the stand-ins: the bundled parser, the bundled mapper, and (for the live shape) no legacy placeholder,
+    # so ``enable`` lets the runtime install do what it does on a node. monkeypatch restores all three after.
+    monkeypatch.setattr(lane, "_parser_for", real_parser_for)
+    monkeypatch.setitem(PARSER_REGISTRY, SCHEMA, ClaudeCodeTranscriptParser)
+    monkeypatch.setitem(ai_chat_mapper._MAPPER_REGISTRY, "ai_coding_tool", CodingToolToAIChatMapper)
+    if mapper == "runtime_installed":
+        monkeypatch.delitem(LEGACY_MAPPERS, "ai_coding_tool")
+    enable(node, SOURCE)
+    registered = ai_chat_mapper._MAPPER_REGISTRY["ai_coding_tool"].__name__
+    assert registered == ("RuntimeInstalledStorageMapper_claude_code_sessions" if mapper == "runtime_installed"
+                          else "CodingToolToAIChatMapper"), registered
+
+    monkeypatch.setattr(lane, "_mark_share_excluded", lambda *_a, **_k: 0)
+    result = _run()
+    assert result["status"] == "ok", result
+
+    stored = {r["message_id"]: r for r in chat_rows(node)}
+    meta = json.loads(stored["claude_code:u4"]["metadata_json"])
+    flag_paths = {"top": meta.get("share_excluded"), "nested": (meta.get("_metadata") or {}).get("share_excluded")}
+    assert flag_paths == ({"top": None, "nested": True} if mapper == "runtime_installed"
+                          else {"top": True, "nested": None}), flag_paths
+    flags = {mid: row["share_excluded"] for mid, row in stored.items()}
+    assert flags == {"claude_code:u1": 0, "claude_code:u2": 0, "claude_code:u3": 0, "claude_code:u4": 1}, flags
+    assert node.execute("SELECT count(*) FROM timeline WHERE record_id = 'claude_code:u4'").fetchone()[0] == 0
+    assert node.execute("SELECT count(*) FROM timeline WHERE record_id = 'claude_code:u2'").fetchone()[0] == 1
+
+
 def test_nothing_derived_references_a_share_excluded_row(node, monkeypatch) -> None:
     """The jobs run on this database through the real post-canonical pipeline, with the model work faked
     into rows: whatever the orchestrators are handed gets an entity, a topic, an embedding and a fact."""
