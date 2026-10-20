@@ -789,20 +789,20 @@ def _read_transcript(
                         segments.append((True, []))
                 elif kind == "thinking":
                     ledger.drop("thinking")
-            first_piece = True
-            for index, (excluded, texts) in enumerate(segments):
+            opened = 0  # rows this line has opened: only a second one needs a suffix to keep ids unique
+            for excluded, texts in segments:
                 text = "\n".join(texts).strip()
                 if not text:
                     continue
                 if reply is not None and reply.share_excluded != excluded:
                     flush()  # the taint instant falls between this text and the reply so far
                 if reply is None:
-                    key = f"{TOOL}:{composer_id}:{begin}" + (f":{index}" if index else "")
+                    key = f"{TOOL}:{composer_id}:{begin}" + (f":{opened}" if opened else "")
+                    opened += 1
                     reply = _Reply(record_uuid=str(uuid.uuid5(_RECORD_NAMESPACE, key)),
                                    created_at=created_at, timestamp_source="file_mtime", share_excluded=excluded)
-                elif first_piece:
+                else:
                     ledger.merged_blocks += 1
-                first_piece = False
                 reply.texts.append(text)
             continue
         else:

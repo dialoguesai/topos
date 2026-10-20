@@ -353,8 +353,23 @@ def test_turn_edge_events_taint_and_compaction_each_end_a_reply(reader, tmp_path
         ("codex:msg_j_a2", "Now the handlers.", False),
         ("codex:msg_j_a3", "The node is up; the handlers are next.", True),
         ("codex:msg_j_a4", "The handlers are quieter now.", True),
-        ("codex:msg_j_a5", "Logging is tidy.", True),
+        ("codex:msg_j_a5", "Logging is tidy.\n\nThe formatter keeps the old format.", True),
     ]
+
+
+def test_a_batch_of_one_keeps_a_reply_whole_after_a_phase_change(reader, tmp_path):
+    # The commentary row fills the batch and the final answer opens in the same step: it is still one row.
+    root = _edges_root(tmp_path, age_seconds=2 * 3600)
+    path = next((root / DAY).glob(f"*{THREAD_J}.jsonl"))
+    store = FakeCursorStore()
+    rows = []
+    for _ in range(20):
+        batch = _read(reader, root, store, batch_size=1, session_path=str(path))
+        if not batch.rows:
+            break
+        rows.extend(batch.rows)
+    assert [r["id"] for r in rows] == [f"codex:msg_j_{n}" for n in ("u1", "a1", "a2", "a3", "a4", "a5")]
+    assert rows[-1]["content"] == "Logging is tidy.\n\nThe formatter keeps the old format."
 
 
 def test_only_the_running_turn_is_held_when_the_turn_id_changes_without_an_event(reader, tmp_path):

@@ -467,7 +467,55 @@ def test_turn_ended_a_user_line_and_the_taint_instant_each_end_a_transcript_repl
     batch = _edge(reader, env, tmp_path, "c0c0c0c0-0008-4a0a-8a0a-a0a0a0a0a008", age_seconds=2 * 3600)
     assert [(r["content"], r["_metadata"]["share_excluded"]) for r in batch.rows] == [
         ("First ask", False), ("E1.", False), ("E2 after the turn ended.", False),
-        ("Second ask", False), ("E3.", False), ("E4 after the call.", True),
+        ("Second ask", False), ("E3.", False), ("E4 after the call.\n\nE5 still after it.", True),
+    ]
+
+
+def test_a_batch_of_one_keeps_the_reply_after_a_taint_split_whole(reader, env, tmp_path):
+    # The shareable part fills the batch and the excluded part opens in the same step: still one row.
+    import time
+
+    root = tmp_path / "cursor_edges"
+    shutil.copytree(EDGES, root)
+    path = next(root.glob("projects/*/agent-transcripts/c0c0c0c0-0008-4a0a-8a0a-a0a0a0a0a008/*.jsonl"))
+    stamp = time.time() - 2 * 3600
+    os.utime(path, (stamp, stamp))
+    store = FakeCursorStore()
+    rows = []
+    for _ in range(20):
+        batch = reader.read_cursor_batch(root_path=root, state_db_path=env.db, cursors=store,
+                                         session_path=str(path), batch_size=1)
+        if not batch.rows:
+            break
+        rows.extend(batch.rows)
+    assert rows[-1]["content"] == "E4 after the call.\n\nE5 still after it."
+
+
+def test_a_batch_of_one_keeps_a_composer_reply_after_a_taint_split_whole(reader, tmp_path):
+    seed = {"workspaces": {}, "composers": [{
+        "composerId": "c0c0c0c0-000b-4a0a-8a0a-a0a0a0a0a00b", "header": None,
+        "composerData": {"createdAt": "2026-10-15T13:00:00.000Z", "status": "completed", "unifiedMode": "agent"},
+        "bubbles": [
+            {"bubbleId": "bubble-t01", "type": 1, "text": "What is on my plate?", "createdAt": "2026-10-15T13:00:00.000Z"},
+            {"bubbleId": "bubble-t02", "type": 2, "text": "Checking.", "createdAt": "2026-10-15T13:00:01.000Z"},
+            {"bubbleId": "bubble-t03", "type": 2, "text": "", "createdAt": "2026-10-15T13:00:02.000Z",
+             "toolFormerData": {"tool": 7, "name": "mcp__topos__query_scope", "status": "completed", "rawArgs": "{}"}},
+            {"bubbleId": "bubble-t04", "type": 2, "text": "Two reviews are due.", "createdAt": "2026-10-15T13:00:03.000Z"},
+            {"bubbleId": "bubble-t05", "type": 2, "text": "Both are small.", "createdAt": "2026-10-15T13:00:04.000Z"},
+        ],
+    }]}
+    db = build_state_db(tmp_path / "SeedUser", seed)
+    home = tmp_path / "empty_home"
+    home.mkdir()
+    store = FakeCursorStore()
+    rows = []
+    for _ in range(20):
+        batch = reader.read_cursor_batch(root_path=home, state_db_path=db, cursors=store, batch_size=1)
+        if not batch.rows and not batch.files_touched:
+            break
+        rows.extend(batch.rows)
+    assert [(r["content"], r["_metadata"]["share_excluded"]) for r in rows] == [
+        ("What is on my plate?", False), ("Checking.", False), ("Two reviews are due.\n\nBoth are small.", True),
     ]
 
 
