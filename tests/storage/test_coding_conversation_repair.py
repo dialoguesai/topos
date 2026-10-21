@@ -266,12 +266,17 @@ def test_a_node_without_the_ai_chat_tables_is_skipped(tmp_path) -> None:
 
 
 def test_the_upgrade_step_runs_the_repair() -> None:
-    """The unreleased manifest declares the step, and the runner's engine-endpoint dispatch reaches the repair."""
+    """The manifest declares the step (under "unreleased" until a cut stamps it into a release), and the runner's
+    engine-endpoint dispatch reaches the repair."""
     import topos.upgrades as upgrades
 
     manifest = json.loads((Path(upgrades.__file__).parent / "manifests.json").read_text())
-    unreleased = next(r for r in manifest["releases"] if r["version"] == "unreleased")
-    step = next(s for s in unreleased["steps"] if s["id"] == "repair-coding-session-conversation-ids")
+    declaring = [
+        s for r in manifest["releases"] for s in r.get("steps", [])
+        if s.get("id") == "repair-coding-session-conversation-ids"
+    ]
+    assert declaring, "no release entry declares repair-coding-session-conversation-ids"
+    step = declaring[-1]  # the newest entry that declares it (releases are listed oldest first)
     assert step["kind"] == "engine_endpoint"
     assert step["params"]["path"] == "/v1/canonical/ai-chat/repair-coding-conversation-ids"
     assert step["consent"] == "auto"
