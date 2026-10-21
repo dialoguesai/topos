@@ -1,12 +1,25 @@
 """Content-free query serve spans: closed labels, and a duration that is never a first token."""
 from __future__ import annotations
 
+import asyncio
+import logging
 import sqlite3
+import threading
+import time
 from uuid import uuid4
 
 import pytest
 
-from topos.serve.spans import SpanRefused, finish_request, flush_stages, publish_stages, start_request, validate_span
+from topos.serve.spans import (
+    SpanRefused,
+    finish_request,
+    flush_stages,
+    publish_stages,
+    start_request,
+    drain_for_shutdown,
+    validate_span,
+    wait_for_writes,
+)
 from topos.storage.db.migrations.registry import MIGRATIONS, max_migration_order
 from topos.storage.db.migrations.serve_spans_v1 import create_serve_spans
 
@@ -76,7 +89,8 @@ def test_a_failed_query_stores_the_error():
 
 @pytest.mark.asyncio
 async def test_handle_query_keeps_an_error_row(monkeypatch):
-    conn = sqlite3.connect(":memory:")
+    # Written by the span worker thread, not the loop: the handle must admit that thread.
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
 
     def explode(*_args, **_kwargs):
@@ -87,6 +101,135 @@ async def test_handle_query_keeps_an_error_row(monkeypatch):
 
     response = await handle_query({"id": "q-1", "type": "query", "payload": {"query": PROBE, "scope_id": "notes"}})
     assert response["status"] == "error"
+    assert wait_for_writes(5.0)
     rows = _rows(conn)
     assert len(rows) == 1 and rows[0][6] == "error"
     assert PROBE not in str(rows)
+
+
+def _hold_gate():
+    """Take the write gate on another thread until ``release`` is set. Returns (release, thread)."""
+    from topos.storage.db.write_gate import db_write_lock
+
+    held, release = threading.Event(), threading.Event()
+
+    def hold():
+        with db_write_lock():
+            held.set()
+            release.wait(10.0)
+
+    thread = threading.Thread(target=hold, daemon=True)
+    thread.start()
+    assert held.wait(5.0)
+    return release, thread
+
+
+@pytest.mark.asyncio
+async def test_a_held_write_gate_does_not_delay_finish_request_on_the_loop(caplog):
+    """21 Oct 2026: the review pass held the gate 60 to 109 s and every query waited here, on the loop.
+    Now the loop hands the rows over and returns; the worker waits, the loop does not."""
+    from topos.storage.db.write_gate import reset_loop_warning_state
+
+    reset_loop_warning_state()
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    release, thread = _hold_gate()
+    try:
+        ticks = 0
+
+        async def tick():
+            nonlocal ticks
+            while True:
+                ticks += 1
+                await asyncio.sleep(0.01)
+
+        ticker = asyncio.ensure_future(tick())
+        started, token = start_request()
+        publish_stages(3.0, 4.0, "ok")
+        with caplog.at_level(logging.WARNING, logger="topos.storage.db.write_gate"):
+            before = time.perf_counter()
+            flush_stages(conn)
+            finish_request(started, "ok", token, conn)
+            elapsed = time.perf_counter() - before
+            await asyncio.sleep(0.25)
+        ticker.cancel()
+        assert elapsed < 0.2, f"finish_request waited {elapsed:.2f}s on the loop with the gate held"
+        assert ticks >= 10, "the loop stalled while the gate was held"
+        assert not wait_for_writes(0.05), "rows were written while the gate was still held"
+        assert not [r for r in caplog.records if "event-loop thread" in r.getMessage()]
+    finally:
+        release.set()
+        thread.join(5.0)
+    assert wait_for_writes(5.0)
+    rows = _rows(conn)
+    assert [row[2] for row in rows] == ["db", "llm", "request"]
+    request = next(row for row in rows if row[2] == "request")
+    assert all(row[1] == request[0] for row in rows if row[2] != "request")
+
+
+@pytest.fixture
+def shared_handler_conn(monkeypatch):
+    """One handle for the handler, closed at teardown, exactly as the query tests do it."""
+    from topos.serve import spans
+
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
+    yield conn
+    # tests/conftest.py drains the writer before this runs. On CI run 39655467662 it did not
+    # exist, close() ran under the writer's INSERT and the process segfaulted.
+    assert spans.wait_for_writes(0.0), "a span was still queued when the fixture closed its handle"
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_the_writer_is_idle_before_a_fixture_closes_its_handle(shared_handler_conn, monkeypatch):
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr("topos.query.manifest_validation.resolve_scope_manifest", explode)
+    from topos.core.handlers.query import handle_query
+
+    # The gate is held for the whole handler call, so the row is still queued when the test
+    # body ends; it is released at the last moment and the writer is left mid-flight on purpose.
+    release, thread = _hold_gate()
+    try:
+        response = await handle_query({"id": "q-2", "type": "query", "payload": {"query": PROBE, "scope_id": "notes"}})
+        assert response["status"] == "error"
+        assert not wait_for_writes(0.0)
+    finally:
+        release.set()
+        thread.join(5.0)
+    # Deliberately no wait here: the teardown hook is what is under test.
+
+
+def test_shutdown_drain_is_bounded_and_lets_late_rows_land(caplog):
+    """A stop must not wait on a gate held for minutes; the rows still land once it is free."""
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    release, thread = _hold_gate()
+    try:
+        from topos.serve import spans
+
+        spans._enqueue(conn, dict(kind="request", name="query", duration_ms=5, outcome="ok",
+                                  parent_span_id=None, span_id=str(uuid4())))
+        with caplog.at_level(logging.INFO, logger="topos.serve.spans"):
+            before = time.perf_counter()
+            landed = drain_for_shutdown(0.1)
+            elapsed = time.perf_counter() - before
+        assert landed is False and elapsed < 1.0
+        assert any("still queued" in r.getMessage() for r in caplog.records)
+    finally:
+        release.set()
+        thread.join(5.0)
+    assert drain_for_shutdown(5.0) is True
+    assert [row[2] for row in _rows(conn)] == ["request"]
+
+
+def test_app_shutdown_drains_the_writer_off_the_loop():
+    """The call site is in shutdown_event, after the control-plane client stops and off the loop."""
+    import inspect
+
+    import topos.app as app_module
+
+    source = inspect.getsource(app_module.shutdown_event)
+    assert "await node_stop.stop_now(run)" in source
+    assert "asyncio.to_thread(drain_for_shutdown, 2.0)" in source
+    assert source.index("stop_now(run)") < source.index("drain_for_shutdown, 2.0")

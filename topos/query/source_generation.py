@@ -74,36 +74,55 @@ def get_data_health_version(
     """Compact version string for fingerprint; changes when ingest bumps generation."""
     if not conn or not source_ids:
         return "mvp"
-    ensure_source_generation_schema(conn)
     ids = sorted({str(s).strip() for s in source_ids if str(s).strip()})
     if not ids:
         return "mvp"
+    # A query is a read. The table is migration 9's; a database without it has no generations,
+    # which is the same answer an empty table gives. Creating it here ran DDL on the app event
+    # loop on every query (the writer, ``bump_source_generation``, still creates it).
     placeholders = ",".join("?" for _ in ids)
     params: tuple = (scope_id, *ids)
-    rows = conn.execute(
-        f"""
-        SELECT source_id, generation FROM {GENERATION_TABLE}
-        WHERE scope_id=? AND source_id IN ({placeholders})
-        """,
-        params,
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT source_id, generation FROM {GENERATION_TABLE}
+            WHERE scope_id=? AND source_id IN ({placeholders})
+            """,
+            params,
+        ).fetchall()
+        wildcard = conn.execute(
+            f"SELECT source_id, generation FROM {GENERATION_TABLE} WHERE scope_id='*'"
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if not _missing_table(exc):
+            raise
+        rows, wildcard = [], []
     gen_by_source = {str(r[0]): int(r[1]) for r in rows}
-    wildcard = conn.execute(
-        f"SELECT source_id, generation FROM {GENERATION_TABLE} WHERE scope_id='*'"
-    ).fetchall()
     for source_id, generation in wildcard:
         gen_by_source.setdefault(str(source_id), int(generation))
     parts = [f"{sid}:{gen_by_source.get(sid, 0)}" for sid in ids]
     return "|".join(parts)
 
 
+def _missing_table(exc: sqlite3.OperationalError) -> bool:
+    return "no such table" in str(exc).lower()
+
+
 def list_installed_source_ids(conn: Optional[sqlite3.Connection]) -> List[str]:
+    """Source ids with an active install, from the install table as it is. Takes no write gate.
+
+    This used to call ``ensure_install_schema()`` first: CREATE TABLE, CREATE INDEX and the
+    scope-key migration under the write gate, on the app event loop, once per query, since June.
+    Measured on 21 Oct 2026: with the gate held 60 to 109 s by the review pass, every query froze
+    the loop here (the gate's warning named ``install_service.py`` twice). A query is a read; a
+    database with no install table has no installs. The install, uninstall, patch and rehydrate
+    writers still create the schema.
+    """
     if conn is None:
         return []
     try:
-        from ..sources.install_service import INSTALL_TABLE, ensure_install_schema
+        from ..sources.install_service import INSTALL_TABLE
 
-        ensure_install_schema()
         rows = conn.execute(
             f"""
             SELECT DISTINCT source_id FROM {INSTALL_TABLE}
@@ -111,6 +130,10 @@ def list_installed_source_ids(conn: Optional[sqlite3.Connection]) -> List[str]:
             """
         ).fetchall()
         return [str(row[0]).strip() for row in rows if row and row[0]]
+    except sqlite3.OperationalError as exc:
+        if not _missing_table(exc):
+            logger.debug("list_installed_source_ids skipped: %s", exc)
+        return []
     except Exception as exc:
         logger.debug("list_installed_source_ids skipped: %s", exc)
         return []
