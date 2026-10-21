@@ -105,8 +105,15 @@ class FakeNode:
             return {"id": "req-1", "status": "ok", "payload": node._plant(dict(payload))}
 
         @app.get("/v1/shell/status")
-        async def shell_status():
-            node.calls.append({"route": "shell_status"})
+        async def shell_status(request: Request):
+            # The real node resolves the label on EVERY socket request (auth.py
+            # `_owner_agent_on_socket`), so a revoked agent is refused here too,
+            # not only at the dispatch door.
+            label = request.headers.get("x-topos-agent")
+            node.calls.append({"route": "shell_status", "label": label})
+            if label is not None and (node.revoked or (node.expected_label and label != node.expected_label)):
+                body = {"detail": AGENT_DISCONNECTED_BODY} if node.wrap_401_in_detail else AGENT_DISCONNECTED_BODY
+                return JSONResponse(body, status_code=401)
             return node._plant(
                 {
                     "name": "topos-node",
