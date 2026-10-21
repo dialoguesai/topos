@@ -5021,6 +5021,14 @@ def _filter_calendar_rows(
     return filtered
 
 
+def _vector_fetch_limit() -> int:
+    """Hits fetched for the vector lane: its own 20, or the wider pool that
+    TOPOS_EVIDENCE_SHAPING groups and cuts back to 20 (`evidence_shaping`)."""
+    from ..features.signal.vector_settings import evidence_pool_limit, evidence_shaping_enabled
+
+    return evidence_pool_limit() if evidence_shaping_enabled() else _SEMANTIC_HIT_LIMIT
+
+
 def _semantic_hits(
     query_text: str,
     *,
@@ -5893,6 +5901,18 @@ _NO_DECAY_FUSION_SOURCES = frozenset(
     {"stat_insights", "facts_store", "entities", "briefs", "goals", "derived_objects", "graph"}
 )
 
+# Contributors whose items are derived from records rather than being records: stats,
+# facts, entity dossiers and mentions, derived objects, graph edges, extracted goals and
+# emotions, briefs, clusters, dimension facts. With TOPOS_EVIDENCE_SHAPING on, their
+# share of the fused list is bounded while record lanes still have evidence (rule 4 in
+# `evidence_shaping`). The split is by kind of evidence, never by connector.
+_DERIVED_FUSION_SOURCES = frozenset(
+    {
+        "stat_insights", "facts_store", "entities", "derived_objects", "graph",
+        "goals", "emotions", "briefs", "clusters", "signal_facts",
+    }
+)
+
 
 def _recency_decay_factor(
     item: Dict[str, Any],
@@ -5923,6 +5943,7 @@ def _rrf_fuse_summary_lists(
     ledger: Optional[Any] = None,
     activity_time_range: Optional[Tuple[str, str]] = None,
     vector_head: int = 0,
+    derived_share: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Fuse ordered contributor lists with weighted reciprocal rank fusion.
 
@@ -5956,6 +5977,13 @@ def _rrf_fuse_summary_lists(
     not mention"; conflated they are both "no data", which is how a report came to
     tell the owner their journal "may not be synced" while it sat indexed. `ledger`
     (optional, never load-bearing) is where that distinction is written down.
+
+    `derived_share` (None or 1.0 = off) holds items that only derived lanes contributed
+    to that share of every prefix of the ranked selection while record evidence remains
+    (`evidence_shaping.bounded_derived_selection`). Without it, weights of 1.5–2.0 on
+    derived lanes that never decay put their first ~30 items above a record lane's best
+    item, and on the owner's snapshot vector items filled 0.2% of the fused top 20.
+    The dated-activity branch keeps its own day-coverage selection.
     """
     from ..features.signal.vector_settings import (
         fusion_recency_enabled,
@@ -6103,6 +6131,22 @@ def _rrf_fuse_summary_lists(
         return []
     max_score = max(scores.values()) or 1.0
     ranked = sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
+
+    bound_derived = derived_share is not None and derived_share < 1.0 and not activity_time_range
+
+    def _bounded_selection(keys: List[str], limit: int) -> List[str]:
+        from .evidence_shaping import bounded_derived_selection
+
+        return bounded_derived_selection(
+            keys,
+            is_derived=lambda key: all(c in _DERIVED_FUSION_SOURCES for c in contributors.get(key) or ()),
+            is_record=lambda key: any(
+                c not in _DERIVED_FUSION_SOURCES and c not in context_sources
+                for c in contributors.get(key) or ()
+            ),
+            share=float(derived_share or 0.0),
+            cap=limit,
+        )
     if activity_time_range:
         ranked.sort(key=lambda pair: _parse_instant(best_item[pair[0]].get("event_at") or best_item[pair[0]].get("occurred_at") or best_item[pair[0]].get("ts")), reverse=True)
         min_per_source = None
@@ -6157,7 +6201,10 @@ def _rrf_fuse_summary_lists(
             goal_keys.sort(key=lambda key: best_item[key].get("retrieval_source") != "user_goal")
             allowed_goals = set(goal_keys[:max(0, goal_cap)])
             selection_ranked = [(key, score) for key, score in ranked if not is_goal(key) or key in allowed_goals]
-        selected = [key for key, _ in selection_ranked[:cap]]
+        if bound_derived:
+            selected = _bounded_selection([key for key, _ in selection_ranked], cap)
+        else:
+            selected = [key for key, _ in selection_ranked[:cap]]
     if ledger is not None and len(ranked) > cap:
         ledger.record(
             _N.STAGE_RETRIEVAL,
@@ -6195,6 +6242,10 @@ def _rrf_fuse_summary_lists(
                 selected_set.discard(drop)
                 selected_set.add(promote)
         selected = [key for key, _ in ranked if key in selected_set][:cap]
+        if bound_derived:
+            # Same set; re-sorting by score alone would put every promoted record back
+            # behind the derived items it was promoted past.
+            selected = _bounded_selection(selected, cap)
 
     # Preserve the head of a primary source's own ranking. Cross-lane overlap
     # can boost lower-ranked rows above that head, so merely counting how many
@@ -6713,6 +6764,8 @@ def _build_summary_items_unfiltered(
     commitment_sink: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     from ..features.signal.vector_settings import (
+        derived_share_max,
+        evidence_shaping_enabled,
         fusion_rrf_enabled,
         fusion_vector_head,
         vector_evidence_min,
@@ -7521,6 +7574,7 @@ def _build_summary_items_unfiltered(
             activity_time_range=activity_window,
             ledger=ledger,
             vector_head=fusion_vector_head(),
+            derived_share=derived_share_max() if evidence_shaping_enabled() else None,
         )
         return _annotate_index_message_roles(fused, bundle_conn, manifest, disclosure_tier=disclosure_tier)
 
@@ -8056,17 +8110,22 @@ class DefaultSignalRetrievalAdapter:
         semantic_hits: List[Dict[str, Any]] = []
         vector_error: Optional[str] = None
         if query_text and global_layers_apply and request.access_mode in ("summary", "inference"):
+            vector_limit = _vector_fetch_limit()
             semantic_hits, vector_error = _semantic_hits(
-                semantic_query, source_id=source_filter, time_range=time_range
+                semantic_query, source_id=source_filter, time_range=time_range, limit=vector_limit
             )
             if not semantic_hits and time_range:
                 # Time scope can starve results (sparse corpora); retry unscoped.
-                semantic_hits, vector_error = _semantic_hits(semantic_query, source_id=source_filter)
+                semantic_hits, vector_error = _semantic_hits(
+                    semantic_query, source_id=source_filter, limit=vector_limit
+                )
             if not semantic_hits and source_ids:
                 for sid in source_ids:
                     if sid == source_filter:
                         continue
-                    semantic_hits, vector_error = _semantic_hits(semantic_query, source_id=sid)
+                    semantic_hits, vector_error = _semantic_hits(
+                        semantic_query, source_id=sid, limit=vector_limit
+                    )
                     if semantic_hits:
                         break
             if semantic_hits:
@@ -8112,6 +8171,16 @@ class DefaultSignalRetrievalAdapter:
                 manifest=manifest,
                 disclosure_tier=request.disclosure_tier,
                 canonical=self._adapters.canonical,
+            )
+            # TOPOS_EVIDENCE_SHAPING: the wider pool fetched above is cut back to the
+            # lane's size here, after the grant filter, so the packet and the fused list
+            # see the same hits. Off, this returns the list untouched.
+            from . import evidence_shaping
+
+            semantic_hits = evidence_shaping.shape_vector_hits(
+                semantic_hits,
+                conn=getattr(self._adapters.signal, "_conn", None),
+                limit=_SEMANTIC_HIT_LIMIT,
             )
             # NOT `semantic_query`. That is the residual — the query minus the
             # spans the entity and time planes already claimed — and the derived
