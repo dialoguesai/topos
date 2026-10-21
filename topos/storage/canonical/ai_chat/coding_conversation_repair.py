@@ -80,6 +80,10 @@ class _Plan:
             if table == "ai_chat_messages":
                 message_ids = keys
         self.left_alone = 0
+        #: The sources that stored each id: a graph row written with no source follows the one source there is.
+        self.sources_by_id: Dict[str, Set[str]] = defaultdict(set)
+        for source_id, conversation_id in stored:
+            self.sources_by_id[conversation_id].add(source_id)
         renames: Dict[Key, str] = {}
         for source_id, conversation_id in stored:
             canonical = canonical_coding_conversation_id(source_id, conversation_id)
@@ -128,7 +132,9 @@ class _Plan:
         if not isinstance(conversation_id, str) or not source_id or (source_id, conversation_id) in self.held:
             return None
         canonical = canonical_coding_conversation_id(source_id, conversation_id)
-        return canonical if canonical and canonical != conversation_id else None
+        if canonical is None or canonical == conversation_id or (source_id, canonical) in self.conflicts:
+            return None
+        return canonical
 
     def report(self, status: str) -> Dict[str, Any]:
         return {
@@ -137,6 +143,8 @@ class _Plan:
             # Conversations after the repair that were stored under another id; ``merged`` came from two rows or more.
             "conversations_renamed": sum(1 for key in self.groups if self.rows[key]),
             "conversations_merged": sum(1 for key in self.groups if len(self.rows[key]) > 1),
+            # Renamed messages with no conversation row: the stored id was one row's key, and another source held it.
+            "conversations_missing": sum(1 for key in self.groups if not self.rows[key]),
             "owner_conflicts": len(self.conflicts),
             "left_alone": self.left_alone,
             "by_source": {s: sum(1 for (src, _new) in self.groups if src == s) for s in CODING_SOURCE_IDS},
@@ -229,14 +237,32 @@ def _derived_keys(conn: sqlite3.Connection) -> Set[Key]:
     if {"metadata_json", "source_id"} <= set(_table_columns(conn, "topic_cluster_members")):
         add("SELECT DISTINCT source_id, json_extract(metadata_json, '$.conversation_id') FROM topic_cluster_members"
             f" WHERE source_id IN ({_SOURCES_SQL}) AND json_valid(metadata_json)")
-    if {"node_id", "source_id"} <= set(_table_columns(conn, "graph_nodes")):
-        add(f"SELECT DISTINCT source_id, node_id FROM graph_nodes WHERE source_id IN ({_SOURCES_SQL})"
-            f" AND node_id LIKE '{_NODE_PREFIX}%'", _NODE_PREFIX)
-    if {"src_node_id", "dst_node_id", "source_id"} <= set(_table_columns(conn, "graph_edges")):
-        for end in ("src_node_id", "dst_node_id"):
-            add(f"SELECT DISTINCT source_id, {end} FROM graph_edges WHERE source_id IN ({_SOURCES_SQL})"
-                f" AND {end} LIKE '{_NODE_PREFIX}%'", _NODE_PREFIX)
     return keys
+
+
+def _graph_renames(conn: sqlite3.Connection, plan: _Plan) -> Dict[str, str]:
+    """``conversation:`` node id → its new id. A node id names one conversation, so nodes and the edges to them move
+    by id alone: under the coding source the graph rows name, or, for rows written with no coding source (the
+    relationship writer keeps whatever its records carried), under the one source that stored the id. An id two
+    sources could claim stays as it is."""
+    sources: Dict[str, Set[Optional[str]]] = defaultdict(set)
+    queries = []
+    if {"node_id", "source_id"} <= set(_table_columns(conn, "graph_nodes")):
+        queries.append(f"SELECT DISTINCT source_id, node_id FROM graph_nodes WHERE node_id LIKE '{_NODE_PREFIX}%'")
+    if {"src_node_id", "dst_node_id", "source_id"} <= set(_table_columns(conn, "graph_edges")):
+        queries += [f"SELECT DISTINCT source_id, {end} FROM graph_edges WHERE {end} LIKE '{_NODE_PREFIX}%'"
+                    for end in ("src_node_id", "dst_node_id")]
+    for sql in queries:
+        for source_id, node_id in conn.execute(sql).fetchall():
+            sources[str(node_id)].add(source_id)
+    renames: Dict[str, str] = {}
+    for node_id, named in sources.items():
+        old = node_id[len(_NODE_PREFIX):]
+        coding = {s for s in named if s in TOOL_BY_SOURCE_ID}
+        candidates = {plan.rename(s, old) for s in (coding or plan.sources_by_id.get(old, set()))}
+        if len(candidates) == 1 and None not in candidates:
+            renames[node_id] = _NODE_PREFIX + candidates.pop()
+    return renames
 
 
 def _repair_derived(conn: sqlite3.Connection, plan: _Plan) -> Dict[str, int]:
@@ -244,18 +270,17 @@ def _repair_derived(conn: sqlite3.Connection, plan: _Plan) -> Dict[str, int]:
     counts = {"signal_embeddings": 0, "topic_cluster_members": 0, "graph_nodes": 0, "graph_edges": 0,
               "pipeline_jobs": 0}
     renames = {key: new for key in _derived_keys(conn) if (new := plan.rename(*key)) is not None}
+    node_renames = _graph_renames(conn, plan)
     conn.execute("CREATE TEMP TABLE IF NOT EXISTS _coding_conversation_renames"
                  " (source_id TEXT NOT NULL, old TEXT NOT NULL, new TEXT NOT NULL, PRIMARY KEY (source_id, old))")
     conn.execute(f"DELETE FROM {_RENAMES}")
     conn.executemany(f"INSERT INTO {_RENAMES} VALUES (?, ?, ?)", sorted((s, o, n) for (s, o), n in renames.items()))
 
-    def lookup(table: str, expr: str, prefix: str = "") -> str:
-        return (f"(SELECT '{prefix}' || r.new FROM {_RENAMES} r WHERE r.source_id = {table}.source_id"
-                f" AND '{prefix}' || r.old = {expr})")
+    def lookup(table: str, expr: str) -> str:
+        return f"(SELECT r.new FROM {_RENAMES} r WHERE r.source_id = {table}.source_id AND r.old = {expr})"
 
-    def named(table: str, expr: str, prefix: str = "") -> str:
-        return (f"EXISTS (SELECT 1 FROM {_RENAMES} r WHERE r.source_id = {table}.source_id"
-                f" AND '{prefix}' || r.old = {expr})")
+    def named(table: str, expr: str) -> str:
+        return f"EXISTS (SELECT 1 FROM {_RENAMES} r WHERE r.source_id = {table}.source_id AND r.old = {expr})"
 
     if renames:
         embeddings = set(_table_columns(conn, "signal_embeddings"))
@@ -285,38 +310,37 @@ def _repair_derived(conn: sqlite3.Connection, plan: _Plan) -> Dict[str, int]:
                 CODING_SOURCE_IDS,
             ).rowcount
 
-        if {"node_id", "source_id"} <= set(_table_columns(conn, "graph_nodes")):
-            present = conn.execute(
-                f"SELECT n.node_id, '{_NODE_PREFIX}' || r.new FROM graph_nodes n JOIN {_RENAMES} r"
-                f" ON r.source_id = n.source_id AND '{_NODE_PREFIX}' || r.old = n.node_id ORDER BY n.node_id"
-            ).fetchall()
-            for old_node, new_node in present:
-                # The writer's label rule (job_writer, relationship_edges): the id after its first colon, 48 characters.
-                label = new_node.split(":", 1)[-1][:48]
-                if conn.execute("SELECT 1 FROM graph_nodes WHERE node_id = ?", (new_node,)).fetchone():
-                    moved = conn.execute("DELETE FROM graph_nodes WHERE node_id = ?", (old_node,)).rowcount
-                else:
-                    moved = conn.execute(
-                        """UPDATE graph_nodes SET node_id = ?, label = ?,
-                               metadata_json = CASE WHEN json_valid(metadata_json)
-                                   THEN json_set(metadata_json, '$.node_id', ?, '$.label', ?) ELSE metadata_json END
-                           WHERE node_id = ?""",
-                        (new_node, label, new_node, label, old_node),
-                    ).rowcount
-                counts["graph_nodes"] += moved
-
-        if {"src_node_id", "dst_node_id", "source_id"} <= set(_table_columns(conn, "graph_edges")):
-            for end in ("src_node_id", "dst_node_id"):
-                new_end = lookup("graph_edges", f"graph_edges.{end}", _NODE_PREFIX)
-                counts["graph_edges"] += conn.execute(
-                    f"""UPDATE graph_edges SET {end} = {new_end},
-                            metadata_json = CASE WHEN json_valid(metadata_json)
-                                THEN json_set(metadata_json, '$.{end}', {new_end}) ELSE metadata_json END
-                        WHERE source_id IN ({_SOURCES_SQL})
-                          AND {named('graph_edges', f'graph_edges.{end}', _NODE_PREFIX)}""",
-                    CODING_SOURCE_IDS,
-                ).rowcount
     conn.execute(f"DROP TABLE IF EXISTS {_RENAMES}")
+
+    if node_renames:
+        conn.execute("CREATE TEMP TABLE IF NOT EXISTS _coding_node_renames (old TEXT PRIMARY KEY, new TEXT NOT NULL)")
+        conn.execute("DELETE FROM temp._coding_node_renames")
+        conn.executemany("INSERT INTO temp._coding_node_renames VALUES (?, ?)", sorted(node_renames.items()))
+        for old_node, new_node in sorted(node_renames.items()):
+            if not conn.execute("SELECT 1 FROM graph_nodes WHERE node_id = ?", (old_node,)).fetchone():
+                continue   # an edge-only straggler: the edges move below
+            # The writer's label rule (job_writer, relationship_edges): the id after its first colon, 48 characters.
+            label = new_node.split(":", 1)[-1][:48]
+            if conn.execute("SELECT 1 FROM graph_nodes WHERE node_id = ?", (new_node,)).fetchone():
+                moved = conn.execute("DELETE FROM graph_nodes WHERE node_id = ?", (old_node,)).rowcount
+            else:
+                moved = conn.execute(
+                    """UPDATE graph_nodes SET node_id = ?, label = ?,
+                           metadata_json = CASE WHEN json_valid(metadata_json)
+                               THEN json_set(metadata_json, '$.node_id', ?, '$.label', ?) ELSE metadata_json END
+                       WHERE node_id = ?""",
+                    (new_node, label, new_node, label, old_node),
+                ).rowcount
+            counts["graph_nodes"] += moved
+        for end in ("src_node_id", "dst_node_id"):
+            new_end = f"(SELECT r.new FROM temp._coding_node_renames r WHERE r.old = graph_edges.{end})"
+            counts["graph_edges"] += conn.execute(
+                f"""UPDATE graph_edges SET {end} = {new_end},
+                        metadata_json = CASE WHEN json_valid(metadata_json)
+                            THEN json_set(metadata_json, '$.{end}', {new_end}) ELSE metadata_json END
+                    WHERE {end} IN (SELECT old FROM temp._coding_node_renames)"""
+            ).rowcount
+        conn.execute("DROP TABLE IF EXISTS temp._coding_node_renames")
 
     if {"payload_json", "status", "source_id"} <= set(_table_columns(conn, "pipeline_jobs")):
         statuses = _marks(_OWED_JOB_STATUSES)
@@ -366,7 +390,12 @@ def repair_coding_conversation_ids(conn: sqlite3.Connection, *, dry_run: bool = 
         if not (_table_columns(conn, "ai_chat_messages") and _table_columns(conn, "ai_chat_conversations")):
             return {"status": "skipped", "reason": "no ai_chat tables", "messages_rewritten": 0}
         if dry_run:
-            return _Plan(conn).report("dry_run")
+            plan = _Plan(conn)
+            report = plan.report("dry_run")
+            report["derived_ids"] = (
+                sum(1 for key in _derived_keys(conn) if plan.rename(*key) is not None) + len(_graph_renames(conn, plan))
+            )
+            return report
     except sqlite3.Error as exc:
         logger.warning("coding conversation repair could not read the ai_chat tables: %s", exc)
         return {"status": "skipped", "error": str(exc), "messages_rewritten": 0}

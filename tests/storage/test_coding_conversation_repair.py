@@ -243,6 +243,12 @@ def test_rows_that_name_two_owners_are_left_alone_and_counted(node) -> None:
     assert held == [f"codex_sessions:{S1}", f"codex_sessions:{S1}", f"claude_code_sessions:{S1}"]
     assert node.execute("SELECT count(*) FROM ai_chat_conversations WHERE conversation_id LIKE ?",
                         (f"%{S1}",)).fetchone()[0] == 2
+    node.execute("INSERT INTO graph_nodes (node_id, node_type, label, metadata_json, source_id)"
+                 " VALUES (?, 'conversation', 'x', '{}', 'claude_code_sessions')", (f"conversation:ai_coding_tool:{S1}",))
+    node.commit()
+    _repair(node)
+    assert node.execute("SELECT count(*) FROM graph_nodes WHERE node_id=?",
+                        (f"conversation:ai_coding_tool:{S1}",)).fetchone()[0] == 1
     # Its derived copies stay with it.
     assert node.execute("SELECT conversation_id FROM signal_embeddings WHERE embedding_id='e1'").fetchone()[0] \
         == f"codex_sessions:{S1}"
@@ -326,8 +332,9 @@ def test_the_repair_is_committed_for_other_connections(node) -> None:
         other.close()
 
 
+@pytest.mark.parametrize("target", ["_repair_derived", "_renumber"])
 @pytest.mark.parametrize("error", [RuntimeError, KeyboardInterrupt])
-def test_a_failure_part_way_leaves_every_row_as_it_was(node, monkeypatch, error) -> None:
+def test_a_failure_part_way_leaves_every_row_as_it_was(node, monkeypatch, error, target) -> None:
     from topos.storage.canonical.ai_chat import coding_conversation_repair as repair
 
     before = _dump(node)
@@ -335,7 +342,7 @@ def test_a_failure_part_way_leaves_every_row_as_it_was(node, monkeypatch, error)
     def boom(*args, **kwargs):
         raise error("synthetic failure after the canonical rename")
 
-    monkeypatch.setattr(repair, "_repair_derived", boom)
+    monkeypatch.setattr(repair, target, boom)
     with pytest.raises(error):
         _repair(node)
 
@@ -425,6 +432,7 @@ def test_two_sources_sharing_one_stored_id_each_get_their_own_tool(node) -> None
     shared = "codex_sessions:owner:topos:t1"
     _message(node, "claude_code:d1", shared, "claude_code_sessions", "2026-10-17T09:00:00Z", 0)
     _message(node, "codex:d2", shared, "codex_sessions", "2026-10-17T09:00:01Z", 0)
+    _conversation(node, shared, "codex_sessions", "2026-10-17T09:00:00Z", "2026-10-17T09:00:01Z", "Shared", None)
     for embedding_id, record_id, source_id in (("ed1", "claude_code:d1", "claude_code_sessions"),
                                                ("ed2", "codex:d2", "codex_sessions")):
         node.execute(
@@ -432,9 +440,11 @@ def test_two_sources_sharing_one_stored_id_each_get_their_own_tool(node) -> None
             " provenance_json, conversation_id) VALUES (?, ?, ?, 'memory', 'm', ?, ?)",
             (embedding_id, record_id, source_id, json.dumps({"conversation_id": shared}), shared),
         )
+    node.execute("INSERT INTO graph_nodes (node_id, node_type, label, metadata_json, source_id)"
+                 " VALUES (?, 'conversation', 'x', '{}', 'codex_sessions')", (f"conversation:{shared}",))
     node.commit()
 
-    _repair(node)
+    result = _repair(node)
 
     assert dict(node.execute("SELECT message_id, conversation_id FROM ai_chat_messages"
                              " WHERE message_id IN ('claude_code:d1', 'codex:d2')").fetchall()) == {
@@ -444,6 +454,11 @@ def test_two_sources_sharing_one_stored_id_each_get_their_own_tool(node) -> None
                              " WHERE embedding_id IN ('ed1', 'ed2')").fetchall()) == {
         "ed1": "claude_code:owner:topos:t1", "ed2": "codex:owner:topos:t1",
     }
+    # One node id names one conversation: it follows the source that wrote it.
+    assert node.execute("SELECT count(*) FROM graph_nodes WHERE node_id='conversation:codex:owner:topos:t1'"
+                        ).fetchone()[0] == 1
+    # The id was one row's PRIMARY KEY, so only one source had a conversation row; the other is counted.
+    assert result["conversations_missing"] == 1
 
 
 def test_a_column_a_later_migration_adds_survives_a_merge(node) -> None:
@@ -456,3 +471,108 @@ def test_a_column_a_later_migration_adds_survives_a_merge(node) -> None:
 
     assert node.execute("SELECT later_column FROM ai_chat_conversations WHERE conversation_id=?",
                         (f"claude_code:{S1}",)).fetchone()[0] == "kept"
+
+
+def test_a_session_with_one_old_id_and_new_turns_is_renumbered(node) -> None:
+    _message(node, "claude_code:b2", f"claude_code:{S2}", "claude_code_sessions", "2026-10-19T10:00:00Z", 0)
+    node.commit()
+
+    _repair(node)
+
+    assert [r for r in _messages(node) if r[0].startswith("claude_code:b")] == [
+        ("claude_code:b1", f"claude_code:{S2}", 0), ("claude_code:b2", f"claude_code:{S2}", 1),
+    ]
+
+
+def test_turns_at_the_same_instant_are_numbered_by_message_id(node) -> None:
+    _message(node, "claude_code:t2", f"codex_sessions:{S1}", "claude_code_sessions", "2026-10-20T12:00:00Z", 2)
+    _message(node, "claude_code:t1", f"claude_code_sessions:{S1}", "claude_code_sessions", "2026-10-20T12:00:00Z", 1)
+    node.commit()
+
+    _repair(node)
+
+    seq = dict(node.execute("SELECT message_id, sequence FROM ai_chat_messages WHERE conversation_id=?",
+                            (f"claude_code:{S1}",)).fetchall())
+    assert (seq["claude_code:a2"], seq["claude_code:t1"], seq["claude_code:t2"], seq["claude_code:a3"]) == (1, 2, 3, 4)
+
+
+def test_each_derived_table_finds_its_own_stragglers(node) -> None:
+    """One old id per table, carried by no other table, so each table's discovery is seen on its own."""
+    _repair(node)
+    node.execute(
+        "INSERT INTO signal_embeddings (embedding_id, record_id, source_id, signal_dimension, model, provenance_json,"
+        " conversation_id) VALUES ('s1', 'claude_code:b1', 'claude_code_sessions', 'memory', 'm', '{}', ?)",
+        (f"ai_coding_tool:{S2}",),
+    )
+    node.execute(
+        "INSERT INTO topic_cluster_members (member_id, cluster_id, record_id, source_id, metadata_json)"
+        " VALUES ('s2', 'k1', 'claude_code:b1', 'claude_code_sessions', ?)",
+        (json.dumps({"conversation_id": f"claude_code_sessions:{S2}"}),),
+    )
+    node.execute("INSERT INTO graph_nodes (node_id, node_type, label, metadata_json, source_id)"
+                 " VALUES (?, 'conversation', 'x', '{}', 'claude_code_sessions')", (f"conversation:ai_coding_tool:{S1}",))
+    node.execute(
+        "INSERT INTO graph_edges (edge_id, src_node_id, dst_node_id, edge_type, weight, metadata_json, source_id)"
+        " VALUES ('s4', 'contact:human:5d9c', ?, 'message_frequency', 1.0, '{}', 'codex_sessions')",
+        (f"conversation:claude_code_sessions:{S3}",),
+    )
+    node.commit()
+
+    again = _repair(node)
+
+    assert node.execute("SELECT conversation_id FROM signal_embeddings WHERE embedding_id='s1'").fetchone()[0] \
+        == f"claude_code:{S2}"
+    assert node.execute("SELECT json_extract(metadata_json, '$.conversation_id') FROM topic_cluster_members"
+                        " WHERE member_id='s2'").fetchone()[0] == f"claude_code:{S2}"
+    assert node.execute("SELECT count(*) FROM graph_nodes WHERE node_id=?",
+                        (f"conversation:claude_code:{S1}",)).fetchone()[0] == 1
+    assert node.execute("SELECT count(*) FROM graph_nodes WHERE node_id LIKE 'conversation:ai_coding_tool:%'"
+                        ).fetchone()[0] == 0
+    assert node.execute("SELECT dst_node_id FROM graph_edges WHERE edge_id='s4'").fetchone()[0] \
+        == f"conversation:codex:{S3}"
+    assert again["derived"]["signal_embeddings"] == 1 and again["derived"]["topic_cluster_members"] == 1
+
+
+def test_a_job_is_renamed_under_its_own_source(node) -> None:
+    node.execute(
+        "INSERT INTO pipeline_jobs (job_id, kind, status, payload_json, source_id, created_at, updated_at)"
+        " VALUES ('j-codex', 'inbox_deferred_enrichment', 'queued', ?, 'codex_sessions', '2026-10-20', '2026-10-20')",
+        (json.dumps({"canonical_records": [{"conversation_id": f"claude_code_sessions:{S3}"}]}),),
+    )
+    node.commit()
+
+    _repair(node)
+
+    payload = json.loads(node.execute("SELECT payload_json FROM pipeline_jobs WHERE job_id='j-codex'").fetchone()[0])
+    assert payload["canonical_records"][0]["conversation_id"] == f"codex:{S3}"
+
+
+def test_graph_rows_written_without_a_source_follow_the_one_source_that_stored_the_id(node) -> None:
+    """relationship_edges stores whatever source_id its records carried, which can be none."""
+    old = f"codex_sessions:{S2}"
+    node.execute("INSERT INTO graph_nodes (node_id, node_type, label, metadata_json, source_id)"
+                 " VALUES (?, 'conversation', 'x', '{}', NULL)", (f"conversation:{old}",))
+    node.execute(
+        "INSERT INTO graph_edges (edge_id, src_node_id, dst_node_id, edge_type, weight, metadata_json, source_id)"
+        " VALUES ('n1', 'contact:human:5d9c', ?, 'message_frequency', 1.0, '{}', NULL)", (f"conversation:{old}",),
+    )
+    node.commit()
+
+    _repair(node)
+
+    assert node.execute("SELECT count(*) FROM graph_nodes WHERE node_id=?",
+                        (f"conversation:claude_code:{S2}",)).fetchone()[0] == 1
+    assert node.execute("SELECT dst_node_id FROM graph_edges WHERE edge_id='n1'").fetchone()[0] \
+        == f"conversation:claude_code:{S2}"
+
+
+def test_a_dry_run_counts_derived_stragglers(node) -> None:
+    _repair(node)
+    node.execute(
+        "INSERT INTO signal_embeddings (embedding_id, record_id, source_id, signal_dimension, model, provenance_json,"
+        " conversation_id) VALUES ('s1', 'claude_code:b1', 'claude_code_sessions', 'memory', 'm', '{}', ?)",
+        (f"ai_coding_tool:{S2}",),
+    )
+    node.commit()
+
+    assert _repair(node, dry_run=True)["derived_ids"] == 1
