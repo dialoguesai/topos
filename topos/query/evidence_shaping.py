@@ -38,13 +38,19 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 # ---------------------------------------------------------------------------
 
 
-def apply_relevance_floor(hits: List[Dict[str, Any]], *, margin: float) -> List[Dict[str, Any]]:
+def apply_relevance_floor(
+    hits: List[Dict[str, Any]], *, margin: float, protect: int = 0
+) -> List[Dict[str, Any]]:
     """Drop hits whose cosine is more than `margin` below the best cosine in the list.
 
     The reference is the best cosine, not the first hit: hybrid and rerank order can put
     a lower cosine first. Keyword-only hits carry no cosine and are kept — the hybrid
     merge keeps them for the same reason (a cosine threshold must not silently drop a
-    keyword match). `margin` <= 0 disables the rule.
+    keyword match). The first `protect` hits are never dropped: that is the ranker's own
+    head, ordered on keyword and rerank evidence the cosine does not see. On the owner's
+    snapshot the ranker's first hit was the answering record with a cosine more than
+    0.15 below the pool's best, and a floor over the whole list cut it. `margin` <= 0
+    disables the rule.
     """
     if margin <= 0 or not hits:
         return list(hits)
@@ -53,8 +59,8 @@ def apply_relevance_floor(hits: List[Dict[str, Any]], *, margin: float) -> List[
         return list(hits)
     floor = max(sims) - margin
     return [
-        h for h in hits
-        if h.get("similarity") is None or float(h["similarity"]) >= floor - 1e-9
+        h for idx, h in enumerate(hits)
+        if idx < protect or h.get("similarity") is None or float(h["similarity"]) >= floor - 1e-9
     ]
 
 
@@ -224,7 +230,9 @@ def shape_vector_hits(
     """Rules 3, 2 and 1, in that order, when the switch is on; the list itself when off.
 
     Floor first so far neighbours never count as support; de-duplicate before grouping
-    so a copy is not a second supporting hit.
+    so a copy is not a second supporting hit. The floor gates only what the wider pool
+    adds beyond the lane's own `limit`: grouping pulls deeper hits up when a
+    conversation collapses, and those are where far neighbours would pad the lane.
     """
     from ..features.signal.vector_settings import (
         evidence_duplicate_jaccard,
@@ -237,7 +245,7 @@ def shape_vector_hits(
 
     if not evidence_shaping_enabled():
         return hits
-    kept = apply_relevance_floor(hits, margin=evidence_floor_margin())
+    kept = apply_relevance_floor(hits, margin=evidence_floor_margin(), protect=limit)
     kept = drop_near_duplicates(kept, threshold=evidence_duplicate_jaccard())
     passages = evidence_group_passages()
     if passages <= 0:

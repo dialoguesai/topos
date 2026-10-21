@@ -5902,10 +5902,12 @@ _NO_DECAY_FUSION_SOURCES = frozenset(
 )
 
 # Contributors whose items are derived from records rather than being records: stats,
-# facts, entity dossiers and mentions, derived objects, graph edges, extracted goals and
+# facts, entity dossiers and edges, derived objects, graph edges, extracted goals and
 # emotions, briefs, clusters, dimension facts. With TOPOS_EVIDENCE_SHAPING on, their
 # share of the fused list is bounded while record lanes still have evidence (rule 4 in
-# `evidence_shaping`). The split is by kind of evidence, never by connector.
+# `evidence_shaping`). The split is by kind of evidence, never by connector. One item
+# kind of the `entities` lane is not derived: an `entity_mention` names one source
+# record by id, so it counts as a reference to that record (`_record_reference_item`).
 _DERIVED_FUSION_SOURCES = frozenset(
     {
         "stat_insights", "facts_store", "entities", "derived_objects", "graph",
@@ -6134,13 +6136,21 @@ def _rrf_fuse_summary_lists(
 
     bound_derived = derived_share is not None and derived_share < 1.0 and not activity_time_range
 
+    def _record_reference_item(key: str) -> bool:
+        # A pointer to one source record, not a summary computed from records. Measured on
+        # the owner's snapshot: every routed browser and iMessage answer the bound lost
+        # was one of these, demoted below derived items as if it were derived.
+        return str(best_item[key].get("retrieval_source") or "") == "entity_mention"
+
     def _bounded_selection(keys: List[str], limit: int) -> List[str]:
         from .evidence_shaping import bounded_derived_selection
 
         return bounded_derived_selection(
             keys,
-            is_derived=lambda key: all(c in _DERIVED_FUSION_SOURCES for c in contributors.get(key) or ()),
-            is_record=lambda key: any(
+            is_derived=lambda key: not _record_reference_item(key) and all(
+                c in _DERIVED_FUSION_SOURCES for c in contributors.get(key) or ()
+            ),
+            is_record=lambda key: _record_reference_item(key) or any(
                 c not in _DERIVED_FUSION_SOURCES and c not in context_sources
                 for c in contributors.get(key) or ()
             ),

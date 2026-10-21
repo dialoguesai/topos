@@ -264,6 +264,22 @@ class TestRelevanceFloor:
         hits = [_hit("top", similarity=0.9), _hit("far", similarity=0.3)]
         assert _ids(es.apply_relevance_floor(hits, margin=0.0)) == ["top", "far"]
 
+    def test_the_rankers_own_head_is_never_cut(self):
+        # Measured on the owner's snapshot: the ranker's #1 hit (keyword + vector) was the
+        # answering record with a cosine 0.15+ below the pool's best. The floor gates what
+        # the wider pool adds, never what the lane would have returned without it.
+        hits = [_hit("first", similarity=0.40), _hit("second", similarity=0.70), _hit("deep", similarity=0.40)]
+        assert _ids(es.apply_relevance_floor(hits, margin=0.15, protect=2)) == ["first", "second"]
+
+    def test_shaping_protects_the_lanes_own_size(self, monkeypatch):
+        monkeypatch.setenv("TOPOS_EVIDENCE_SHAPING", "on")
+        monkeypatch.setenv("TOPOS_EVIDENCE_FLOOR_MARGIN", "0.15")
+        hits = [_hit("head", similarity=0.40)] + [_hit(f"m{i}", similarity=0.70) for i in range(24)]
+        hits += [_hit("deep", similarity=0.40)]
+        out = _ids(es.shape_vector_hits(hits, conn=None, limit=20))
+        assert out[0] == "head"
+        assert es.apply_relevance_floor(hits, margin=0.15, protect=20)[-1]["record_id"] == "m23"
+
 
 # ---------------------------------------------------------------------------
 # Rules 1–3 together, through the settings
@@ -393,6 +409,17 @@ class TestBoundedDerivedShare:
         lists[1] = ("facts_store", 1.5, [mixed] + lists[1][2])
         fused = _rrf_fuse_summary_lists(lists, cap=4, derived_share=0.5)
         assert [i["record_id"] for i in fused] == ["mixed", "stat0", "stat1", "vec1"]
+
+    def test_a_pointer_to_a_record_is_a_record_reference(self):
+        # entity_mention names one source record by id; it is not a computed summary,
+        # so the bound must not demote it below derived items (measured: every routed
+        # browser and iMessage loss on the snapshot was such a pointer).
+        mention = {**_item("msg7", "entity_mention"), "entity_id": "e1"}
+        dossier = _item("dossier1", "entity_dossier")
+        lists = _lists(n_vector=0) + [("entities", 0.1, [dossier, mention])]
+        fused = _rrf_fuse_summary_lists(lists, cap=4, derived_share=0.5)
+        assert [i["record_id"] for i in fused][:2] == ["stat0", "msg7"]
+        assert "dossier1" not in [i["record_id"] for i in fused]
 
     def test_pins_do_not_undo_the_bound(self):
         lists = _lists() + [("goals", 1.0, [_item(f"goal{i}", "user_goal") for i in range(3)])]
