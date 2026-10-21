@@ -14,6 +14,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import logging
+import os
 from pathlib import Path
 import re
 import sqlite3
@@ -119,6 +120,8 @@ def legacy_digest(db):
 def capped_digest():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(EvidenceReviewStore, "_authority_digest", staticmethod(legacy_digest))
+        # A swapped digest proves nothing: no open under it keeps a verified token (`_state_token`).
+        patch.setattr(EvidenceReviewStore, "_state_token", lambda self: None)
         yield patch
 
 
@@ -816,6 +819,8 @@ def uncrosschecked_digest(db):
 def trusting_the_pk_index():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(EvidenceReviewStore, "_authority_digest", staticmethod(uncrosschecked_digest))
+        # A swapped digest proves nothing: no open under it keeps a verified token (`_state_token`).
+        patch.setattr(EvidenceReviewStore, "_state_token", lambda self: None)
         yield patch
 
 
@@ -837,6 +842,8 @@ def key_sourced_digest(db):
 def trusting_the_index_key():
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(EvidenceReviewStore, "_authority_digest", staticmethod(key_sourced_digest))
+        # A swapped digest proves nothing: no open under it keeps a verified token (`_state_token`).
+        patch.setattr(EvidenceReviewStore, "_state_token", lambda self: None)
         yield patch
 
 
@@ -1097,11 +1104,14 @@ def test_the_exit_digest_runs_only_when_a_review_row_was_written(enrolled, diges
             call()
         return len(digest_calls)
 
-    # A read observes the clock (one verifying open that writes no review row) and opens once more.
-    assert digests(lambda: enrolled.service.read(enrolled.lookup)) == 2
-    assert digests(lambda: enrolled.corpus[0].qualify(enrolled.corpus[2], reviews=enrolled.reviews)) == 2
-    # A record adds its own mutating open, the only one that pays an exit digest.
-    assert digests(lambda: enrolled.service.record(next_request(enrolled, "counted-record"), now=1500)) == 5
+    # A read observes the clock (one verifying open that writes no review row) and opens once more; both find
+    # the token the seed's last open kept and digest nothing (`_state_token`).
+    assert digests(lambda: enrolled.service.read(enrolled.lookup)) == 0
+    assert digests(lambda: enrolled.corpus[0].qualify(enrolled.corpus[2], reviews=enrolled.reviews)) == 0
+    # A record adds its own mutating open, the only one that pays an exit digest; the one verifying open after
+    # it digests the moved rows again, and keeps that.
+    assert digests(lambda: enrolled.service.record(next_request(enrolled, "counted-record"), now=1500)) == 2
+    assert digests(lambda: enrolled.service.read(enrolled.lookup)) == 0
 
 
 @pytest.mark.parametrize("statement", [
@@ -1788,3 +1798,119 @@ def test_an_owner_read_does_not_write_the_clock_high_water_it_already_has(enroll
             enrolled.service.read(enrolled.lookup)
     assert matching(log, "UPDATE review_identity") == []
     assert matching(log, "SELECT highest_generation FROM review_identity"), "it still has to be checked"
+
+
+# --- the entry digest runs once per store state -----------------------------------------------------------
+# The owner's node, 21 Oct 2026: the automatic-review pass held the node-wide write gate for 187 ms per row,
+# 101 ms of it this digest at the one `_db` open every row makes (`_observe_clock`), over 14,216 rows of a
+# 1,790-review store. `_state_token` lets a verifying open skip the digest only while nothing can have moved
+# the rows since the last one proved them (`EvidenceReviewStore._state_token`). These tests pin both halves:
+# an unchanged store is digested once, and every way the rows can move still runs, and fails, the digest.
+
+
+@contextmanager
+def counted_digests():
+    """`_authority_digest` exactly as it is, counting how many times a verifying open runs it."""
+    calls = []
+    original = EvidenceReviewStore._authority_digest
+
+    def counting(db):
+        calls.append(1)
+        return original(db)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(EvidenceReviewStore, "_authority_digest", staticmethod(counting))
+        yield calls
+
+
+def test_an_unchanged_store_is_digested_once_and_every_change_digests_it_again(enrolled):
+    sized(enrolled, "small")
+
+    def opens(count):
+        for _ in range(count):
+            with enrolled.reviews._db() as db:
+                db.execute("SELECT count(*) FROM fact_reviews").fetchone()
+
+    with counted_digests() as calls, owner():
+        opens(3)
+        # The seed's last verifying open digested and kept the token: nothing has moved it since.
+        assert calls == []
+        with enrolled.reviews._db() as db:
+            db.execute("UPDATE fact_reviews SET active=active")
+        # A writing transaction skips the entry digest and runs the exit digest, as always ...
+        assert len(calls) == 1
+        opens(2)
+        # ... and the next open digests the moved rows again, once.
+        assert len(calls) == 2
+        # A commit by another connection that changes no cell still moves the file: digested again, once.
+        tamper(enrolled.store, "UPDATE fact_reviews SET active=active")
+        opens(2)
+        assert len(calls) == 3
+        assert enrolled.service.read(enrolled.lookup).current_review is not None
+
+
+def test_a_review_body_edited_by_hand_between_verified_opens_is_still_refused(enrolled):
+    """Not through SQLite: one byte of a review body changed in the file, at the same length, with its mtime put
+    back. No commit happened, so the file change counter and `data_version` are as they were; size and mtime are
+    as they were. Only ctime says the file was written, and that is enough for the next open to digest again."""
+    sized(enrolled, "small")
+    with owner():
+        enrolled.service.read(enrolled.lookup)   # verified: the token is kept
+    data = bytearray(enrolled.store.read_bytes())
+    found = [at for at in range(len(data)) if data.startswith(b'"reading"', at)]
+    assert found, "the seeded reviews' domain word, in every page image that holds a review body"
+    for at in found:
+        data[at + 1:at + 8] = b"Reading"
+    stat = enrolled.store.stat()
+    enrolled.store.write_bytes(bytes(data))
+    os.utime(enrolled.store, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert enrolled.store.stat().st_size == stat.st_size
+    assert enrolled.read_codes() == ("review_store_rollback",) * 3
+
+
+def test_an_older_store_restored_in_place_after_a_verified_open_is_still_refused(enrolled):
+    """The restore of `test_an_older_store_restored_in_place_is_refused_as_rollback`, after an open that kept
+    the token, with the file's mtime put back: the restored header's change counter moves `data_version`."""
+    current = sized(enrolled, "small")
+    older = enrolled.store.read_bytes()
+    with owner():
+        enrolled.service.revoke(RevokeEvidenceReview(fact_id=enrolled.corpus[2], review_id="seed-review-2",
+            expected_review_revision=current.review_revision))
+        enrolled.service.read(enrolled.lookup)   # verified: the token is kept
+    stat = enrolled.store.stat()
+    before = enrolled.marker.read_bytes()
+    enrolled.store.write_bytes(older)
+    os.utime(enrolled.store, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert enrolled.store.stat().st_size == stat.st_size, "the restore keeps the size and mtime: only the content moved"
+    assert enrolled.read_codes() == ("review_store_rollback",) * 3
+    assert enrolled.marker.read_bytes() == before
+
+
+def test_a_restored_backup_moved_over_the_store_after_a_verified_open_is_still_refused(enrolled):
+    """The same restore as a file swap: an older copy, its size and mtime equal to the store's, moved over the
+    path with `os.replace`. That is a new inode, which the built store's own identity pin refuses before any
+    token or digest is read; a restarted runtime digests the restored rows and refuses them as rollback."""
+    current = sized(enrolled, "small")
+    older = enrolled.store.read_bytes()
+    with owner():
+        enrolled.service.revoke(RevokeEvidenceReview(fact_id=enrolled.corpus[2], review_id="seed-review-2",
+            expected_review_revision=current.review_revision))
+        enrolled.service.read(enrolled.lookup)   # verified: the token is kept
+    stat = enrolled.store.stat()
+    restored = enrolled.store.with_name(enrolled.store.name + ".restored")
+    restored.write_bytes(older)
+    restored.chmod(0o600)
+    os.utime(restored, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert restored.stat().st_size == stat.st_size
+    os.replace(restored, enrolled.store)
+    assert enrolled.store.stat().st_ino != stat.st_ino
+    # The built store (reached directly and through a fresh `get()`) refuses the new inode; a restart digests.
+    assert enrolled.read_codes() == ("review_database_binding", "review_database_binding", "review_store_rollback")
+
+
+def test_a_store_without_a_floor_never_reads_a_token(corpus):
+    """A standalone store has no marker to skip against: nothing is verified, and no probe is opened."""
+    resolver, reviews = corpus[0], corpus[1]
+    with owner(), reviews._db() as db:
+        db.execute("SELECT 1").fetchone()
+    assert reviews._verified is None and reviews._probe is None
