@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **The review store is digested once per state, not at every open.** `[O]` Every verifying open of the enrolled review store digested every review row against its enrollment marker. On a node with a 1,790-review store that digest was 101 ms of the 187 ms each automatic-review row held the node-wide write gate (21 Oct 2026, 14,216 rows), and three opens per row that reached its floors. A verifying open now skips the entry digest only while the store file's identity, size and times and its `PRAGMA data_version` are the ones the last digest verified against the same marker; any commit, any other write to the file, a moved marker, or a probe that cannot be read runs the digest in full as before. The exit digest of a writing transaction is unchanged and clears what was verified. On a copy of that node's data, interleaved runs of 20 rows, one `prepare` fell from 49–67 ms to 23–26 ms on AI-chat rows and from 46–50 ms to 22–23 ms on iMessage rows, the store's share from 24–31 ms to 1.3 ms. No data or schema changes.
+
 ## [1.5.14] — 2026-10-20
 
 - [S1] [P] Content-free query serve spans and daily owner activity on the dashboard. Migration 89 adds `serve_spans`: one row per query, retrieval and query-inference span with its duration, outcome and, only when a caller observed one, time to first token. No query text, record, or caller identity is stored, and the store refuses anything else. The owner dashboard reads serve p50/p95 from it. The dashboard measurements payload (still schema version 1, so the control plane passes it through unchanged) adds recorded MCP tool-call requests per day, which callers made them, and routine runs, all on the retained-day contract: days outside the retained log are unavailable, never zero. No backfill or reprocessing.

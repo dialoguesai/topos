@@ -1604,6 +1604,10 @@ class EvidenceReviewStore:
         # Attached by the enrollment runtime after it verified the marker; a
         # standalone store has no external rollback floor.
         self._floor = None
+        # (`_state_token`, expected digest) of the last verifying open that digested the rows, and the probe
+        # connection the token reads `PRAGMA data_version` on (opened at the first verifying open, read only).
+        self._verified = None
+        self._probe = None
         with resolver._read() as (conn, _floor):
             self._clock_id, self._highest_generation = clock_state(conn)
             with self._db(initializing=True) as db:
@@ -1806,8 +1810,12 @@ class EvidenceReviewStore:
                     self._check_identity(db.execute(_IDENTITY_SELECT).fetchone())
                     if floor is not None:
                         self._check_schema(db)
-                        if self._authority_digest(db) != floor.expected_authority_digest():
-                            raise PolicyError("review_store_rollback")
+                        expected = floor.expected_authority_digest()
+                        token = self._state_token()
+                        if token is None or self._verified != (token, expected):
+                            if self._authority_digest(db) != expected:
+                                raise PolicyError("review_store_rollback")
+                            self._verified = None if token is None else (token, expected)
                         access = _ReviewAccess()
                         db.set_authorizer(access)
                 yield db
@@ -1815,6 +1823,7 @@ class EvidenceReviewStore:
                 published = None
                 if floor is not None:
                     if access.touched:
+                        self._verified = None   # the rows move here: the next open digests them again
                         after = self._authority_digest(db)
                         if after != floor.expected_authority_digest():
                             # Durable before the commit. A crash in either order
@@ -1834,13 +1843,45 @@ class EvidenceReviewStore:
                 if published is not None:
                     floor.publish_active(published)
             except sqlite3.Error:
+                self._verified = None
                 db.rollback()
                 raise PolicyError("review_storage_unavailable") from None
             except BaseException:
+                self._verified = None
                 db.rollback()
                 raise
             finally:
                 db.close()
+
+    def _state_token(self):
+        """What the store file is right now, read under `BEGIN IMMEDIATE`: its identity, size and times, and
+        `PRAGMA data_version` on this store's own probe connection, which moves once any other connection -- this
+        process's own `_db` openings included -- has committed to the file since the probe last looked.
+
+        Every verifying open digests every review row against the marker (`_authority_digest`, the rollback
+        check). On the owner's node that digest was most of what one automatic-review row cost under the
+        node-wide write gate: 101 ms of 187 ms per `prepare` on 21 Oct 2026 (14,216 rows, a 1,790-row store),
+        three opens per row that reached its floors. The digest proves the rows are the marker's; this token
+        says whether they can have moved since the last digest proved it: no SQLite transaction has committed
+        (`data_version`, which rests on the file change counter the store's rollback journal bumps at every
+        commit), and nothing has written the file by any other means (size, mtime and ctime: a rewrite by hand
+        moves ctime, which no unprivileged writer can set back). So an open whose token and expected digest are
+        the ones last verified skips the entry digest; any other token, a moved marker, or a probe that cannot
+        be read runs it in full, exactly as before. The exit digest of a writing transaction is unchanged, and
+        every write or failure clears what was verified, so the next open digests again. This holds against
+        what the marker holds against -- a restore or an edit of the store file -- and, like the marker, not
+        against a privileged host administrator who rewrites every trusted file together."""
+        try:
+            info = _checked_file(self.path, code="review_database_binding")
+            if self._probe is None:
+                self._probe = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True, isolation_level=None,
+                                              check_same_thread=False)
+            cursor = self._probe.execute("PRAGMA data_version")
+            version = cursor.fetchall()
+            cursor.close()
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, version[0][0])
+        except (PolicyError, sqlite3.Error, OSError, IndexError, TypeError):
+            return None
 
     def _observe_clock(self, canonical_conn):
         clock_id, generation = clock_state(canonical_conn)
