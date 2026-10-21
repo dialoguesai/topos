@@ -1881,8 +1881,31 @@ def test_an_older_store_restored_in_place_after_a_verified_open_is_still_refused
     before = enrolled.marker.read_bytes()
     enrolled.store.write_bytes(older)
     os.utime(enrolled.store, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert enrolled.store.stat().st_size == stat.st_size, "the restore keeps the size and mtime: only the content moved"
     assert enrolled.read_codes() == ("review_store_rollback",) * 3
     assert enrolled.marker.read_bytes() == before
+
+
+def test_a_restored_backup_moved_over_the_store_after_a_verified_open_is_still_refused(enrolled):
+    """The same restore as a file swap: an older copy, its size and mtime equal to the store's, moved over the
+    path with `os.replace`. That is a new inode, which the built store's own identity pin refuses before any
+    token or digest is read; a restarted runtime digests the restored rows and refuses them as rollback."""
+    current = sized(enrolled, "small")
+    older = enrolled.store.read_bytes()
+    with owner():
+        enrolled.service.revoke(RevokeEvidenceReview(fact_id=enrolled.corpus[2], review_id="seed-review-2",
+            expected_review_revision=current.review_revision))
+        enrolled.service.read(enrolled.lookup)   # verified: the token is kept
+    stat = enrolled.store.stat()
+    restored = enrolled.store.with_name(enrolled.store.name + ".restored")
+    restored.write_bytes(older)
+    restored.chmod(0o600)
+    os.utime(restored, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert restored.stat().st_size == stat.st_size
+    os.replace(restored, enrolled.store)
+    assert enrolled.store.stat().st_ino != stat.st_ino
+    # The built store (reached directly and through a fresh `get()`) refuses the new inode; a restart digests.
+    assert enrolled.read_codes() == ("review_database_binding", "review_database_binding", "review_store_rollback")
 
 
 def test_a_store_without_a_floor_never_reads_a_token(corpus):
