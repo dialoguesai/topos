@@ -90,6 +90,14 @@ async def dispatch_answer(ws, message):
                 # BL-159, counts-only: which door, never an id. The service's own line follows with its seconds.
                 _log.warning("permissions answer relay: no result within %d s (%s)", WAIT_SECONDS,
                              "fetch" if kind == FETCH_TYPE else "ask")
+                # Lane 190 (the 21 Oct gate, Q7): a FETCH that ran out of this wait is not a refusal. The answer is
+                # finished or still being written, and the fetch's own store read was waiting behind the node's
+                # write gate. Answered as a refusal, the control plane forgot the held answer and the app ended the
+                # turn with "didn't answer this one" while the node had answered. So a fetch's wait running out is
+                # `answer_busy` (429): the control plane keeps the id and the app keeps polling. An ASK's wait
+                # running out stays a refusal: a retried ask would be a second job.
+                if kind == FETCH_TYPE:
+                    raise AnswerBusy() from None
                 raise
         finally:
             reset_principal(token)

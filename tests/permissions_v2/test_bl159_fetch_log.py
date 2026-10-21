@@ -166,7 +166,8 @@ def test_the_relay_logs_its_own_wait_running_out_without_an_id(monkeypatch, capl
                                                               "payload": {"envelope": {}, "intent": {}}}))
     finally:
         finish.set()
-    assert socket.frame["code"] == 403
+    # Lane 190: a fetch whose wait ran out is `answer_busy`, not a refusal (the id stays held, the app keeps polling).
+    assert (socket.frame["code"], socket.frame["error"]) == (429, "answer_busy")
     messages = [record.getMessage() for record in caplog.records]
     assert any(message.startswith("permissions answer relay: no result within") and message.endswith("(fetch)")
                for message in messages)
