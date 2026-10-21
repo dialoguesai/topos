@@ -163,3 +163,38 @@ async def test_a_held_write_gate_does_not_delay_finish_request_on_the_loop(caplo
     assert [row[2] for row in rows] == ["db", "llm", "request"]
     request = next(row for row in rows if row[2] == "request")
     assert all(row[1] == request[0] for row in rows if row[2] != "request")
+
+
+@pytest.fixture
+def shared_handler_conn(monkeypatch):
+    """One handle for the handler, closed at teardown, exactly as the query tests do it."""
+    from topos.serve import spans
+
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
+    yield conn
+    # tests/conftest.py drains the writer before this runs. On CI run 39655467662 it did not
+    # exist, close() ran under the writer's INSERT and the process segfaulted.
+    assert spans.wait_for_writes(0.0), "a span was still queued when the fixture closed its handle"
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_the_writer_is_idle_before_a_fixture_closes_its_handle(shared_handler_conn, monkeypatch):
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr("topos.query.manifest_validation.resolve_scope_manifest", explode)
+    from topos.core.handlers.query import handle_query
+
+    # The gate is held for the whole handler call, so the row is still queued when the test
+    # body ends; it is released at the last moment and the writer is left mid-flight on purpose.
+    release, thread = _hold_gate()
+    try:
+        response = await handle_query({"id": "q-2", "type": "query", "payload": {"query": PROBE, "scope_id": "notes"}})
+        assert response["status"] == "error"
+        assert not wait_for_writes(0.0)
+    finally:
+        release.set()
+        thread.join(5.0)
+    # Deliberately no wait here: the teardown hook is what is under test.

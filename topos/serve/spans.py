@@ -228,7 +228,14 @@ def _enqueue(conn, fields: dict) -> None:
 
 
 def wait_for_writes(timeout: float = 5.0) -> bool:
-    """Block until every queued span is written or dropped. For tests and shutdown; True when idle."""
+    """Block until every queued span is written or dropped. True when idle.
+
+    Whoever closes a connection the worker may be writing on must call this first. The node never
+    does (the worker's connection is its own, per thread); a test that injects one handle for the
+    handler and closes it in a fixture did, and ``close()`` under the worker's INSERT is a
+    segmentation fault, not an exception (CI run 39655467662, 21 Oct 2026). tests/conftest.py
+    calls this before every teardown.
+    """
     deadline = time.monotonic() + max(0.0, timeout)
     with _idle:
         while _outstanding:

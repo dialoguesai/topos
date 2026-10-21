@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 
+import warnings
 import pytest
 
 # Project root on sys.path for editable installs and `pytest` without install
@@ -169,6 +170,25 @@ def pytest_runtest_logstart(nodeid: str, location) -> None:
     """
     del location
     live_db_watch.set_current_test(nodeid)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_runtest_teardown(item, nextitem) -> None:
+    """Let the serve-span writer finish before any fixture closes a connection.
+
+    ``handle_query`` hands its timing rows to one writer thread and returns. A test that
+    injects a connection for the handler (``monkeypatch`` on ``get_db_connection``) and closes
+    it in its fixture's teardown raced that thread: on CI run 39655467662 (public lane rest,
+    21 Oct 2026) the fixture's ``close()`` ran while the writer was inside the INSERT on the
+    same handle, and sqlite3 finalising a statement another thread was stepping killed the
+    process with a segmentation fault, with no pytest line to show for it. ``tryfirst`` puts
+    this before pytest's own teardown, so the queue is empty when the fixtures run. Costs one
+    integer read per test when nothing was queued; never imports the module itself.
+    """
+    del item, nextitem
+    spans = sys.modules.get("topos.serve.spans")
+    if spans is not None and not spans.wait_for_writes(10.0):
+        warnings.warn("serve-span writer still busy at teardown; a fixture may close its connection under it")
 
 
 def pytest_runtest_logfinish(nodeid: str) -> None:
