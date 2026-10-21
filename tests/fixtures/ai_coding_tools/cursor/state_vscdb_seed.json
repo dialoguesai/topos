@@ -65,6 +65,24 @@
       "header": null,
       "composerData": {"createdAt": "2026-10-15T11:30:00.000Z", "status": "none", "unifiedMode": "agent"},
       "bubbles": []
+    },
+    {
+      "composerId": "c0c0c0c0-0007-4a0a-8a0a-a0a0a0a0a007",
+      "header": {"workspaceId": "1f2e3d4c5b6a79880000aaaabbbbcccc", "createdAt": "2026-10-15T12:00:00.000Z", "lastUpdatedAt": "2026-10-15T12:03:10.000Z", "isArchived": 0, "isSubagent": 0},
+      "composerData": {"name": "Config import speed-up", "createdAt": "2026-10-15T12:00:00.000Z", "status": "completed", "unifiedMode": "agent"},
+      "bubbles": [
+        {"bubbleId": "bubble-k01", "type": 1, "text": "<timestamp>Wednesday, Oct 15, 2026, 12:00 PM</timestamp>\n<user_query>\nSpeed up the config import\n</user_query>", "createdAt": "2026-10-15T12:00:00.000Z"},
+        {"bubbleId": "bubble-k02", "type": 2, "text": "Profiling the import first.", "createdAt": "2026-10-15T12:00:10.000Z"},
+        {"bubbleId": "bubble-k03", "type": 2, "text": "", "createdAt": "2026-10-15T12:00:20.000Z", "toolFormerData": {"tool": 15, "name": "run_terminal_cmd", "status": "completed", "rawArgs": "{\"command\":\"python -X importtime -c 'import app'\"}"}},
+        {"bubbleId": "bubble-k04", "type": 2, "text": "Weighing the loaders", "isThought": true, "thinking": {"text": "Weighing the loaders", "signature": "sig"}, "createdAt": "2026-10-15T12:00:30.000Z"},
+        {"bubbleId": "bubble-k05", "type": 2, "text": "Most of the time goes to the YAML parse.", "createdAt": "2026-10-15T12:00:40.000Z"},
+        {"bubbleId": "bubble-k06", "type": 1, "text": "Read file", "createdAt": "2026-10-15T12:00:50.000Z", "toolFormerData": {"tool": 1, "name": "read_file", "status": "completed", "rawArgs": "{\"path\":\"app/config.py\"}"}},
+        {"bubbleId": "bubble-k07", "type": 2, "text": "Switched it to the C loader; the import is four times faster.", "createdAt": "2026-10-15T12:01:00.000Z"},
+        {"bubbleId": "bubble-k08", "type": 1, "text": "<timestamp>Wednesday, Oct 15, 2026, 12:02 PM</timestamp>\n<system_notification>\nThe background job finished.\n</system_notification>", "createdAt": "2026-10-15T12:02:00.000Z"},
+        {"bubbleId": "bubble-k09", "type": 2, "text": "The background job was the cache warm-up; nothing to do.", "createdAt": "2026-10-15T12:02:10.000Z"},
+        {"bubbleId": "bubble-k10", "type": 1, "text": "Why did `<user_query>` show up in my old rows?", "createdAt": "2026-10-15T12:03:00.000Z"},
+        {"bubbleId": "bubble-k11", "type": 2, "text": "Older builds kept the wrapper.", "createdAt": "2026-10-15T12:03:10.000Z"}
+      ]
     }
   ]
 }

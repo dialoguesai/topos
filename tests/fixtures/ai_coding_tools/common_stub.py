@@ -38,6 +38,8 @@ class Ledger(DropLedger):
 
     scrubbed_counts: Dict[str, int] = field(default_factory=dict)
     tainted_turns: int = 0
+    merged_blocks: int = 0
+    harness_spans_stripped: int = 0
 
     def scrubbed(self, name: str, n: int = 1) -> None:
         self.scrubbed_counts[name] = self.scrubbed_counts.get(name, 0) + n
