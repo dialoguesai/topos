@@ -101,3 +101,67 @@ def test_a_fetch_the_service_refuses_is_still_the_refusal(monkeypatch):
     _stamped(monkeypatch, Service())
     frame = _dispatch(answer_transport.FETCH_TYPE)
     assert (frame["code"], frame["error"]) == (403, "permission_denied")
+
+
+def _payload(answer_id):
+    return {"envelope": {}, "intent": {"answer_id": answer_id}}
+
+
+def test_a_second_fetch_for_an_answer_still_waiting_is_busy_at_once_with_no_second_thread(monkeypatch):
+    """The app polls every few seconds for up to twelve minutes; while one fetch of an answer still waits behind
+    the write gate, the next fetch of the same answer is answered busy without a second thread. Another answer's
+    fetch is not held back, and once the first thread ends the same answer is fetched again as usual."""
+    gate = threading.Event()
+    calls = []
+
+    class Service:
+        def fetch(self, *, payload, **_kwargs):
+            calls.append(payload["answer_id"])
+            if payload["answer_id"] == "ans_slow":
+                gate.wait(5)
+            return {"state": "answered"}, {"answer": "x"}
+
+        def _current(self, _envelope):
+            return None, SimpleNamespace(search=SimpleNamespace(selective_facts=None))
+
+    _stamped(monkeypatch, Service())
+    monkeypatch.setattr("topos.permissions_v2.signing.parse_envelope", lambda _e: None)
+    answer_transport._FETCHES_WAITING.clear()
+
+    async def one(answer_id):
+        socket = Socket()
+        await answer_transport.dispatch_answer(socket, {"id": "req-" + answer_id, "type": answer_transport.FETCH_TYPE,
+                                                        "payload": _payload(answer_id)})
+        return socket.frame
+
+    async def main():
+        first = await one("ans_slow")                      # the wait runs out: busy, thread still waiting
+        second = await one("ans_slow")                     # answered busy at once, no second thread
+        other = await one("ans_other")                     # another answer is not held back
+        gate.set()
+        await asyncio.sleep(0.2)                           # the first thread ends and drops its key
+        third = await one("ans_slow")
+        return first, second, other, third
+
+    first, second, other, third = asyncio.run(main())
+    assert (first["code"], first["error"]) == (429, "answer_busy")
+    assert (second["code"], second["error"]) == (429, "answer_busy")
+    assert other["status"] == "ok"
+    assert third["status"] == "ok"
+    assert calls == ["ans_slow", "ans_other", "ans_slow"]
+    assert not answer_transport._FETCHES_WAITING
+
+
+def test_the_waiting_key_is_dropped_when_the_service_raises(monkeypatch):
+    from topos.permissions_v2.canonical import PolicyError
+
+    class Service:
+        def fetch(self, **_kwargs):
+            raise PolicyError("permission_denied")
+
+    _stamped(monkeypatch, Service())
+    answer_transport._FETCHES_WAITING.clear()
+    socket = Socket()
+    asyncio.run(answer_transport.dispatch_answer(socket, {"id": "req-1", "type": answer_transport.FETCH_TYPE,
+                                                          "payload": _payload("ans_a")}))
+    assert socket.frame["code"] == 403 and not answer_transport._FETCHES_WAITING

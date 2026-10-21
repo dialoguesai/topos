@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import logging
 
 from topos.principal import THIRD_PARTY, reset_principal, set_principal
@@ -18,6 +19,19 @@ FETCH_TYPE = "permissions_v2_answer_fetch"
 #: How long this dispatch waits for the service before answering the uniform refusal. The work itself is not
 #: cancelled (a thread cannot be): a fetch still running then hands its body to a reply nobody reads.
 WAIT_SECONDS = 15
+
+#: Lane 190: the fetches whose store read is still running on a thread, keyed by the asker and the answer id. A second
+#: fetch for the same answer while the first still waits behind the node's write gate is answered busy at once, with no
+#: second thread: the app polls every few seconds for up to twelve minutes, and each wait-out would otherwise leave
+#: one more thread blocked on the gate (the node's shared thread pool is small). The key is dropped when the thread ends.
+_FETCHES_WAITING: set = set()
+_FETCHES_LOCK = threading.Lock()
+
+
+def _fetch_waiting_key(principal, payload):
+    intent = payload.get("intent")
+    answer_id = intent.get("answer_id") if isinstance(intent, dict) else None
+    return (principal.acting_user, principal.client_id, str(answer_id or ""))
 _log = logging.getLogger(__name__)
 
 
@@ -66,9 +80,24 @@ async def dispatch_answer(ws, message):
             raise PolicyError("permission_denied")
         account_words = _owner_account_words(message, kind, request_id)
         accepted_version = _accepted_version(message, kind)
+        waiting_key = None
+        if kind == FETCH_TYPE:
+            waiting_key = _fetch_waiting_key(principal, payload)
+            with _FETCHES_LOCK:
+                if waiting_key in _FETCHES_WAITING:
+                    raise AnswerBusy()
+                _FETCHES_WAITING.add(waiting_key)
         token = set_principal(principal)
         try:
             def work():
+                try:
+                    return _work()
+                finally:
+                    if waiting_key is not None:
+                        with _FETCHES_LOCK:
+                            _FETCHES_WAITING.discard(waiting_key)
+
+            def _work():
                 service = get_runtime().answers()
                 if kind == SUBMIT_TYPE:
                     result, output = service.submit(envelope=payload["envelope"], payload=payload["intent"],
