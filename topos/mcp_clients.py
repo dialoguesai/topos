@@ -493,6 +493,13 @@ def active_elevation(
     Fail closed on every branch — a revoked client has no active elevations no
     matter what the rows say, and expiry is checked at read time so no reaper
     is load-bearing. A grant for scope '*' covers every scope.
+
+    A read, and it runs on the app event loop once per query from a client
+    principal (packet resolution). It used to create the two tables first,
+    under the write gate: measured 21 Oct 2026, with the gate held 60 to 109 s
+    by the review pass, that froze the loop here (the gate's warning named this
+    module). A database without the tables has no clients, so no elevation.
+    The writers (mint, request, decide, revoke, list) still create the schema.
     """
     try:
         cid = normalize_client_id(client_id)
@@ -500,7 +507,6 @@ def active_elevation(
         return None
     scope = str(scope_id or "").strip()
     try:
-        ensure_mcp_clients_table(conn)
         client = get_client(conn, cid)
         if client is None or client.get("revoked_at"):
             return None
@@ -518,6 +524,9 @@ def active_elevation(
             if exp and exp <= now:
                 continue
             return row
+    except sqlite3.OperationalError as exc:
+        if "no such table" not in str(exc).lower():
+            logger.warning("active_elevation lookup failed for %r", client_id, exc_info=True)
     except Exception:  # noqa: BLE001 — DB trouble must never widen disclosure
         logger.warning("active_elevation lookup failed for %r", client_id, exc_info=True)
     return None
