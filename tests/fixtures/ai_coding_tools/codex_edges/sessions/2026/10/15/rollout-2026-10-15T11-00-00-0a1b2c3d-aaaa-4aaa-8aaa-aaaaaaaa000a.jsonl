@@ -4,7 +4,7 @@
 {"timestamp":"2026-10-15T11:00:03.000Z","ordinal":3,"type":"event_msg","payload":{"type":"task_complete"}}
 {"timestamp":"2026-10-15T11:00:04.000Z","ordinal":4,"type":"event_msg","payload":{"type":"task_started"}}
 {"timestamp":"2026-10-15T11:00:05.000Z","ordinal":5,"type":"response_item","payload":{"type":"message","id":"msg_j_a2","role":"assistant","content":[{"type":"output_text","text":"Now the handlers."}],"phase":"commentary"}}
-{"timestamp":"2026-10-15T11:00:06.000Z","ordinal":6,"type":"response_item","payload":{"type":"function_call","id":"fc_j_1","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"topos-node status --json\"]}","call_id":"call_j_1"}}
+{"timestamp":"2026-10-15T11:00:06.000Z","ordinal":6,"type":"response_item","payload":{"type":"function_call","id":"fc_j_1","name":"shell","arguments":"{\"command\":[\"bash\",\"-lc\",\"sqlite3 ~/.topos/database.db .tables\"]}","call_id":"call_j_1"}}
 {"timestamp":"2026-10-15T11:00:07.000Z","ordinal":7,"type":"response_item","payload":{"type":"function_call_output","call_id":"call_j_1","output":"{\"ok\":true}"}}
 {"timestamp":"2026-10-15T11:00:08.000Z","ordinal":8,"type":"response_item","payload":{"type":"message","id":"msg_j_a3","role":"assistant","content":[{"type":"output_text","text":"The node is up; the handlers are next."}],"phase":"commentary"}}
 {"timestamp":"2026-10-15T11:00:09.000Z","ordinal":9,"type":"compacted","payload":{"message":"summary"}}

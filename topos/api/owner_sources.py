@@ -14,6 +14,9 @@ unpaired or below the disk floor.
 unless the source is enabled in the active profile; the dataset always comes from the identity
 and never from the body.
 ``GET …/sources/{id}`` → the status block the CLI shows.
+``POST …/reclassify-touches {apply?: bool}`` → re-judge stored replies under the read / system-touch rule
+(owner ruling 20 Oct 2026): counts only; ``apply`` clears the flag where no read came first. Owner only —
+never the enrolled agent — because it widens what can be shared.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ _NO_STORE = {"Cache-Control": "no-store"}
 _PREVIEW_FIELDS = frozenset({"skip"})
 _ENABLE_FIELDS = frozenset({"skip", "backfill"})
 _SYNC_FIELDS = frozenset({"session_path"})
+_RECLASSIFY_FIELDS = frozenset({"apply"})
 
 
 def _owner(principal, *, reads: bool = False) -> None:
@@ -197,6 +201,30 @@ async def pause(source_id: str, principal=Depends(resolve_request_principal)):
 async def resume(source_id: str, principal=Depends(resolve_request_principal)):
     _owner(principal)
     return await _set_paused(_ai_source(source_id), False)
+
+
+@router.post("/sources/{source_id}/reclassify-touches")
+async def reclassify_touches(source_id: str, payload: Optional[dict] = Body(None),
+                             principal=Depends(resolve_request_principal)):
+    _owner(principal)
+    sid = _ai_source(source_id)
+    body = _body(payload, _RECLASSIFY_FIELDS)
+    apply = body.get("apply", False)
+    if not isinstance(apply, bool):
+        raise HTTPException(400, "owner_sources_payload_invalid", headers=_NO_STORE)
+    from topos.ingestion.ai_tool_touch_repair import reclassify_touches as run_repair
+
+    try:
+        result = await asyncio.to_thread(lambda: run_repair(_conn(), sid, apply=apply))
+    except Exception as exc:  # noqa: BLE001 -- the kind only; no path, row or exception text leaves the node
+        logger.warning("reclassify-touches %s failed: %s", sid, type(exc).__name__)
+        raise HTTPException(503, "owner_sources_reclassify_unavailable", headers=_NO_STORE) from None
+    if result.get("catchup_jobs_queued"):
+        from topos.core.state import get_db_connection
+        from topos.pipeline.job_runner import start_pipeline_worker
+
+        start_pipeline_worker(get_db_connection)
+    return JSONResponse(result, headers=_NO_STORE)
 
 
 @router.post("/sources/{source_id}/sync")

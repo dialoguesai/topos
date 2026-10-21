@@ -128,7 +128,27 @@ def test_environment_context_block_stripped_from_user_text(reader, codex_root):
     assert row["content"] == "Check the node status with the topos CLI"
 
 
-def test_topos_function_call_taints_following_assistant_records_only(reader, codex_root):
+def test_topos_status_call_is_a_system_touch_and_excludes_nothing(reader, codex_root):
+    """Owner ruling 20 Oct 2026: D's ``topos-node status --json`` returns no owner data: recorded, not excluding."""
+    batch = _read(reader, codex_root)
+    assert [(r["id"], r["_metadata"]["share_excluded"]) for r in _thread(batch, THREAD_D)] == [
+        ("codex:msg_d_u1", False),
+        ("codex:msg_d_a1", False),
+        ("codex:msg_d_a2", False),
+        ("codex:msg_d_u2", False),
+    ]
+    assert batch.ledger.tainted_turns == 1  # G: 1 (mcp_attribution query_scope)
+    assert batch.ledger.dropped["tool_use"] == 5  # D 1, G 1, H 3
+    assert batch.ledger.dropped["tool_result"] == 5
+    kinds = sorted((t["session_id"], t["kind"], t["surface"]) for t in batch.ledger.touches)
+    assert kinds == [(THREAD_D, "system", "topos_cli_admin"), (THREAD_G, "read", "topos_data_tool")]
+
+
+def test_topos_data_call_taints_following_assistant_records_only(reader, codex_root):
+    rollout = next(codex_root.rglob(f"*{THREAD_D}*.jsonl"))
+    text = rollout.read_text()
+    assert "topos-node status --json" in text
+    rollout.write_text(text.replace("topos-node status --json", "sqlite3 ~/.topos/database.db .tables"))
     batch = _read(reader, codex_root)
     assert [(r["id"], r["_metadata"]["share_excluded"]) for r in _thread(batch, THREAD_D)] == [
         ("codex:msg_d_u1", False),
@@ -138,9 +158,11 @@ def test_topos_function_call_taints_following_assistant_records_only(reader, cod
     ]
     # a2 and a3 are one reply after the call; a1 before it keeps its own, shareable row.
     assert _row(batch, "codex:msg_d_a2")["content"] == "The node is running and paired.\n\nNothing else to do."
-    assert batch.ledger.tainted_turns == 2  # D: 1 (shell topos-node), G: 1 (mcp_attribution)
+    assert batch.ledger.tainted_turns == 2  # D: 1 (the merged reply after the database read), G: 1 (mcp_attribution)
     assert batch.ledger.dropped["tool_use"] == 5  # D 1, G 1, H 3
     assert batch.ledger.dropped["tool_result"] == 5
+    reads = [t for t in batch.ledger.touches if t["session_id"] == THREAD_D]
+    assert [(t["kind"], t["surface"]) for t in reads] == [("read", "topos_database")]
 
 
 def test_imported_sessions_flagged_cross_tool_import(reader, codex_root):

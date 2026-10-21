@@ -113,8 +113,11 @@ class FakeReader:
     """``read_<tool>_batch`` with the §2.7b signature; hands out the batches it was given, in order."""
 
     def __init__(self, *batches: Sequence[Dict[str, Any]], secret_sightings: int = 0,
-                 receipt: Optional[Dict[str, Any]] = None) -> None:
+                 receipt: Optional[Dict[str, Any]] = None,
+                 touches: Optional[Sequence[Dict[str, Any]]] = None) -> None:
         self.batches: List[List[Dict[str, Any]]] = [list(b) for b in batches]
+        # The real Ledger's ``touches`` (owner ruling 20 Oct 2026), handed out with every batch that has rows.
+        self.touches = [dict(t) for t in (touches or ())]
         self.calls: List[Dict[str, Any]] = []
         self.secret_sightings = secret_sightings
         self.receipt = dict(receipt or {})
@@ -155,6 +158,7 @@ class FakeReader:
         for row in rows:
             if row["_metadata"]["share_excluded"]:
                 ledger.tainted()
+        ledger.touches = [dict(t) for t in self.touches] if rows else []
         newest = max((str(r["created_at"]) for r in rows), default=None)
         return SimpleNamespace(
             rows=[{**r, "_metadata": dict(r["_metadata"]), **({"_facets": dict(r["_facets"])} if "_facets" in r else {})} for r in rows],

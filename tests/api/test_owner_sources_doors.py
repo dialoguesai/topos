@@ -57,6 +57,7 @@ _DOORS = (
     (f"/sources/{SOURCE}/pause", "post"),
     (f"/sources/{SOURCE}/resume", "post"),
     (f"/sources/{SOURCE}/sync", "post"),
+    (f"/sources/{SOURCE}/reclassify-touches", "post"),
 )
 
 
@@ -382,7 +383,8 @@ def test_an_enrolled_agent_on_the_socket_reads_the_scope_and_the_status_but_chan
             status = client.get(BASE + f"/sources/{SOURCE}")
             assert status.status_code == 200, status.text
             for path in (f"/sources/{SOURCE}/preview", f"/sources/{SOURCE}/enable", f"/sources/{SOURCE}/pause",
-                         f"/sources/{SOURCE}/resume", f"/sources/{SOURCE}/sync"):
+                         f"/sources/{SOURCE}/resume", f"/sources/{SOURCE}/sync",
+                         f"/sources/{SOURCE}/reclassify-touches"):
                 response = client.post(BASE + path, json={})
                 assert response.status_code == 403 and response.json()["detail"] == "owner_socket_required", path
         # the class is minted on the socket only: the same word on another channel is nobody
@@ -392,3 +394,29 @@ def test_an_enrolled_agent_on_the_socket_reads_the_scope_and_the_status_but_chan
     finally:
         app.dependency_overrides.pop(resolve_request_principal, None)
     assert conn.execute("SELECT COUNT(*) FROM pipeline_jobs").fetchone()[0] == 0
+
+
+def test_reclassify_touches_is_a_counts_only_dry_run_unless_the_owner_applies(node, monkeypatch, tmp_path) -> None:
+    """Owner ruling 20 Oct 2026: re-judging stored replies under the read / system-touch rule. Nothing under ``~``
+    is read: the transcript root points at an empty scratch folder."""
+    app, conn, _reader = node
+    monkeypatch.setattr("topos.ingestion.sources.claude_code_reader.DEFAULT_ROOT", tmp_path / "no-transcripts")
+    with _client(app) as client:
+        dry = client.post(BASE + f"/sources/{SOURCE}/reclassify-touches", json={})
+        assert dry.status_code == 200, dry.text
+        assert dry.json()["applied"] is False and dry.json()["would_clear"] == 0
+        assert dry.headers["cache-control"] == "no-store"
+        # Applying widens what can be shared: refused at the socket without the app or a human confirmation,
+        # and so is any body that is not plainly a dry run.
+        for body in ({"apply": True}, {"apply": "yes"}, {"root": "/etc"}):
+            refused = client.post(BASE + f"/sources/{SOURCE}/reclassify-touches", json=body)
+            assert refused.status_code == 403 and refused.json()["error"] == "owner_confirmation_required", body
+        from topos.uds import write_owner_confirmation
+
+        bad = client.post(BASE + f"/sources/{SOURCE}/reclassify-touches", json={"apply": "yes"},
+                          headers={"X-Topos-Owner-Confirm": write_owner_confirmation()})
+        assert bad.status_code == 400
+        applied = client.post(BASE + f"/sources/{SOURCE}/reclassify-touches", json={"apply": True},
+                              headers={"X-Topos-Owner-Confirm": write_owner_confirmation()})
+        assert applied.status_code == 200, applied.text
+        assert applied.json()["applied"] is True and applied.json()["cleared"] == 0

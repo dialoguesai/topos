@@ -82,6 +82,11 @@ def transcript_install_body(body: Any) -> bool:
     return definition == json.loads(json.dumps(bundled.to_dict()))
 
 
+def _reclassify_dry_run(body: Any) -> bool:
+    """``reclassify-touches`` with ``apply`` false (or absent) only counts; applying it widens what can be shared."""
+    return isinstance(body, dict) and set(body) <= {"apply", "dataset_id"} and body.get("apply", False) is False
+
+
 def _entailment_list(body: Any) -> bool:
     return isinstance(body, dict) and body.get("operation") == "list"
 
@@ -125,6 +130,16 @@ def _o(method: str, template: str, reason: str) -> RouteRule:
 def _x(method: str, template: str, reason: str) -> RouteRule:
     return RouteRule(method, template, DISPATCHER, reason)
 
+
+#: Checked before the carve-outs: a transcript-source door that WIDENS what can be shared (owner ruling 20 Oct 2026,
+#: the read / system-touch re-judgement) is not "the owner's own files read into his own node" — applying it needs
+#: the app or a confirmation the human gave on a terminal; its dry run is a read.
+_RECLASSIFY_RULE = RouteRule(
+    "POST", "/api/local/owner/sources/{source_id}/reclassify-touches", DANGEROUS,
+    "makes owner-only coding-session replies shareable again (owner ruling 20 Oct 2026); the dry run only counts",
+    _reclassify_dry_run,
+)
+PRECEDENCE: Tuple[RouteRule, ...] = (_RECLASSIFY_RULE,)
 
 #: Checked first: the contract says these pass, whatever else matches.
 CARVE_OUTS: Tuple[RouteRule, ...] = (
@@ -323,6 +338,7 @@ CENSUS: Tuple[RouteRule, ...] = (
     _o("POST", "/api/local/owner/sources/{source_id}/pause", "L5 owner door: pause (refuses the sync door and the scheduler)"),
     _o("POST", "/api/local/owner/sources/{source_id}/resume", "L5 owner door: resume"),
     _o("POST", "/api/local/owner/sources/{source_id}/sync", "L5 owner door: one sync, optionally one session file"),
+    _RECLASSIFY_RULE,
     # ui_config.py / user_identity.py
     _o("PUT", "/v1/ui-config", "UI preferences"),
     _d("PUT", "/v1/user-identity", "the owner's identity mapping"),
@@ -350,10 +366,13 @@ UNKNOWN_RULE = RouteRule("*", "*", UNKNOWN, "a mutating route the census does no
 
 
 def lookup(method: str, path: str) -> RouteRule:
-    """The rule for one request: carve-outs first (they are the more specific patterns), then the census."""
+    """The rule for one request: the precedence rules, the carve-outs (the more specific patterns), the census."""
     method = str(method or "GET").upper()
     if method not in MUTATING_METHODS:
         return READ_RULE
+    for rule in PRECEDENCE:
+        if rule.matches(method, path):
+            return rule
     for rule in CARVE_OUTS:
         if rule.matches(method, path):
             return rule

@@ -237,3 +237,32 @@ def test_headless_exits_4_when_the_node_never_answers_within_10s(home: Path, mon
         f"Error: Topos did not answer on port {port} within 60 s (pid 4242). See the log: {home / '.topos' / 'logs' / 'node.log'}"
     )
     assert sum(waits) >= 10.0 and all(w == 0.5 for w in waits)
+
+
+@pytest.mark.parametrize("args", [["start", "--headless"], ["setup", "--client", "claude-code", "--plan", "--json"]])
+def test_a_fresh_process_reads_the_saved_key_before_importing_settings(tmp_path: Path, held_port: int, args):
+    """2026-10-20: `topos-node start --headless` on a paired node died with
+    "TOPOS_KEY is required": `start` was not among the subcommands that load
+    ~/.topos/.env before the node's settings module is imported. In-process tests
+    cannot see it (settings is already imported), so this runs a fresh process."""
+    import subprocess
+    import sys
+
+    (tmp_path / ".topos").mkdir()
+    (tmp_path / ".topos" / ".env").write_text("TOPOS_KEY=" + "x" * 40 + "\n")  # a placeholder, not key-shaped
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("TOPOS_") and k not in ("HOME", "PYTEST_CURRENT_TEST")}
+    import topos
+
+    # The checkout under test, not whatever `topos` the interpreter would find from tmp_path.
+    env["PYTHONPATH"] = str(Path(topos.__file__).resolve().parents[1])
+    env.update(HOME=str(tmp_path), TOPOS_SKIP_UPDATE_CHECK="1",
+               TOPOS_UDS_PATH=str(tmp_path / ".topos" / "engine.sock"))
+    argv = [sys.executable, "-m", "topos.cli", *args]
+    if args[0] == "start":
+        argv += ["--port", str(held_port)]
+    proc = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=120, cwd=str(tmp_path))
+
+    assert "ValidationError" not in proc.stderr and "TOPOS_KEY is required" not in proc.stderr, proc.stderr[-800:]
+    if args[0] == "start":
+        assert proc.returncode == 4, proc.stderr[-800:]  # the held port, reported before any boot
