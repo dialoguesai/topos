@@ -317,8 +317,6 @@ def _repair_derived(conn: sqlite3.Connection, plan: _Plan) -> Dict[str, int]:
         conn.execute("DELETE FROM temp._coding_node_renames")
         conn.executemany("INSERT INTO temp._coding_node_renames VALUES (?, ?)", sorted(node_renames.items()))
         for old_node, new_node in sorted(node_renames.items()):
-            if not conn.execute("SELECT 1 FROM graph_nodes WHERE node_id = ?", (old_node,)).fetchone():
-                continue   # an edge-only straggler: the edges move below
             # The writer's label rule (job_writer, relationship_edges): the id after its first colon, 48 characters.
             label = new_node.split(":", 1)[-1][:48]
             if conn.execute("SELECT 1 FROM graph_nodes WHERE node_id = ?", (new_node,)).fetchone():

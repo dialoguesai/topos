@@ -573,6 +573,22 @@ def test_a_dry_run_counts_derived_stragglers(node) -> None:
         " conversation_id) VALUES ('s1', 'claude_code:b1', 'claude_code_sessions', 'memory', 'm', '{}', ?)",
         (f"ai_coding_tool:{S2}",),
     )
+    node.execute("INSERT INTO graph_nodes (node_id, node_type, label, metadata_json, source_id)"
+                 " VALUES (?, 'conversation', 'x', '{}', 'claude_code_sessions')", (f"conversation:ai_coding_tool:{S1}",))
     node.commit()
 
-    assert _repair(node, dry_run=True)["derived_ids"] == 1
+    assert _repair(node, dry_run=True)["derived_ids"] == 2
+
+
+def test_a_sourceless_graph_node_two_sources_could_claim_is_left_alone(node) -> None:
+    shared = "codex_sessions:owner:topos:t2"
+    _message(node, "claude_code:e1", shared, "claude_code_sessions", "2026-10-17T09:00:00Z", 0)
+    _message(node, "codex:e2", shared, "codex_sessions", "2026-10-17T09:00:01Z", 0)
+    node.execute("INSERT INTO graph_nodes (node_id, node_type, label, metadata_json, source_id)"
+                 " VALUES (?, 'conversation', 'x', '{}', NULL)", (f"conversation:{shared}",))
+    node.commit()
+
+    _repair(node)
+
+    assert [r[0] for r in node.execute("SELECT node_id FROM graph_nodes WHERE node_id LIKE '%owner:topos:t2'")] \
+        == [f"conversation:{shared}"]
