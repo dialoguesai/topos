@@ -11,8 +11,9 @@ transcripts under ``<session>/subagents/``; files deleted after 30 days.
 What this reader does with it (CONTRACTS §2.3, §2.4, §2.7):
 
 * emits a ``user`` row only for text the person typed (the keyboard-origin
-  table in ``common``), one ``assistant`` row per reply, and counts every other
-  record in the ledger by reason;
+  table in ``common``) — at the keyboard, or queued while the agent worked —
+  one ``assistant`` row per reply, and counts every other record in the ledger
+  by reason;
 * scrubs secrets, home paths and hostnames before a row leaves here;
 * taints a session from the first Topos touch in it or in any of its sub-agent
   files, and marks every later assistant row ``share_excluded``;
@@ -32,6 +33,16 @@ collapses onto the stored row (first writer wins). A reply still running at
 the end of the bytes read (the last record asked for a tool, or a tool result
 came after it) is left unread for the next run, unless the file has been quiet
 for ``OPEN_REPLY_HOLD_SECONDS``.
+
+A prompt the person types while the agent works reaches the file as a
+``queued_command`` attachment, not a ``user`` record. It becomes a ``user`` row
+at the attachment's uuid and stamp when the attachment passes the queued-prompt
+origin table in ``common`` (``commandMode`` prompt, ``origin.kind`` human, not
+``isMeta``), then the same harness and scrub rules as a typed record. Task
+notifications and peer messages are dropped by origin. An entry whose
+``source_uuid`` names a ``user`` record read in the same pass is that record's
+copy and is dropped (never seen on disk, 20 Oct: no ``source_uuid`` named any
+record).
 
 It never reads anything but the files under the root it is given, and the
 default root is only a default: tests point it at fixture trees.
@@ -61,6 +72,7 @@ from ..parsers.ai_coding_tool.common import (
     DROP_THINKING,
     DROP_TOOL_RESULT,
     DROP_TOOL_USE,
+    CLAUDE_CODE_QUEUED_PROMPT_ORIGIN,
     Ledger,
     classify_user_text,
     content_blocks,
@@ -102,6 +114,9 @@ TITLE_PROBE_LINES = 400
 OPEN_REPLY_HOLD_SECONDS = 3600.0
 # Attachment types that deliver a prompt into a running turn: what the agent writes next answers it.
 QUEUED_PROMPT_ATTACHMENTS = frozenset({"queued_command"})
+# Prefix on the origin tag of a dropped queued entry, so the ledger tells it from a typed record's.
+QUEUED_ORIGIN_PREFIX = "queued_command:"
+DROP_QUEUED_TYPED_COPY = "queued_prompt_typed_copy"
 DROP_UNPARSEABLE = "unparseable"
 DROP_OTHER_BLOCK = "other_block"
 DROP_OUTSIDE_ROOT = "outside_root"
@@ -659,6 +674,25 @@ def _user_text(record: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     return "\n\n".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text"), None
 
 
+def _queued_prompt_text(prompt: Any) -> Tuple[Optional[str], Optional[str]]:
+    """``(joined text, drop reason)`` for a queued prompt: a string, or text and image blocks as in a typed record."""
+    if isinstance(prompt, str):
+        return prompt, None
+    if not isinstance(prompt, list):
+        return None, DROP_UNPARSEABLE
+    blocks = [block for block in prompt if isinstance(block, dict)]
+    if len(blocks) != len(prompt) or any(block.get("type") not in ("text", "image") for block in blocks):
+        return None, non_keyboard_reason("content_blocks")
+    return "\n\n".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text"), None
+
+
+def _queued_attachment(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    attachment = record.get("attachment")
+    if isinstance(attachment, dict) and attachment.get("type") in QUEUED_PROMPT_ATTACHMENTS:
+        return attachment
+    return None
+
+
 def _message(record: Dict[str, Any]) -> Dict[str, Any]:
     message = record.get("message")
     return message if isinstance(message, dict) else {}
@@ -681,8 +715,7 @@ def _ends_reply(record: Dict[str, Any]) -> bool:
     if record_type == "system":
         return True
     if record_type == "attachment":
-        attachment = record.get("attachment")
-        return isinstance(attachment, dict) and attachment.get("type") in QUEUED_PROMPT_ATTACHMENTS
+        return _queued_attachment(record) is not None
     return False
 
 
@@ -725,6 +758,12 @@ def _classify(
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     pending: Optional[_Pending] = None
+    entries = list(entries)
+    # A queued entry whose source_uuid names one of these is that typed record's copy, before it or after it.
+    typed_uuids = {
+        record["uuid"] for _line, record in entries
+        if record is not None and record.get("type") == "user" and isinstance(record.get("uuid"), str)
+    }
 
     def emit(role: str, *, uuid: str, content: str, stamp: datetime, ts_source: str,
              origin: str, share_excluded: bool, model: Optional[str]) -> None:
@@ -829,6 +868,32 @@ def _classify(
             ledger.drop(non_keyboard_reason(tag), origin=tag)
             return
         text, reason = _user_text(record)
+        typed(record, uuid, text, reason)
+
+    def queued(record: Dict[str, Any], attachment: Dict[str, Any]) -> None:
+        if record.get("isSidechain") is True:
+            ledger.drop(DROP_SUBAGENT)
+            return
+        uuid = record.get("uuid")
+        if not isinstance(uuid, str) or not uuid:
+            ledger.drop(DROP_UNPARSEABLE)
+            return
+        if uuid in seen_uuids:
+            ledger.drop(DROP_FORK_DUPLICATE)
+            return
+        seen_uuids.add(uuid)
+        tag = origin_violation(attachment, CLAUDE_CODE_QUEUED_PROMPT_ORIGIN)
+        if tag is not None:
+            ledger.drop(non_keyboard_reason(QUEUED_ORIGIN_PREFIX + tag), origin=QUEUED_ORIGIN_PREFIX + tag)
+            return
+        if attachment.get("source_uuid") in typed_uuids:
+            ledger.drop(DROP_QUEUED_TYPED_COPY)
+            return
+        text, reason = _queued_prompt_text(attachment.get("prompt"))
+        typed(record, uuid, text, reason)
+
+    def typed(record: Dict[str, Any], uuid: str, text: Optional[str], reason: Optional[str]) -> None:
+        """The person's own words, typed or queued: harness spans out, scrubbed, one ``user`` row."""
         if reason is not None:
             ledger.drop(reason, origin=reason.split(":", 1)[1] if ":" in reason else None)
             return
@@ -864,6 +929,8 @@ def _classify(
             user(record)
         elif record_type == "system":
             ledger.drop(DROP_SYSTEM)
+        elif record_type == "attachment" and _queued_attachment(record) is not None:
+            queued(record, _queued_attachment(record))
         else:
             # Titles, summaries, snapshots, attachments, progress: not turns, not drops.
             ledger.meta_records += 1

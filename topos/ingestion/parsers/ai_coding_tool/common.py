@@ -482,6 +482,17 @@ CLAUDE_CODE_KEYBOARD_ORIGIN: Tuple[OriginRule, ...] = (
     OriginRule("promptSource", denied=("system",)),
 )
 
+# A ``queued_command`` attachment (a prompt delivered into a running turn) is the person's own only when every
+# row holds, read off the attachment. Measured on the owner's store 2026-10-20 (counts only, 6,854 entries):
+# task notifications carry ``commandMode=task-notification``; peer messages carry ``origin.kind=peer`` and
+# ``isMeta``; the 9 prompt-mode entries with no ``origin`` were all harness events. So ``origin.kind`` must be
+# present and human here, unlike the typed-record rule where older builds lack it.
+CLAUDE_CODE_QUEUED_PROMPT_ORIGIN: Tuple[OriginRule, ...] = (
+    OriginRule("commandMode", allowed=("prompt",)),
+    OriginRule("origin.kind", allowed=("human",)),
+    OriginRule("isMeta", allowed=(ABSENT, None, False)),
+)
+
 
 def _lookup(record: Mapping[str, Any], dotted: str) -> Any:
     value: Any = record
