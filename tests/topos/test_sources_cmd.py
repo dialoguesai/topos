@@ -158,3 +158,28 @@ def test_quiet_sync_of_a_paused_or_not_enabled_source_is_silent_and_exit_0():
     assert quiet.stdout == "" and quiet.stderr == ""
     assert loud.exit_code == 1 and "source_not_enabled" in loud.stderr
     assert _doors(node)[0][2] == {"session_path": "/tmp/agent-transcripts/x.jsonl"}
+
+
+def test_reclassify_touches_is_a_dry_run_by_default_and_prints_counts_only(caplog):
+    node = _node()
+    node.door_results[("claude_code_sessions", "reclassify-touches")] = (200, {
+        "status": "ok", "source_id": "claude_code_sessions", "applied": False, "flagged_rows": 9, "would_clear": 4,
+        "kept_after_a_read": 3, "kept_no_transcript": 1, "topos_reads": 2, "topos_system_touches": 2,
+        "session_hint": PLANTED,
+    })
+    with serve_fake_node(node, _socket_path()):
+        result = _run(["reclassify-touches", "claude_code_sessions"])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    assert _doors(node) == [("claude_code_sessions", "reclassify-touches", {"apply": False})]
+    assert "9 replies are kept owner-only" in result.stdout and "4 would be shareable again" in result.stdout
+    assert PLANTED not in result.stdout + result.stderr + caplog.text
+
+
+def test_reclassify_touches_apply_needs_a_human_at_a_terminal():
+    """Applying makes replies shareable: refused without a terminal, before anything reaches the node."""
+    node = _node()
+    with serve_fake_node(node, _socket_path()):
+        result = _run(["reclassify-touches", "claude_code_sessions", "--apply"])
+    assert result.exit_code == 1
+    assert "run it in your own terminal" in result.stderr
+    assert _doors(node) == []

@@ -334,12 +334,20 @@ def claim_matching_queued_jobs(
     source_id: Optional[str],
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
     limit: int = 100,
+    max_records: Optional[int] = None,
+    records_already: int = 0,
 ) -> List[Dict[str, Any]]:
     """Claim every queued job of ``kind`` for ``source_id``, oldest first.
 
     Lets the worker coalesce a backlog — e.g. 40 one-record inbox deliveries —
     into a single derive batch so the per-batch jobs (dimension briefs, topic
     work) run once instead of once per delivery.
+
+    ``max_records`` bounds the merged batch by the records the payloads carry
+    (``canonical_records``), counting ``records_already`` from the claimer's own
+    job. Claiming stops at the first job that would cross it, so the oldest work
+    still goes first. Without it a backfill of large jobs became one batch of
+    ~15,000 records that committed nothing for a day (2026-10-19).
     """
     ensure_pipeline_jobs_schema(conn)
     expires = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
@@ -348,7 +356,10 @@ def claim_matching_queued_jobs(
     with with_db_write():
         begin_immediate(conn)
         try:
-            query = "SELECT job_id FROM pipeline_jobs WHERE status='queued' AND kind=?"
+            query = (
+                "SELECT job_id, COALESCE(json_array_length(payload_json, '$.canonical_records'), 0) "
+                "FROM pipeline_jobs WHERE status='queued' AND kind=?"
+            )
             params: list[Any] = [kind]
             if source_id is None:
                 query += " AND source_id IS NULL"
@@ -358,7 +369,13 @@ def claim_matching_queued_jobs(
             query += " ORDER BY created_at ASC LIMIT ?"
             params.append(int(limit))
             rows = conn.execute(query, tuple(params)).fetchall()
+            total = int(records_already or 0)
             for row in rows:
+                if max_records is not None:
+                    size = int(row[1] or 0)
+                    if total + size > int(max_records):
+                        break
+                    total += size
                 updated = conn.execute(
                     """
                     UPDATE pipeline_jobs

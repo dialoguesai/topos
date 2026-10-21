@@ -16,6 +16,7 @@ the review store are the real ones. Only the timers are shorter. The catch-up is
 """
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import json
 import sqlite3
@@ -440,14 +441,16 @@ class Running:
             self.loop.settings, debounce=debounce, tick=tick,
             **({} if min_interval is None else {"min_interval": min_interval}))
         step, observe = self.loop.step, self.loop.observe
+        self._observing = threading.Lock()                  # held by one observation, or by `unobserved`
 
         def counted_step():
             self.passes += 1
             return step()
 
         def counted_observe(service):
-            self.observations += 1
-            return observe(service)
+            with self._observing:
+                self.observations += 1
+                return observe(service)
         self.loop.step, self.loop.observe = counted_step, counted_observe
         self.loop._wake.set()                                # leave the first 5 s wait: the shorter tick from here
         Runtime._start_sweeper(self.runtime, interval=sweep_every)
@@ -481,6 +484,31 @@ class Running:
     def quiet(self) -> bool:
         with self.loop._lock:
             return not self.loop._pending
+
+    @contextlib.contextmanager
+    def unobserved(self):
+        """Inside, the loop observes nothing: an observation already running finishes first, and the next starts
+        after. So what changes inside reaches the loop as one change, whatever the machine's load (the sweep thread
+        and the owner's writes otherwise race on the wall clock)."""
+        with self._observing:
+            yield
+
+    def observed_facts(self) -> str | None:
+        """The fact digest the loop recorded at its last observation (`RefreshLoop._observe_facts`)."""
+        with self.loop._lock:
+            return self.loop._facts
+
+    def settled(self, node: Node) -> bool:
+        """The loop's own settle signal for facts: it has observed the node's current fact state, and nothing is
+        pending (no build queued or running). Read in that order: an observation that recorded the current state
+        queued its build first, so a build it owes shows as pending here."""
+        from topos.permissions_v2.refresh_loop import fact_digest
+        conn = sqlite3.connect(str(node.corpus.resolver.path), timeout=30)
+        try:
+            current = fact_digest(conn)
+        finally:
+            conn.close()
+        return self.observed_facts() == current and self.quiet()
 
     def stop(self):
         self.runtime._sweeper_stop.set()

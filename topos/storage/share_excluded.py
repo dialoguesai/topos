@@ -76,8 +76,10 @@ def row_share_excluded(row: Any) -> bool:
 def record_share_excluded(record: Any) -> bool:
     """Whether one canonical record is a row the owner keeps from every share: its ``share_excluded`` value, else
     the ``share_excluded`` the reader put in its ``metadata_json`` (a dict, or the JSON text the row stores). The
-    same fact migration 85's triggers read at write time, for the paths that see the record before the row."""
-    if not isinstance(record, dict):
+    same fact migration 85's triggers read at write time, for the paths that see the record before the row: flat
+    (``share_excluded``, the bundled mapper) or nested (``_metadata.share_excluded``, the runtime-installed mapper a
+    live node uses)."""
+    if not isinstance(record, Mapping):
         return False
     if record.get(COLUMN) in (1, True, "1"):
         return True
@@ -87,7 +89,10 @@ def record_share_excluded(record: Any) -> bool:
             meta = json.loads(meta)
         except ValueError:
             return False
-    return isinstance(meta, dict) and meta.get(COLUMN) is True
+    if not isinstance(meta, dict):
+        return False
+    nested = meta.get("_metadata")
+    return meta.get(COLUMN) is True or (isinstance(nested, dict) and nested.get(COLUMN) is True)
 
 
 __all__ = ["COLUMN", "TABLE", "record_share_excluded", "row_share_excluded", "share_excluded_clause",

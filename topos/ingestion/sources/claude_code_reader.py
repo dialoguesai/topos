@@ -11,12 +11,44 @@ transcripts under ``<session>/subagents/``; files deleted after 30 days.
 What this reader does with it (CONTRACTS §2.3, §2.4, §2.7):
 
 * emits a ``user`` row only for text the person typed (the keyboard-origin
-  table in ``common``), an ``assistant`` row per ``message.id`` with its text
-  blocks joined in order, and counts every other record in the ledger by reason;
+  table in ``common``) — at the keyboard, or queued while the agent worked —
+  one ``assistant`` row per reply, and counts every other record in the ledger
+  by reason;
 * scrubs secrets, home paths and hostnames before a row leaves here;
-* taints a session from the first Topos touch in it or in any of its sub-agent
-  files, and marks every later assistant row ``share_excluded``;
+* names the project folder once per row as the §2.6 facet ``project_key`` (the
+  repo folder's basename from the records' ``cwd``; never the path, never the
+  ``-Users-…`` slug the folder is stored under), riding top-level outside the
+  record so L5 lifts it into the owner-only facets table and the preview can
+  list it as a name ``--skip`` takes;
+* taints a session from the first READ of Topos in it or in any of its sub-agent
+  files, and marks every later assistant row ``share_excluded``; a system touch
+  (status, health check, setup) is recorded on the ledger and excludes nothing;
 * reads each file from its byte cursor, so an hourly run costs the new bytes.
+
+A reply is the text blocks from the first assistant text after a turn
+boundary up to the next one, joined in order: one agentic turn writes a record
+per content block and a new ``message.id`` per API call, so the narration
+between its tool calls would otherwise be ten short rows. Tool calls, their
+results, thinking and meta records (attachments, titles, snapshots) sit inside
+a reply and are dropped from it as before. A boundary is any user record that
+is not a tool result (typed, injected or an interrupt), a ``system`` record, a
+prompt queued mid-turn (``queued_command`` attachment), or the taint instant,
+so no row mixes shareable and excluded text. The row takes the reply's first
+text record's uuid and stamp; a fork or resume copy of a whole reply therefore
+collapses onto the stored row (first writer wins). A reply still running at
+the end of the bytes read (the last record asked for a tool, or a tool result
+came after it) is left unread for the next run, unless the file has been quiet
+for ``OPEN_REPLY_HOLD_SECONDS``.
+
+A prompt the person types while the agent works reaches the file as a
+``queued_command`` attachment, not a ``user`` record. It becomes a ``user`` row
+at the attachment's uuid and stamp when the attachment passes the queued-prompt
+origin table in ``common`` (``commandMode`` prompt, ``origin.kind`` human, not
+``isMeta``), then the same harness and scrub rules as a typed record. Task
+notifications and peer messages are dropped by origin. An entry whose
+``source_uuid`` names a ``user`` record read in the same pass is that record's
+copy and is dropped (never seen on disk, 20 Oct: no ``source_uuid`` named any
+record).
 
 It never reads anything but the files under the root it is given, and the
 default root is only a default: tests point it at fixture trees.
@@ -27,6 +59,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +78,7 @@ from ..parsers.ai_coding_tool.common import (
     DROP_THINKING,
     DROP_TOOL_RESULT,
     DROP_TOOL_USE,
+    CLAUDE_CODE_QUEUED_PROMPT_ORIGIN,
     Ledger,
     classify_user_text,
     content_blocks,
@@ -53,8 +87,10 @@ from ..parsers.ai_coding_tool.common import (
     make_record,
     non_keyboard_reason,
     origin_violation,
+    project_key_from_cwd,
     scrub_text,
-    taints,
+    TOUCH_READ,
+    topos_touch,
 )
 
 logger = logging.getLogger("topos.ingestion.sources.claude_code_reader")
@@ -81,6 +117,17 @@ TAINT_MARKER_SUFFIX = "#taint"
 TAIL_PROBE_BYTES = 64 * 1024
 # Lines read from the top of a file to find the first typed prompt for a title.
 TITLE_PROBE_LINES = 400
+# Lines read from the top of a folder's session files to find the first record naming a ``cwd``
+# (summaries and snapshots carry none): the folder's project facet, and what a basename skip matches.
+PROJECT_PROBE_LINES = 64
+# A reply still running at the end of a file is held for the next run; after this long without a write
+# the session is taken as closed or crashed mid-tool, and the reply is emitted as it stands.
+OPEN_REPLY_HOLD_SECONDS = 3600.0
+# Attachment types that deliver a prompt into a running turn: what the agent writes next answers it.
+QUEUED_PROMPT_ATTACHMENTS = frozenset({"queued_command"})
+# Prefix on the origin tag of a dropped queued entry, so the ledger tells it from a typed record's.
+QUEUED_ORIGIN_PREFIX = "queued_command:"
+DROP_QUEUED_TYPED_COPY = "queued_prompt_typed_copy"
 DROP_UNPARSEABLE = "unparseable"
 DROP_OTHER_BLOCK = "other_block"
 DROP_OUTSIDE_ROOT = "outside_root"
@@ -107,19 +154,27 @@ class _Session:
     file_mtime: float
     # First record stamp seen in the file: the fallback for records without one.
     session_epoch: Optional[float] = None
+    # The folder's §2.6 facet: the repo folder's basename, or None.
+    project_key: Optional[str] = None
 
 
 @dataclass
-class _Pending:
-    """One assistant reply being assembled across the records that share its message.id."""
+class _Piece:
+    """The text blocks of one assistant record, with the record's id and stamp."""
 
-    message_id: str
     uuid: str
     epoch: float
     stamp: datetime
     ts_source: str
     model: Optional[str]
     texts: List[str] = field(default_factory=list)
+
+
+@dataclass
+class _Pending:
+    """One assistant reply being assembled: one piece per text-bearing record, up to the next turn boundary."""
+
+    pieces: List[_Piece] = field(default_factory=list)
 
 
 def read_claude_code_batch(
@@ -140,7 +195,8 @@ def read_claude_code_batch(
     ``batch_size`` is a soft cap checked between files, so a file's cursor only
     ever moves past whole records. ``since_unix`` applies to files not yet
     cursored, by their newest RECORD stamp (mtime is not a proxy: spike A).
-    ``skip_folders`` are project slugs (as listed, or in their scrubbed ``-~-``
+    ``skip_folders`` are project folder names: the basename the preview lists
+    (the §2.6 facet), or the stored slug (as listed, or in its scrubbed ``-~-``
     form). ``secrets`` are the node's exact secrets (§2.4 step 1); ``hostnames``
     and ``usernames`` default to this machine's (§2.4 step 3).
     """
@@ -154,14 +210,14 @@ def read_claude_code_batch(
         usernames = machine_usernames()
     root = Path(root_path) if root_path is not None else DEFAULT_ROOT
     if session_path is not None:
-        candidates = _session_path_candidates(Path(session_path), root, skip, ledger)
+        candidates = _session_path_candidates(Path(session_path), root, skip, ledger, usernames)
     else:
-        candidates = _walk_root(root, skip, ledger)
+        candidates = _walk_root(root, skip, ledger, usernames)
 
     rows: List[Dict[str, Any]] = []
     seen_uuids: Set[str] = set()
     files_touched = 0
-    for path in candidates:
+    for path, project_key in candidates:
         if batch_size and len(rows) >= batch_size:
             break
         file_rows, touched = _read_session_file(
@@ -173,6 +229,7 @@ def read_claude_code_batch(
             secrets=secrets,
             hostnames=hostnames,
             usernames=usernames,
+            project_key=project_key,
         )
         if touched:
             files_touched += 1
@@ -196,13 +253,38 @@ def _skip_set(skip_folders: Sequence[str]) -> Set[str]:
     return {str(name).strip() for name in skip_folders if str(name).strip()}
 
 
-def _folder_skipped(slug: str, skip: Set[str]) -> bool:
+def _folder_skipped(slug: str, skip: Set[str], project_key: Optional[str] = None) -> bool:
+    """Whether a listed name excludes this folder: its project basename (what the preview lists), its stored
+    slug, or the slug's scrubbed ``-~-`` form."""
     if not skip:
         return False
     if slug in skip:
         return True
+    if project_key is not None and project_key in skip:
+        return True
     scrubbed, _ = scrub_text(slug, hostnames=(), usernames=())
     return scrubbed in skip
+
+
+def _folder_project_key(files: Sequence[Path], usernames: Sequence[str]) -> Optional[str]:
+    """The folder's facet (``common.project_key_from_cwd``) from the first record naming a ``cwd`` in the head
+    of any of its session files. One folder is one working directory (the slug is that path), so the first
+    sighting decides; a folder whose records name none has no facet."""
+    for path in files:
+        try:
+            with path.open("rb") as handle:
+                for index, line in enumerate(handle):
+                    if index >= PROJECT_PROBE_LINES:
+                        break
+                    record = _parse_line(line)
+                    if record is None:
+                        continue
+                    cwd = record.get("cwd")
+                    if isinstance(cwd, str) and cwd.strip():
+                        return project_key_from_cwd(cwd, usernames=usernames)
+        except OSError:
+            continue
+    return None
 
 
 def _within(path: Path, root: Path) -> bool:
@@ -219,27 +301,34 @@ def _is_side_file(name: str) -> bool:
     return any(marker in name for marker in SIDE_FILE_MARKERS)
 
 
-def _session_path_candidates(path: Path, root: Path, skip: Set[str], ledger: Ledger) -> List[Path]:
+def _session_path_candidates(
+    path: Path, root: Path, skip: Set[str], ledger: Ledger, usernames: Sequence[str],
+) -> List[Tuple[Path, Optional[str]]]:
     """The hook's ``transcript_path``: one file under the tool's own root, still subject to the folder and
     side-file rules. A path outside the root is dropped: the sync door takes it from any socket caller."""
     if not _within(path, root):
         ledger.drop(DROP_OUTSIDE_ROOT)
         return []
-    if _folder_skipped(path.parent.name, skip):
+    project_key = _folder_project_key([path], usernames)
+    if _folder_skipped(path.parent.name, skip, project_key):
         ledger.drop(DROP_SKIPPED_FOLDER)
         return []
     if _is_side_file(path.name):
         ledger.drop(DROP_SIDE_FILE)
         return []
-    return [path]
+    return [(path, project_key)]
 
 
-def _walk_root(root: Path, skip: Set[str], ledger: Ledger) -> List[Path]:
-    """Session files under ``root/<slug>/``, oldest first; side files and skipped folders counted."""
+def _walk_root(
+    root: Path, skip: Set[str], ledger: Ledger, usernames: Sequence[str],
+) -> List[Tuple[Path, Optional[str]]]:
+    """``(session file, project facet)`` pairs under ``root/<slug>/``, oldest first within a folder; side
+    files and skipped folders counted. A folder skipped by name costs no read; one skipped by its basename
+    costs the head of a file, and nothing in it is counted."""
     if not root.is_dir():
         logger.info("Claude Code root %s is not a directory; nothing to read", root)
         return []
-    candidates: List[Path] = []
+    candidates: List[Tuple[Path, Optional[str]]] = []
     for project_dir in sorted(root.iterdir()):
         if not project_dir.is_dir():
             continue
@@ -247,11 +336,12 @@ def _walk_root(root: Path, skip: Set[str], ledger: Ledger) -> List[Path]:
             ledger.drop(DROP_SKIPPED_FOLDER)
             continue
         files: List[Tuple[float, str, Path]] = []
+        side_files = 0
         for entry in project_dir.iterdir():
             if not entry.is_file():
                 continue
             if _is_side_file(entry.name):
-                ledger.drop(DROP_SIDE_FILE)
+                side_files += 1
                 continue
             if entry.suffix != ".jsonl":
                 continue
@@ -262,7 +352,14 @@ def _walk_root(root: Path, skip: Set[str], ledger: Ledger) -> List[Path]:
             files.append((mtime, entry.name, entry))
         # Oldest first: of a fork pair the original is usually older, so it is
         # the copy that keeps its uuids and the fork that counts as duplicate.
-        candidates.extend(path for _mtime, _name, path in sorted(files, key=lambda item: (item[0], item[1])))
+        ordered = [path for _mtime, _name, path in sorted(files, key=lambda item: (item[0], item[1]))]
+        project_key = _folder_project_key(ordered, usernames)
+        if _folder_skipped(project_dir.name, skip, project_key):
+            ledger.drop(DROP_SKIPPED_FOLDER)
+            continue
+        if side_files:
+            ledger.drop(DROP_SIDE_FILE, side_files)
+        candidates.extend((path, project_key) for path in ordered)
     return candidates
 
 
@@ -281,6 +378,7 @@ def _read_session_file(
     secrets: Sequence[str],
     hostnames: Optional[Sequence[str]],
     usernames: Optional[Sequence[str]],
+    project_key: Optional[str] = None,
 ) -> Tuple[List[Dict[str, Any]], bool]:
     key = str(path)
     cursor = cursors.get(SOURCE_ID, key)
@@ -312,6 +410,14 @@ def _read_session_file(
         ledger.drop(DROP_FILE_GONE)
         return [], False
     lines, consumed = _complete_lines(data)
+    records = [_parse_line(line) for line in lines]
+    hold = None
+    if time.time() - float(stat.st_mtime) < OPEN_REPLY_HOLD_SECONDS:
+        hold = _open_reply_start(records)
+    if hold is not None:
+        # Whole lines before the open reply; the reply and everything after it wait for the next run.
+        consumed = sum(len(line) + 1 for line in lines[:hold])
+        lines, records = lines[:hold], records[:hold]
 
     ledger.conversations_seen += 1
     session_id = path.stem
@@ -324,8 +430,9 @@ def _read_session_file(
         turn_index=cursor.record_count if cursor is not None else 0,
         taint_at=taint_at,
         file_mtime=float(stat.st_mtime),
+        project_key=project_key,
     )
-    rows = _classify(lines, state, ledger, seen_uuids, secrets, hostnames, usernames)
+    rows = _classify(zip(lines, records), state, ledger, seen_uuids, secrets, hostnames, usernames)
 
     if state.taint_at is not None and (marker is None or state.taint_at < marker):
         _put_taint_marker(cursors, key, state.taint_at)
@@ -339,7 +446,8 @@ def _read_session_file(
     )
     if rows:
         ledger.conversations_kept += 1
-    return rows, True
+    # A file whose only new bytes are a held reply moved nothing: the runner stops asking for it.
+    return rows, bool(rows) or consumed > 0 or cursor is None
 
 
 def _read_from(path: Path, offset: int) -> bytes:
@@ -461,9 +569,40 @@ def _put_taint_marker(cursors: Any, key: str, epoch: float) -> None:
 
 
 def _tool_use_taint(block: Dict[str, Any]) -> bool:
-    """A tool call touches a Topos surface by its name or by ANY of its inputs — the shell command, but also the
-    path a Read/Grep/Edit names (security review F6: ``~/.topos/database.db`` read through a file tool)."""
+    """True when the call READS Topos (a system touch is recorded, never excluding)."""
+    touch = _tool_use_touch(block)
+    return touch is not None and touch[0] == TOUCH_READ
+
+
+def _note_touch(ledger: Ledger, session_id: str, block: Dict[str, Any], touch: Tuple[str, str],
+                epoch: Optional[float]) -> None:
+    anchor = block.get("id") if isinstance(block.get("id"), str) and block.get("id") else None
+    ledger.note_touch(tool=TOOL, session_id=session_id, touch=touch, at=epoch, anchor=anchor)
+
+
+#: Tools whose text is OUTPUT — a file being written, a brief for a sub-agent, a message to a peer, a structured
+#: answer: their words bring nothing of Topos into the session (a sub-agent's own calls are scanned from its
+#: transcript), so only the path they act on is judged.
+_OUTPUT_ONLY_TOOLS = frozenset({
+    "Write", "Edit", "MultiEdit", "NotebookEdit", "TodoWrite", "Agent", "Task", "SendMessage", "StructuredOutput",
+    "SubagentHandoff", "mcp__ccd_session__spawn_task", "mcp__ccd_session__mark_chapter",
+})
+_TARGET_KEYS = ("file_path", "path", "notebook_path")
+
+
+def _tool_use_touch(block: Dict[str, Any]) -> Optional[Tuple[str, str]]:
+    """A tool call touches a Topos surface by its name or by its inputs — the shell command, but also the path a
+    Read/Grep/Edit names (security review F6: ``~/.topos/database.db`` read through a file tool). A Bash call is
+    judged by its command (not its description); an output-only tool by the path it acts on; any other tool by
+    ALL of its inputs (fail closed)."""
     inputs = block.get("input")
+    name = block.get("name")
+    if isinstance(inputs, dict) and name == "Bash" and isinstance(inputs.get("command"), str):
+        inputs = {"command": inputs["command"]}
+    elif isinstance(inputs, dict) and name in _OUTPUT_ONLY_TOOLS:
+        inputs = {key: inputs[key] for key in _TARGET_KEYS if isinstance(inputs.get(key), str)}
+        if not inputs:
+            return topos_touch(name, None)
     text: Optional[str] = None
     if isinstance(inputs, str):
         text = inputs
@@ -472,7 +611,7 @@ def _tool_use_taint(block: Dict[str, Any]) -> bool:
             text = json.dumps(inputs, ensure_ascii=False, default=str)
         except (TypeError, ValueError):
             text = str(inputs)
-    return taints(block.get("name"), text)
+    return topos_touch(block.get("name"), text)
 
 
 def _scan_subagents(session_dir: Path, cursors: Any, ledger: Ledger) -> Optional[float]:
@@ -509,8 +648,15 @@ def _scan_subagents(session_dir: Path, cursors: Any, ledger: Ledger) -> Optional
                 continue
             message = record.get("message") if isinstance(record.get("message"), dict) else {}
             for block in content_blocks(message.get("content")):
-                if block.get("type") == "tool_use" and _tool_use_taint(block):
-                    earliest = _min_epoch(earliest, _record_epoch(record) or float(stat.st_mtime))
+                if block.get("type") != "tool_use":
+                    continue
+                touch = _tool_use_touch(block)
+                if touch is None:
+                    continue
+                epoch = _record_epoch(record) or float(stat.st_mtime)
+                _note_touch(ledger, session_dir.name, block, touch, epoch)
+                if touch[0] == TOUCH_READ:
+                    earliest = _min_epoch(earliest, epoch)
         cursors.put(SOURCE_ID, key, size=int(stat.st_size), mtime=float(stat.st_mtime),
                     offset=offset + consumed, record_count=0)
     return earliest
@@ -623,8 +769,81 @@ def _user_text(record: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
     return "\n\n".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text"), None
 
 
+def _queued_prompt_text(prompt: Any) -> Tuple[Optional[str], Optional[str]]:
+    """``(joined text, drop reason)`` for a queued prompt: a string, or text and image blocks as in a typed record."""
+    if isinstance(prompt, str):
+        return prompt, None
+    if not isinstance(prompt, list):
+        return None, DROP_UNPARSEABLE
+    blocks = [block for block in prompt if isinstance(block, dict)]
+    if len(blocks) != len(prompt) or any(block.get("type") not in ("text", "image") for block in blocks):
+        return None, non_keyboard_reason("content_blocks")
+    return "\n\n".join(str(block.get("text") or "") for block in blocks if block.get("type") == "text"), None
+
+
+def _queued_attachment(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    attachment = record.get("attachment")
+    if isinstance(attachment, dict) and attachment.get("type") in QUEUED_PROMPT_ATTACHMENTS:
+        return attachment
+    return None
+
+
+def _message(record: Dict[str, Any]) -> Dict[str, Any]:
+    message = record.get("message")
+    return message if isinstance(message, dict) else {}
+
+
+def _carries_tool_result(record: Dict[str, Any]) -> bool:
+    return any(block.get("type") == "tool_result" for block in content_blocks(_message(record).get("content")))
+
+
+def _ends_reply(record: Dict[str, Any]) -> bool:
+    """Whether this record closes the reply being assembled (a turn boundary, see the module docstring).
+
+    Sub-agent records written into the main file belong to the sub-agent, not to the reply around them.
+    """
+    record_type = record.get("type")
+    if record.get("isSidechain") is True:
+        return False
+    if record_type == "user":
+        return not _carries_tool_result(record)
+    if record_type == "system":
+        return True
+    if record_type == "attachment":
+        return _queued_attachment(record) is not None
+    return False
+
+
+def _has_text(record: Dict[str, Any]) -> bool:
+    return any(block.get("type") == "text" for block in content_blocks(_message(record).get("content")))
+
+
+def _open_reply_start(records: Sequence[Optional[Dict[str, Any]]]) -> Optional[int]:
+    """Index of the record that starts a reply still running at the end of ``records``, else None.
+
+    Running = after its first text the last word is a tool call (``stop_reason`` ``tool_use``) or a tool
+    result, so another API call is coming. An end_turn, a missing stop_reason or a boundary closes it.
+    """
+    start: Optional[int] = None
+    awaiting = False
+    for index, record in enumerate(records):
+        if record is None:
+            continue
+        if _ends_reply(record):
+            start, awaiting = None, False
+        elif record.get("isSidechain") is True:
+            continue
+        elif record.get("type") == "assistant":
+            if start is None and _has_text(record):
+                start = index
+            awaiting = _message(record).get("stop_reason") == "tool_use"
+        elif record.get("type") == "user":
+            awaiting = True
+    return start if awaiting else None
+
+
 def _classify(
-    lines: Iterable[bytes],
+    entries: Iterable[Tuple[bytes, Optional[Dict[str, Any]]]],
     state: _Session,
     ledger: Ledger,
     seen_uuids: Set[str],
@@ -634,6 +853,12 @@ def _classify(
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     pending: Optional[_Pending] = None
+    entries = list(entries)
+    # A queued entry whose source_uuid names one of these is that typed record's copy, before it or after it.
+    typed_uuids = {
+        record["uuid"] for _line, record in entries
+        if record is not None and record.get("type") == "user" and isinstance(record.get("uuid"), str)
+    }
 
     def emit(role: str, *, uuid: str, content: str, stamp: datetime, ts_source: str,
              origin: str, share_excluded: bool, model: Optional[str]) -> None:
@@ -651,37 +876,48 @@ def _classify(
             timestamp_source=ts_source,
             model_slug=model,
         )
+        # The facet rides beside the §2.2 record, never inside it (CONTRACTS §2.4): L5 lifts it off
+        # before the row is written anywhere.
+        row["project_key"] = state.project_key
         state.turn_index += 1
         ledger.turns_emitted += 1
         if share_excluded:
             ledger.tainted(1)
         rows.append(row)
 
+    def excluded_at(epoch: float) -> bool:
+        return state.taint_at is not None and epoch >= state.taint_at
+
     def flush() -> None:
         nonlocal pending
         if pending is None:
             return
         reply, pending = pending, None
-        if not reply.texts:
-            return
-        content = "\n\n".join(text.strip() for text in reply.texts if text and text.strip())
-        content, counts = scrub_text(content, secrets=secrets, hostnames=hostnames, usernames=usernames)
-        ledger.record_scrubs(counts, session_id=state.session_id)
-        if not content.strip():
-            ledger.drop(DROP_EMPTY)
-            return
-        excluded = state.taint_at is not None and reply.epoch >= state.taint_at
-        emit("assistant", uuid=reply.uuid, content=content, stamp=reply.stamp, ts_source=reply.ts_source,
-             origin="assistant", share_excluded=excluded, model=reply.model)
+        # One row per run of pieces on the same side of the taint instant, judged with the instant as it
+        # stands now: a Topos call in the same record as a text taints that record's text, never the
+        # narration before it, and no row mixes shareable and excluded text.
+        runs: List[List[_Piece]] = []
+        for piece in reply.pieces:
+            if runs and excluded_at(runs[-1][0].epoch) == excluded_at(piece.epoch):
+                runs[-1].append(piece)
+            else:
+                runs.append([piece])
+        for run in runs:
+            ledger.merged_blocks += len(run) - 1
+            first = run[0]
+            content = "\n\n".join(text.strip() for piece in run for text in piece.texts if text and text.strip())
+            content, counts = scrub_text(content, secrets=secrets, hostnames=hostnames, usernames=usernames)
+            ledger.record_scrubs(counts, session_id=state.session_id)
+            if not content.strip():
+                ledger.drop(DROP_EMPTY)
+                continue
+            emit("assistant", uuid=first.uuid, content=content, stamp=first.stamp, ts_source=first.ts_source,
+                 origin="assistant", share_excluded=excluded_at(first.epoch), model=first.model)
 
     def assistant(record: Dict[str, Any]) -> None:
         nonlocal pending
-        message = record.get("message") if isinstance(record.get("message"), dict) else {}
-        message_id = str(message.get("id") or record.get("uuid") or "")
-        if pending is not None and pending.message_id != message_id:
-            flush()
+        message = _message(record)
         if record.get("isSidechain") is True:
-            flush()
             ledger.drop(DROP_SUBAGENT)
             return
         uuid = record.get("uuid")
@@ -697,25 +933,27 @@ def _classify(
         if not blocks:
             ledger.drop(DROP_EMPTY)
             return
-        first_text_here = True
+        piece = _Piece(uuid, epoch, stamp, ts_source,
+                       model=message.get("model") if isinstance(message.get("model"), str) else None)
         for block in blocks:
             block_type = block.get("type")
             if block_type == "text":
-                if pending is None or pending.message_id != message_id:
-                    pending = _Pending(message_id, uuid, epoch, stamp, ts_source,
-                                       model=message.get("model") if isinstance(message.get("model"), str) else None)
-                elif first_text_here:
-                    ledger.merged_blocks += 1
-                first_text_here = False
-                pending.texts.append(str(block.get("text") or ""))
+                piece.texts.append(str(block.get("text") or ""))
             elif block_type == "tool_use":
                 ledger.drop(DROP_TOOL_USE)
-                if _tool_use_taint(block):
-                    state.taint_at = _min_epoch(state.taint_at, epoch)
+                touch = _tool_use_touch(block)
+                if touch is not None:
+                    _note_touch(ledger, state.session_id, block, touch, epoch)
+                    if touch[0] == TOUCH_READ:
+                        state.taint_at = _min_epoch(state.taint_at, epoch)
             elif block_type in ("thinking", "redacted_thinking"):
                 ledger.drop(DROP_THINKING)
             else:
                 ledger.drop(f"{DROP_OTHER_BLOCK}:{block_type}")
+        if piece.texts:
+            if pending is None:
+                pending = _Pending()
+            pending.pieces.append(piece)
 
     def user(record: Dict[str, Any]) -> None:
         uuid = record.get("uuid")
@@ -731,6 +969,32 @@ def _classify(
             ledger.drop(non_keyboard_reason(tag), origin=tag)
             return
         text, reason = _user_text(record)
+        typed(record, uuid, text, reason)
+
+    def queued(record: Dict[str, Any], attachment: Dict[str, Any]) -> None:
+        if record.get("isSidechain") is True:
+            ledger.drop(DROP_SUBAGENT)
+            return
+        uuid = record.get("uuid")
+        if not isinstance(uuid, str) or not uuid:
+            ledger.drop(DROP_UNPARSEABLE)
+            return
+        if uuid in seen_uuids:
+            ledger.drop(DROP_FORK_DUPLICATE)
+            return
+        seen_uuids.add(uuid)
+        tag = origin_violation(attachment, CLAUDE_CODE_QUEUED_PROMPT_ORIGIN)
+        if tag is not None:
+            ledger.drop(non_keyboard_reason(QUEUED_ORIGIN_PREFIX + tag), origin=QUEUED_ORIGIN_PREFIX + tag)
+            return
+        if attachment.get("source_uuid") in typed_uuids:
+            ledger.drop(DROP_QUEUED_TYPED_COPY)
+            return
+        text, reason = _queued_prompt_text(attachment.get("prompt"))
+        typed(record, uuid, text, reason)
+
+    def typed(record: Dict[str, Any], uuid: str, text: Optional[str], reason: Optional[str]) -> None:
+        """The person's own words, typed or queued: harness spans out, scrubbed, one ``user`` row."""
         if reason is not None:
             ledger.drop(reason, origin=reason.split(":", 1)[1] if ":" in reason else None)
             return
@@ -751,25 +1015,25 @@ def _classify(
         emit("user", uuid=uuid, content=kept, stamp=stamp, ts_source=ts_source,
              origin="keyboard", share_excluded=False, model=None)
 
-    for line in lines:
-        record = _parse_line(line)
+    for line, record in entries:
         if record is None:
             if line.strip():
                 ledger.drop(DROP_UNPARSEABLE)
             continue
         ledger.message_nodes += 1
+        if _ends_reply(record):
+            flush()
         record_type = record.get("type")
         if record_type == "assistant":
             assistant(record)
         elif record_type == "user":
-            flush()
             user(record)
         elif record_type == "system":
-            flush()
             ledger.drop(DROP_SYSTEM)
+        elif record_type == "attachment" and _queued_attachment(record) is not None:
+            queued(record, _queued_attachment(record))
         else:
-            # Titles, summaries, snapshots, progress: not turns, not drops.
-            flush()
+            # Titles, summaries, snapshots, attachments, progress: not turns, not drops.
             ledger.meta_records += 1
     flush()
     return rows

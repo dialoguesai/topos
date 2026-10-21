@@ -10,6 +10,7 @@ from datetime import datetime
 from typing import Any, Dict, Iterable, Optional
 
 from ..storage.db.write_gate import batched_writes, commit_connection
+from ..storage.share_excluded import record_share_excluded, row_share_excluded
 from .lifecycle.exclusions import excluded_record_ids
 from .stats.definitions import row_event_ts
 from .stats.engine import _record_id, _table_for_row
@@ -48,6 +49,7 @@ class TimelineProjectionResult:
     rendering_normalized: int = 0
     identity_mismatch: int = 0
     excluded: int = 0
+    share_excluded: int = 0
     missing_timestamp: int = 0
     missing_record_id: int = 0
 
@@ -197,6 +199,12 @@ def project_timeline_rows(
                 continue
             if record_id in excluded:
                 result.excluded += 1
+                continue
+            # An owner-only coding-session reply (CONTRACTS §2.6) is never projected: ``_mark_share_excluded`` took
+            # its timeline row out, and a repair that reads the canonical table must not put it back. The column
+            # fails closed (anything but 0 is flagged); the metadata catches a row whose column was never set.
+            if row_share_excluded(row) or record_share_excluded(row):
+                result.share_excluded += 1
                 continue
             event_at = row_event_ts(row)
             if event_at is None:

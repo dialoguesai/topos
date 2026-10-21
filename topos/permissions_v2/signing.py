@@ -154,8 +154,14 @@ class SignedKnowledgeAnswerEnvelope(SignedKnowledgeEnvelope):
     request_type: AnswerRequestType
 
 
+#: The truth pack's request types (truth_contract.TRUTH_REQUEST_TYPES): a claim, and a free statement to read and
+#: check (`effort: high`) or only to read for confirmation.
+TruthRequestType = Literal["permissions.v2.verify_claim", "permissions.v2.verify_claim_statement",
+                           "permissions.v2.interpret_claim"]
+
+
 class KnowledgeTruthEnvelopeBody(KnowledgeEnvelopeBody):
-    request_type: Literal["permissions.v2.verify_claim"]
+    request_type: TruthRequestType
 
 
 class SignedKnowledgeTruthEnvelope(KnowledgeTruthEnvelopeBody):
@@ -163,7 +169,7 @@ class SignedKnowledgeTruthEnvelope(KnowledgeTruthEnvelopeBody):
 
 
 class TruthRequestContext(RequestContext):
-    request_type: Literal["permissions.v2.verify_claim"]
+    request_type: TruthRequestType
 
 
 class AnswerRequestContext(RequestContext):
@@ -210,7 +216,7 @@ def parse_authority(raw) -> AnyAuthorityBinding:
 def parse_envelope(raw, *, signed=True):
     raw = _value(raw)
     if raw.get("capability_version") == "permissions-beta/p2c-v3":
-        if raw.get("request_type") == "permissions.v2.verify_claim":
+        if raw.get("request_type") in TruthRequestType.__args__:
             return (SignedKnowledgeTruthEnvelope if signed else KnowledgeTruthEnvelopeBody).parse(raw)
         if raw.get("request_type") in ("permissions.v2.answer", "permissions.v2.answer.fetch"):
             return (SignedKnowledgeAnswerEnvelope if signed else KnowledgeAnswerEnvelopeBody).parse(raw)
@@ -232,7 +238,7 @@ def parse_envelope(raw, *, signed=True):
 
 def parse_request_context(raw) -> AnyRequestContext:
     raw = _value(raw)
-    if raw.get("request_type") == "permissions.v2.verify_claim":
+    if raw.get("request_type") in TruthRequestType.__args__:
         return TruthRequestContext.parse(raw)
     if raw.get("request_type") in ("permissions.v2.answer", "permissions.v2.answer.fetch"):
         return AnswerRequestContext.parse(raw)
@@ -243,7 +249,8 @@ def parse_request_context(raw) -> AnyRequestContext:
     return RequestContext.parse(raw)
 
 
-def request_digest(request_type: RequestType | FactRequestType | SearchRequestType | AnswerRequestType, payload: Any) -> str:
+def request_digest(request_type: RequestType | FactRequestType | SearchRequestType | AnswerRequestType | TruthRequestType,
+                   payload: Any) -> str:
     return digest({"request_type": request_type, "payload": payload})
 
 

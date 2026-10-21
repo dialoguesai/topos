@@ -19,6 +19,8 @@ report scripts all call it, like ``chatgpt_export`` before it.
 from __future__ import annotations
 
 import getpass
+import hashlib
+import json
 import re
 import socket
 from dataclasses import dataclass, field
@@ -330,6 +332,36 @@ def scrub_text(
     return text, counts
 
 
+def project_key_from_cwd(cwd: Any, *, usernames: Optional[Sequence[str]] = None) -> Optional[str]:
+    """The §2.6 project facet for a working directory: its last path segment, on either separator, and only
+    when the §2.4 path scrub leaves that segment as it was.
+
+    None otherwise: the home folder itself (the scrub turns it into the placeholder, or into a fragment of
+    it when the login name has a space), a folder named like a ``.local`` host, a path-slug folder, a drive
+    or the root, anything that is not a string, and a segment equal to a login name (a home under a root the
+    scrub does not know, such as ``/mnt/c/Users/x``). ``usernames`` default to this machine's.
+    """
+    if not isinstance(cwd, str) or not cwd.strip():
+        return None
+    raw = cwd.strip()
+    scrubbed, _ = scrub_text(raw, hostnames=(), usernames=())
+    raw_segments = _path_segments(raw)
+    segments = _path_segments(scrubbed)
+    if not raw_segments or not segments:
+        return None
+    name = segments[-1]
+    if name != raw_segments[-1] or name == HOME_PLACEHOLDER or name.endswith(":"):
+        return None
+    users = machine_usernames() if usernames is None else tuple(usernames)
+    if any(user and name.casefold() == user.casefold() for user in users):
+        return None
+    return name
+
+
+def _path_segments(path: str) -> List[str]:
+    return [part for part in re.split(r"[\\/]+", path) if part]
+
+
 # ---------------------------------------------------------------------------
 # §2.3 harness text
 # ---------------------------------------------------------------------------
@@ -358,6 +390,14 @@ SYSTEM_REMINDER_TAG = "system-reminder"
 
 _LEADING_REMINDERS = re.compile(r"^\s*(?:<system-reminder>.*?</system-reminder>\s*)+", re.DOTALL)
 _LEADING_REMINDER_ONE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+# One complete harness span that starts a line and ends the text: ``<tag …>…</tag>`` with no other
+# opening or closing of the same tag inside it, so a span never swallows typed text between two spans.
+_TRAILING_HARNESS_SPAN = re.compile(
+    r"(?:\A|\n)[ \t]*<(?P<tag>"
+    + "|".join(re.escape(tag) + (r"[A-Za-z0-9_-]*" if tag.endswith("_") else "") for tag in HARNESS_TAGS)
+    + r")(?:\s[^>]*)?>(?:(?!</?(?P=tag)[\s>]).)*</(?P=tag)>\s*\Z",
+    re.DOTALL,
+)
 
 
 def strip_leading_system_reminders(text: str) -> Tuple[str, int]:
@@ -373,6 +413,25 @@ def strip_leading_system_reminders(text: str) -> Tuple[str, int]:
         return (text or "").strip(), 0
     removed = len(_LEADING_REMINDER_ONE.findall(match.group(0)))
     return text[match.end():].strip(), removed
+
+
+def strip_trailing_harness_spans(text: str) -> Tuple[str, int]:
+    """Remove complete harness spans that start a line and run to the end of the text.
+
+    Measured 20 Oct (live node, counts only): the 10 typed rows that still held
+    a harness tag were all typed text, a newline, then one whole
+    ``<system-reminder>`` span to the end. A span with typed text after it, or
+    a tag named inline in a sentence, is the person's own words and stays.
+    Returns ``(remaining, spans_removed)``; ``remaining`` is stripped.
+    """
+    remaining = (text or "").strip()
+    removed = 0
+    while True:
+        match = _TRAILING_HARNESS_SPAN.search(remaining)
+        if match is None:
+            return remaining, removed
+        remaining = remaining[:match.start()].rstrip()
+        removed += 1
 
 
 def harness_tag(text: str) -> Optional[str]:
@@ -393,12 +452,18 @@ def classify_user_text(text: str) -> Tuple[str, Optional[str], int]:
     """``(kept_text, harness_tag_or_None, reminder_spans_stripped)`` for a user record's text.
 
     A tag means the record is harness-injected; a bare system-reminder (nothing
-    left once the span is gone) reports ``system-reminder``.
+    left once the span is gone) reports ``system-reminder``. Typed text keeps
+    nothing of the complete harness spans that trail it; the count of spans
+    removed covers both ends.
     """
     remaining, stripped = strip_leading_system_reminders(text)
     if stripped and not remaining:
         return "", SYSTEM_REMINDER_TAG, stripped
-    return remaining, harness_tag(remaining), stripped
+    tag = harness_tag(remaining)
+    if tag is not None:
+        return remaining, tag, stripped
+    kept, trailing = strip_trailing_harness_spans(remaining)
+    return kept, None, stripped + trailing
 
 
 def is_harness_text(text: str) -> bool:
@@ -449,6 +514,17 @@ CLAUDE_CODE_KEYBOARD_ORIGIN: Tuple[OriginRule, ...] = (
     OriginRule("promptSource", denied=("system",)),
 )
 
+# A ``queued_command`` attachment (a prompt delivered into a running turn) is the person's own only when every
+# row holds, read off the attachment. Measured on the owner's store 2026-10-20 (counts only, 6,854 entries):
+# task notifications carry ``commandMode=task-notification``; peer messages carry ``origin.kind=peer`` and
+# ``isMeta``; the 9 prompt-mode entries with no ``origin`` were all harness events. So ``origin.kind`` must be
+# present and human here, unlike the typed-record rule where older builds lack it.
+CLAUDE_CODE_QUEUED_PROMPT_ORIGIN: Tuple[OriginRule, ...] = (
+    OriginRule("commandMode", allowed=("prompt",)),
+    OriginRule("origin.kind", allowed=("human",)),
+    OriginRule("isMeta", allowed=(ABSENT, None, False)),
+)
+
 
 def _lookup(record: Mapping[str, Any], dotted: str) -> Any:
     value: Any = record
@@ -491,13 +567,185 @@ _TAINT_NAME = re.compile(r"topos|mcp__plugin_topos|remote__", re.IGNORECASE)
 TAINT_COMMAND_MARKERS: Tuple[str, ...] = ("~/.topos", ".topos/", "/.topos", "engine.sock", "topos-node")
 
 
-def taints(tool_or_server_name: Optional[str], command_text: Optional[str]) -> bool:
-    """True when this tool call or shell command touches a Topos surface (§2.7)."""
-    if tool_or_server_name and _TAINT_NAME.search(tool_or_server_name):
-        return True
+# Two kinds of Topos touch (owner ruling 20 Oct 2026). A READ can bring the owner's data — including other
+# people's messages — into the session, so the assistant's later replies are kept for the owner only
+# (share_excluded). A SYSTEM touch administers or inspects Topos without returning that data (`topos-node status`,
+# a health check, the node's log): it is recorded and counted, and it no longer excludes anything. When in doubt
+# a touch is a READ, so the rule fails closed.
+TOUCH_READ = "read"
+TOUCH_SYSTEM = "system"
+
+#: Topos MCP tools that return no owner data: identity, catalogs, counts, sync state.
+_META_TOOLS = frozenset({
+    "mcp_session_context", "list_scopes", "list_connectors", "describe_connector", "sources_status",
+    "list_database_tables", "get_table_schema",
+})
+#: `topos-node` subcommands that administer the node and print no owner data.
+_ADMIN_SUBCOMMANDS = frozenset({
+    "status", "doctor", "setup", "start", "service", "pair", "agents", "sources", "setup-models",
+    "profile", "reprocess",
+})
+#: First path component under ~/.topos that holds no owner data or secret.
+_SYSTEM_FILES = frozenset({
+    "logs", "config.yaml", "active-profile.json", "install-id", "cp_stamp_key.pub", "deploy-head",
+    "runtime", "models",
+})
+#: Socket routes that answer health, status or source administration only (counts, no content).
+_SYSTEM_SOCKET_ROUTE = re.compile(
+    r"^/(healthcheck|v1/shell/status|v1/disk-status|v1/disk-space-policy|api/local/owner/scope"
+    r"|api/local/owner/sources/[a-z0-9_]+(/(preview|enable|pause|resume|sync))?)/?$"
+)
+_CLI = re.compile(r"topos-node(?:\s+(-{0,2}[A-Za-z][\w-]*))?")
+_TOPOS_PATH = re.compile(r"(?<![\w.-])\.topos(?![\w.-])(?:/([^\s\"'/]*))?")
+_URL_PATH = re.compile(r"https?://[^/\s\"']+(/[^\s\"'?]*)")
+#: A quoted absolute route such as ``conn.request("GET", "/v1/x")`` (file paths are filtered out below).
+_QUOTED_ROUTE = re.compile(r"[\"'](/(?:api|v1|v2|healthcheck|mcp)[^\s\"'?]*)")
+#: Commands that only list or test files, and the text filters their output may be piped through.
+_LIST_COMMANDS = frozenset({"ls", "du", "stat", "file", "test", "[", "find", "tree"})
+_LIST_FILTERS = frozenset({"head", "tail", "grep", "egrep", "wc", "sort", "uniq", "cut", "column"})
+#: ``find`` actions that run something or write: the listing is then not only a listing.
+_FIND_ACTIONS = re.compile(r"\s-(?:exec|execdir|ok|okdir|delete|fprint\w*|fls)\b")
+#: Pieces that add nothing to a listing: discarded stderr, and a trailing ``&& echo …`` / ``|| echo …``.
+_LISTING_NOISE = re.compile(r"\s*\d?>\s*/dev/null|\s*2>&1|\s*(?:&&|\|\|)\s*echo\b[^;&|<>`$]*")
+#: ``topos-node`` where the shell RUNS it: at the start of a command (after ``;``, ``&&``, ``|``, ``$(`` …),
+#: behind env assignments and wrappers (``uv run``, ``nohup``, ``sh -c`` …), with or without a path.
+_CLI_INVOCATION = re.compile(
+    r"(?:^|[;&|(\n`]|\$\()\s*"
+    r"(?:(?:\w+=\S*|nohup|exec|sudo|command|time|env|uvx|uv\s+run|timeout\s+\S+|(?:ba|z)?sh\s+-\w*c)\s+[\"']?)*"
+    r"(?:\S*/)?topos-node(?:\s+(-{0,2}[A-Za-z][\w-]*))?"
+)
+#: The CLI's only data door: it serves the owner's data to whoever runs it.
+_DATA_SUBCOMMANDS = frozenset({"mcp"})
+
+
+def _shell_text(text: str) -> str:
+    """The shell command inside a JSON-dumped tool input (``{"command": ...}``, a string or an argv list), else
+    the text itself."""
+    stripped = text.strip()
+    if stripped.startswith("{"):
+        try:
+            value = json.loads(stripped)
+        except ValueError:
+            return text
+        if isinstance(value, dict):
+            for key in ("command", "cmd"):
+                if isinstance(value.get(key), str):
+                    return value[key]
+                if isinstance(value.get(key), list) and all(isinstance(v, str) for v in value[key]):
+                    return " ".join(value[key])
+    return text
+
+
+def _listing_only(text: str) -> bool:
+    """A whole command that only lists or tests files, optionally piped through text filters: nothing chained,
+    redirected, substituted or executed rides along, so it shows names and sizes, never contents."""
+    command = text if not text.strip().startswith("{") else _shell_text(text)
+    command = command.replace("${HOME}", "~").replace("$HOME", "~")
+    command = _LISTING_NOISE.sub(" ", command).strip()
+    if not command or re.search(r"[;&<>`$]", command):
+        return False
+    stages = [stage.strip() for stage in command.split("|")]
+    head = stages[0].split()
+    if not head or head[0] not in _LIST_COMMANDS:
+        return False
+    if head[0] == "find" and _FIND_ACTIONS.search(" " + stages[0]):
+        return False
+    return all(stage.split() and stage.split()[0] in _LIST_FILTERS for stage in stages[1:])
+
+
+def _cli_touches(text: str) -> List[Tuple[str, str]]:
+    found: List[Tuple[str, str]] = []
+    for match in _CLI_INVOCATION.finditer(_shell_text(text)):
+        word = (match.group(1) or "").lower()
+        if word in _DATA_SUBCOMMANDS:
+            found.append((TOUCH_READ, "topos_cli_data"))
+        elif not word or word.startswith("-") or word in _ADMIN_SUBCOMMANDS:
+            found.append((TOUCH_SYSTEM, "topos_cli_admin"))
+        else:
+            found.append((TOUCH_READ, "topos_cli_data"))  # a subcommand this build does not know: fail closed
+    for match in _CLI.finditer(text):
+        # Anywhere else — a description, a grep pattern, ``pgrep -f topos-node``, an agent's prompt — the name is a
+        # mention, unless it names the data door.
+        word = (match.group(1) or "").lower()
+        found.append((TOUCH_READ, "topos_cli_data") if word in _DATA_SUBCOMMANDS
+                     else (TOUCH_SYSTEM, "topos_cli_mention"))
+    return found
+
+
+def _name_touch(name: str) -> Optional[Tuple[str, str]]:
+    if not _TAINT_NAME.search(name):
+        return None
+    if "remote__" in name.lower():
+        return TOUCH_READ, "connector_tool"
+    tail = re.split(r"__|/|\.|\s+", name.strip().lower())[-1]  # mcp__server__tool, server/tool, "server tool"
+    if tail in _META_TOOLS:
+        return TOUCH_SYSTEM, "topos_meta_tool"
+    return TOUCH_READ, "topos_data_tool"
+
+
+def _command_touches(text: str) -> List[Tuple[str, str]]:
+    if not any(marker in text for marker in TAINT_COMMAND_MARKERS):
+        return []  # never broader than the §2.7 markers
+    found: List[Tuple[str, str]] = []
+    if "database.db" in text:
+        found.append((TOUCH_READ, "topos_database"))
+    found.extend(_cli_touches(text))
+    for match in _TOPOS_PATH.finditer(text):
+        part = match.group(1) or ""
+        if part in _SYSTEM_FILES:
+            found.append((TOUCH_SYSTEM, "topos_files"))
+        elif part == "engine.sock":
+            continue  # judged by its route below
+        elif part == "":
+            # Listing the folder is system; a Grep/Read/cat over the folder is a read.
+            listing = _listing_only(text)
+            found.append((TOUCH_SYSTEM, "topos_files") if listing else (TOUCH_READ, "topos_private_files"))
+        elif part.startswith("database.db"):
+            continue  # counted above
+        else:
+            found.append((TOUCH_READ, "topos_private_files"))
+    if "engine.sock" in text:
+        routes = _URL_PATH.findall(text) + _QUOTED_ROUTE.findall(text)
+        if routes:
+            admin_only = all(_SYSTEM_SOCKET_ROUTE.match(route) for route in routes)
+        else:
+            admin_only = _listing_only(text)  # a call we cannot read the route of: fail closed
+        found.append((TOUCH_SYSTEM, "topos_socket_admin") if admin_only else (TOUCH_READ, "topos_socket_data"))
+    if not found:
+        found.append((TOUCH_READ, "topos_other"))  # a marker the rules above did not place: fail closed
+    return found
+
+
+def topos_touch(tool_or_server_name: Optional[str], command_text: Optional[str]) -> Optional[Tuple[str, str]]:
+    """``(kind, surface)`` when this tool call or shell command touches a Topos surface (§2.7), else None.
+
+    ``kind`` is TOUCH_READ or TOUCH_SYSTEM; READ wins when one call does both. ``surface`` is a coarse
+    label for the owner's record (never the command text, which can carry paths and secrets).
+    """
+    touches: List[Tuple[str, str]] = []
+    if tool_or_server_name:
+        named = _name_touch(tool_or_server_name)
+        if named:
+            touches.append(named)
     if command_text:
-        return any(marker in command_text for marker in TAINT_COMMAND_MARKERS)
-    return False
+        touches.extend(_command_touches(command_text))
+    if not touches:
+        return None
+    reads = [t for t in touches if t[0] == TOUCH_READ]
+    return reads[0] if reads else touches[0]
+
+
+def touch_record_id(tool: str, session_id: str, anchor: str) -> str:
+    """Stable id of one touch, so a re-read of the same transcript records nothing twice."""
+    digest = hashlib.sha256(f"{tool}\x00{session_id}\x00{anchor}".encode("utf-8")).hexdigest()[:32]
+    return f"{tool}:{digest}"
+
+
+def taints(tool_or_server_name: Optional[str], command_text: Optional[str]) -> bool:
+    """True when this tool call or shell command READS a Topos surface (§2.7): only a read excludes the
+    assistant's later replies from sharing. A system touch is recorded through :func:`topos_touch` instead."""
+    touch = topos_touch(tool_or_server_name, command_text)
+    return touch is not None and touch[0] == TOUCH_READ
 
 
 # ---------------------------------------------------------------------------
@@ -589,6 +837,25 @@ class Ledger(DropLedger):
     meta_records: int = 0
     harness_spans_stripped: int = 0
     subagent_files_scanned: int = 0
+    # Every Topos touch the run saw (owner ruling 20 Oct 2026): what the sync writes to the owner-only touch
+    # table. Never in ``as_dict`` — that is persisted as counts — and never holding command text.
+    touches: List[Dict[str, Any]] = field(default_factory=list)
+    _touch_ids: set = field(default_factory=set, repr=False, compare=False)
+
+    def note_touch(self, *, tool: str, session_id: str, touch: Tuple[str, str], at: Optional[float],
+                   anchor: Optional[str] = None) -> bool:
+        """Record one Topos touch; the same ``anchor`` (a tool-call id) in the same session counts once.
+        Returns False for a repeat."""
+        kind, surface = touch
+        touch_id = touch_record_id(tool, session_id, anchor or f"{at}:{kind}:{surface}")
+        if touch_id in self._touch_ids:
+            return False
+        self._touch_ids.add(touch_id)
+        self.touches.append({
+            "touch_id": touch_id, "tool": tool, "session_id": session_id, "kind": kind, "surface": surface,
+            "touched_at": (datetime.fromtimestamp(at, tz=timezone.utc).isoformat() if at is not None else None),
+        })
+        return True
 
     def drop(self, reason: str, count: int = 1, *, origin: Optional[str] = None) -> None:
         super().drop(reason, count)
@@ -632,6 +899,8 @@ class Ledger(DropLedger):
             "tainted_turns": self.tainted_turns,
             "harness_spans_stripped": self.harness_spans_stripped,
             "subagent_files_scanned": self.subagent_files_scanned,
+            "topos_reads": sum(1 for t in self.touches if t["kind"] == TOUCH_READ),
+            "topos_system_touches": sum(1 for t in self.touches if t["kind"] == TOUCH_SYSTEM),
             "secret_sightings": dict(sorted(self.secret_sightings.items())),
             "sessions_with_secrets": len(self.secret_sightings),
         }

@@ -90,3 +90,65 @@ def test_the_facets_table_is_hidden_from_the_data_explorer() -> None:
     from topos.data_explorer_tables import OWNER_ONLY_TABLES
 
     assert FACETS_TABLE in OWNER_ONLY_TABLES
+
+
+def _old_node_with_unmarked_rows(tmp_path):
+    """A node as the trigger bug left it: the column exists, the triggers read only ``$.share_excluded``, and replies
+    the reader flagged at ``$._metadata.share_excluded`` (the runtime-installed mapper's shape) were stored with the
+    column at 0 and projected into the timeline."""
+    import json
+
+    conn = sqlite3.connect(str(tmp_path / "old.db"))
+    conn.execute(
+        "CREATE TABLE ai_chat_messages (message_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, sender_type TEXT NOT NULL,"
+        " sender_id TEXT, event_at TEXT NOT NULL, content TEXT NOT NULL, content_rendered TEXT, metadata_json TEXT,"
+        " sequence INTEGER NOT NULL DEFAULT 0, source_id TEXT NOT NULL, share_excluded INTEGER NOT NULL DEFAULT 0)"
+    )
+    conn.execute("CREATE TABLE timeline (event_at TEXT, record_id TEXT, source_id TEXT, canonical_table TEXT)")
+    rows = {
+        "codex:nested": {"_metadata": {"tool": "codex", "share_excluded": True}, "mapper_id": "ai_coding_tool"},
+        "codex:flat": {"tool": "codex", "share_excluded": True},
+        "codex:repaired": {"_metadata": {"tool": "codex", "share_excluded": False}, "mapper_id": "ai_coding_tool"},
+        "codex:plain": {"_metadata": {"tool": "codex"}, "mapper_id": "ai_coding_tool"},
+    }
+    for message_id, meta in rows.items():
+        conn.execute(
+            "INSERT INTO ai_chat_messages (message_id, conversation_id, sender_type, event_at, content, metadata_json,"
+            " source_id) VALUES (?, 'codex:s', 'assistant', '2026-10-17T15:50:00Z', 'invented reply', ?, 'codex_sessions')",
+            (message_id, json.dumps(meta)),
+        )
+        conn.execute(
+            "INSERT INTO timeline (event_at, record_id, source_id, canonical_table)"
+            " VALUES ('2026-10-17T15:50:00Z', ?, 'codex_sessions', 'ai_chat_messages')",
+            (message_id,),
+        )
+    conn.commit()
+    return conn
+
+
+def test_the_backfill_flags_rows_the_old_triggers_missed_and_drops_their_timeline_rows(tmp_path) -> None:
+    """Fail closed on the row's own metadata, at either path: a flagged reply gets the column and loses its timeline
+    row; one whose metadata says false (a touch repair clears the metadata before the column) or says nothing keeps both."""
+    from topos.storage.db.migrations.ai_coding_sessions_v1 import BACKFILL_ID
+
+    conn = _old_node_with_unmarked_rows(tmp_path)
+    apply_ai_coding_sessions_v1_up(conn)
+    flags = dict(conn.execute("SELECT message_id, share_excluded FROM ai_chat_messages").fetchall())
+    assert flags == {"codex:nested": 1, "codex:flat": 1, "codex:repaired": 0, "codex:plain": 0}, flags
+    in_timeline = {r[0] for r in conn.execute("SELECT record_id FROM timeline").fetchall()}
+    assert in_timeline == {"codex:repaired", "codex:plain"}, in_timeline
+    assert conn.execute("SELECT 1 FROM wiki_schema_migrations WHERE migration_id = ?", (BACKFILL_ID,)).fetchone()
+
+
+def test_the_backfill_runs_once_and_waits_for_a_lazily_created_table(tmp_path) -> None:
+    """A node without the ai_chat tables records nothing, so the boot that first sees the table still backfills it.
+    Once recorded, a later boot does not scan again: the fixed triggers cover every write after it."""
+    from topos.storage.db.migrations.ai_coding_sessions_v1 import BACKFILL_ID, backfill_unmarked_share_excluded
+
+    empty = sqlite3.connect(str(tmp_path / "empty.db"))
+    apply_ai_coding_sessions_v1_up(empty)
+    assert not empty.execute("SELECT 1 FROM wiki_schema_migrations WHERE migration_id = ?", (BACKFILL_ID,)).fetchone()
+
+    conn = _old_node_with_unmarked_rows(tmp_path)
+    assert backfill_unmarked_share_excluded(conn) == {"flagged": 2, "timeline_removed": 2}
+    assert backfill_unmarked_share_excluded(conn) is None, "recorded once; a second pass does not scan"

@@ -54,7 +54,8 @@ def user(n: int, parent: str | None, session: str, i: int, content, *, base: dat
     return record
 
 
-def assistant(n: int, parent: str | None, session: str, i: int, blocks, msg_id: str, *, base: datetime = BASE, **extra) -> dict:
+def assistant(n: int, parent: str | None, session: str, i: int, blocks, msg_id: str, *, base: datetime = BASE,
+              stop: str | None = None, **extra) -> dict:
     record = {
         "parentUuid": parent,
         "isSidechain": False,
@@ -75,8 +76,20 @@ def assistant(n: int, parent: str | None, session: str, i: int, blocks, msg_id: 
         "uuid": uid(n),
         "timestamp": ts(i, base),
     }
+    if stop is not None:
+        record["message"]["stop_reason"] = stop
     record.update(extra)
     return record
+
+
+def attachment(n: int, parent: str | None, session: str, i: int, payload: dict, *, base: datetime = BASE) -> dict:
+    return {"parentUuid": parent, "isSidechain": False, "type": "attachment", "attachment": payload,
+            "uuid": uid(n), "sessionId": session, "timestamp": ts(i, base)}
+
+
+def system(n: int, parent: str | None, session: str, i: int, subtype: str, *, base: datetime = BASE) -> dict:
+    return {"parentUuid": parent, "isSidechain": False, "type": "system", "subtype": subtype, "isMeta": False,
+            "uuid": uid(n), "sessionId": session, "timestamp": ts(i, base)}
 
 
 def text(t: str) -> dict:
@@ -361,9 +374,11 @@ def case_two_folders() -> None:
         user(0xD1, None, a, 0, "Widget work"),
         assistant(0xD2, uid(0xD1), a, 1, [text("Sure.")], "msg_md1"),
     ])
+    # A folder's slug is its working directory, so this session's records name the secretproj path.
+    secret_cwd = "/Users/fake/dev/secretproj"
     write_jsonl(session_file("two_folders", b, "-Users-fake-dev-secretproj"), [
-        user(0xD3, None, b, 2, "Secret work"),
-        assistant(0xD4, uid(0xD3), b, 3, [text("Quietly.")], "msg_md2"),
+        user(0xD3, None, b, 2, "Secret work", cwd=secret_cwd),
+        assistant(0xD4, uid(0xD3), b, 3, [text("Quietly.")], "msg_md2", cwd=secret_cwd),
     ])
 
 
@@ -429,6 +444,185 @@ def case_since_window() -> None:
     ])
 
 
+def case_agentic_reply() -> None:
+    # One agentic turn written the way Claude Code writes it: one record per content block, a new
+    # message.id per API call, tool calls and their results between the narration, meta records
+    # mid-turn, a stop-hook system record at the end. Then a second turn that a prompt typed
+    # mid-turn (a queued_command attachment) splits in two.
+    s = uid(0x117)
+    write_jsonl(session_file("agentic_reply", s), [
+        user(0x1B1, None, s, 0, "Fix the flaky upload test"),
+        assistant(0x1B2, uid(0x1B1), s, 1, [text("Let me look at the test first.")], "msg_ag1", stop="tool_use"),
+        assistant(0x1B3, uid(0x1B2), s, 2, [tool_use("Read", {"file_path": f"{CWD}/tests/test_upload.py"}, "toolu_ag1")],
+                  "msg_ag1", stop="tool_use"),
+        attachment(0x1B4, uid(0x1B3), s, 3, {"type": "total_tokens_reminder", "text": "Tokens used: 1200"}),
+        user(0x1B5, uid(0x1B4), s, 4, tool_result("def test_upload():\n    sleep(0.1)", "toolu_ag1")),
+        {"type": "custom-title", "customTitle": "Flaky upload test", "sessionId": s},
+        assistant(0x1B6, uid(0x1B5), s, 5, [thinking("It sleeps instead of waiting")], "msg_ag2", stop="tool_use"),
+        assistant(0x1B7, uid(0x1B6), s, 6, [text("The test sleeps instead of waiting for the upload.")], "msg_ag2",
+                  stop="tool_use"),
+        assistant(0x1B8, uid(0x1B7), s, 7, [tool_use("Edit", {"file_path": f"{CWD}/tests/test_upload.py"}, "toolu_ag2")],
+                  "msg_ag2", stop="tool_use"),
+        user(0x1B9, uid(0x1B8), s, 8, tool_result("The file has been updated.", "toolu_ag2")),
+        assistant(0x1BA, uid(0x1B9), s, 9, [text("Fixed: it now waits on the upload event.")], "msg_ag3", stop="end_turn"),
+        assistant(0x1BB, uid(0x1BA), s, 10, [text("The test passed ten runs in a row.")], "msg_ag3", stop="end_turn"),
+        system(0x1BC, uid(0x1BB), s, 11, "stop_hook_summary"),
+        user(0x1BD, uid(0x1BC), s, 12, "Thanks. Now the lint error?"),
+        assistant(0x1BE, uid(0x1BD), s, 13, [text("Checking the lint output.")], "msg_ag4", stop="tool_use"),
+        assistant(0x1BF, uid(0x1BE), s, 14, [tool_use("Bash", {"command": "ruff check ."}, "toolu_ag3")], "msg_ag4",
+                  stop="tool_use"),
+        user(0x1C0, uid(0x1BF), s, 15, tool_result("app.py:12: E501 line too long", "toolu_ag3")),
+        attachment(0x1C1, uid(0x1C0), s, 16, {"type": "queued_command", "prompt": "also fix the README typo",
+                                              "commandMode": "prompt", "origin": {"kind": "human"}}),
+        assistant(0x1C2, uid(0x1C1), s, 17, [text("Line 12 was too long; it is wrapped now.")], "msg_ag5", stop="tool_use"),
+        assistant(0x1C3, uid(0x1C2), s, 18, [text("And the README typo is fixed.")], "msg_ag5", stop="end_turn"),
+    ])
+
+
+OPEN_REPLY_SESSION = 0x118
+
+
+def case_open_reply() -> None:
+    # A turn still running when the reader gets there: the last record asked for a tool and nothing
+    # answered yet. ``open_reply_tail`` holds the records that arrive later; a test appends them.
+    s = uid(OPEN_REPLY_SESSION)
+    write_jsonl(session_file("open_reply", s), [
+        user(0x1D1, None, s, 0, "Run the slow suite"),
+        assistant(0x1D2, uid(0x1D1), s, 1, [text("Starting the slow suite.")], "msg_or1", stop="tool_use"),
+        assistant(0x1D3, uid(0x1D2), s, 2, [tool_use("Bash", {"command": "pytest -m slow"}, "toolu_or1")], "msg_or1",
+                  stop="tool_use"),
+    ])
+    write_jsonl(session_file("open_reply_tail", s), [
+        user(0x1D4, uid(0x1D3), s, 3, tool_result("12 passed", "toolu_or1")),
+        assistant(0x1D5, uid(0x1D4), s, 4, [text("All 12 slow tests passed.")], "msg_or2", stop="end_turn"),
+    ])
+
+
+def case_harness_trailing() -> None:
+    # Harness spans AFTER typed text: stripped when a complete span runs from the start of a line to the
+    # end of the text; an inline mention or a span with typed text after it is the person's own words.
+    s = uid(0x119)
+    write_jsonl(session_file("harness_trailing", s), [
+        user(0x1E1, None, s, 0, "Fix the flaky test\n\n<system-reminder>\nThe user opened tests/test_upload.py.\n</system-reminder>"),
+        assistant(0x1E2, uid(0x1E1), s, 1, [text("On it.")], "msg_ht1"),
+        user(0x1E3, uid(0x1E2), s, 2, "Why does `<command-name>` show up in my rows?"),
+        user(0x1E4, uid(0x1E3), s, 3, "Keep this:\n<system-reminder>pasted in the middle</system-reminder>\nand this line too"),
+        user(0x1E5, uid(0x1E4), s, 4, [text("Ship it"), text("<system-reminder>\nThe todo list is empty.\n</system-reminder>")]),
+        user(0x1E6, uid(0x1E5), s, 5, "Two notes\n<system-reminder>a</system-reminder>\n<local-command-stdout>b</local-command-stdout>\n"),
+        user(0x1E7, uid(0x1E6), s, 6, 'Look here\n<ide_selection path="app.py">\nline 3\n</ide_selection>'),
+        user(0x1E8, uid(0x1E7), s, 7, "Is it fine to end a note with <system-reminder>x</system-reminder>"),
+        user(0x1E9, uid(0x1E8), s, 8, "a\n<system-reminder>1</system-reminder>\nkeep me\n<system-reminder>2</system-reminder>"),
+    ])
+
+
+def case_reply_edges() -> None:
+    # Where a reply must end and where it must not: a system record ends it; sub-agent records inside the
+    # main file do not; a record holding text AND a Topos call starts an excluded row of its own, so the
+    # narration before it stays shareable.
+    s = uid(0x11A)
+    sub = {"isSidechain": True, "agentId": "e1f2"}
+    write_jsonl(session_file("reply_edges", s), [
+        user(0x201, None, s, 0, "Check the deploy"),
+        assistant(0x202, uid(0x201), s, 1, [text("Looking at the deploy log.")], "msg_re1", stop="tool_use"),
+        system(0x203, uid(0x202), s, 2, "api_error"),
+        assistant(0x204, uid(0x203), s, 3, [text("Retried: the deploy is green.")], "msg_re2", stop="end_turn"),
+        user(0x205, uid(0x204), s, 4, "Now the release notes"),
+        assistant(0x206, uid(0x205), s, 5, [text("Drafting them with a helper.")], "msg_re3", stop="tool_use"),
+        assistant(0x207, uid(0x206), s, 6, [tool_use("Agent", {"prompt": "draft notes"}, "toolu_re1")], "msg_re3",
+                  stop="tool_use"),
+        user(0x208, uid(0x207), s, 7, "draft notes", **sub),
+        assistant(0x209, uid(0x208), s, 8, [text("Helper draft ready.")], "msg_re4", stop="end_turn", **sub),
+        user(0x20A, uid(0x209), s, 9, tool_result("Notes drafted.", "toolu_re1")),
+        assistant(0x20B, uid(0x20A), s, 10, [text("The notes are in RELEASE.md.")], "msg_re5", stop="end_turn"),
+        user(0x20C, uid(0x20B), s, 11, "What did I ship last week?"),
+        assistant(0x20D, uid(0x20C), s, 12, [text("Let me check.")], "msg_re6", stop="tool_use"),
+        assistant(0x20E, uid(0x20D), s, 13,
+                  [text("Asking your Topos now."),
+                   tool_use("mcp__plugin_topos_topos__query_scope", {"scope_id": "work_context:read"}, "toolu_re2")],
+                  "msg_re7", stop="tool_use"),
+        user(0x20F, uid(0x20E), s, 14, tool_result('{"data": {}}', "toolu_re2")),
+        assistant(0x210, uid(0x20F), s, 15, [text("You shipped the uploader.")], "msg_re8", stop="end_turn"),
+    ])
+
+
+QUEUED_SESSION = 0x120
+QUEUED_FORK = 0x121
+
+
+def queued(n: int, parent: str | None, session: str, i: int, prompt, *, mode: str = "prompt", origin=None,
+           source: str | None = None, sidechain: bool = False, **extra) -> dict:
+    # A prompt delivered into a running turn, shaped as Claude Code writes it: the fields live on the attachment.
+    payload = {"type": "queued_command", "prompt": prompt, "commandMode": mode, "timestamp": ts(i)}
+    if origin is not None:
+        payload["origin"] = origin
+    if source is not None:
+        payload["source_uuid"] = source
+    payload.update(extra)
+    record = attachment(n, parent, session, i, payload)
+    record["isSidechain"] = sidechain
+    return record
+
+
+def case_queued_prompts() -> None:
+    # Prompts queued while the agent works. Only the person's own (commandMode prompt, origin.kind human, not
+    # isMeta) become user rows; task notifications, peer messages, isMeta and origin-less entries stay out.
+    # A source_uuid that names a typed record in the file is that record's copy, before or after it.
+    s = uid(QUEUED_SESSION)
+    human = {"kind": "human"}
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+    original = [
+        user(0x221, None, s, 0, "Refactor the parser"),
+        assistant(0x222, uid(0x221), s, 1, [text("Reading the parser first.")], "msg_q1", stop="tool_use"),
+        assistant(0x223, uid(0x222), s, 2, [tool_use("Read", {"file_path": f"{CWD}/parser.py"}, "toolu_q1")], "msg_q1",
+                  stop="tool_use"),
+        queued(0x224, uid(0x223), s, 3,
+               f"Also update {CWD}/README.md\n<system-reminder>The user sent this while you worked.</system-reminder>",
+               origin=human, source="qsrc-0001", humanTurn=True),
+    ]
+    write_jsonl(session_file("queued_prompts", s), original + [
+        user(0x225, uid(0x224), s, 4, tool_result("def parse(): ...", "toolu_q1")),
+        assistant(0x226, uid(0x225), s, 5, [text("Parser split into two modules; README updated.")], "msg_q2",
+                  stop="tool_use"),
+        queued(0x227, uid(0x226), s, 6, "<task-notification>build done</task-notification>", mode="task-notification"),
+        queued(0x228, uid(0x227), s, 7, "<task-notification>tests done</task-notification>", mode="task-notification",
+               origin={"kind": "task-notification"}),
+        queued(0x229, uid(0x228), s, 8, "Peer lane says the build is green", origin={"kind": "peer", "from": "lane-b"},
+               isMeta=True),
+        queued(0x22A, uid(0x229), s, 9, "Meta text in a human queue entry", origin=human, isMeta=True),
+        queued(0x22B, uid(0x22A), s, 10, "<ci-monitor-event>checks green</ci-monitor-event>", source="qsrc-0002"),
+        queued(0x22C, uid(0x22B), s, 11, [text("What does this diagram show?"), image], origin=human),
+        queued(0x22D, uid(0x22C), s, 12, [image], origin=human, source="qsrc-0004"),
+        queued(0x22E, uid(0x22D), s, 13, "<bash-input>ls</bash-input>", origin=human, source="qsrc-0005"),
+        queued(0x22F, uid(0x22E), s, 14, "Refactor the parser", origin=human, source=uid(0x221)),
+        queued(0x230, uid(0x22F), s, 15, {"text": "a prompt that is neither text nor blocks"}, origin=human),
+        queued(0x231, uid(0x230), s, 16, [{"type": "document", "source": {"type": "text", "data": "notes"}}],
+               origin=human),
+        queued(0x232, uid(0x231), s, 17, "Queued inside a sub-agent", origin=human, sidechain=True),
+        queued(0x233, uid(0x232), s, 18, "Ship it", origin=human, source=uid(0x234)),
+        user(0x234, uid(0x233), s, 19, "Ship it"),
+        assistant(0x235, uid(0x234), s, 20, [text("Shipped.")], "msg_q3", stop="end_turn"),
+        queued(0x236, uid(0x235), s, 21, "   ", origin=human, source="qsrc-0006"),
+        # A typed record with no uuid: a queued entry with no source_uuid is not its copy.
+        {k: v for k, v in user(0x238, uid(0x236), s, 22, "No uuid on this one").items() if k != "uuid"},
+        # A source_uuid naming an assistant record is no typed copy; the person's prompt stays a row.
+        queued(0x239, None, s, 23, "Also check the tests", origin=human, source=uid(0x222)),
+        # A list with a stray non-block item is not text and image blocks.
+        queued(0x23A, uid(0x239), s, 24, ["stray", text("Stray item beside a block")], origin=human),
+        # A queued entry with no uuid cannot be a row.
+        {k: v for k, v in queued(0x23B, uid(0x23A), s, 25, "Queued with no uuid", origin=human).items()
+         if k != "uuid"},
+        # Text on both sides of an image: the image adds nothing between them.
+        queued(0x23C, uid(0x23A), s, 26, [text("Before the image"), image, text("after the image")], origin=human),
+        # A peer entry whose source_uuid names a typed record is counted by its origin, not as a copy.
+        queued(0x23D, uid(0x23C), s, 27, "Peer echo of the first prompt", origin={"kind": "peer"}, isMeta=True,
+               source=uid(0x221)),
+    ])
+    f = uid(QUEUED_FORK)
+    write_jsonl(session_file("queued_prompts", f), [dict(r, sessionId=f) for r in (original[0], original[3])] + [
+        queued(0x237, uid(0x224), f, 22, "Fork-only follow-up", origin=human, source="qsrc-0007"),
+    ])
+
+
 def main() -> None:
     if ROOT.exists():
         shutil.rmtree(ROOT)
@@ -449,6 +643,11 @@ def main() -> None:
         case_titles,
         case_no_title,
         case_since_window,
+        case_agentic_reply,
+        case_open_reply,
+        case_harness_trailing,
+        case_reply_edges,
+        case_queued_prompts,
     ):
         build()
     print(f"wrote {sum(1 for _ in ROOT.rglob('*') if _.is_file())} files under {ROOT}")

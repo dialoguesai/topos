@@ -250,6 +250,61 @@ def test_a_flagged_row_is_excluded_the_moment_it_is_written(node, monkeypatch) -
     assert flags["claude_code:u4"] == 1, flags
 
 
+@pytest.mark.parametrize("mapper", ["runtime_installed", "bundled"])
+def test_the_real_write_path_flags_the_row_without_the_post_write_mark(node, monkeypatch, mapper) -> None:
+    """The test above runs the fakes, whose metadata is flat. The real parser keeps the reader's ``_metadata``
+    and the canonical writer stores whatever the registered ``ai_coding_tool`` mapper makes of it. The bundled
+    mapper merges it flat (``$.share_excluded``). Nodes up to 1.5.14 ran a runtime install that replaced the
+    bundled mapper with ``RuntimeInstalledStorageMapper``, which nests the reader's metadata
+    (``$._metadata.share_excluded``): the shape those nodes stored, and still store on re-sync of rows already
+    there. Since #156 an install never replaces a mapper the node ships, so the nested shape is reproduced here
+    by registering a mapper with that shape outright. With the post-write mark gone, the triggers and the
+    pipeline's projection filter are all that stand between that row and a share."""
+    import topos.ingestion.ai_tool_sync as lane
+    from topos.ingestion.parsers import PARSER_REGISTRY
+    from topos.ingestion.parsers.ai_coding_tool.claude_code import ClaudeCodeTranscriptParser
+    from topos.storage.canonical.ai_chat import mapper as ai_chat_mapper
+    from topos.storage.canonical.ai_chat.coding_tool_mapper import CodingToolToAIChatMapper
+
+    class NestingMapper(CodingToolToAIChatMapper):
+        """The 1.5.14 runtime-installed shape: the reader's ``_metadata`` nested whole under ``_metadata``."""
+
+        def map_to_canonical(self, staging_record, source="ai_coding_tool"):
+            [message] = super().map_to_canonical(staging_record, source)
+            extra = staging_record.get("_metadata")
+            nested = {k: v for k, v in (message.metadata_json or {}).items() if k in ("thread_id", "original_source")}
+            nested["_metadata"] = dict(extra) if isinstance(extra, dict) else extra
+            message.metadata_json = nested
+            return [message]
+
+    real_parser_for = lane._parser_for
+    arm(monkeypatch, node, reader=FakeReader(_batch()))
+    # Undo the stand-ins: the bundled parser and the bundled (or, for the live shape, the nesting) mapper.
+    # monkeypatch restores all three after.
+    monkeypatch.setattr(lane, "_parser_for", real_parser_for)
+    monkeypatch.setitem(PARSER_REGISTRY, SCHEMA, ClaudeCodeTranscriptParser)
+    monkeypatch.setitem(ai_chat_mapper._MAPPER_REGISTRY, "ai_coding_tool",
+                        NestingMapper if mapper == "runtime_installed" else CodingToolToAIChatMapper)
+    enable(node, SOURCE)
+    registered = ai_chat_mapper._MAPPER_REGISTRY["ai_coding_tool"].__name__
+    # #156: an install never replaces a mapper the node registered itself.
+    assert registered == ("NestingMapper" if mapper == "runtime_installed" else "CodingToolToAIChatMapper"), registered
+
+    monkeypatch.setattr(lane, "_mark_share_excluded", lambda *_a, **_k: 0)
+    result = _run()
+    assert result["status"] == "ok", result
+
+    stored = {r["message_id"]: r for r in chat_rows(node)}
+    meta = json.loads(stored["claude_code:u4"]["metadata_json"])
+    flag_paths = {"top": meta.get("share_excluded"), "nested": (meta.get("_metadata") or {}).get("share_excluded")}
+    assert flag_paths == ({"top": None, "nested": True} if mapper == "runtime_installed"
+                          else {"top": True, "nested": None}), flag_paths
+    flags = {mid: row["share_excluded"] for mid, row in stored.items()}
+    assert flags == {"claude_code:u1": 0, "claude_code:u2": 0, "claude_code:u3": 0, "claude_code:u4": 1}, flags
+    assert node.execute("SELECT count(*) FROM timeline WHERE record_id = 'claude_code:u4'").fetchone()[0] == 0
+    assert node.execute("SELECT count(*) FROM timeline WHERE record_id = 'claude_code:u2'").fetchone()[0] == 1
+
+
 def test_nothing_derived_references_a_share_excluded_row(node, monkeypatch) -> None:
     """The jobs run on this database through the real post-canonical pipeline, with the model work faked
     into rows: whatever the orchestrators are handed gets an entity, a topic, an embedding and a fact."""
@@ -334,6 +389,41 @@ def test_the_project_facet_is_stored_owner_only_and_never_in_metadata_json(node,
     ]
     raw = node.execute("SELECT payload_json FROM raw_chat_messages_claude_code").fetchall()
     assert raw and all("glowworks" not in r[0] and "_facets" not in r[0] for r in raw)
+
+
+def _touches():
+    from topos.ingestion.parsers.ai_coding_tool.common import Ledger, TOUCH_READ, TOUCH_SYSTEM
+
+    ledger = Ledger()
+    ledger.note_touch(tool="claude_code", session_id=SESSION, touch=(TOUCH_SYSTEM, "topos_cli_admin"),
+                      at=1_791_972_000.5, anchor="toolu_status")
+    ledger.note_touch(tool="claude_code", session_id=SESSION, touch=(TOUCH_READ, "topos_data_tool"),
+                      at=1_791_972_002.5, anchor="toolu_query")
+    return ledger.touches
+
+
+def test_every_topos_touch_is_recorded_owner_only_once_with_no_command_text(node, monkeypatch) -> None:
+    """Owner ruling 20 Oct 2026: read AND system touches are kept in the owner-only touch table; a second read
+    of the same transcript (a resume, a cursor reset) records nothing twice."""
+    from topos.data_explorer_tables import OWNER_ONLY_TABLES
+
+    arm(monkeypatch, node, reader=FakeReader(_batch(), _batch(), touches=_touches()))
+    enable(node, SOURCE)
+    first = _run()
+    assert first["status"] == "ok" and first["topos_touches_recorded"] == 2
+    rows = node.execute(
+        "SELECT tool, session_id, kind, surface, touched_at FROM ai_coding_topos_touches ORDER BY touched_at"
+    ).fetchall()
+    assert [tuple(r) for r in rows] == [
+        ("claude_code", SESSION, "system", "topos_cli_admin", "2026-10-14T10:00:00.500000+00:00"),
+        ("claude_code", SESSION, "read", "topos_data_tool", "2026-10-14T10:00:02.500000+00:00"),
+    ]
+    columns = {c[1] for c in node.execute("PRAGMA table_info(ai_coding_topos_touches)").fetchall()}
+    assert columns == {"touch_id", "tool", "session_id", "kind", "surface", "touched_at", "recorded_at"}
+    assert "ai_coding_topos_touches" in OWNER_ONLY_TABLES
+    second = _run()
+    assert second["topos_touches_recorded"] == 0
+    assert node.execute("SELECT COUNT(*) FROM ai_coding_topos_touches").fetchone()[0] == 2
 
 
 def test_the_result_carries_the_ledger_and_the_checkpoint_is_the_newest_created_at(node, monkeypatch) -> None:
