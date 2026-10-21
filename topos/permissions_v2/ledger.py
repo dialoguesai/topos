@@ -625,14 +625,40 @@ class PolicyLedger:
             conn.execute("UPDATE p2a_requests SET status='checkpointed' WHERE request_id=?", (lease.request_id,))
             return receipt
 
-    def checkpoint_truth(self, lease, *, intent, output, revision, now):
-        """One consumed read, current explicit pack consent, and a private receipt."""
-        from .truth_contract import VERIFY, TruthIntent, TruthResult, authorize_truth
+    def checkpoint_truth(self, lease, *, intent, output, revision, now, provenance=None):
+        """One consumed read, current explicit pack consent, and a private receipt.
+
+        A claim that names an interpretation (`ConfirmedTruthIntent`) adds `provenance` to the receipt: whether the
+        checked answer is the one the node showed (confirmed), another answer to that question (corrected), or not
+        linked to one it showed (unlinked). A three-key claim's receipt is byte for byte what it was before."""
+        from .truth_contract import VERIFY, ConfirmedTruthIntent, TruthResult, parse_intent
+        intent, output = parse_intent(intent.model_dump()), TruthResult.parse(output.model_dump())
+        linked = isinstance(intent, ConfirmedTruthIntent)
+        if linked != (provenance is not None) or provenance not in (None, "confirmed", "corrected", "unlinked"):
+            raise PolicyError("decision_inconsistent")
+        return self._checkpoint_truth(lease, request_type=VERIFY, payload=intent.model_dump(), intent=intent,
+                                      output=output, revision=revision, now=now,
+                                      extra={"interpretation": provenance} if linked else {})
+
+    def checkpoint_truth_statement(self, lease, *, statement, intent, output, revision, now):
+        """`checkpoint_truth` for a statement the node read (`effort: high`): bound to the signed statement, and the
+        receipt says which claim it was read as and by which interpreter. Never the statement's text."""
+        from .truth_contract import VERIFY_STATEMENT, TruthIntent, TruthStatement, TruthStatementResult
+        statement = TruthStatement.parse(statement.model_dump())
+        intent, output = TruthIntent.parse(intent.model_dump()), TruthStatementResult.parse(output.model_dump())
+        read = output.interpreted
+        if (read.question_id, read.value) != (intent.question_id, intent.value) or statement.pack_id != intent.pack_id:
+            raise PolicyError("decision_inconsistent")
+        return self._checkpoint_truth(lease, request_type=VERIFY_STATEMENT, payload=statement.model_dump(),
+                                      intent=intent, output=output, revision=revision, now=now,
+                                      extra={"interpreted": read.model_dump()})
+
+    def _checkpoint_truth(self, lease, *, request_type, payload, intent, output, revision, now, extra):
+        from .truth_contract import authorize_truth
         from .signing import request_digest
-        intent, output = TruthIntent.parse(intent.model_dump()), TruthResult.parse(output.model_dump())
         with self._transaction() as conn:
             envelope = self._leased_envelope(conn, lease)
-            if envelope.request_type != VERIFY or envelope.request_hash != request_digest(VERIFY, intent.model_dump()):
+            if envelope.request_type != request_type or envelope.request_hash != request_digest(request_type, payload):
                 raise PolicyError("request_binding")
             verify_current_signature(envelope, trusted_keys=self.trusted_keys, now=now)
             authority, policy = self._authority(conn, envelope.grant_id, now)
@@ -647,11 +673,42 @@ class PolicyLedger:
                 "node_epoch": authority.node_epoch, "protection_revision": authority.protection_revision,
                 "candidate_revision": decision["candidate_revision"], "decision_hash": digest(decision),
                 "output_hash": digest(output.model_dump()), "verdict": "permit", "checked_at": now,
-                "execution_enabled": False}
+                "execution_enabled": False, **extra}
             conn.execute("INSERT INTO p2a_receipts VALUES (?,?,?)", (lease.request_id,
                 canonical_bytes(receipt).decode("ascii"), canonical_bytes(decision).decode("ascii")))
             conn.execute("UPDATE p2a_requests SET status='checkpointed' WHERE request_id=?", (lease.request_id,))
             return authority
+
+    def record_interpretation(self, admission: Admission, *, output, now: int):
+        """Claim the id of a statement read for confirmation (`permissions.v2.interpret_claim`), terminal, with a
+        private receipt of what was shown: codes, the interpreter, and the id's hash, never the statement or the id.
+
+        No owner answer was read, so no daily question is counted (the interpreter's own hourly allowance bounds
+        these). The authority and signature are checked again here, after the model ran."""
+        from .truth_contract import INTERPRET, InterpretationResult, authorize_truth
+        output = InterpretationResult.parse(output.model_dump())
+        if admission.envelope.request_type != INTERPRET:
+            raise PolicyError("unsupported_query")
+        with self._transaction() as conn:
+            verify_current_signature(admission.envelope, trusted_keys=self.trusted_keys, now=now)
+            authority, policy = self._authority(conn, admission.envelope.grant_id, now)
+            if any(getattr(admission.envelope, key) != value for key, value in authority.model_dump().items()):
+                raise PolicyError("authority_stale")
+            authorize_truth(policy, output.interpretation)
+            self._claim(conn, admission, envelope_json="", status="interpreted", now=now)
+            shown = {"question_id": output.interpretation.question_id, "value": output.interpretation.value,
+                     "interpreter": output.interpreter}
+            decision = {"stage": "interpretation", "verdict": "shown", "policy_hash": authority.policy_hash, **shown}
+            receipt = {"version": "topos-local-receipt/interpret-v1", "request_id": admission.lease.request_id,
+                       "envelope_hash": admission.lease.envelope_hash, "policy_hash": authority.policy_hash,
+                       "node_epoch": authority.node_epoch, "interpreted": shown,
+                       "interpretation_id_hash": digest({"interpretation_id": output.interpretation_id}),
+                       "expires_at": output.expires_at, "decision_hash": digest(decision),
+                       "output_hash": digest(output.model_dump()), "checked_at": now}
+            conn.execute("INSERT INTO p2a_receipts VALUES (?,?,?)", (admission.lease.request_id,
+                canonical_bytes(receipt).decode("ascii"), canonical_bytes(decision).decode("ascii")))
+        admission.status = "interpreted"
+        return authority
 
     # -- p2c-v1: one set-level decision per search (additive; the methods above are unchanged) --
 
