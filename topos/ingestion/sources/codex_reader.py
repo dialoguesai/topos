@@ -25,6 +25,17 @@ subagent thread whose "user" messages are parent-injected), joined from the
 as SEPARATE blocks, so ``CODEX_HARNESS_BLOCK_TAGS`` is matched per block, never
 inside a block. ``auto-compact-*`` turns are the compaction summary, not typed.
 
+Assistant rows are per reply, not per message: a turn writes a ``message``
+item between each round of tool calls, so consecutive assistant messages of
+one turn (``turn_id``, from the item's
+``internal_chat_message_metadata_passthrough``) and one ``phase`` are joined
+into one row with the first message's id and stamp. Commentary and the final
+answer stay separate rows. Any other message (user, developer), a
+``task_started``/``task_complete``/``turn_aborted`` event, ``compacted``,
+``session_meta`` or the taint instant ends the reply. A turn still running at
+the end of a rollout younger than ``OPEN_REPLY_HOLD_SECONDS`` (its last item
+is commentary, a tool call or a tool output) is left for the next run.
+
 Follows ``imessage_reader.py``'s shape: a frozen batch dataclass, one public
 ``read_codex_batch``, defaults resolved only when no root is given. The reader
 never writes under the root; ``state_5.sqlite`` is opened ``mode=ro``. Nothing
@@ -45,7 +56,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
 from topos.ingestion.parsers.ai_coding_tool.common import Ledger, make_record, scrub_text, taints
 
@@ -107,6 +118,10 @@ ENVELOPE_KEYS = frozenset({"timestamp", "ordinal", "type", "payload", "metadata"
 # A last line with no trailing newline on a file this young is a writer mid-append:
 # leave it for the next run. Older files are taken as complete.
 SETTLE_SECONDS = 30.0
+# A turn still running at the end of a rollout this young is held for the next run (see the docstring).
+OPEN_REPLY_HOLD_SECONDS = 3600.0
+TURN_EDGE_EVENTS = frozenset({"task_started", "task_complete", "turn_aborted"})
+TURN_EDGE_LINES = frozenset({"compacted", "session_meta"})
 TITLE_MAX = 120
 
 
@@ -330,6 +345,78 @@ def _metadata_of(line: Dict[str, Any]) -> Dict[str, Any]:
     return metadata if isinstance(metadata, dict) else {}
 
 
+def _turn_id(line: Dict[str, Any], payload: Dict[str, Any]) -> Optional[str]:
+    """The item's turn id: real rollouts carry it only in the message's passthrough metadata."""
+    passthrough = payload.get("internal_chat_message_metadata_passthrough")
+    for source in (passthrough if isinstance(passthrough, dict) else {}, _metadata_of(line), payload):
+        value = source.get("turn_id")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _ends_reply(line: Dict[str, Any]) -> bool:
+    """A line that closes the assistant reply being assembled (see the module docstring)."""
+    kind = line.get("type")
+    if kind in TURN_EDGE_LINES:
+        return True
+    payload = _payload_of(line)
+    if kind == "event_msg":
+        return payload.get("type") in TURN_EDGE_EVENTS
+    return kind == "response_item" and payload.get("type") == "message" and payload.get("role") != "assistant"
+
+
+def _open_reply_start(entries: Sequence[Tuple[int, Optional[Dict[str, Any]]]]) -> Optional[int]:
+    """Index of the first assistant message of a turn still running at the end of ``entries``, else None."""
+    start: Optional[int] = None
+    turn: Optional[str] = None
+    awaiting = False
+    for index, (_end, line) in enumerate(entries):
+        if not line:
+            continue
+        if _ends_reply(line):
+            start, awaiting = None, False
+            continue
+        if line.get("type") != "response_item":
+            continue
+        payload = _payload_of(line)
+        if payload.get("type") == "message":
+            item_turn = _turn_id(line, payload)
+            if start is not None and item_turn != turn:
+                start = None
+            if start is None:
+                start, turn = index, item_turn
+            awaiting = payload.get("phase") == ORIGIN_COMMENTARY
+        else:
+            # A tool call, a tool output or reasoning: the model has another step to take.
+            awaiting = True
+    return start if awaiting else None
+
+
+@dataclass
+class _Piece:
+    """One assistant message's text, before it is folded into a reply."""
+
+    key: str
+    text: str
+    created_at: datetime
+    timestamp_source: str
+    origin: str
+    turn_id: Optional[str]
+    share_excluded: bool
+
+
+@dataclass
+class _Reply:
+    first: _Piece
+    texts: List[str] = field(default_factory=list)
+
+    def takes(self, piece: _Piece) -> bool:
+        return (piece.origin, piece.turn_id, piece.share_excluded) == (
+            self.first.origin, self.first.turn_id, self.first.share_excluded,
+        )
+
+
 def _block_is_harness(text: str) -> bool:
     return bool(_HARNESS_BLOCK_RE.match(text) or _NO_PLACEHOLDER_RE.match(text))
 
@@ -479,7 +566,8 @@ def _process_line(
     since_unix: Optional[float],
     secrets: Sequence[str],
     file_mtime: float,
-) -> Optional[Dict[str, Any]]:
+) -> Union[Dict[str, Any], _Piece, None]:
+    """A user record, an assistant :class:`_Piece` for the caller to fold into a reply, or None."""
     kind = line.get("type")
     payload = _payload_of(line)
     if kind == "session_meta":
@@ -528,7 +616,7 @@ def _process_line(
         ledger.drop("system")  # developer/system prompts are injected, never typed
         return None
     metadata = _metadata_of(line)
-    turn_id = metadata.get("turn_id") or payload.get("turn_id")
+    turn_id = _turn_id(line, payload)
     if isinstance(turn_id, str) and turn_id.startswith(AUTO_COMPACT_TURN_PREFIX):
         ledger.drop("harness_injected")
         return None
@@ -568,12 +656,31 @@ def _process_line(
     text, counts = scrub_text(text, secrets=secrets)
     for name, count in counts.items():
         ledger.scrubbed(name, count)
-    if role == "user" and state.first_prompt is None:
+    if role == "assistant":
+        return _Piece(key=item_key, text=text, created_at=created_at, timestamp_source=timestamp_source,
+                      origin=origin, turn_id=turn_id, share_excluded=share_excluded)
+    if state.first_prompt is None:
         state.first_prompt = text
+    return _emit(state, ledger, key=item_key, role=role, text=text, created_at=created_at,
+                 timestamp_source=timestamp_source, origin=origin, share_excluded=share_excluded)
+
+
+def _emit(
+    state: _ThreadState,
+    ledger: Ledger,
+    *,
+    key: str,
+    role: str,
+    text: str,
+    created_at: datetime,
+    timestamp_source: str,
+    origin: str,
+    share_excluded: bool,
+) -> Optional[Dict[str, Any]]:
     try:
         record = make_record(
             tool=TOOL,
-            record_uuid=item_key,
+            record_uuid=key,
             session_id=state.thread_id,
             role=role,
             content=text,
@@ -629,19 +736,50 @@ def _read_rollout(
 
     rows: List[Dict[str, Any]] = []
     consumed = start
-    for end, line in _iter_complete_lines(path, start, settled=settled):
+    entries = list(_iter_complete_lines(path, start, settled=settled))
+    if time.time() - file_mtime < OPEN_REPLY_HOLD_SECONDS:
+        hold = _open_reply_start(entries)
+        if hold is not None:
+            entries = entries[:hold]
+    reply: Optional[_Reply] = None
+
+    def flush() -> None:
+        nonlocal reply
+        if reply is None:
+            return
+        done, reply = reply, None
+        first = done.first
+        record = _emit(state, ledger, key=first.key, role="assistant", text="\n\n".join(done.texts),
+                       created_at=first.created_at, timestamp_source=first.timestamp_source,
+                       origin=first.origin, share_excluded=first.share_excluded)
+        if record is not None:
+            rows.append(record)
+
+    for end, line in entries:
         if line is None:
             ledger.drop("unparseable")
         elif line:
-            record = _process_line(
+            if _ends_reply(line):
+                flush()
+            out = _process_line(
                 line, state, ledger=ledger, seen=seen, skip=skip,
                 since_unix=since_unix, secrets=secrets, file_mtime=file_mtime,
             )
-            if record is not None:
-                rows.append(record)
+            if isinstance(out, _Piece):
+                if reply is not None and not reply.takes(out):
+                    flush()
+                if reply is None:
+                    reply = _Reply(first=out)
+                else:
+                    ledger.merged_blocks += 1
+                reply.texts.append(out.text)
+            elif out is not None:
+                rows.append(out)
         consumed = end
-        if len(rows) >= limit:
+        # A batch ends between replies only, so the size cap never cuts one in two.
+        if reply is None and len(rows) >= limit:
             break
+    flush()
     title = state.display_title()
     for row in rows:
         row["_metadata"]["conversation_title"] = title
@@ -704,7 +842,6 @@ def read_codex_batch(
                     continue
                 start = cursor.offset
                 base_count = cursor.record_count
-        touched += 1
         ledger.conversations_seen += 1
         file_rows, consumed, state = _read_rollout(
             path,
@@ -721,6 +858,9 @@ def read_codex_batch(
             settled=(now - stat.st_mtime) >= SETTLE_SECONDS,
             file_mtime=stat.st_mtime,
         )
+        if file_rows or consumed != start or cursor is None:
+            # A rollout whose only new lines are a held turn moved nothing: the runner stops asking for it.
+            touched += 1
         if file_rows:
             ledger.conversations_kept += 1
         if state.cross_tool_import:

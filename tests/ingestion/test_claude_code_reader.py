@@ -133,12 +133,15 @@ def test_a_session_with_nothing_to_title_from_gets_the_fallback_on_every_record(
 def test_tool_result_inside_role_user_is_never_human(cursors) -> None:
     batch = read("tool_result_in_user", cursors)
     assert_record_shape(batch.rows)
-    assert roles(batch.rows) == ["user", "assistant", "assistant"]
-    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(n)}" for n in (0x11, 0x12, 0x15)]
+    assert roles(batch.rows) == ["user", "assistant"]
+    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(n)}" for n in (0x11, 0x12)]
+    # The reply reads across the tool call it made; the tool's output is not in it.
+    assert batch.rows[1]["content"] == "Reading it now.\n\nThe config sets a 5s timeout and 3 retries."
     assert not any("timeout = 5" in row["content"] for row in batch.rows)
     ledger = batch.ledger.as_dict()
     assert ledger["dropped"] == {"tool_result": 1, "tool_use": 1}
-    assert ledger["turns_emitted"] == 3 and ledger["message_nodes"] == 5
+    assert ledger["turns_emitted"] == 2 and ledger["message_nodes"] == 5
+    assert ledger["merged_blocks"] == 1
 
 
 def test_thinking_and_tool_use_blocks_are_dropped_and_counted(cursors) -> None:
@@ -297,21 +300,24 @@ def test_topos_call_taints_exactly_the_assistant_turns_after_it(cursors) -> None
     batch = read("topos_call_then_three", cursors)
     assert_record_shape(batch.rows)
     assert [row["id"] for row in batch.rows] == [
-        f"claude_code:{uid(n)}" for n in (0xA1, 0xA2, 0xA5, 0xA6, 0xA7, 0xA8)
+        f"claude_code:{uid(n)}" for n in (0xA1, 0xA2, 0xA5, 0xA6, 0xA7)
     ]
+    assert by_uuid(batch.rows, 0xA2)["content"] == "Let me ask your Topos."
+    assert by_uuid(batch.rows, 0xA7)["content"] == "Last week was the tray icon.\n\nAnything else?"
     excluded = {row["id"]: row["_metadata"]["share_excluded"] for row in batch.rows}
+    # A reply is cut at the taint instant: the narration before the Topos call stays shareable on its own
+    # row, everything after it is excluded; 0xA7 and 0xA8 are one reply.
     assert excluded == {
         f"claude_code:{uid(0xA1)}": False,
         f"claude_code:{uid(0xA2)}": False,
         f"claude_code:{uid(0xA5)}": True,
         f"claude_code:{uid(0xA6)}": False,
         f"claude_code:{uid(0xA7)}": True,
-        f"claude_code:{uid(0xA8)}": True,
     }
     assistant_after = [r for r in batch.rows if r["role"] == "assistant" and r["_metadata"]["share_excluded"]]
-    assert len(assistant_after) == 3
+    assert len(assistant_after) == 2
     ledger = batch.ledger.as_dict()
-    assert ledger["tainted_turns"] == 3
+    assert ledger["tainted_turns"] == 2
     assert ledger["dropped"] == {"tool_result": 1, "tool_use": 1}
 
 
@@ -326,15 +332,16 @@ def test_a_taint_instant_known_up_front_still_spares_the_assistant_turns_before_
     cursors.put(SOURCE_ID, str(path) + TAINT_MARKER_SUFFIX, size=0, mtime=call_epoch, offset=0, record_count=0)
     batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
     excluded = {row["id"]: row["_metadata"]["share_excluded"] for row in batch.rows}
+    # A reply is cut at the taint instant: the narration before the Topos call stays shareable on its own
+    # row, everything after it is excluded; 0xA7 and 0xA8 are one reply.
     assert excluded == {
         f"claude_code:{uid(0xA1)}": False,
         f"claude_code:{uid(0xA2)}": False,
         f"claude_code:{uid(0xA5)}": True,
         f"claude_code:{uid(0xA6)}": False,
         f"claude_code:{uid(0xA7)}": True,
-        f"claude_code:{uid(0xA8)}": True,
     }
-    assert batch.ledger.as_dict()["tainted_turns"] == 3
+    assert batch.ledger.as_dict()["tainted_turns"] == 2
 
 
 def test_bash_touching_topos_home_taints_the_session(cursors) -> None:
@@ -344,14 +351,14 @@ def test_bash_touching_topos_home_taints_the_session(cursors) -> None:
         f"claude_code:{uid(0xB1)}": False,
         f"claude_code:{uid(0xB2)}": False,
         f"claude_code:{uid(0xB5)}": True,
-        f"claude_code:{uid(0xB6)}": True,
     }
-    assert batch.ledger.as_dict()["tainted_turns"] == 2
+    assert by_uuid(batch.rows, 0xB5)["content"] == "The node answers.\n\nShall I continue?"
+    assert batch.ledger.as_dict()["tainted_turns"] == 1
 
 
 def test_subagent_only_taint_marks_the_parent_session(cursors) -> None:
     batch = read("subagent_taint", cursors)
-    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(n)}" for n in (0x81, 0x82, 0x85, 0x86)]
+    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(n)}" for n in (0x81, 0x82, 0x85)]
     assert not any(row["id"] == f"claude_code:{uid(0x94)}" for row in batch.rows)
     assert not any("Found 2 mails" in row["content"] for row in batch.rows)
     excluded = {row["id"]: row["_metadata"]["share_excluded"] for row in batch.rows}
@@ -359,10 +366,9 @@ def test_subagent_only_taint_marks_the_parent_session(cursors) -> None:
         f"claude_code:{uid(0x81)}": False,
         f"claude_code:{uid(0x82)}": False,
         f"claude_code:{uid(0x85)}": True,
-        f"claude_code:{uid(0x86)}": True,
     }
     ledger = batch.ledger.as_dict()
-    assert ledger["tainted_turns"] == 2
+    assert ledger["tainted_turns"] == 1
     assert ledger["subagent_files_scanned"] == 1
     assert ledger["dropped"] == {"tool_result": 1, "tool_use": 1}
 
@@ -371,7 +377,7 @@ def test_taint_persists_across_runs_so_later_turns_stay_excluded(cursors, tmp_pa
     root = tmp_path / "subagent_taint"
     shutil.copytree(FIXTURES / "subagent_taint", root)
     first = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
-    assert first.ledger.as_dict()["tainted_turns"] == 2
+    assert first.ledger.as_dict()["tainted_turns"] == 1
     main = root / SLUG / f"{uid(0x109)}.jsonl"
     late = {
         "parentUuid": uid(0x86), "isSidechain": False, "userType": "external", "cwd": "/Users/fake/dev/widget",
@@ -385,7 +391,7 @@ def test_taint_persists_across_runs_so_later_turns_stay_excluded(cursors, tmp_pa
     second = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
     assert [row["id"] for row in second.rows] == [f"claude_code:{uid(0x87)}"]
     assert second.rows[0]["_metadata"]["share_excluded"] is True
-    assert second.rows[0]["_metadata"]["turn_index"] == 4
+    assert second.rows[0]["_metadata"]["turn_index"] == 3
     assert second.ledger.as_dict()["tainted_turns"] == 1
 
 
@@ -523,8 +529,8 @@ def test_session_path_reads_one_file_and_still_scans_its_subagents(cursors) -> N
     batch = read_claude_code_batch(
         root_path=FIXTURES / "subagent_taint", cursors=cursors, session_path=str(path), hostnames=(), usernames=(),
     )
-    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(n)}" for n in (0x81, 0x82, 0x85, 0x86)]
-    assert batch.ledger.as_dict()["tainted_turns"] == 2
+    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(n)}" for n in (0x81, 0x82, 0x85)]
+    assert batch.ledger.as_dict()["tainted_turns"] == 1
     assert batch.scanned_files == 1 and batch.files_touched == 1
 
 
@@ -574,3 +580,188 @@ def test_a_hooks_session_path_outside_the_tools_root_reads_nothing(cursors, tmp_
                                    hostnames=(), usernames=())
     assert batch.rows == [] and batch.scanned_files == 0
     assert batch.ledger.as_dict()["dropped_files"] == {"outside_root": 1}
+
+
+# ---------------------------------------------------------------------------
+# One row per reply: the narration of one agentic turn is one row
+# ---------------------------------------------------------------------------
+
+
+AGENTIC_REPLY = (
+    "Let me look at the test first.\n\n"
+    "The test sleeps instead of waiting for the upload.\n\n"
+    "Fixed: it now waits on the upload event.\n\n"
+    "The test passed ten runs in a row."
+)
+
+
+def test_one_agentic_turn_is_one_row_across_its_tool_calls_and_meta_records(cursors) -> None:
+    batch = read("agentic_reply", cursors)
+    assert_record_shape(batch.rows)
+    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(n)}" for n in (0x1B1, 0x1B2, 0x1BD, 0x1BE, 0x1C2)]
+    assert roles(batch.rows) == ["user", "assistant", "user", "assistant", "assistant"]
+    # Id and stamp are the reply's FIRST text record's; text is every text block in order, nothing else.
+    reply = by_uuid(batch.rows, 0x1B2)
+    assert reply["content"] == AGENTIC_REPLY
+    assert reply["created_at"] == "2026-10-01T09:00:00.250Z"
+    assert "sleep(0.1)" not in reply["content"] and "It sleeps instead" not in reply["content"]
+    assert [row["_metadata"]["turn_index"] for row in batch.rows] == [0, 1, 2, 3, 4]
+    ledger = batch.ledger.as_dict()
+    assert ledger["merged_blocks"] == 4
+    assert ledger["turns_emitted"] == 5
+    assert ledger["dropped"] == {"system": 1, "thinking": 1, "tool_result": 3, "tool_use": 3}
+    assert ledger["meta_records"] == 3
+    assert ledger["message_nodes"] == 20
+
+
+def test_a_prompt_typed_mid_turn_splits_the_reply(cursors) -> None:
+    # A queued_command attachment is a prompt delivered while the agent works: what comes after answers it.
+    batch = read("agentic_reply", cursors)
+    assert by_uuid(batch.rows, 0x1BE)["content"] == "Checking the lint output."
+    second = by_uuid(batch.rows, 0x1C2)
+    assert second["content"] == "Line 12 was too long; it is wrapped now.\n\nAnd the README typo is fixed."
+    assert second["created_at"] == "2026-10-01T09:00:04.250Z"
+
+
+def test_a_finished_reply_on_a_file_just_written_is_emitted_at_once(cursors, tmp_path) -> None:
+    # The hook case: the Stop hook syncs the instant the turn ends; end_turn closes the reply.
+    root = tmp_path / "agentic_reply"
+    shutil.copytree(FIXTURES / "agentic_reply", root)
+    path = root / SLUG / f"{uid(0x117)}.jsonl"
+    os.utime(path, None)
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert by_uuid(batch.rows, 0x1C2)["content"].endswith("And the README typo is fixed.")
+    assert cursors.get(SOURCE_ID, str(path)).offset == path.stat().st_size
+
+
+def _open_reply_root(tmp_path, *, age_seconds: float, tail_lines: int = 0):
+    root = tmp_path / "open_reply"
+    shutil.copytree(FIXTURES / "open_reply", root)
+    session = uid(0x118)
+    path = root / SLUG / f"{session}.jsonl"
+    if tail_lines:
+        tail = (FIXTURES / "open_reply_tail" / SLUG / f"{session}.jsonl").read_bytes().splitlines(keepends=True)
+        with path.open("ab") as handle:
+            handle.write(b"".join(tail[:tail_lines]))
+    stamp = datetime.now(timezone.utc).timestamp() - age_seconds
+    os.utime(path, (stamp, stamp))
+    return root, path
+
+
+def test_a_reply_still_running_is_held_back_and_merged_on_the_next_run(cursors, tmp_path) -> None:
+    root, path = _open_reply_root(tmp_path, age_seconds=5)
+    first_line = len(path.read_bytes().splitlines(keepends=True)[0])
+    first = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert [row["id"] for row in first.rows] == [f"claude_code:{uid(0x1D1)}"]
+    # The cursor stops where the open reply starts, and nothing read past it is counted yet.
+    assert cursors.get(SOURCE_ID, str(path)).offset == first_line
+    assert cursors.get(SOURCE_ID, str(path)).record_count == 1
+    assert first.ledger.as_dict()["dropped"] == {}
+    assert first.ledger.as_dict()["message_nodes"] == 1
+    tail = (FIXTURES / "open_reply_tail" / SLUG / f"{uid(0x118)}.jsonl").read_bytes()
+    with path.open("ab") as handle:
+        handle.write(tail)
+    second = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert [row["id"] for row in second.rows] == [f"claude_code:{uid(0x1D2)}"]
+    row = second.rows[0]
+    assert row["content"] == "Starting the slow suite.\n\nAll 12 slow tests passed."
+    assert row["created_at"] == "2026-10-01T09:00:00.250Z"
+    assert row["_metadata"]["turn_index"] == 1
+    assert second.ledger.as_dict()["dropped"] == {"tool_result": 1, "tool_use": 1}
+    assert second.ledger.as_dict()["merged_blocks"] == 1
+    assert cursors.get(SOURCE_ID, str(path)).offset == path.stat().st_size
+
+
+def test_a_held_reply_with_nothing_new_reports_the_file_untouched(cursors, tmp_path) -> None:
+    # The runner loops while a batch reports touched files: a held reply must not keep it spinning.
+    root, path = _open_reply_root(tmp_path, age_seconds=5)
+    read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    again = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert again.rows == [] and again.files_touched == 0
+
+
+def test_a_reply_waiting_on_a_tool_result_just_written_is_still_held(cursors, tmp_path) -> None:
+    root, path = _open_reply_root(tmp_path, age_seconds=5, tail_lines=1)
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(0x1D1)}"]
+    assert cursors.get(SOURCE_ID, str(path)).offset == len(path.read_bytes().splitlines(keepends=True)[0])
+
+
+def test_a_trailing_tool_result_alone_keeps_the_reply_open(cursors, tmp_path) -> None:
+    # The last assistant record carries no stop_reason; only the tool result after it says a call is pending.
+    root, path = _open_reply_root(tmp_path, age_seconds=5, tail_lines=1)
+    lines = path.read_bytes().splitlines(keepends=True)
+    record = json.loads(lines[2])
+    record["message"].pop("stop_reason")
+    lines[2] = (json.dumps(record) + "\n").encode()
+    path.write_bytes(b"".join(lines))
+    os.utime(path, None)
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(0x1D1)}"]
+
+
+def test_an_open_reply_in_a_file_quiet_for_an_hour_is_emitted(cursors, tmp_path) -> None:
+    # A session closed or crashed mid-tool never writes the end of its turn; the reply is not held forever.
+    root, path = _open_reply_root(tmp_path, age_seconds=2 * 3600)
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(0x1D1)}", f"claude_code:{uid(0x1D2)}"]
+    assert batch.rows[1]["content"] == "Starting the slow suite."
+    assert batch.ledger.as_dict()["dropped"] == {"tool_use": 1}
+    assert cursors.get(SOURCE_ID, str(path)).offset == path.stat().st_size
+
+
+# ---------------------------------------------------------------------------
+# Harness spans after typed text (§2.3)
+# ---------------------------------------------------------------------------
+
+
+def test_trailing_harness_spans_are_stripped_and_counted_but_the_persons_own_text_is_kept(cursors) -> None:
+    batch = read("harness_trailing", cursors)
+    assert_record_shape(batch.rows)
+    users = [row for row in batch.rows if row["role"] == "user"]
+    assert [row["id"] for row in users] == [
+        f"claude_code:{uid(n)}" for n in (0x1E1, 0x1E3, 0x1E4, 0x1E5, 0x1E6, 0x1E7, 0x1E8, 0x1E9)
+    ]
+    assert [row["content"] for row in users] == [
+        "Fix the flaky test",
+        "Why does `<command-name>` show up in my rows?",
+        "Keep this:\n<system-reminder>pasted in the middle</system-reminder>\nand this line too",
+        "Ship it",
+        "Two notes",
+        "Look here",
+        # A span named inline at the end is not on a line of its own: the person's words.
+        "Is it fine to end a note with <system-reminder>x</system-reminder>",
+        # Only the span that ends the text goes; typed text between two spans is never swallowed.
+        "a\n<system-reminder>1</system-reminder>\nkeep me",
+    ]
+    assert {row["_metadata"]["conversation_title"] for row in batch.rows} == {"Fix the flaky test"}
+    ledger = batch.ledger.as_dict()
+    assert ledger["harness_spans_stripped"] == 6
+    assert ledger["dropped"] == {}
+    assert ledger["turns_emitted"] == 9
+
+
+def test_a_system_record_ends_a_reply_and_sub_agent_records_do_not(cursors) -> None:
+    batch = read("reply_edges", cursors)
+    assert_record_shape(batch.rows)
+    assert [row["id"] for row in batch.rows] == [
+        f"claude_code:{uid(n)}" for n in (0x201, 0x202, 0x204, 0x205, 0x206, 0x20C, 0x20D, 0x20E)
+    ]
+    assert by_uuid(batch.rows, 0x202)["content"] == "Looking at the deploy log."
+    assert by_uuid(batch.rows, 0x204)["content"] == "Retried: the deploy is green."
+    assert by_uuid(batch.rows, 0x206)["content"] == "Drafting them with a helper.\n\nThe notes are in RELEASE.md."
+    assert not any("Helper draft" in row["content"] for row in batch.rows)
+
+
+def test_text_beside_a_topos_call_never_drags_earlier_narration_out_of_sharing(cursors) -> None:
+    # The record holding the call's own text is excluded (its stamp is the taint instant); the reply text
+    # before it keeps a shareable row of its own, and no row mixes the two.
+    batch = read("reply_edges", cursors)
+    before = by_uuid(batch.rows, 0x20D)
+    after = by_uuid(batch.rows, 0x20E)
+    assert (before["content"], before["_metadata"]["share_excluded"]) == ("Let me check.", False)
+    assert (after["content"], after["_metadata"]["share_excluded"]) == (
+        "Asking your Topos now.\n\nYou shipped the uploader.", True,
+    )
+    assert after["created_at"] == "2026-10-01T09:00:03.250Z"
+    assert batch.ledger.as_dict()["tainted_turns"] == 1
