@@ -35,10 +35,17 @@ class InMemoryCanonicalStore:
         offset: int = 0,
         disclosure_tier: str = "owner_raw",
         contains: Optional[List[str]] = None,
+        record_ids: Optional[List[str]] = None,
     ) -> ListPage:
         rows = list(self._tables.get(table, {}).values())
         if source_id is not None:
             rows = [r for r in rows if r.get("source_id") == source_id]
+        if record_ids is not None:
+            wanted = {str(r) for r in record_ids if str(r).strip()}
+            rows = [
+                r for r in rows
+                if str(r.get("record_id") or r.get("message_id") or "") in wanted
+            ]
         tokens = [str(t).strip().lower() for t in (contains or []) if str(t).strip()]
         if tokens:
             rows = [
