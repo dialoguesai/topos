@@ -1,0 +1,2 @@
+{"role":"user","message":{"content":[{"type":"text","text":"<user_query>\nLook it up\n</user_query>"}]}}
+{"role":"assistant","message":{"content":[{"type":"text","text":"Before the call."},{"type":"tool_use","name":"mcp__topos__query_scope","input":{"scope":"work_context:read"}},{"type":"text","text":"After the call."}]}}
