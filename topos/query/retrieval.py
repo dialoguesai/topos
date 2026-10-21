@@ -1335,12 +1335,18 @@ def _list_canonical_rows(
     limit: int = 100,
     disclosure_tier: str = "owner_raw",
     contains: Optional[List[str]] = None,
+    record_ids: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     # A table this node has never created holds no rows — the one funnel every
     # canonical lane goes through (scope routes, the entity-thread lane, the
     # employer heuristic) so no future lane can reach around the probe.
     if _canonical_table_absent(adapters, table):
         return []
+    # `record_ids` narrows the DISCLOSED page to named rows. It is a filter on the
+    # same tiered query, not a lookup: an adapter that predates it serves the plain
+    # page and the caller still intersects by id, so the worst case is a wider
+    # scan, never an undisclosed row.
+    id_kwargs: Dict[str, Any] = {"record_ids": list(record_ids)} if record_ids is not None else {}
     # canonical.list() already applies the disclosure tier (SQL adapters via the
     # per-table _disclosure spec; in-memory fake via apply_disclosure_tier_to_rows), so the
     # rows returned here are ALREADY disclosed to `disclosure_tier`. Re-applying the swap
@@ -1358,16 +1364,27 @@ def _list_canonical_rows(
                 source_id=source_id,
                 disclosure_tier=disclosure_tier,
                 contains=contains,
+                **id_kwargs,
             )
         except TypeError:
-            # Adapter predates the contains filter — fall back to a plain page.
-            page = adapters.canonical.list(
-                table,
-                limit=limit,
-                offset=0,
-                source_id=source_id,
-                disclosure_tier=disclosure_tier,
-            )
+            try:
+                page = adapters.canonical.list(
+                    table,
+                    limit=limit,
+                    offset=0,
+                    source_id=source_id,
+                    disclosure_tier=disclosure_tier,
+                    contains=contains,
+                )
+            except TypeError:
+                # Adapter predates the contains filter — fall back to a plain page.
+                page = adapters.canonical.list(
+                    table,
+                    limit=limit,
+                    offset=0,
+                    source_id=source_id,
+                    disclosure_tier=disclosure_tier,
+                )
         for row in page.items:
             record_id = str(row.get("record_id") or row.get("message_id") or "")
             # contact_identifiers rows share record_id (= contact_id) across
@@ -2031,6 +2048,20 @@ _ENTITY_THREAD_MENTION_LIMIT = 600
 #: Items the lane may contribute. A thread is evidence beside the scope routes, never a
 #: replacement for them: an entity with hundreds of linked rows must not own the packet.
 _ENTITY_THREAD_CAP = 8
+#: Rows the PARTICIPATION join may contribute, owner view only: the newest messages of
+#: the threads a contact-bound person takes part in. The mention join above reaches a
+#: record because its text names the subject; a message someone SENDS does not name
+#: them, so "what have I talked about with <person> lately" reached 1 of that contact's
+#: 199 rows from the last 30 days on the live store (2026-10-21) while cadence facts
+#: filled the packet. Sixteen is a readable slice of a thread, not the thread.
+_ENTITY_PARTICIPATION_CAP = 16
+#: Newest candidate rows read across the contact's threads before the time window and
+#: the disclosed page decide; bounds work, not membership.
+_ENTITY_PARTICIPATION_SCAN = 400
+#: Packet slots reserved for participation rows when the lane has them (a fusion floor,
+#: `min_per_source`): the thread is evidence, and ten of twenty-five leaves the facts,
+#: edges and dossier lines their share.
+_ENTITY_PARTICIPATION_SPINE = 10
 
 
 def _entity_thread_entities(
@@ -2087,6 +2118,139 @@ def _entity_thread_entities(
             continue
         kept.append(entity_id)
     return kept, skipped
+
+
+def _participation_record_ids(
+    conn: Optional[Any],
+    linked: List[Dict[str, Any]],
+    entity_ids: List[str],
+    *,
+    query_text: str,
+    time_range: Optional[Tuple[str, str]],
+) -> List[str]:
+    """Newest message ids of the threads a contact-bound person takes part in.
+
+    A list, newest first — a loader the fault inventory can replace with ``[]``
+    (`test_lane_fault_injection.py`), and an empty one is the lane's own "nothing" exactly.
+    Membership is by
+    IDENTITY, not by text: the entity's contact, that contact's identifiers, every
+    conversation one of those identifiers has sent to, and the newest rows of those
+    conversations — the owner's replies included, since a conversation with someone is
+    both sides of it. Nothing here reads a row body; the ids go to the disclosed list.
+
+    Only the best-matching contact-bound entities take part, and "best" is the name
+    that covers MOST of the ask, not the linker's score alone: the linker scores a
+    single-word name found whole in the query as a full match, so on the owner's store
+    a different person known by the first name alone linked at the same score as the
+    contact the full name named, and would have brought their thread too. A bare first
+    name that links several people at one span is honestly ambiguous and pulls each of
+    their threads. The owner's own entity never qualifies (``is_self``), nor does an
+    entity the resolver bound to no contact — an org or a place has no thread to sit in.
+
+    The window is soft, on `_prefer_time_window`'s rule: rows inside the plan's range
+    when any exist, else the newest rows, and the caller labels them.
+    """
+    if conn is None or not entity_ids:
+        return []
+    score_by_id = {
+        str(e.get("entity_id") or ""): float(e.get("match_score") or 0.0) for e in (linked or [])
+    }
+    placeholders = ",".join("?" for _ in entity_ids)
+    try:
+        from ..features.entities.linking import normalize_name
+
+        rows = conn.execute(
+            f"SELECT entity_id, contact_id, normalized_name, aliases_json FROM entities "
+            f"WHERE entity_id IN ({placeholders}) AND contact_id IS NOT NULL "
+            f"AND COALESCE(is_self, 0) = 0",
+            entity_ids,
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — fail closed: no lane rather than a blind one
+        _note_lane_fault("entity_participation", exc)
+        return []
+    query_tokens = {t for t in normalize_name(str(query_text or "")).split() if len(t) >= 3}
+    # (entity, contact, linker score, span): span is the characters of the ask covered by
+    # the entity's name tokens, taken over its best name. An alias list that does not parse
+    # is one name fewer, never a fault.
+    bound: List[Tuple[str, str, float, int]] = []
+    for r in rows:
+        if not r[1]:
+            continue
+        names = [str(r[2] or "")]
+        try:
+            names += [normalize_name(a) for a in json.loads(r[3] or "[]")]
+        except (TypeError, ValueError):
+            names = names[:1]
+        span = max(
+            (sum(len(t) for t in set(n.split()) if len(t) >= 3 and t in query_tokens) for n in names if n),
+            default=0,
+        )
+        bound.append((str(r[0]), str(r[1]), score_by_id.get(str(r[0]), 0.0), span))
+    if not bound:
+        return []
+    # Span first: a first name covers both the contact it names in full and a namesake
+    # equally, and that is the ambiguity. The linker's score only breaks a tie when no
+    # name was found whole (a misspelling linked by token overlap).
+    best_span = max(span for _, _, _, span in bound)
+    if best_span > 0:
+        contact_ids = sorted({cid for _, cid, _, span in bound if span == best_span})
+    else:
+        best_score = max(score for _, _, score, _ in bound)
+        contact_ids = sorted({cid for _, cid, score, _ in bound if score >= best_score})
+    try:
+        ph = ",".join("?" for _ in contact_ids)
+        identifiers = [
+            str(r[0]).strip()
+            for r in conn.execute(
+                f"SELECT DISTINCT identifier FROM contact_identifiers WHERE contact_id IN ({ph})",
+                contact_ids,
+            ).fetchall()
+            if r[0] is not None and str(r[0]).strip() and str(r[0]).strip().lower() != "self"
+        ]
+        if not identifiers:
+            return []
+        ph = ",".join("?" for _ in identifiers)
+        conversations = [
+            str(r[0])
+            for r in conn.execute(
+                f"SELECT DISTINCT conversation_id FROM conversation_messages "
+                f"WHERE sender_id IN ({ph}) AND conversation_id IS NOT NULL",
+                identifiers,
+            ).fetchall()
+            if r[0]
+        ]
+        if not conversations:
+            return []
+        ph = ",".join("?" for _ in conversations)
+        try:
+            dated = conn.execute(
+                f"SELECT message_id, COALESCE(event_at, created_at) FROM conversation_messages "
+                f"WHERE conversation_id IN ({ph}) "
+                f"ORDER BY COALESCE(event_at, created_at) DESC LIMIT ?",
+                [*conversations, _ENTITY_PARTICIPATION_SCAN],
+            ).fetchall()
+        except Exception:  # noqa: BLE001 — a store without event_at
+            dated = conn.execute(
+                f"SELECT message_id, created_at FROM conversation_messages "
+                f"WHERE conversation_id IN ({ph}) ORDER BY created_at DESC LIMIT ?",
+                [*conversations, _ENTITY_PARTICIPATION_SCAN],
+            ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — same rule: no lane, never a partial one
+        _note_lane_fault("entity_participation", exc)
+        return []
+    candidates = [(str(r[0]), r[1]) for r in dated if r[0]]
+    if time_range:
+        start = _parse_instant(time_range[0])
+        end = _parse_instant(time_range[1])
+        if start is not None and end is not None:
+            in_window = []
+            for rid, raw_ts in candidates:
+                ts = _parse_instant(str(raw_ts).replace(" ", "T", 1) if raw_ts else None)
+                if ts is not None and start <= ts <= end:
+                    in_window.append((rid, raw_ts))
+            if in_window:
+                candidates = in_window
+    return [rid for rid, _ in candidates]
 
 
 def _entity_thread_mentions(
@@ -2211,6 +2375,131 @@ def _blackhole_filter_thread_mentions(
     return filtered, untabled - blocked_records
 
 
+def _load_participation_items(
+    *,
+    manifest: ScopeResolutionManifest,
+    adapters: AdapterBundle,
+    conn: Optional[Any],
+    linked: List[Dict[str, Any]],
+    entity_ids: List[str],
+    query_text: str,
+    source_ids: List[str],
+    disclosure_tier: str,
+    first_person: bool,
+    belief_intent: bool,
+    exposure_visible: bool,
+    plan,
+    ledger: Optional[Any],
+    thread_sink: Optional[Dict[str, Any]],
+    role_cache: Dict[str, Optional[bool]],
+    display_cache: Dict[str, str],
+    highlight_cache: Dict[str, str],
+    sender_entity_cache: Dict[str, Tuple[Optional[str], bool]],
+) -> List[Dict[str, Any]]:
+    """The newest rows of the subject's own threads, read through the disclosed page.
+
+    Same guards as the mention join: ids come from `_participation_record_ids`, rows
+    come from `_list_canonical_rows` (tiered, protected rows already withheld), items
+    come from `_canonical_row_to_item`. What differs is the ORDER and the LABEL. A
+    thread slice is ranked by recency, not by lexical overlap with "talked … lately",
+    which no message says; and every row is labelled with who said it, because a
+    thread read as bare sentences cannot be summarised as a conversation. The owner
+    is "me" — this lane runs only on the owner's view.
+    """
+    table = "conversation_messages"
+    ids = _participation_record_ids(
+        conn, linked, entity_ids,
+        query_text=query_text,
+        time_range=getattr(plan, "time_range", None) if plan else None,
+    )
+    if not ids:
+        return []
+    order = {rid: index for index, rid in enumerate(ids)}
+    rows = _list_canonical_rows(
+        adapters,
+        table,
+        source_ids=source_ids,
+        limit=len(ids),
+        disclosure_tier=disclosure_tier,
+        record_ids=ids,
+    )
+    items: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    for row in rows:
+        rid = str(row.get("record_id") or row.get("message_id") or "").strip()
+        if not rid or rid not in order or rid in seen:
+            continue
+        seen.add(rid)
+        item = _canonical_row_to_item(
+            table,
+            row,
+            manifest=manifest,
+            query_text=query_text,
+            conn=conn,
+            first_person=first_person,
+            belief_intent=belief_intent,
+            exposure_visible=exposure_visible,
+            role_cache=role_cache,
+            display_cache=display_cache,
+            highlight_cache=highlight_cache,
+            retrieval_source=f"entity_thread:{table}",
+            disclosure_tier=disclosure_tier,
+        )
+        if item is None:
+            continue
+        item["canonical_table"] = table
+        item["thread_role"] = "participant"
+        text = str(item.get("summary_text") or "")
+        if not text.startswith("["):
+            owner = _message_row_owner(table, row, conn, role_cache)
+            label = "me" if owner is True else _sender_display(
+                conn, str(row.get("sender_id") or ""), display_cache
+            )
+            if label:
+                text = f"[{label}] {text}"
+                item["summary_text"] = text
+                item["topic"] = text[:120]
+        # Newest first IS the relevance of a thread slice; the lexical score the
+        # builder computed is against words no message in the thread needs to say.
+        item["relevance_score"] = round(1.0 - order[rid] / (len(ids) + 1), 4)
+        items.append(item)
+        if thread_sink is not None:
+            thread_sink.setdefault("candidates", {})[f"{table}|{rid}"] = {
+                "record_id": rid,
+                "canonical_table": table,
+                "entity_id": None,
+                "event_at": item.get("event_at"),
+                "speaker": _thread_speaker(
+                    conn,
+                    table,
+                    row,
+                    role_cache=role_cache,
+                    display_cache=display_cache,
+                    entity_cache=sender_entity_cache,
+                ),
+                "decision": _decision_marker(item.get("summary_text") or ""),
+            }
+    items.sort(key=lambda it: order.get(str(it.get("record_id") or ""), len(order)))
+    kept = items[:_ENTITY_PARTICIPATION_CAP]
+    if ledger is not None:
+        # The same closed-set slug as the mention join: a reason is a protocol word
+        # shared with the control plane and the app, and this is the same lane
+        # reached by a second key. `detail.join` says which.
+        ledger.record(
+            _N.STAGE_RETRIEVAL,
+            "contributed",
+            "entity_thread_lane",
+            dropped=max(0, len(items) - len(kept)),
+            detail={
+                "join": "participation",
+                "linked_records": len(ids),
+                "matched": len(items),
+                "contributed": len(kept),
+            },
+        )
+    return kept
+
+
 def _load_entity_thread_items(
     *,
     manifest: ScopeResolutionManifest,
@@ -2273,24 +2562,52 @@ def _load_entity_thread_items(
     if thread_sink is not None:
         thread_sink["entities"] = list(entity_ids)
 
+    role_cache: Dict[str, Optional[bool]] = {}
+    display_cache: Dict[str, str] = {}
+    highlight_cache: Dict[str, str] = {}
+    sender_entity_cache: Dict[str, Tuple[Optional[str], bool]] = {}
+
+    # The participation join — the subject's THREADS, beside the mention join's
+    # records. Owner view only: a grantee's roster rule (`_thread_participants`)
+    # already withholds who a conversation was with, and a lane that selects rows
+    # by who sent them would hand that back one body at a time.
+    participation: List[Dict[str, Any]] = []
+    if owner_view and "conversation_messages" in tables:
+        participation = _load_participation_items(
+            manifest=manifest,
+            adapters=adapters,
+            conn=conn,
+            linked=linked,
+            entity_ids=entity_ids,
+            query_text=query_text,
+            source_ids=source_ids,
+            disclosure_tier=disclosure_tier,
+            first_person=first_person,
+            belief_intent=belief_intent,
+            exposure_visible=exposure_visible,
+            plan=plan,
+            ledger=ledger,
+            thread_sink=thread_sink,
+            role_cache=role_cache,
+            display_cache=display_cache,
+            highlight_cache=highlight_cache,
+            sender_entity_cache=sender_entity_cache,
+        )
+
     by_table, untabled, surfaces, entity_by_record = _entity_thread_mentions(
         conn, entity_ids, tables=tables
     )
     if not by_table and not untabled:
-        return []
+        return participation
 
     by_table, untabled = _blackhole_filter_thread_mentions(
         by_table, untabled, conn=conn, owner_view=owner_view
     )
     if not by_table and not untabled:
-        return []
+        return participation
 
     items: List[Dict[str, Any]] = []
     seen: Set[str] = set()
-    role_cache: Dict[str, Optional[bool]] = {}
-    display_cache: Dict[str, str] = {}
-    highlight_cache: Dict[str, str] = {}
-    sender_entity_cache: Dict[str, Tuple[Optional[str], bool]] = {}
     wanted_total = 0
     for table in tables:
         wanted = set(by_table.get(table) or set()) | untabled
@@ -2371,6 +2688,15 @@ def _load_entity_thread_items(
     items = _prefer_time_window(items, getattr(plan, "time_range", None) if plan else None)
     items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
     kept = items[:_ENTITY_THREAD_CAP]
+    if participation:
+        # The thread first, then the rows that merely mention the name: the fusion
+        # floor promotes this lane's head, and on "what did we talk about" the head
+        # is the conversation, not a message elsewhere that named the person.
+        in_thread = {f"{it.get('canonical_table')}|{it.get('record_id')}" for it in participation}
+        kept = participation + [
+            it for it in kept
+            if f"{it.get('canonical_table')}|{it.get('record_id')}" not in in_thread
+        ]
     if ledger is not None:
         # The lane's own coverage line: how many of the thread's records the scan
         # actually reached. `matched` short of `linked` is the honest shape of a
@@ -7089,6 +7415,21 @@ def _build_summary_items_unfiltered(
         if overheard_items:
             min_per = dict(min_per or {})
             min_per["overheard"] = max(int(min_per.get("overheard") or 0), 2)
+        # The participation join: a named person's own thread is the EVIDENCE for
+        # "what did we talk about", and at the lane's canonical weight its rows,
+        # ranked behind the mention join's, lose the top-25 to a dozen content
+        # lanes the same way the graph lane did (measured on the owner snapshot:
+        # 16 lane rows, 0 survivors). Reserve a spine for them — up to ten, never
+        # more than the lane has — so the thread is read beside the facts about it,
+        # not displaced by them.
+        participant_rows = sum(
+            1 for it in entity_thread_items if it.get("thread_role") == "participant"
+        )
+        if participant_rows:
+            min_per = dict(min_per or {})
+            min_per["entity_thread"] = max(
+                int(min_per.get("entity_thread") or 0), min(participant_rows, _ENTITY_PARTICIPATION_SPINE)
+            )
         # NOTE: cosine similarity must NOT waive the zero-df gate — a strong hit
         # on the generic half of a query ("compiler rewrite") cannot evidence a
         # name the corpus does not contain ("Threnody-7"). The N-lane found
