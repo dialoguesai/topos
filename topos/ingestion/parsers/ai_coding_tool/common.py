@@ -390,6 +390,14 @@ SYSTEM_REMINDER_TAG = "system-reminder"
 
 _LEADING_REMINDERS = re.compile(r"^\s*(?:<system-reminder>.*?</system-reminder>\s*)+", re.DOTALL)
 _LEADING_REMINDER_ONE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
+# One complete harness span that starts a line and ends the text: ``<tag …>…</tag>`` with no other
+# opening or closing of the same tag inside it, so a span never swallows typed text between two spans.
+_TRAILING_HARNESS_SPAN = re.compile(
+    r"(?:\A|\n)[ \t]*<(?P<tag>"
+    + "|".join(re.escape(tag) + (r"[A-Za-z0-9_-]*" if tag.endswith("_") else "") for tag in HARNESS_TAGS)
+    + r")(?:\s[^>]*)?>(?:(?!</?(?P=tag)[\s>]).)*</(?P=tag)>\s*\Z",
+    re.DOTALL,
+)
 
 
 def strip_leading_system_reminders(text: str) -> Tuple[str, int]:
@@ -405,6 +413,25 @@ def strip_leading_system_reminders(text: str) -> Tuple[str, int]:
         return (text or "").strip(), 0
     removed = len(_LEADING_REMINDER_ONE.findall(match.group(0)))
     return text[match.end():].strip(), removed
+
+
+def strip_trailing_harness_spans(text: str) -> Tuple[str, int]:
+    """Remove complete harness spans that start a line and run to the end of the text.
+
+    Measured 20 Oct (live node, counts only): the 10 typed rows that still held
+    a harness tag were all typed text, a newline, then one whole
+    ``<system-reminder>`` span to the end. A span with typed text after it, or
+    a tag named inline in a sentence, is the person's own words and stays.
+    Returns ``(remaining, spans_removed)``; ``remaining`` is stripped.
+    """
+    remaining = (text or "").strip()
+    removed = 0
+    while True:
+        match = _TRAILING_HARNESS_SPAN.search(remaining)
+        if match is None:
+            return remaining, removed
+        remaining = remaining[:match.start()].rstrip()
+        removed += 1
 
 
 def harness_tag(text: str) -> Optional[str]:
@@ -425,12 +452,18 @@ def classify_user_text(text: str) -> Tuple[str, Optional[str], int]:
     """``(kept_text, harness_tag_or_None, reminder_spans_stripped)`` for a user record's text.
 
     A tag means the record is harness-injected; a bare system-reminder (nothing
-    left once the span is gone) reports ``system-reminder``.
+    left once the span is gone) reports ``system-reminder``. Typed text keeps
+    nothing of the complete harness spans that trail it; the count of spans
+    removed covers both ends.
     """
     remaining, stripped = strip_leading_system_reminders(text)
     if stripped and not remaining:
         return "", SYSTEM_REMINDER_TAG, stripped
-    return remaining, harness_tag(remaining), stripped
+    tag = harness_tag(remaining)
+    if tag is not None:
+        return remaining, tag, stripped
+    kept, trailing = strip_trailing_harness_spans(remaining)
+    return kept, None, stripped + trailing
 
 
 def is_harness_text(text: str) -> bool:

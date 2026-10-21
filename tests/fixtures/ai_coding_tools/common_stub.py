@@ -45,6 +45,8 @@ class Ledger(DropLedger):
     _touch_ids: set = field(default_factory=set, repr=False, compare=False)
 
     note_touch = _real_common.Ledger.note_touch
+    merged_blocks: int = 0
+    harness_spans_stripped: int = 0
 
     def scrubbed(self, name: str, n: int = 1) -> None:
         self.scrubbed_counts[name] = self.scrubbed_counts.get(name, 0) + n

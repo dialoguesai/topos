@@ -30,6 +30,7 @@ COMPOSER_EMPTY_WINDOW = "c0c0c0c0-0003-4a0a-8a0a-a0a0a0a0a003"
 COMPOSER_JSONL = "c0c0c0c0-0004-4a0a-8a0a-a0a0a0a0a004"
 COMPOSER_DRAFT = "c0c0c0c0-0005-4a0a-8a0a-a0a0a0a0a005"
 COMPOSER_SUBAGENT_INFO = "c0c0c0c0-0006-4a0a-8a0a-a0a0a0a0a006"
+COMPOSER_AGENTIC = "c0c0c0c0-0007-4a0a-8a0a-a0a0a0a0a007"
 WORKSPACE_BETA = "1f2e3d4c5b6a79880000aaaabbbbcccc"
 PROJECT_SLUG = "-Users-someone-dev-beta-project"
 
@@ -130,5 +131,17 @@ def append_bubble(conn: sqlite3.Connection, composer_id: str, bubble: Dict[str, 
     data = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
     data.setdefault("fullConversationHeadersOnly", []).append(_header_entry(bubble))
     conn.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", _bubble_row(composer_id, bubble))
+    conn.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (key, json.dumps(data)))
+    conn.commit()
+
+
+def set_composer_fields(conn: sqlite3.Connection, composer_id: str, **fields: Any) -> None:
+    """Writer side of the running-composer guard: rewrite ``composerData`` keys (``status``,
+    ``generatingBubbleIds``) the way the IDE does while a reply is generating and when it ends."""
+    key = f"composerData:{composer_id}"
+    row = conn.execute("SELECT value FROM cursorDiskKV WHERE key = ?", (key,)).fetchone()
+    raw = row[0]
+    data = json.loads(raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw)
+    data.update(fields)
     conn.execute("INSERT INTO cursorDiskKV VALUES (?, ?)", (key, json.dumps(data)))
     conn.commit()
