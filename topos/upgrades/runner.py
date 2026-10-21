@@ -686,6 +686,14 @@ def _exec_derived_rebuild(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
                 from ..features.signal.derived_index import index_derived_objects
 
                 detail["targets"][name] = dict(index_derived_objects(conn) or {})
+            elif name in ("local_sync_embeddings",):
+                # Embeds what iMessage/Signal sync stored before sync embedded
+                # its batches. Queues each source's first bounded batch and
+                # returns; the pipeline queue drains the rest and resumes after
+                # a restart, so this step's "done" means started, not finished.
+                from ..ingestion.local_sync_catchup import start_catchup
+
+                detail["targets"][name] = dict(start_catchup(conn))
             elif name in ("closeness_fact_anchors", "closeness_anchors"):
                 # Must run BEFORE entity_graph in the same step: the repair
                 # rewrites the facts, the rebuild is what turns them into

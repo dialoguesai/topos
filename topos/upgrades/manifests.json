@@ -1124,7 +1124,24 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
+      "steps": [
+        {
+          "id": "embed-local-sync-messages",
+          "kind": "derived_rebuild",
+          "title": "Embed iMessage and Signal messages that sync stored without a vector",
+          "why": "The local-sync lane ran only a source's canonical jobs (emo_27, entities) and never the signal lane, where embeddings live, so no synced message was embedded. Measured on one node 2026-10-21: 3,991 of 97,262 iMessage rows had a vector, all written by one-off runs in July, and none had an embeddings progress marker, so vector search could not reach a single message synced after July. Sync now embeds each batch; this queues the rows stored before.",
+          "params": {
+            "targets": [
+              "local_sync_embeddings"
+            ]
+          },
+          "progress": "the step finishes once the first batch is queued; pipeline_jobs rows of kind local_sync_embeddings_catchup (500 record ids each) drain the rest, each queueing the next",
+          "idempotent": "rows are chosen by a missing embeddings progress marker at the current spec_version, and the marker is written only after the batch's vectors commit; writes are (record_id, model, chunk_index)-keyed with a content-hash skip, so a restart, a failed batch or a rerun converges",
+          "consent": "prompt",
+          "cost": "local embedding model only (MiniLM on CPU, 2 threads), no network, no LLM. Measured on synthetic iMessage-length rows on a loaded Apple-silicon Mac: 82-110 rows/s, about 20 min for ~98k rows (allow 40 when the node is busy), about 7 KB of disk per row (~0.6 GB). Nodes with no iMessage or Signal rows queue nothing.",
+          "order": 1
+        }
+      ],
       "notes": []
     }
   ]
