@@ -529,6 +529,42 @@ def test_ledger_accepts_the_other_readers_reasons_positionally_and_keeps_its_cou
     assert (out["message_nodes"], out["turns_emitted"], out["conversations_seen"], out["conversations_kept"]) == (40, 9, 3, 2)
 
 
+@pytest.mark.parametrize("cwd,expected", [
+    ("/Users/fake/dev/widget", "widget"),
+    ("/Users/fake/dev/my-app/", "my-app"),
+    ("C:\\Users\\fake\\dev\\my-app", "my-app"),
+    ("/Users/Shared/dev/shared-app", "shared-app"),
+    ("/tmp/foo/", "foo"),
+    ("/Users/fake", None),
+    ("/Users/fake/", None),
+    ("/home/fake", None),
+    ("C:\\Users\\fake", None),
+    ("/Users/John Doe", None),
+    ("/Users/John Doe/dev/widget", "widget"),
+    ("/Users/fake/dev/box.local", None),
+    ("/private/tmp/scratch/-Users-fake-dev-app", None),
+    ("/", None),
+    ("C:\\", None),
+    ("~", None),
+    ("", None),
+    ("   ", None),
+    (None, None),
+    (42, None),
+])
+def test_project_key_from_cwd_is_the_last_segment_the_scrub_left_alone(cwd, expected) -> None:
+    assert common.project_key_from_cwd(cwd, usernames=()) == expected
+
+
+def test_project_key_from_cwd_refuses_a_login_name_whatever_root_it_sits_under(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert common.project_key_from_cwd("/mnt/c/Users/fake", usernames=("fake",)) is None
+    assert common.project_key_from_cwd("/var/home/Fake", usernames=("fake",)) is None
+    assert common.project_key_from_cwd("/mnt/c/Users/fake/dev/widget", usernames=("fake",)) == "widget"
+    # Not told any names, it asks this machine (the reader passes the ones it already resolved).
+    monkeypatch.setattr(common, "machine_usernames", lambda: ("fake",))
+    assert common.project_key_from_cwd("/export/home/fake") is None
+    assert common.project_key_from_cwd("/export/home/other") == "other"
+
+
 def test_ledger_counts_drops_by_reason_and_origin_scrubs_taints_and_secret_sightings() -> None:
     ledger = Ledger()
     ledger.drop("tool_use")

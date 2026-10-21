@@ -58,6 +58,14 @@ def scrub_text(text: str, *, secrets: Sequence[str] = ()) -> tuple[str, Dict[str
     return text, {}
 
 
+def project_key_from_cwd(cwd: Any, *, usernames: Optional[Sequence[str]] = None) -> Optional[str]:
+    """L4's rule without the scrub (identity here): the last path segment on either separator."""
+    if not isinstance(cwd, str) or not cwd.strip():
+        return None
+    parts = [part for part in re.split(r"[\\/]+", cwd.strip()) if part]
+    return parts[-1] if parts else None
+
+
 _LEADING_TAG = re.compile(r"^\s*<[A-Za-z][\w.-]*(?:[\s>]|$)")
 
 
@@ -150,6 +158,7 @@ def _build_stub_module() -> types.ModuleType:
     common = types.ModuleType(COMMON_NAME)
     common.Ledger = Ledger
     common.scrub_text = scrub_text
+    common.project_key_from_cwd = project_key_from_cwd
     common.is_harness_text = is_harness_text
     common.taints = taints
     common.make_record = make_record
