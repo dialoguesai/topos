@@ -18,7 +18,7 @@ from .canonical import PolicyError, canonical_bytes, digest
 from .forwarding import ReleaseBody, sign_node_result
 from .runtime import get_runtime
 from .signing import TruthRequestContext, parse_envelope, verify_current_signature
-from .truth_contract import VERIFY, TruthIntent, authorize_truth
+from .truth_contract import VERIFY, authorize_truth, parse_intent
 
 MESSAGE_TYPE = 'permissions_v2_verify_claim'
 
@@ -33,7 +33,7 @@ def dispatch(runtime, principal, envelope, payload, request_id):
         raise PolicyError('request_binding')
     if principal.cls != THIRD_PARTY or principal.channel != 'cp_relay' or not principal.acting_user or not principal.client_id:
         raise PolicyError('recipient_relay_required')
-    intent = TruthIntent.parse(payload)
+    intent = parse_intent(payload)  # a claim, or a claim that confirms a reading shown by truth_statement
     ledger = runtime.protocol.ledger
     request = TruthRequestContext.parse({**ledger.identity.model_dump(), 'actor_id': principal.acting_user,
         'client_id': principal.client_id, 'grant_id': signed.grant_id, 'assignment_id': signed.assignment_id,
@@ -47,7 +47,10 @@ def dispatch(runtime, principal, envelope, payload, request_id):
             current, policy = ledger._authority(db, signed.grant_id, int(time.time()))
             authorize_truth(policy, intent)
         output, revision = read(runtime, intent)
-        current = ledger.checkpoint_truth(lease, intent=intent, output=output, revision=revision, now=int(time.time()))
+        from .truth_statement import provenance
+        linked = provenance(intent, grant_id=signed.grant_id, now=int(time.time()))
+        current = ledger.checkpoint_truth(lease, intent=intent, output=output, revision=revision, now=int(time.time()),
+                                          provenance=linked)
     checked_at = int(time.time())
     verify_current_signature(signed, trusted_keys=ledger.trusted_keys, now=checked_at)
     result = sign_node_result(ReleaseBody(version='topos-node-disclosure/v1', kid=runtime.protocol.node_signing_kid,
@@ -69,7 +72,7 @@ async def dispatch_verify_claim(ws, message):
             raise PolicyError('release_payload_invalid')
         runtime = get_runtime()
         signed = parse_envelope(body['envelope'])
-        intent = TruthIntent.parse(body['intent'])
+        intent = parse_intent(body['intent'])
         result, output, revision = await asyncio.to_thread(dispatch, runtime, principal, body['envelope'], body['intent'], request_id)
         def current():
             now = int(time.time())

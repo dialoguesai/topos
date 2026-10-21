@@ -1431,6 +1431,7 @@ async def handle_calibration(message):
     from ...features.calibration.store import catalog, save, verify, RevisionConflict
     from ...permissions_v2.truth_contract import TruthIntent
     from ...permissions_v2.canonical import PolicyError
+    from ...permissions_v2.truth_interpret import Busy
     req_id = message.get('id')
     if getattr(current_principal(), 'cls', None) != OWNER_APP:
         return {'id': req_id, 'status': 'error', 'code': 403, 'error': 'owner_mode_required'}
@@ -1439,9 +1440,15 @@ async def handle_calibration(message):
         payload = message.get('payload') or {}
         payload = {k: v for k, v in payload.items() if k != 'topos_id'}
         kind = message['type']
+        if kind == 'calibration_preview' and 'statement' in payload:
+            # verify-claim effort high, the owner's preview: what the node's interpreter read, or where it refused.
+            from ...permissions_v2.truth_statement import preview
+            return {'id': req_id, 'status': 'ok', 'payload': preview(conn, payload)}
         result = (catalog(conn) if kind == 'calibration_catalog' else save(conn, payload)
                   if kind == 'calibration_answer' else verify(conn, TruthIntent.parse(payload))[0].model_dump())
         return {'id': req_id, 'status': 'ok', 'payload': result}
+    except Busy as exc:
+        return {'id': req_id, 'status': 'error', 'code': 429, 'error': exc.code}
     except RevisionConflict as exc:
         return {'id': req_id, 'status': 'error', 'code': 409, 'error': str(exc)}
     except (ValueError, PolicyError) as exc:

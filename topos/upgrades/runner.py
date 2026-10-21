@@ -571,6 +571,13 @@ def _exec_engine_endpoint(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
         return dict(
             repair_ingest_clock_dates(conn, dry_run=bool(params.get("dry_run", False)))
         )
+    if path == "/v1/canonical/ai-chat/repair-coding-conversation-ids":
+        # Coding sessions filed under another source's prefix (a runtime-install shim over the shared
+        # mapper). New writes are fixed in runtime_install; rows already on disk only move if swept.
+        from ..storage.canonical.ai_chat.coding_conversation_repair import repair_coding_conversation_ids
+
+        params = step.get("params") or {}
+        return dict(repair_coding_conversation_ids(conn, dry_run=bool(params.get("dry_run", False))))
     if path == "/v1/privacy/off-limits/carry-contact-excludes":
         # D24: the older sharing model's explicit per-person excludes become
         # Off-limits entries before that model is removed (contact_excludes).

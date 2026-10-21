@@ -261,8 +261,12 @@ def build_node(path: Path, *, user_id: str = OWNER, topos_id: Optional[str] = TO
 
 
 def arm(monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection, *, reader: Optional[FakeReader] = None,
-        post_canonical: Any = "stub") -> FakeReader:
-    """Point the process at ``conn`` and install the stand-ins. Returns the reader in use."""
+        post_canonical: Any = "stub", fakes: bool = True) -> FakeReader:
+    """Point the process at ``conn`` and install the stand-ins. Returns the reader in use.
+
+    ``fakes=False`` keeps the bundled parsers and the real ``ai_coding_tool`` mapper, so a runtime
+    install runs exactly as it does on a node; the reader stays a fake either way.
+    """
     import topos.core.handlers as hub
     import topos.core.state as state
     import topos.ingestion.ai_tool_sync as lane
@@ -288,16 +292,13 @@ def arm(monkeypatch: pytest.MonkeyPatch, conn: sqlite3.Connection, *, reader: Op
     # install_service binds the accessor at import; the install row must land in this database.
     monkeypatch.setattr(install_service, "get_db_connection", lambda: conn)
     monkeypatch.setattr(switches, "is_bound", lambda env=None: False)
-    from topos.canonicalization.mappers import MAPPER_REGISTRY as LEGACY_MAPPERS
 
-    for schema_id in SCHEMA_IDS.values():
-        monkeypatch.setitem(PARSER_REGISTRY, schema_id, FakeAiCodingToolParser)
-    monkeypatch.setitem(ai_chat_mapper._MAPPER_REGISTRY, "ai_coding_tool", FakeAiCodingToolMapper)
-    # A runtime install builds dynamic mappers for an id it cannot find in the legacy registry and
-    # would clobber the fake above; a placeholder there keeps the install from doing so.
-    monkeypatch.setitem(LEGACY_MAPPERS, "ai_coding_tool", object)
-    # The runner refuses a parser that is not bundled; the fake stands in for L4's bundled class.
-    monkeypatch.setattr(lane, "_parser_for", lambda schema_id: FakeAiCodingToolParser)
+    if fakes:
+        for schema_id in SCHEMA_IDS.values():
+            monkeypatch.setitem(PARSER_REGISTRY, schema_id, FakeAiCodingToolParser)
+        monkeypatch.setitem(ai_chat_mapper._MAPPER_REGISTRY, "ai_coding_tool", FakeAiCodingToolMapper)
+        # The runner refuses a parser that is not bundled; the fake stands in for L4's bundled class.
+        monkeypatch.setattr(lane, "_parser_for", lambda schema_id: FakeAiCodingToolParser)
     reader = reader or FakeReader([])
     monkeypatch.setattr(lane, "_reader_for", lambda tool: reader)
     monkeypatch.setattr(lane, "_cursor_store_for", lambda db: MemoryCursors())

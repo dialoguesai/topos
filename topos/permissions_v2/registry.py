@@ -94,9 +94,13 @@ Policy = (KnowledgePolicy | PolicyV2 | FactPolicyV2 | StatedDayFactPolicy | Atte
           | OpaqueSubjectSourcePolicy | DirectSearchPolicy | SearchPolicy)
 PolicyDecision = (KnowledgeSetDecision | Decision | FactDecision | StatedDayFactDecision | AttestedSubjectFactDecision | WorkFactDecision
                   | AttestedSubjectSourceDecision | OpaqueSubjectSourceDecision | DirectSearchSetDecision | SearchSetDecision)
-from .truth_contract import TruthResult
+from .truth_contract import (INTERPRET, VERIFY, VERIFY_STATEMENT, InterpretationResult, TruthResult,
+                             TruthStatementResult)
 
-Disclosure = (TruthResult | KnowledgeSearchResult | MessageDisclosure | OpaqueMessageDisclosure | FactScalarDisclosure | WorkScalarDisclosure
+#: Each truth request type's signed output.
+TRUTH_OUTPUTS = {VERIFY: TruthResult, VERIFY_STATEMENT: TruthStatementResult, INTERPRET: InterpretationResult}
+
+Disclosure = (TruthResult | TruthStatementResult | InterpretationResult | KnowledgeSearchResult | MessageDisclosure | OpaqueMessageDisclosure | FactScalarDisclosure | WorkScalarDisclosure
               | MessageSearchResult)
 
 
@@ -159,10 +163,10 @@ def parse_decision(raw, *, capability: str) -> PolicyDecision:
 
 
 def parse_disclosure(raw, *, capability: str, request_type: str | None = None) -> Disclosure:
-    if request_type == "permissions.v2.verify_claim":
+    if request_type in TRUTH_OUTPUTS:
         if capability != CAPABILITY_KNOWLEDGE:
             raise PolicyError("unsupported_capability")
-        return TruthResult.parse(value_of(raw))
+        return TRUTH_OUTPUTS[request_type].parse(value_of(raw))
     if capability == CAPABILITY_KNOWLEDGE:
         return KnowledgeSearchResult.parse(value_of(raw))
     # p2a-v3 releases the opaque-id view; p2a-v1 and p2a-v2 the one they were signed for.
