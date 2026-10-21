@@ -58,6 +58,30 @@ def _request_disclosure() -> None:
     request_run()
 
 
+#: Signal-lane jobs this lane runs at sync time, alongside the canonical ones.
+#: It runs no signal lane of its own, so without this ``embeddings`` never ran
+#: on a synced message: measured on one node 21 Oct 2026, 93,271 of 97,262
+#: iMessage rows had no vector while entities and emo_27 had run on them all.
+#: The rest of the signal lane (goal extraction, facts, topic clusters, briefs)
+#: stays off this lane: several of those call the local LLM per record.
+SYNC_TIME_SIGNAL_JOBS = ("embeddings",)
+
+
+def sync_time_jobs(source_def: Any) -> List[str]:
+    """Jobs one local-sync batch runs: the canonical ones, then the signal ones it owes.
+
+    Both lists are override-aware, so an enrichment the owner detached from this
+    source stays detached here too.
+    """
+    from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
+    from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
+
+    jobs = list(effective_canonical_enrichment_jobs(source_def) or [])
+    signal_jobs = resolved_signal_derivation_jobs(source_def)
+    jobs.extend(j for j in SYNC_TIME_SIGNAL_JOBS if j in signal_jobs and j not in jobs)
+    return jobs
+
+
 def _run_local_sync_enrichment_if_enabled(
     *,
     db_conn: Any,
@@ -90,7 +114,11 @@ def _run_local_sync_enrichment_if_enabled(
             return
         if getattr(source_def, "enrichment_trigger", "manual") != "automatic":
             return
-        job_names = list(getattr(source_def, "canonical_enrichment_jobs", []) or [])
+        # Run through the canonical orchestrator: EmbeddingsJob is the same
+        # class in both lanes, it persists to signal_embeddings from either,
+        # and this orchestrator writes the progress marker the catch-up
+        # (local_sync_catchup.py) reads.
+        job_names = sync_time_jobs(source_def)
         if not job_names:
             return
         from ..enrichment.derived_tables import DerivedTablesManager
