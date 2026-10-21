@@ -602,6 +602,18 @@ def case_queued_prompts() -> None:
         queued(0x236, uid(0x235), s, 21, "   ", origin=human, source="qsrc-0006"),
         # A typed record with no uuid: a queued entry with no source_uuid is not its copy.
         {k: v for k, v in user(0x238, uid(0x236), s, 22, "No uuid on this one").items() if k != "uuid"},
+        # A source_uuid naming an assistant record is no typed copy; the person's prompt stays a row.
+        queued(0x239, None, s, 23, "Also check the tests", origin=human, source=uid(0x222)),
+        # A list with a stray non-block item is not text and image blocks.
+        queued(0x23A, uid(0x239), s, 24, ["stray", text("Stray item beside a block")], origin=human),
+        # A queued entry with no uuid cannot be a row.
+        {k: v for k, v in queued(0x23B, uid(0x23A), s, 25, "Queued with no uuid", origin=human).items()
+         if k != "uuid"},
+        # Text on both sides of an image: the image adds nothing between them.
+        queued(0x23C, uid(0x23A), s, 26, [text("Before the image"), image, text("after the image")], origin=human),
+        # A peer entry whose source_uuid names a typed record is counted by its origin, not as a copy.
+        queued(0x23D, uid(0x23C), s, 27, "Peer echo of the first prompt", origin={"kind": "peer"}, isMeta=True,
+               source=uid(0x221)),
     ])
     f = uid(QUEUED_FORK)
     write_jsonl(session_file("queued_prompts", f), [dict(r, sessionId=f) for r in (original[0], original[3])] + [

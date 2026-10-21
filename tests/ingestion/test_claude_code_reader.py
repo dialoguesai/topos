@@ -798,9 +798,11 @@ def test_a_prompt_queued_mid_turn_is_a_user_row_at_its_own_id_and_stamp(cursors,
     batch = read_queued(tmp_path, cursors)
     assert_record_shape(batch.rows)
     assert [row["id"] for row in batch.rows] == [
-        f"claude_code:{uid(n)}" for n in (0x221, 0x222, 0x224, 0x226, 0x22C, 0x234, 0x235, 0x237)
+        f"claude_code:{uid(n)}" for n in (0x221, 0x222, 0x224, 0x226, 0x22C, 0x234, 0x235, 0x239, 0x23C, 0x237)
     ]
-    assert roles(batch.rows) == ["user", "assistant", "user", "assistant", "user", "user", "assistant", "user"]
+    assert roles(batch.rows) == [
+        "user", "assistant", "user", "assistant", "user", "user", "assistant", "user", "user", "user"
+    ]
     queued = by_uuid(batch.rows, 0x224)
     # Same rules as a typed record: the trailing harness span goes, the home path is scrubbed.
     assert queued["content"] == "Also update ~/dev/widget/README.md"
@@ -808,7 +810,8 @@ def test_a_prompt_queued_mid_turn_is_a_user_row_at_its_own_id_and_stamp(cursors,
     assert queued["thread_id"] == uid(0x120)
     assert queued["_metadata"]["origin"] == "keyboard"
     assert queued["_metadata"]["share_excluded"] is False
-    assert [row["_metadata"]["turn_index"] for row in batch.rows] == [0, 1, 2, 3, 4, 5, 6, 0]
+    assert [row["_metadata"]["turn_index"] for row in batch.rows] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 0]
+    assert "claude_code:None" not in {row["id"] for row in batch.rows}
     # The reply around the queued prompt splits at it, as before.
     assert by_uuid(batch.rows, 0x222)["content"] == "Reading the parser first."
     assert by_uuid(batch.rows, 0x226)["content"] == "Parser split into two modules; README updated."
@@ -822,9 +825,11 @@ def test_a_queued_prompt_given_as_blocks_keeps_only_its_text(cursors, tmp_path) 
     batch = read_queued(tmp_path, cursors)
     assert by_uuid(batch.rows, 0x22C)["content"] == "What does this diagram show?"
     assert by_uuid(batch.rows, 0x22C)["created_at"] == "2026-10-01T09:00:02.750Z"
+    assert by_uuid(batch.rows, 0x23C)["content"] == "Before the image\n\nafter the image"
     blob = json.dumps(batch.rows)
     assert "iVBORw0KGgo" not in blob and "base64" not in blob
     assert "notes" not in blob and "neither text nor blocks" not in blob
+    assert "Stray item" not in blob and "stray" not in blob and "Queued with no uuid" not in blob
     ids = {row["id"] for row in batch.rows}
     for n in (0x22D, 0x230, 0x231, 0x236):
         assert f"claude_code:{uid(n)}" not in ids
@@ -834,34 +839,34 @@ def test_task_notifications_peer_messages_and_meta_queue_entries_stay_out_counte
     batch = read_queued(tmp_path, cursors)
     blob = json.dumps(batch.rows)
     for absent in ("task-notification", "build done", "Peer lane", "Meta text", "ci-monitor", "checks green",
-                   "bash-input", "Queued inside a sub-agent", "<"):
+                   "bash-input", "Queued inside a sub-agent", "Peer echo", "<"):
         assert absent not in blob, absent
     ledger = batch.ledger.as_dict()
     assert ledger["dropped"] == {
         "empty": 2,
         "fork_duplicate": 2,
         "harness_injected": 1,
-        "non_keyboard_origin:content_blocks": 1,
+        "non_keyboard_origin:content_blocks": 2,
         "non_keyboard_origin:queued_command:commandMode=task-notification": 2,
         "non_keyboard_origin:queued_command:isMeta": 1,
         "non_keyboard_origin:queued_command:origin.kind": 1,
-        "non_keyboard_origin:queued_command:origin.kind=peer": 1,
+        "non_keyboard_origin:queued_command:origin.kind=peer": 2,
         "queued_prompt_typed_copy": 2,
         "subagent": 1,
         "tool_result": 1,
         "tool_use": 1,
-        "unparseable": 2,
+        "unparseable": 3,
     }
     assert ledger["origins"] == {
         "bash-input": 1,
-        "content_blocks": 1,
+        "content_blocks": 2,
         "queued_command:commandMode=task-notification": 2,
         "queued_command:isMeta": 1,
         "queued_command:origin.kind": 1,
-        "queued_command:origin.kind=peer": 1,
+        "queued_command:origin.kind=peer": 2,
     }
-    assert ledger["turns_emitted"] == 8
-    assert ledger["message_nodes"] == 26
+    assert ledger["turns_emitted"] == 10
+    assert ledger["message_nodes"] == 31
     assert ledger["meta_records"] == 0 and ledger["merged_blocks"] == 0
     assert ledger["message_nodes"] == (
         ledger["turns_emitted"] + ledger["dropped_nodes_total"] + ledger["merged_blocks"] + ledger["meta_records"]
