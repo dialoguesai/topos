@@ -619,17 +619,23 @@ def _post_canonical(*, source_def: Any, canonical_records: List[Dict[str, Any]],
     or prevent the sync receipt and checkpoint from being written.
     """
     from ..pipeline.job_store import enqueue_job
+    from .ai_tool_catchup import BATCH_SIZE
 
     if db_conn is None:
         raise RuntimeError("no database connection for deferred coding-session processing")
-    job_id = enqueue_job(
-        db_conn, kind="inbox_deferred_enrichment", source_id=source_def.source_id,
-        sync_batch_id=sync_batch_id,
-        idempotency_key=f"ai-tool-derivation:{sync_batch_id}",
-        payload={"source_id": source_def.source_id, "sync_batch_id": sync_batch_id,
-                 "canonical_records": canonical_records},
-    )
-    return {"status": "queued", "job_id": job_id}
+    # One job per BATCH_SIZE records. A job is one executor call that commits its
+    # progress only when it ends; a transcript batch of up to 2,000 records as a
+    # single job lost everything on a restart (2026-10-19).
+    job_ids = []
+    for part, start in enumerate(range(0, len(canonical_records), BATCH_SIZE)):
+        job_ids.append(enqueue_job(
+            db_conn, kind="inbox_deferred_enrichment", source_id=source_def.source_id,
+            sync_batch_id=sync_batch_id,
+            idempotency_key=f"ai-tool-derivation:{sync_batch_id}:part{part}",
+            payload={"source_id": source_def.source_id, "sync_batch_id": sync_batch_id,
+                     "canonical_records": canonical_records[start:start + BATCH_SIZE]},
+        ))
+    return {"status": "queued", "job_ids": job_ids}
 
 
 def node_secret_values(conn: Any = None) -> Tuple[str, ...]:
@@ -723,11 +729,16 @@ def _chunks(items: Sequence[str], size: int = 400) -> Iterable[Sequence[str]]:
 
 def _ensure_storage(conn: Any) -> None:
     """The column and the facets table, before the first write: the ai_chat tables may be newer than the migrations."""
-    from ..storage.db.migrations.ai_coding_sessions_v1 import ensure_facets_table, ensure_share_excluded_column
+    from ..storage.db.migrations.ai_coding_sessions_v1 import (
+        ensure_facets_table,
+        ensure_share_excluded_column,
+        ensure_touches_table,
+    )
 
     with with_db_write():
         ensure_share_excluded_column(conn)
         ensure_facets_table(conn)
+        ensure_touches_table(conn)
         commit_connection(conn)
 
 
@@ -816,6 +827,27 @@ def _write_facets(conn: Any, tool: str, facets: Dict[str, str]) -> int:
         )
         commit_connection(conn)
     return len(facets)
+
+
+def _write_touches(conn: Any, touches: Sequence[Dict[str, Any]]) -> int:
+    """The reader's Topos touches into the owner-only table; a touch already recorded is kept as it was."""
+    rows = [t for t in touches if isinstance(t, dict) and t.get("touch_id") and t.get("kind") in ("read", "system")]
+    if not rows:
+        return 0
+    from ..storage.db.migrations.ai_coding_sessions_v1 import TOUCHES_TABLE
+
+    now = _utcnow_iso()
+    with with_db_write():
+        before = getattr(conn, "total_changes", None)
+        conn.executemany(
+            f"INSERT OR IGNORE INTO {TOUCHES_TABLE} (touch_id, tool, session_id, kind, surface, touched_at, recorded_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [(t["touch_id"], str(t.get("tool") or ""), str(t.get("session_id") or ""), t["kind"],
+              str(t.get("surface") or ""), t.get("touched_at"), now) for t in rows],
+        )
+        added = (conn.total_changes - before) if isinstance(before, int) else len(rows)
+        commit_connection(conn)
+    return int(added)
 
 
 def _lift_facets(row: Dict[str, Any]) -> Optional[str]:
@@ -955,7 +987,7 @@ def _run_locked(
     _ensure_storage(db_conn)
 
     totals = {"processed": 0, "skipped": 0, "created": 0, "excluded": 0, "facets": 0, "duplicates": 0,
-              "scanned_files": 0, "files_touched": 0}
+              "scanned_files": 0, "files_touched": 0, "touches": 0}
     receipt: Dict[str, Any] = {}
     ledger: Dict[str, Any] = {}
     reader_kwargs: Dict[str, Any] = {}
@@ -989,7 +1021,10 @@ def _run_locked(
         touched = int(getattr(batch, "files_touched", 0) or 0)
         totals["scanned_files"] += int(getattr(batch, "scanned_files", 0) or 0)
         totals["files_touched"] += touched
-        ledger = _merge_ledgers(ledger, _ledger_dict(getattr(batch, "ledger", None)))
+        batch_ledger = getattr(batch, "ledger", None)
+        ledger = _merge_ledgers(ledger, _ledger_dict(batch_ledger))
+        # Touches go in before the cursor moves, like the rows: a re-read records nothing twice (INSERT OR IGNORE).
+        totals["touches"] += _write_touches(db_conn, list(getattr(batch_ledger, "touches", None) or []))
         for field in RECEIPT_FIELDS:
             value = getattr(batch, field, None)
             if isinstance(value, bool) or value is None:
@@ -1108,6 +1143,7 @@ def _run_locked(
         "records_duplicate": totals["duplicates"],
         "messages_created": totals["created"],
         "facets_written": totals["facets"],
+        "topos_touches_recorded": totals["touches"],
         "scanned_files": totals["scanned_files"],
         "files_touched": totals["files_touched"],
         "last_record_id": final_last_record_id,
@@ -1161,6 +1197,7 @@ def ai_tool_post_sync(conn: Any, dataset_id: str, result: Dict[str, Any], sync_o
         for key in (
             "outcome", "records_processed", "records_skipped", "records_share_excluded", "messages_created",
             "scanned_files", "files_touched", "last_record_id", "code", "error", "ledger", "reader_receipt",
+            "topos_touches_recorded",
         )
         if result.get(key) is not None
     }

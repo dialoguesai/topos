@@ -58,7 +58,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple, Union
 
-from topos.ingestion.parsers.ai_coding_tool.common import Ledger, make_record, scrub_text, taints
+from topos.ingestion.parsers.ai_coding_tool.common import (
+    TOUCH_READ,
+    Ledger,
+    make_record,
+    project_key_from_cwd,
+    scrub_text,
+    topos_touch,
+)
 
 if TYPE_CHECKING:  # L4 owns the store; the reader only needs its two methods.
     from topos.ingestion.checkpoints.file_cursors import FileCursorStore
@@ -214,10 +221,8 @@ def _classify_source(value: Any) -> Tuple[str, bool]:
 
 
 def _project_key(cwd: Any) -> Optional[str]:
-    if not isinstance(cwd, str) or not cwd.strip():
-        return None
-    name = Path(cwd.strip()).name
-    return name or None
+    """The §2.6 facet, by the rule every reader shares: the folder's basename, None for the home folder itself."""
+    return project_key_from_cwd(cwd)
 
 
 def _title_from_prompt(text: str) -> str:
@@ -464,7 +469,7 @@ def _content_key(line: Dict[str, Any], payload: Dict[str, Any]) -> str:
 
 def _attribution_text(metadata: Dict[str, Any]) -> Optional[str]:
     """``metadata.mcp_attribution`` names the MCP server/tool a call went to;
-    its keys are not pinned, so every string value is offered to ``taints``."""
+    its keys are not pinned, so every string value is offered to ``topos_touch``."""
     attribution = metadata.get("mcp_attribution")
     if isinstance(attribution, dict):
         values = [str(v) for v in attribution.values() if isinstance(v, (str, int))]
@@ -474,7 +479,27 @@ def _attribution_text(metadata: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+Touch = Tuple[str, str]
+
+
+def _stronger(*touches: Optional[Touch]) -> Optional[Touch]:
+    """A read wins over a system touch; None when nothing touched Topos."""
+    found = [t for t in touches if t is not None]
+    reads = [t for t in found if t[0] == TOUCH_READ]
+    return reads[0] if reads else (found[0] if found else None)
+
+
 def _call_taints(payload: Dict[str, Any], metadata: Dict[str, Any]) -> bool:
+    touch = _call_touch(payload, metadata)
+    return touch is not None and touch[0] == TOUCH_READ
+
+
+def _event_taints(payload: Dict[str, Any]) -> bool:
+    touch = _event_touch(payload)
+    return touch is not None and touch[0] == TOUCH_READ
+
+
+def _call_touch(payload: Dict[str, Any], metadata: Dict[str, Any]) -> Optional[Touch]:
     name = payload.get("name")
     if not isinstance(name, str):
         name = None
@@ -492,12 +517,10 @@ def _call_taints(payload: Dict[str, Any], metadata: Dict[str, Any]) -> bool:
         parts = action.get("command")
         command = " ".join(str(p) for p in parts) if isinstance(parts, list) else json.dumps(action, default=str)
     attribution = _attribution_text(metadata)
-    if attribution and taints(attribution, None):
-        return True
-    return taints(name, command)
+    return _stronger(topos_touch(attribution, None) if attribution else None, topos_touch(name, command))
 
 
-def _event_taints(payload: Dict[str, Any]) -> bool:
+def _event_touch(payload: Dict[str, Any]) -> Optional[Touch]:
     kind = payload.get("type")
     if kind == "mcp_tool_call_begin":
         invocation = payload.get("invocation") if isinstance(payload.get("invocation"), dict) else payload
@@ -505,14 +528,35 @@ def _event_taints(payload: Dict[str, Any]) -> bool:
         tool = invocation.get("tool")
         name = "/".join(str(v) for v in (server, tool) if isinstance(v, str))
         arguments = invocation.get("arguments")
-        return taints(name or None, json.dumps(arguments, default=str) if arguments is not None else None)
+        return topos_touch(name or None, json.dumps(arguments, default=str) if arguments is not None else None)
     if kind == "exec_command_begin":
         parts = payload.get("command")
         command = " ".join(str(p) for p in parts) if isinstance(parts, list) else (
             parts if isinstance(parts, str) else None
         )
-        return taints(None, command)
-    return False
+        return topos_touch(None, command)
+    return None
+
+
+def _call_anchor(payload: Dict[str, Any]) -> Optional[str]:
+    """The call id both the event and the response item carry, so one call is one touch."""
+    for holder in (payload, payload.get("invocation") if isinstance(payload.get("invocation"), dict) else {}):
+        value = holder.get("call_id")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _note_touch(ledger: Ledger, state: "_ThreadState", line: Dict[str, Any], payload: Dict[str, Any],
+                touch: Optional[Touch], file_mtime: float) -> None:
+    if touch is None:
+        return
+    if touch[0] == TOUCH_READ:
+        state.tainted = True
+    stamp = _parse_iso(line.get("timestamp"))
+    at = stamp.timestamp() if stamp is not None else file_mtime
+    ledger.note_touch(tool=TOOL, session_id=str(state.thread_id or ""), touch=touch, at=at,
+                      anchor=_call_anchor(payload))
 
 
 def _line_time(line: Dict[str, Any], state: _ThreadState, file_mtime: float) -> Tuple[datetime, str]:
@@ -578,8 +622,7 @@ def _process_line(
             state.model = payload["model"]
         return None
     if kind == "event_msg":
-        if _event_taints(payload):
-            state.tainted = True
+        _note_touch(ledger, state, line, payload, _event_touch(payload), file_mtime)
         return None
     if kind != "response_item":
         return None
@@ -587,8 +630,7 @@ def _process_line(
     ledger.message_nodes += 1
     item_type = payload.get("type")
     if item_type in TOOL_CALL_TYPES:
-        if _call_taints(payload, _metadata_of(line)):
-            state.tainted = True
+        _note_touch(ledger, state, line, payload, _call_touch(payload, _metadata_of(line)), file_mtime)
         ledger.drop("tool_use")
         return None
     if item_type in TOOL_OUTPUT_TYPES:

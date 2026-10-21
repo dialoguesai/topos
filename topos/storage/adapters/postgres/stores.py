@@ -54,15 +54,23 @@ class PostgresCanonicalAdapter:
         offset: int = 0,
         disclosure_tier: str = "owner_raw",
         contains: Optional[List[str]] = None,
+        record_ids: Optional[List[str]] = None,
     ) -> ListPage:
         _ = disclosure_tier
         if table not in self._NATIVE_TABLES:
             return ListPage(items=[], total=0, offset=offset, limit=limit)
         params: List[Any] = []
-        where = ""
+        clauses: List[str] = []
         if source_id is not None:
-            where = " WHERE source_id=%s"
+            clauses.append("source_id=%s")
             params.append(source_id)
+        if record_ids is not None:
+            wanted_ids = [str(r) for r in record_ids if str(r).strip()]
+            if not wanted_ids:
+                return ListPage(items=[], total=0, offset=offset, limit=limit)
+            clauses.append(f"{_NATIVE_ID_COL[table]} = ANY(%s)")
+            params.append(wanted_ids)
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
         cur = self._conn.cursor()
         try:
             cur.execute(f"SELECT COUNT(*) FROM {table}{where}", tuple(params))

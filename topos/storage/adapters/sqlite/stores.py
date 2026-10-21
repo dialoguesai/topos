@@ -487,8 +487,12 @@ class SQLiteCanonicalStore:
         offset: int = 0,
         disclosure_tier: str = "owner_raw",
         contains: Optional[List[str]] = None,
+        record_ids: Optional[List[str]] = None,
     ) -> ListPage:
         if table not in self._NATIVE_TABLES:
+            return ListPage(items=[], total=0, offset=offset, limit=limit)
+        wanted_ids = [str(r) for r in (record_ids or []) if str(r).strip()]
+        if record_ids is not None and not wanted_ids:
             return ListPage(items=[], total=0, offset=offset, limit=limit)
 
         spec_key = _native_list_spec_key(self._conn, table, disclosure_tier)
@@ -540,6 +544,9 @@ class SQLiteCanonicalStore:
                     per_token.append("(" + " OR ".join(f"lower({c}) LIKE ?" for c in cols) + ")")
                     params.extend([like] * len(cols))
                 clauses.append("(" + " OR ".join(per_token) + ")")
+        if wanted_ids:
+            clauses.append("record_id IN (" + ",".join("?" for _ in wanted_ids) + ")")
+            params.extend(wanted_ids)
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         count_row = self._conn.execute(f"SELECT COUNT(*) FROM ({query})", params).fetchone()
@@ -601,7 +608,13 @@ class SQLiteCanonicalStore:
         offset: int = 0,
         disclosure_tier: str = "owner_raw",
         contains: Optional[List[str]] = None,
+        record_ids: Optional[List[str]] = None,
     ) -> ListPage:
+        # `record_ids` selects FROM the disclosed page, never around it: the tier,
+        # the protection list and the NSFW withhold are applied by the same query
+        # whether or not ids are named. It is how a lane that already knows WHICH
+        # rows belong to a subject (the participation join) reads them without
+        # `get()`, which takes no tier at all.
         if table in self._NATIVE_TABLES:
             return self._list_native(
                 table,
@@ -610,6 +623,7 @@ class SQLiteCanonicalStore:
                 offset=offset,
                 disclosure_tier=disclosure_tier,
                 contains=contains,
+                record_ids=record_ids,
             )
 
         query = "SELECT payload_json FROM wiki_canonical_records WHERE table_name=?"
@@ -621,6 +635,12 @@ class SQLiteCanonicalStore:
         if tokens:
             query += " AND (" + " OR ".join("lower(payload_json) LIKE ?" for _ in tokens) + ")"
             params.extend(f"%{t}%" for t in tokens)
+        wanted_ids = [str(r) for r in (record_ids or []) if str(r).strip()]
+        if record_ids is not None:
+            if not wanted_ids:
+                return ListPage(items=[], total=0, offset=offset, limit=limit)
+            query += " AND record_id IN (" + ",".join("?" for _ in wanted_ids) + ")"
+            params.extend(wanted_ids)
         count_row = self._conn.execute(
             f"SELECT COUNT(*) FROM ({query})",
             params,

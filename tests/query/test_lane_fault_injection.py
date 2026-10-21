@@ -56,6 +56,9 @@ SWALLOWING_LOADERS: List[str] = [
     "_load_fact_store_items",
     "_load_stat_insight_items",
     "_load_recent_summary_items",
+    # The participation join of the entity-thread lane: the id read that decides which rows
+    # the lane may ask the disclosed page for. Its "nothing" is an empty list.
+    "_participation_record_ids",
 ]
 
 #: An ordinary ask that a working node answers, so a difference is the fault and not the question.

@@ -51,7 +51,9 @@ def by_uuid(rows, n: int) -> dict:
 
 def assert_record_shape(rows) -> None:
     for row in rows:
-        assert set(row) == {"id", "thread_id", "role", "content", "created_at", "_metadata"}
+        # The §2.2 record plus the one top-level facet L5 lifts off it (CONTRACTS §2.4): never anything else.
+        assert set(row) - {"project_key"} == {"id", "thread_id", "role", "content", "created_at", "_metadata"}
+        assert row.get("project_key") is None or (isinstance(row["project_key"], str) and row["project_key"])
         assert row["id"].startswith("claude_code:")
         assert row["role"] in ("user", "assistant")
         assert row["content"].strip() == row["content"] and row["content"]
@@ -63,6 +65,7 @@ def assert_record_shape(rows) -> None:
         assert meta["origin"] == ("keyboard" if row["role"] == "user" else "assistant")
         assert isinstance(meta["share_excluded"], bool)
         assert meta["timestamp_source"] == "record"
+        assert "project_key" not in meta and "cwd" not in meta
         blob = json.dumps(row)
         for forbidden in ("cwd", "/Users/", "/home/", "gitBranch", "-Users-"):
             assert forbidden not in blob, (forbidden, blob)
@@ -274,6 +277,159 @@ def test_skip_folders_also_match_the_scrubbed_slug_form(cursors) -> None:
     assert batch.ledger.as_dict()["dropped"] == {"skipped_folder": 1}
 
 
+# ---------------------------------------------------------------------------
+# The project facet (§2.6): the folder's basename rides top-level, and is what --skip takes
+# ---------------------------------------------------------------------------
+
+
+def test_rows_carry_the_project_folder_basename_as_a_top_level_facet(cursors) -> None:
+    batch = read("two_folders", cursors)
+    assert_record_shape(batch.rows)
+    keys = {row["thread_id"]: row["project_key"] for row in batch.rows}
+    assert keys == {uid(0x10D): "widget", uid(0x10E): "secretproj"}
+    assert all("project_key" not in row["_metadata"] and "cwd" not in row["_metadata"] for row in batch.rows)
+
+
+def test_skip_folders_match_the_project_basename_the_preview_lists(cursors) -> None:
+    batch = read("two_folders", cursors, skip_folders=("secretproj",))
+    assert [row["content"] for row in batch.rows] == ["Widget work", "Sure."]
+    assert {row["thread_id"] for row in batch.rows} == {uid(0x10D)}
+    assert batch.ledger.as_dict()["dropped"] == {"skipped_folder": 1}
+    assert batch.scanned_files == 1 and batch.files_touched == 1
+    secret_file = FIXTURES / "two_folders" / "-Users-fake-dev-secretproj" / f"{uid(0x10E)}.jsonl"
+    assert cursors.get(SOURCE_ID, str(secret_file)) is None
+
+
+def test_session_path_honours_a_basename_skip(cursors) -> None:
+    skipped = FIXTURES / "two_folders" / "-Users-fake-dev-secretproj" / f"{uid(0x10E)}.jsonl"
+    batch = read_claude_code_batch(
+        root_path=FIXTURES / "two_folders", cursors=cursors, session_path=str(skipped),
+        skip_folders=("secretproj",), hostnames=(), usernames=(),
+    )
+    assert batch.rows == []
+    assert batch.ledger.as_dict()["dropped"] == {"skipped_folder": 1}
+    assert cursors.get(SOURCE_ID, str(skipped)) is None
+
+
+def _rewrite_cwd(root: Path, slug: str, cwd) -> None:
+    """Rewrite every record's ``cwd`` under ``root/slug`` (``None`` drops the field)."""
+    for path in (root / slug).glob("*.jsonl"):
+        lines = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            record = json.loads(line)
+            if cwd is None:
+                record.pop("cwd", None)
+            else:
+                record["cwd"] = cwd
+            lines.append(json.dumps(record))
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_project_key_is_null_when_no_record_names_a_cwd(cursors, tmp_path) -> None:
+    root = tmp_path / "two_folders"
+    shutil.copytree(FIXTURES / "two_folders", root)
+    _rewrite_cwd(root, "-Users-fake-dev-widget", None)
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert_record_shape(batch.rows)
+    keys = {row["thread_id"]: row["project_key"] for row in batch.rows}
+    assert keys == {uid(0x10D): None, uid(0x10E): "secretproj"}
+    # Without a basename the slug forms still skip it; nothing else does.
+    again = read_claude_code_batch(root_path=root, cursors=FileCursorStore(sqlite3.connect(":memory:")),
+                                   skip_folders=("widget",), hostnames=(), usernames=())
+    assert {row["thread_id"] for row in again.rows} == {uid(0x10D), uid(0x10E)}
+    slugged = read_claude_code_batch(root_path=root, cursors=FileCursorStore(sqlite3.connect(":memory:")),
+                                     skip_folders=("-~-dev-widget",), hostnames=(), usernames=())
+    assert {row["thread_id"] for row in slugged.rows} == {uid(0x10E)}
+
+
+@pytest.mark.parametrize("cwd", ["/Users/fake", "/home/fake/", "C:\\Users\\fake", "/Users/John Doe", "C:\\Users\\John Doe"])
+def test_a_session_run_from_the_home_folder_has_no_project_key_and_never_the_login_name(cursors, tmp_path, cwd) -> None:
+    root = tmp_path / "two_folders"
+    shutil.copytree(FIXTURES / "two_folders", root)
+    _rewrite_cwd(root, "-Users-fake-dev-widget", cwd)
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert_record_shape(batch.rows)
+    keys = {row["thread_id"]: row["project_key"] for row in batch.rows}
+    assert keys == {uid(0x10D): None, uid(0x10E): "secretproj"}
+    blob = json.dumps([row["project_key"] for row in batch.rows])
+    assert "fake" not in blob and "Doe" not in blob and "~" not in blob
+
+
+def test_a_home_folder_under_a_root_the_scrub_does_not_know_still_gives_no_key(cursors, tmp_path) -> None:
+    """WSL keeps homes under /mnt/c/Users; the path rules do not fire there, the login name does."""
+    root = tmp_path / "two_folders"
+    shutil.copytree(FIXTURES / "two_folders", root)
+    _rewrite_cwd(root, "-Users-fake-dev-widget", "/mnt/c/Users/fake")
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=("fake",))
+    keys = {row["thread_id"]: row["project_key"] for row in batch.rows}
+    assert keys == {uid(0x10D): None, uid(0x10E): "secretproj"}
+    # Without the login name the reader has nothing to recognise it by: the rule is only as good as its input.
+    unaware = read_claude_code_batch(root_path=root, cursors=FileCursorStore(sqlite3.connect(":memory:")),
+                                     hostnames=(), usernames=())
+    assert {row["project_key"] for row in unaware.rows if row["thread_id"] == uid(0x10D)} == {"fake"}
+
+
+@pytest.mark.parametrize("cwd,expected", [
+    ("/Users/fake/dev/my-app/", "my-app"),
+    ("C:\\Users\\fake\\dev\\my-app", "my-app"),
+    ("/Users/Shared/dev/shared-app", "shared-app"),
+])
+def test_project_key_is_the_last_path_segment_on_either_separator(cursors, tmp_path, cwd, expected) -> None:
+    root = tmp_path / "two_folders"
+    shutil.copytree(FIXTURES / "two_folders", root)
+    _rewrite_cwd(root, "-Users-fake-dev-widget", cwd)
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert {row["project_key"] for row in batch.rows if row["thread_id"] == uid(0x10D)} == {expected}
+    skipped = read_claude_code_batch(root_path=root, cursors=FileCursorStore(sqlite3.connect(":memory:")),
+                                     skip_folders=(expected,), hostnames=(), usernames=())
+    assert {row["thread_id"] for row in skipped.rows} == {uid(0x10E)}
+    assert skipped.ledger.as_dict()["dropped"] == {"skipped_folder": 1}
+
+
+def test_the_folder_key_skips_unusable_cwd_values_and_keeps_looking(cursors, tmp_path) -> None:
+    """A null, blank or non-string ``cwd`` ahead of the real one does not end the search with None."""
+    root = tmp_path / "two_folders"
+    shutil.copytree(FIXTURES / "two_folders", root)
+    path = next((root / "-Users-fake-dev-widget").glob("*.jsonl"))
+    body = path.read_text(encoding="utf-8")
+    head = "\n".join(json.dumps(record) for record in (
+        {"type": "summary", "summary": "Widget", "cwd": None},
+        {"type": "file-history-snapshot", "cwd": ""},
+        {"type": "progress", "cwd": 7},
+    ))
+    path.write_text(head + "\n" + body, encoding="utf-8")
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert {row["project_key"] for row in batch.rows if row["thread_id"] == uid(0x10D)} == {"widget"}
+
+
+def test_a_hooks_path_outside_the_root_is_dropped_before_any_file_is_read(cursors, tmp_path, monkeypatch) -> None:
+    """Security re-check N4 still holds with the peek: an outside-root ``transcript_path`` is never opened."""
+    from topos.ingestion.sources import claude_code_reader as module
+
+    outside = tmp_path / "elsewhere" / "-Users-fake-dev-widget" / f"{uid(0x10D)}.jsonl"
+    outside.parent.mkdir(parents=True)
+    outside.write_text(json.dumps({"type": "user", "cwd": "/Users/fake/dev/widget"}) + "\n", encoding="utf-8")
+    peeked: list = []
+    monkeypatch.setattr(module, "_folder_project_key", lambda files, usernames: peeked.append(list(files)))
+    batch = read_claude_code_batch(
+        root_path=FIXTURES / "two_folders", cursors=cursors, session_path=str(outside), hostnames=(), usernames=(),
+    )
+    assert batch.rows == [] and peeked == []
+    assert batch.ledger.as_dict()["dropped"] == {"outside_root": 1}
+
+
+def test_the_folder_key_comes_from_the_first_record_that_names_a_cwd(cursors, tmp_path) -> None:
+    """A summary line first, then records: the key is still the folder's basename."""
+    root = tmp_path / "two_folders"
+    shutil.copytree(FIXTURES / "two_folders", root)
+    path = next((root / "-Users-fake-dev-widget").glob("*.jsonl"))
+    body = path.read_text(encoding="utf-8")
+    path.write_text(json.dumps({"type": "summary", "summary": "Widget", "leafUuid": uid(0xD2)}) + "\n" + body,
+                    encoding="utf-8")
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=(), usernames=())
+    assert {row["project_key"] for row in batch.rows if row["thread_id"] == uid(0x10D)} == {"widget"}
+
+
 def test_since_unix_uses_record_timestamps_not_file_mtime(cursors, tmp_path) -> None:
     root = tmp_path / "since_window"
     shutil.copytree(FIXTURES / "since_window", root)
@@ -344,8 +500,34 @@ def test_a_taint_instant_known_up_front_still_spares_the_assistant_turns_before_
     assert batch.ledger.as_dict()["tainted_turns"] == 2
 
 
-def test_bash_touching_topos_home_taints_the_session(cursors) -> None:
+def test_a_health_check_on_the_socket_is_a_system_touch_recorded_without_excluding(cursors) -> None:
+    """Owner ruling 20 Oct 2026: the fixture's ``curl --unix-socket ~/.topos/engine.sock …/healthcheck`` reads no
+    owner data, so nothing after it is excluded — but the touch is recorded and counted."""
     batch = read("bash_touches_topos", cursors)
+    excluded = {row["id"]: row["_metadata"]["share_excluded"] for row in batch.rows}
+    # Nothing excludes, so the narration on both sides of the health check is ONE reply (one row per turn).
+    assert excluded == {
+        f"claude_code:{uid(0xB1)}": False,
+        f"claude_code:{uid(0xB2)}": False,
+    }
+    assert by_uuid(batch.rows, 0xB2)["content"] == "Checking.\n\nThe node answers.\n\nShall I continue?"
+    ledger = batch.ledger.as_dict()
+    assert ledger["tainted_turns"] == 0
+    assert ledger["topos_system_touches"] == 1 and ledger["topos_reads"] == 0
+    [touch] = batch.ledger.touches
+    assert (touch["tool"], touch["session_id"], touch["kind"], touch["surface"]) == (
+        "claude_code", uid(0x10B), "system", "topos_socket_admin")
+    assert touch["touched_at"].startswith("2026-")
+
+
+def test_bash_reading_the_topos_database_taints_the_session(cursors, tmp_path) -> None:
+    root = tmp_path / "bash_reads_topos"
+    shutil.copytree(FIXTURES / "bash_touches_topos", root)
+    transcript = root / SLUG / f"{uid(0x10B)}.jsonl"
+    text = transcript.read_text()
+    assert "http://localhost/healthcheck" in text
+    transcript.write_text(text.replace("http://localhost/healthcheck", "http://localhost/api/local/owner/query"))
+    batch = read_claude_code_batch(root_path=root, cursors=cursors, hostnames=("fakebox-7",), usernames=("fake",))
     excluded = {row["id"]: row["_metadata"]["share_excluded"] for row in batch.rows}
     assert excluded == {
         f"claude_code:{uid(0xB1)}": False,
@@ -353,7 +535,10 @@ def test_bash_touching_topos_home_taints_the_session(cursors) -> None:
         f"claude_code:{uid(0xB5)}": True,
     }
     assert by_uuid(batch.rows, 0xB5)["content"] == "The node answers.\n\nShall I continue?"
-    assert batch.ledger.as_dict()["tainted_turns"] == 1
+    ledger = batch.ledger.as_dict()
+    assert ledger["tainted_turns"] == 1  # B5 and B6 are one reply after the read
+    assert ledger["topos_reads"] == 1 and ledger["topos_system_touches"] == 0
+    assert [t["surface"] for t in batch.ledger.touches] == ["topos_socket_data"]
 
 
 def test_subagent_only_taint_marks_the_parent_session(cursors) -> None:
@@ -561,13 +746,19 @@ def test_a_tool_call_taints_by_any_input_that_names_a_topos_surface_not_only_a_s
 
     assert _tool_use_taint({"type": "tool_use", "name": "Read", "input": {"file_path": "/Users/someone/.topos/database.db"}})
     assert _tool_use_taint({"type": "tool_use", "name": "Grep", "input": {"pattern": "key", "path": "/Users/someone/.topos/"}})
-    assert _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "topos-node status --json"}})
+    # `topos-node status` administers the node and returns no owner data: a system touch (owner ruling 20 Oct 2026).
+    assert not _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "topos-node status --json"}})
+    assert _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "topos-node mcp --stdio"}})
     assert _tool_use_taint({"type": "tool_use", "name": "mcp__plugin_topos__query_scope", "input": {"scope_id": "messages:read"}})
     assert not _tool_use_taint({"type": "tool_use", "name": "Read", "input": {"file_path": "/Users/someone/project/README.md"}})
     assert not _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "ls -la"}})
     assert not _tool_use_taint({"type": "tool_use", "name": "Edit", "input": None})
-    # an absolute ~/.topos path with no trailing slash is the same surface (security re-check N6)
-    assert _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "ls /Users/someone/.topos"}})
+    # an absolute ~/.topos path with no trailing slash is the same surface (security re-check N6); listing it
+    # is a system touch, reading through it is a read
+    assert not _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "ls /Users/someone/.topos"}})
+    assert _tool_use_taint({"type": "tool_use", "name": "Bash", "input": {"command": "cat /Users/someone/.topos/.env"}})
+    assert _tool_use_taint({"type": "tool_use", "name": "Bash",
+                            "input": {"command": "grep -r token /Users/someone/.topos"}})
 
 
 def test_a_hooks_session_path_outside_the_tools_root_reads_nothing(cursors, tmp_path) -> None:
@@ -580,6 +771,30 @@ def test_a_hooks_session_path_outside_the_tools_root_reads_nothing(cursors, tmp_
                                    hostnames=(), usernames=())
     assert batch.rows == [] and batch.scanned_files == 0
     assert batch.ledger.as_dict()["dropped_files"] == {"outside_root": 1}
+
+
+def test_output_only_tools_are_judged_by_their_target_path_not_their_text() -> None:
+    """Writing a note that mentions ~/.topos/.env, or briefing a sub-agent about the database, reads nothing of
+    Topos (the sub-agent's own calls are scanned from its transcript). The target path still counts (F6)."""
+    from topos.ingestion.sources.claude_code_reader import _tool_use_touch
+
+    def touch(name, inputs):
+        return _tool_use_touch({"type": "tool_use", "name": name, "input": inputs})
+
+    assert touch("Write", {"file_path": "/Users/someone/dev/NOTES.md",
+                           "content": "never cat ~/.topos/.env or open ~/.topos/database.db"}) is None
+    assert touch("Edit", {"file_path": "/Users/someone/dev/a.py", "old_string": "x",
+                          "new_string": "DB = '~/.topos/database.db'"}) is None
+    assert touch("Agent", {"prompt": "count rows in ~/.topos/database.db with sqlite3"}) is None
+    assert touch("SendMessage", {"to": "peer", "message": "topos-node mcp is down"}) is None
+    assert touch("Bash", {"command": "git status", "description": "Unlike ~/.topos/.env this is safe"}) is None
+    # the target path still decides
+    assert touch("Edit", {"file_path": "/Users/someone/.topos/.env", "old_string": "a", "new_string": "b"})[0] == "read"
+    assert touch("Write", {"file_path": "/Users/someone/.topos/config.yaml", "content": "x"})[0] == "system"
+    # a tool this build does not know keeps the all-inputs rule (fail closed)
+    assert touch("SomeNewTool", {"note": "/Users/someone/.topos/database.db"})[0] == "read"
+    # the command itself still decides for Bash
+    assert touch("Bash", {"command": "sqlite3 ~/.topos/database.db .tables", "description": "count"})[0] == "read"
 
 
 # ---------------------------------------------------------------------------

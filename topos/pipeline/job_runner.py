@@ -22,6 +22,7 @@ from .job_store import (
     claim_matching_queued_jobs,
     claim_next_job,
     complete_job,
+    enqueue_job,
     fail_job,
     recover_stale_jobs,
     record_derivation_completion,
@@ -478,18 +479,28 @@ def _long_running_kinds() -> list[str]:
 #: them runs the per-batch jobs (dimension briefs, topic work) once instead of
 #: once per delivery. Leftovers beyond the cap stay queued for the next cycle.
 _COALESCE_MAX_JOBS = 100
+#: Records one coalesced derive batch may carry. Matches the coding-session
+#: recovery batch (``ai_tool_catchup.BATCH_SIZE``) and stays inside incremental
+#: topic assignment's 200-record limit. A batch commits its progress markers only
+#: when it ends, so this is also the most work a node restart can throw away.
+_COALESCE_MAX_RECORDS = 128
 
 
 def _coalesce_inbox_jobs(
     conn, job: Dict[str, Any], payload: Dict[str, Any]
 ) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
     """Merge queued inbox jobs for the same source into this job's batch."""
+    own_records = len(payload.get("canonical_records") or [])
+    if own_records >= _COALESCE_MAX_RECORDS:
+        return [job], payload
     siblings = claim_matching_queued_jobs(
         conn,
         lease_owner=_lease_owner,
         kind=str(job["kind"]),
         source_id=job.get("source_id"),
         limit=_COALESCE_MAX_JOBS,
+        max_records=_COALESCE_MAX_RECORDS,
+        records_already=own_records,
     )
     if not siblings:
         return [job], payload
@@ -504,6 +515,49 @@ def _coalesce_inbox_jobs(
         len(merged_records),
     )
     return [job, *siblings], merged_payload
+
+
+def _split_oversized_inbox_job(conn, job: Dict[str, Any], payload: Dict[str, Any]) -> List[str]:
+    """Queue a coding-session job's records as cap-sized jobs and close the original.
+
+    1.5.10–1.5.13 queued one deferred-enrichment job per transcript batch of up
+    to 2,000 records. Such a job runs as one executor call that commits nothing
+    until it ends, so a restart loses all of it. Splitting before any model work
+    lets an upgraded node resume those queues in bounded, restartable pieces.
+    Children are keyed on the parent, so a second claim of the same parent (a
+    stop between the split and the parent's completion) queues nothing new.
+    Returns the child job ids in record order.
+    """
+    records = list(payload.get("canonical_records") or [])
+    parent_id = str(job["job_id"])
+    parent_key = str(job.get("idempotency_key") or parent_id)
+    children: List[str] = []
+    for part, start in enumerate(range(0, len(records), _COALESCE_MAX_RECORDS)):
+        chunk = records[start:start + _COALESCE_MAX_RECORDS]
+        children.append(enqueue_job(
+            conn,
+            kind=str(job["kind"]),
+            source_id=job.get("source_id"),
+            sync_batch_id=job.get("sync_batch_id"),
+            idempotency_key=f"{parent_key}:part{part}",
+            payload={**payload, "canonical_records": chunk},
+        ))
+    complete_job(conn, parent_id, detail={"status": "split", "split_into": children,
+                                          "records": len(records)})
+    logger.info("split an oversized derive job into %d jobs of at most %d records: source=%s records=%d",
+                len(children), _COALESCE_MAX_RECORDS, job.get("source_id"), len(records))
+    return children
+
+
+def _splits_before_running(kind: str, job: Dict[str, Any], payload: Dict[str, Any]) -> bool:
+    """Only coding-session deferred jobs over the cap, and never one carrying a write receipt."""
+    if kind != "inbox_deferred_enrichment" or job.get("write_id"):
+        return False
+    if len(payload.get("canonical_records") or []) <= _COALESCE_MAX_RECORDS:
+        return False
+    from ..ingestion.ai_tool_sync import AI_TOOL_SOURCE_IDS
+
+    return str(job.get("source_id") or "") in AI_TOOL_SOURCE_IDS
 
 
 async def _run_db(conn_factory: Callable[[], Any], fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
@@ -613,6 +667,10 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
     # back here, and they are released below once the job cannot run again.
     payload = job_secrets.restore(job_id, dict(job.get("payload") or {}))
     jobs = [job]
+    if _splits_before_running(kind, job, payload):
+        await _run_db(conn_factory, _split_oversized_inbox_job, job, payload)
+        job_secrets.release(job_id)
+        return
     if kind == "inbox_deferred_enrichment":
         jobs, payload = await _run_db(conn_factory, _coalesce_inbox_jobs, job, payload)
     if kind in ("enrichment_process_source", "ai_tool_enrichment_catchup", LOCAL_SYNC_KIND):
