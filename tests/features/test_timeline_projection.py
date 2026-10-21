@@ -293,3 +293,71 @@ def test_only_missing_backfill_restores_timeline(conn, monkeypatch) -> None:
     )
     assert repeated["rows_processed"] == 0
 
+
+
+def _ai_chat_conn(tmp_path) -> sqlite3.Connection:
+    from topos.storage.canonical.ai_chat.tables import CanonicalTablesManager
+
+    db = sqlite3.connect(str(tmp_path / "timeline-share-excluded.db"))
+    db.row_factory = sqlite3.Row
+    apply_all_migrations(db)
+    CanonicalTablesManager(db)
+    # The lazy ai_chat tables came after the migrations ran: the always-run step adds share_excluded now.
+    apply_all_migrations(db)
+    return db
+
+
+def test_repair_never_projects_a_share_excluded_ai_chat_row(tmp_path) -> None:
+    """``_mark_share_excluded`` takes a flagged coding-session reply out of ``timeline`` (CONTRACTS §2.6); the repair
+    must not put it back. Three replies: one shareable, one with the column set, one whose column is still 0 but whose
+    stored metadata carries the reader's flag (a sync killed before its mark, on a node from before the trigger fix).
+    Only the shareable one is projected, whether by the full repair or by a direct call with the rows as stored."""
+    import json
+
+    db = _ai_chat_conn(tmp_path)
+    try:
+        def insert(message_id: str, nested_flag: bool) -> None:
+            db.execute(
+                "INSERT INTO ai_chat_messages (message_id, conversation_id, sender_type, event_at, content,"
+                " metadata_json, source_id) VALUES (?, 'claude_code:s1', 'assistant', '2026-10-14T10:00:00Z',"
+                " 'invented reply', ?, 'claude_code_sessions')",
+                (message_id, json.dumps({"_metadata": {"tool": "claude_code", "share_excluded": nested_flag}})),
+            )
+
+        insert("claude_code:shareable", False)
+        insert("claude_code:flagged", False)
+        insert("claude_code:meta-only", True)
+        db.execute("UPDATE ai_chat_messages SET share_excluded = 1 WHERE message_id = 'claude_code:flagged'")
+        # The column of the meta-only row as an old node left it: never marked.
+        db.execute("UPDATE ai_chat_messages SET share_excluded = 0 WHERE message_id = 'claude_code:meta-only'")
+        db.commit()
+
+        report = project_canonical_timeline(db, source_id="claude_code_sessions", missing_only=True)
+        projected = {r[0] for r in db.execute("SELECT record_id FROM timeline").fetchall()}
+        assert projected == {"claude_code:shareable"}, projected
+        assert report["by_table"]["ai_chat_messages"]["share_excluded"] == 2
+
+        db.execute("DELETE FROM timeline")
+        rows = [dict(r, _table="ai_chat_messages") for r in db.execute("SELECT * FROM ai_chat_messages").fetchall()]
+        result = project_timeline_rows(db, rows)
+        projected = {r[0] for r in db.execute("SELECT record_id FROM timeline").fetchall()}
+        assert projected == {"claude_code:shareable"}, projected
+        assert (result.written, result.share_excluded) == (1, 2)
+    finally:
+        db.close()
+
+
+def test_projection_fails_closed_on_an_unreadable_share_excluded_value(conn) -> None:
+    """A row that carries the column reads as flagged unless the value is 0 (``row_share_excluded``): a NULL is not
+    shareable. A row of a table without the column is projected as before."""
+    result = project_timeline_rows(
+        conn,
+        [
+            {"_table": "ai_chat_messages", "message_id": "ai-null", "ts": "2026-07-13T12:00:00Z", "share_excluded": None},
+            {"_table": "ai_chat_messages", "message_id": "ai-zero", "ts": "2026-07-13T12:00:00Z", "share_excluded": 0},
+            {"_table": "journal_entries", "entry_id": "journal-1", "entry_at": "2026-07-13T12:00:00Z"},
+        ],
+    )
+    projected = {r[0] for r in conn.execute("SELECT record_id FROM timeline").fetchall()}
+    assert projected == {"ai-zero", "journal-1"}, projected
+    assert result.share_excluded == 1

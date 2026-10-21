@@ -105,6 +105,19 @@ def _truth_version() -> int:
     return 1 if switches.on(switches.MESSAGE_SEARCH) else 0
 
 
+def _truth_interpret_version() -> int:
+    """`permissions_v2_truth_interpret_version`: 1 when this node reads a free statement with its pinned local model
+    (verify-claim effort high: knowledge search and the interpreter switch on, the shipped examples intact and the
+    pinned model ready), else 0. The control plane forwards a statement its grammar refused only to a node that says 1;
+    any other node gets the fast path only."""
+    try:
+        from ..permissions_v2.truth_statement import capability_version
+
+        return int(capability_version())
+    except Exception:  # noqa: BLE001 -- a node that cannot tell does not read statements
+        return 0
+
+
 def _fact_ontology_switches() -> int:
     """`permissions_v2_fact_ontology_switches`: 1, this node releases a fact only while the fact's ontology is
     switched on here (selective_facts.ONTOLOGY_SWITCHES_VERSION, where the rule is). It says what the code does, so
@@ -206,6 +219,7 @@ def build_engine_capabilities() -> Dict[str, Any]:
         "permissions_v2_search_batch_version": _search_batch_version(),
         "permissions_v2_answer_version": _answer_version(),
         "permissions_v2_truth_version": _truth_version(),
+        "permissions_v2_truth_interpret_version": _truth_interpret_version(),
         "permissions_v2_answer_model": _answer_model_status(),
         # Facts by ontology: >= 1 says this node shares a fact only while its ontology is switched on here. The
         # control plane offers Facts, and forwards a fact, only for a node that says so (a node before the rule

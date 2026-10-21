@@ -619,17 +619,23 @@ def _post_canonical(*, source_def: Any, canonical_records: List[Dict[str, Any]],
     or prevent the sync receipt and checkpoint from being written.
     """
     from ..pipeline.job_store import enqueue_job
+    from .ai_tool_catchup import BATCH_SIZE
 
     if db_conn is None:
         raise RuntimeError("no database connection for deferred coding-session processing")
-    job_id = enqueue_job(
-        db_conn, kind="inbox_deferred_enrichment", source_id=source_def.source_id,
-        sync_batch_id=sync_batch_id,
-        idempotency_key=f"ai-tool-derivation:{sync_batch_id}",
-        payload={"source_id": source_def.source_id, "sync_batch_id": sync_batch_id,
-                 "canonical_records": canonical_records},
-    )
-    return {"status": "queued", "job_id": job_id}
+    # One job per BATCH_SIZE records. A job is one executor call that commits its
+    # progress only when it ends; a transcript batch of up to 2,000 records as a
+    # single job lost everything on a restart (2026-10-19).
+    job_ids = []
+    for part, start in enumerate(range(0, len(canonical_records), BATCH_SIZE)):
+        job_ids.append(enqueue_job(
+            db_conn, kind="inbox_deferred_enrichment", source_id=source_def.source_id,
+            sync_batch_id=sync_batch_id,
+            idempotency_key=f"ai-tool-derivation:{sync_batch_id}:part{part}",
+            payload={"source_id": source_def.source_id, "sync_batch_id": sync_batch_id,
+                     "canonical_records": canonical_records[start:start + BATCH_SIZE]},
+        ))
+    return {"status": "queued", "job_ids": job_ids}
 
 
 def node_secret_values(conn: Any = None) -> Tuple[str, ...]:

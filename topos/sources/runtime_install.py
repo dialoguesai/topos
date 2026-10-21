@@ -25,6 +25,11 @@ from ..storage.canonical.ai_chat import mapper as storage_mapper_module
 # bundled triples without replacing them with generic runtime shims on install.
 BUNDLED_PARSER_IDS = frozenset(PARSER_REGISTRY.keys())
 BUNDLED_MAPPER_IDS = frozenset(MAPPER_REGISTRY.keys())
+# The ai_chat mappers registered in code (``ai_coding_tool`` among them, at the parser package's import above). The
+# legacy snapshot alone missed them: a runtime install of one coding source then put a shim bound to ITS source id
+# over the mapper all three coding sources share, and the first coding source a process installed named every coding
+# conversation until the next restart (``codex_sessions:<session>`` on Claude Code rows, 20 Oct 2026).
+BUNDLED_STORAGE_MAPPER_IDS = frozenset(storage_mapper_module._MAPPER_REGISTRY.keys())
 
 
 def _maybe_parse_json(value: Any) -> Any:
@@ -408,10 +413,12 @@ def _build_dynamic_storage_mapper_class(source_def: DataSourceDefinition, mapper
             return [message]
 
         def extract_conversation_id(self, staging_record: Dict[str, Any]) -> str:
+            # The row's own source: sources sharing a mapper id share this class, built for the first to install.
+            source_id = _coerce_text(staging_record.get("source_id")) or source_def.source_id
             conv = _coerce_text(staging_record.get("thread_id") or staging_record.get("conversation_id") or "")
             if conv and ":" not in conv:
-                return f"{source_def.source_id}:{conv}"
-            return conv or f"{source_def.source_id}:{_coerce_text(staging_record.get('dataset_id'))}"
+                return f"{source_id}:{conv}"
+            return conv or f"{source_id}:{_coerce_text(staging_record.get('dataset_id'))}"
 
     RuntimeInstalledStorageMapper.__name__ = f"RuntimeInstalledStorageMapper_{source_def.source_id.replace('-', '_')}"
     return RuntimeInstalledStorageMapper
@@ -492,8 +499,10 @@ def install_source_definition(source_def_payload: Dict[str, Any]) -> RuntimeInst
     )
 
     mapper_id = str(source_def.canonical_mapper_id or "").strip() or None
+    # A bundled ai_chat mapper is never replaced, custom extract map or not: it is shared by every source naming it.
     use_bundled_mapper = bool(
-        mapper_id and mapper_id in BUNDLED_MAPPER_IDS and not has_custom_extract_map
+        mapper_id
+        and ((mapper_id in BUNDLED_MAPPER_IDS and not has_custom_extract_map) or mapper_id in BUNDLED_STORAGE_MAPPER_IDS)
     )
 
     previous_parsers: Dict[str, Any] = {}

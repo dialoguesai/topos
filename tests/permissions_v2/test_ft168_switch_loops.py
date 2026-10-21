@@ -20,6 +20,7 @@ Expected failures here are findings (FT168 report): each names what it shows in 
 """
 from __future__ import annotations
 
+import contextlib
 import os
 import threading
 import time
@@ -262,28 +263,35 @@ def test_a_switch_never_takes_the_share_dark_with_the_real_sweep_and_loop(served
 @pytest.mark.parametrize("gap", ["no_gap", "one_sweep_apart"])
 def test_switches_in_quick_succession_end_in_the_last_state_and_never_refuse(served, monkeypatch, caplog, sequence, gap):
     """Whatever the loop saw of the switches in between, the share ends holding what the last one says, by the
-    loop's own builds, and is served throughout."""
+    loop's own builds, and is served throughout.
+
+    `no_gap` holds the loop's observations while the switches are written (`Running.unobserved`), so no sweep
+    looks between them on any machine; before, it assumed the writes fit inside one 0.25 s sweep, which a loaded CI
+    runner broke. Settled is the loop's own signal (`Running.settled`: it has observed the current fact state and
+    owes no build), not a quiet moment: a quiet moment can come before a late sweep sees the last switch and queues
+    one more build."""
     node = served
     reasons = ft.record_refusal_reasons(node)
     running = ft.Running(node, monkeypatch)
     try:
         with caplog.at_level("WARNING"), ft.Asker(node, QUERY) as asker:
             assert running.wait(lambda: running.observations >= 2) is not None
-            for on in sequence:
-                seen = running.observations
-                assert ft.switch(node, ft.WORK, on)
-                if gap == "one_sweep_apart":
-                    assert running.wait(lambda: running.observations > seen) is not None
-                if not on:
-                    # Off is decided by the release, whatever the index holds and whatever the loop has seen.
-                    assert ft.ask(node, QUERY, request_id=f"ft168-off-{time.monotonic_ns()}")[0] == []
+            with running.unobserved() if gap == "no_gap" else contextlib.nullcontext():
+                for on in sequence:
+                    seen = running.observations
+                    assert ft.switch(node, ft.WORK, on)
+                    if gap == "one_sweep_apart":
+                        assert running.wait(lambda: running.observations > seen) is not None
+                    if not on:
+                        # Off is decided by the release, whatever the index holds and whatever the loop has seen.
+                        assert ft.ask(node, QUERY, request_id=f"ft168-off-{time.monotonic_ns()}")[0] == []
             expected = 2 if sequence[-1] else 0
-            settled = running.wait(lambda: running.quiet() and fact_members(node) == expected
+            settled = running.wait(lambda: running.settled(node) and fact_members(node) == expected
                                    and fact_members(node, ANSWERS) == expected, 30)
             assert settled is not None, (fact_members(node), running.builds, ft.restores(node))
             seen = running.observations
             assert running.wait(lambda: running.observations >= seen + 3) is not None     # and it stays there
-            assert running.quiet() and fact_members(node) == expected
+            assert running.settled(node) and fact_members(node) == expected
             facts, others, refused = ft.ask(node, QUERY)
             assert refused is None and others and len(facts) == (1 if sequence[-1] else 0)
         assert stale_lines(caplog) == []

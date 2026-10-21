@@ -95,15 +95,16 @@ def codex_read(tmp_path: Path):
 
 def test_codex_preview_lists_project_basenames(codex_read, monkeypatch) -> None:
     result = _preview(monkeypatch, codex_read, "codex_sessions")
+    # main's reply-merge fixtures (#157) added a sixth Codex session, in eta-project.
     assert result["folders"] == ["alpha-project", "delta-project", "epsilon-project", "eta-project", "gamma-project"]
-    assert result["sessions"] == 6 and result["turns"] == 23  # test_codex_reader.TOTAL_ROWS
+    assert result["sessions"] == 6 and result["turns"] == 23
     _assert_listed_names_are_bare(result["folders"])
 
 
 def test_codex_preview_skip_takes_a_listed_name(codex_read, monkeypatch) -> None:
     result = _preview(monkeypatch, codex_read, "codex_sessions", skip=["alpha-project"])
     assert result["folders"] == ["delta-project", "epsilon-project", "eta-project", "gamma-project"]
-    assert result["sessions"] == 4 and result["turns"] == 17  # alpha's two threads hold 6 of the 23 rows
+    assert result["sessions"] == 4 and result["turns"] == 17
 
 
 def _real_reader(name: str):
@@ -166,8 +167,9 @@ def cursor_read(tmp_path: Path):
 
 def test_cursor_preview_lists_project_basenames(cursor_read, monkeypatch) -> None:
     result = _preview(monkeypatch, cursor_read.read, "cursor_sessions")
+    # main's reply-merge fixtures (#157) added a fourth Cursor composer under beta-project.
     assert result["folders"] == ["beta-project"]
-    assert result["sessions"] == 4 and result["turns"] == 16  # test_cursor_reader.TOTAL_ROWS
+    assert result["sessions"] == 4 and result["turns"] == 16
     _assert_listed_names_are_bare(result["folders"])
 
 
