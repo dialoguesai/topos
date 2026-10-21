@@ -1122,8 +1122,8 @@
       ]
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.5.15",
+      "summary": "Release 1.5.15.",
       "steps": [
         {
           "id": "repair-coding-session-conversation-ids",
@@ -1161,6 +1161,12 @@
       "notes": [
         "Coding-session conversations are named <tool>:<session> again (claude_code:, codex:, cursor:). Rows written under another source's prefix by 1.5.13 and the 1.5.14 candidate are renamed in place and split sessions merged; no transcript is re-read and no message text, timestamp or authorship changes. A review pinning a renamed coding row reads stale until its next pass."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }
