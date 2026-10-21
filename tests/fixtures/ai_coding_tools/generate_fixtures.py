@@ -543,6 +543,84 @@ def case_reply_edges() -> None:
     ])
 
 
+QUEUED_SESSION = 0x120
+QUEUED_FORK = 0x121
+
+
+def queued(n: int, parent: str | None, session: str, i: int, prompt, *, mode: str = "prompt", origin=None,
+           source: str | None = None, sidechain: bool = False, **extra) -> dict:
+    # A prompt delivered into a running turn, shaped as Claude Code writes it: the fields live on the attachment.
+    payload = {"type": "queued_command", "prompt": prompt, "commandMode": mode, "timestamp": ts(i)}
+    if origin is not None:
+        payload["origin"] = origin
+    if source is not None:
+        payload["source_uuid"] = source
+    payload.update(extra)
+    record = attachment(n, parent, session, i, payload)
+    record["isSidechain"] = sidechain
+    return record
+
+
+def case_queued_prompts() -> None:
+    # Prompts queued while the agent works. Only the person's own (commandMode prompt, origin.kind human, not
+    # isMeta) become user rows; task notifications, peer messages, isMeta and origin-less entries stay out.
+    # A source_uuid that names a typed record in the file is that record's copy, before or after it.
+    s = uid(QUEUED_SESSION)
+    human = {"kind": "human"}
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+    original = [
+        user(0x221, None, s, 0, "Refactor the parser"),
+        assistant(0x222, uid(0x221), s, 1, [text("Reading the parser first.")], "msg_q1", stop="tool_use"),
+        assistant(0x223, uid(0x222), s, 2, [tool_use("Read", {"file_path": f"{CWD}/parser.py"}, "toolu_q1")], "msg_q1",
+                  stop="tool_use"),
+        queued(0x224, uid(0x223), s, 3,
+               f"Also update {CWD}/README.md\n<system-reminder>The user sent this while you worked.</system-reminder>",
+               origin=human, source="qsrc-0001", humanTurn=True),
+    ]
+    write_jsonl(session_file("queued_prompts", s), original + [
+        user(0x225, uid(0x224), s, 4, tool_result("def parse(): ...", "toolu_q1")),
+        assistant(0x226, uid(0x225), s, 5, [text("Parser split into two modules; README updated.")], "msg_q2",
+                  stop="tool_use"),
+        queued(0x227, uid(0x226), s, 6, "<task-notification>build done</task-notification>", mode="task-notification"),
+        queued(0x228, uid(0x227), s, 7, "<task-notification>tests done</task-notification>", mode="task-notification",
+               origin={"kind": "task-notification"}),
+        queued(0x229, uid(0x228), s, 8, "Peer lane says the build is green", origin={"kind": "peer", "from": "lane-b"},
+               isMeta=True),
+        queued(0x22A, uid(0x229), s, 9, "Meta text in a human queue entry", origin=human, isMeta=True),
+        queued(0x22B, uid(0x22A), s, 10, "<ci-monitor-event>checks green</ci-monitor-event>", source="qsrc-0002"),
+        queued(0x22C, uid(0x22B), s, 11, [text("What does this diagram show?"), image], origin=human),
+        queued(0x22D, uid(0x22C), s, 12, [image], origin=human, source="qsrc-0004"),
+        queued(0x22E, uid(0x22D), s, 13, "<bash-input>ls</bash-input>", origin=human, source="qsrc-0005"),
+        queued(0x22F, uid(0x22E), s, 14, "Refactor the parser", origin=human, source=uid(0x221)),
+        queued(0x230, uid(0x22F), s, 15, {"text": "a prompt that is neither text nor blocks"}, origin=human),
+        queued(0x231, uid(0x230), s, 16, [{"type": "document", "source": {"type": "text", "data": "notes"}}],
+               origin=human),
+        queued(0x232, uid(0x231), s, 17, "Queued inside a sub-agent", origin=human, sidechain=True),
+        queued(0x233, uid(0x232), s, 18, "Ship it", origin=human, source=uid(0x234)),
+        user(0x234, uid(0x233), s, 19, "Ship it"),
+        assistant(0x235, uid(0x234), s, 20, [text("Shipped.")], "msg_q3", stop="end_turn"),
+        queued(0x236, uid(0x235), s, 21, "   ", origin=human, source="qsrc-0006"),
+        # A typed record with no uuid: a queued entry with no source_uuid is not its copy.
+        {k: v for k, v in user(0x238, uid(0x236), s, 22, "No uuid on this one").items() if k != "uuid"},
+        # A source_uuid naming an assistant record is no typed copy; the person's prompt stays a row.
+        queued(0x239, None, s, 23, "Also check the tests", origin=human, source=uid(0x222)),
+        # A list with a stray non-block item is not text and image blocks.
+        queued(0x23A, uid(0x239), s, 24, ["stray", text("Stray item beside a block")], origin=human),
+        # A queued entry with no uuid cannot be a row.
+        {k: v for k, v in queued(0x23B, uid(0x23A), s, 25, "Queued with no uuid", origin=human).items()
+         if k != "uuid"},
+        # Text on both sides of an image: the image adds nothing between them.
+        queued(0x23C, uid(0x23A), s, 26, [text("Before the image"), image, text("after the image")], origin=human),
+        # A peer entry whose source_uuid names a typed record is counted by its origin, not as a copy.
+        queued(0x23D, uid(0x23C), s, 27, "Peer echo of the first prompt", origin={"kind": "peer"}, isMeta=True,
+               source=uid(0x221)),
+    ])
+    f = uid(QUEUED_FORK)
+    write_jsonl(session_file("queued_prompts", f), [dict(r, sessionId=f) for r in (original[0], original[3])] + [
+        queued(0x237, uid(0x224), f, 22, "Fork-only follow-up", origin=human, source="qsrc-0007"),
+    ])
+
+
 def main() -> None:
     if ROOT.exists():
         shutil.rmtree(ROOT)
@@ -567,6 +645,7 @@ def main() -> None:
         case_open_reply,
         case_harness_trailing,
         case_reply_edges,
+        case_queued_prompts,
     ):
         build()
     print(f"wrote {sum(1 for _ in ROOT.rglob('*') if _.is_file())} files under {ROOT}")
