@@ -254,31 +254,41 @@ def test_a_flagged_row_is_excluded_the_moment_it_is_written(node, monkeypatch) -
 def test_the_real_write_path_flags_the_row_without_the_post_write_mark(node, monkeypatch, mapper) -> None:
     """The test above runs the fakes, whose metadata is flat. The real parser keeps the reader's ``_metadata``
     and the canonical writer stores whatever the registered ``ai_coding_tool`` mapper makes of it. The bundled
-    mapper merges it flat (``$.share_excluded``). Enabling the source runs a runtime install, which registers
-    ``RuntimeInstalledStorageMapper`` over the bundled one because the legacy registry has no ``ai_coding_tool``. That
-    mapper nests the reader's metadata (``$._metadata.share_excluded``), which is the shape a live node stores.
-    With the post-write mark gone, the triggers and the pipeline's projection filter are all that stand
-    between that row and a share."""
+    mapper merges it flat (``$.share_excluded``). Nodes up to 1.5.14 ran a runtime install that replaced the
+    bundled mapper with ``RuntimeInstalledStorageMapper``, which nests the reader's metadata
+    (``$._metadata.share_excluded``): the shape those nodes stored, and still store on re-sync of rows already
+    there. Since #156 an install never replaces a mapper the node ships, so the nested shape is reproduced here
+    by registering a mapper with that shape outright. With the post-write mark gone, the triggers and the
+    pipeline's projection filter are all that stand between that row and a share."""
     import topos.ingestion.ai_tool_sync as lane
-    from topos.canonicalization.mappers import MAPPER_REGISTRY as LEGACY_MAPPERS
     from topos.ingestion.parsers import PARSER_REGISTRY
     from topos.ingestion.parsers.ai_coding_tool.claude_code import ClaudeCodeTranscriptParser
     from topos.storage.canonical.ai_chat import mapper as ai_chat_mapper
     from topos.storage.canonical.ai_chat.coding_tool_mapper import CodingToolToAIChatMapper
 
+    class NestingMapper(CodingToolToAIChatMapper):
+        """The 1.5.14 runtime-installed shape: the reader's ``_metadata`` nested whole under ``_metadata``."""
+
+        def map_to_canonical(self, staging_record, source="ai_coding_tool"):
+            [message] = super().map_to_canonical(staging_record, source)
+            extra = staging_record.get("_metadata")
+            nested = {k: v for k, v in (message.metadata_json or {}).items() if k in ("thread_id", "original_source")}
+            nested["_metadata"] = dict(extra) if isinstance(extra, dict) else extra
+            message.metadata_json = nested
+            return [message]
+
     real_parser_for = lane._parser_for
     arm(monkeypatch, node, reader=FakeReader(_batch()))
-    # Undo the stand-ins: the bundled parser, the bundled mapper, and (for the live shape) no legacy placeholder,
-    # so ``enable`` lets the runtime install do what it does on a node. monkeypatch restores all three after.
+    # Undo the stand-ins: the bundled parser and the bundled (or, for the live shape, the nesting) mapper.
+    # monkeypatch restores all three after.
     monkeypatch.setattr(lane, "_parser_for", real_parser_for)
     monkeypatch.setitem(PARSER_REGISTRY, SCHEMA, ClaudeCodeTranscriptParser)
-    monkeypatch.setitem(ai_chat_mapper._MAPPER_REGISTRY, "ai_coding_tool", CodingToolToAIChatMapper)
-    if mapper == "runtime_installed":
-        monkeypatch.delitem(LEGACY_MAPPERS, "ai_coding_tool")
+    monkeypatch.setitem(ai_chat_mapper._MAPPER_REGISTRY, "ai_coding_tool",
+                        NestingMapper if mapper == "runtime_installed" else CodingToolToAIChatMapper)
     enable(node, SOURCE)
     registered = ai_chat_mapper._MAPPER_REGISTRY["ai_coding_tool"].__name__
-    assert registered == ("RuntimeInstalledStorageMapper_claude_code_sessions" if mapper == "runtime_installed"
-                          else "CodingToolToAIChatMapper"), registered
+    # #156: an install never replaces a mapper the node registered itself.
+    assert registered == ("NestingMapper" if mapper == "runtime_installed" else "CodingToolToAIChatMapper"), registered
 
     monkeypatch.setattr(lane, "_mark_share_excluded", lambda *_a, **_k: 0)
     result = _run()
