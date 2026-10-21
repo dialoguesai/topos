@@ -5922,6 +5922,7 @@ def _rrf_fuse_summary_lists(
     goal_cap: Optional[int] = None,
     ledger: Optional[Any] = None,
     activity_time_range: Optional[Tuple[str, str]] = None,
+    vector_head: int = 0,
 ) -> List[Dict[str, Any]]:
     """Fuse ordered contributor lists with weighted reciprocal rank fusion.
 
@@ -6210,6 +6211,32 @@ def _rrf_fuse_summary_lists(
             lane_keys = list(dict.fromkeys(_fusion_item_key(item) for item in ordered))
             heads.extend(key for key in lane_keys[:quota] if key in best_item and key not in heads)
         selected = (heads + [key for key in selected if key not in heads])[:cap]
+
+    # The vector lane's own best evidence hits, kept at the head. RRF scores a lane by
+    # weight / (k + rank), and this lane fuses at 1.0 with recency decay while stat
+    # insights (2.0) and facts, entities and derived objects (1.5) fuse undecayed: at
+    # k=60 a stat insight at rank 60 outscores the vector lane's FIRST hit, so a dense
+    # corpus filled every slot before it. That hit is the closest record to the question
+    # whichever source holds it, and `semantic_hits` never reach an answer on their own
+    # (the game layer rebuilds `public_result` from `summaries`). Unlike the source heads
+    # above it holds for a specific ask too, behind that ask's witnesses below; only
+    # `vector`, never its sub-floor `vector_context`; and an eviction it causes never
+    # takes a `min_per_source` floor's item. Temporal selection keeps its day coverage.
+    if vector_head and not activity_time_range:
+        lane = next((ordered for name, _, ordered in lists if name == "vector"), [])
+        lead = [
+            key for key in dict.fromkeys(_fusion_item_key(item) for item in lane)
+            if key in best_item and key not in heads
+        ][:vector_head]
+        if lead:
+            rest = [key for key in selected if key not in heads and key not in lead]
+            floors = set(min_per_source or ())
+            while rest and len(heads) + len(lead) + len(rest) > cap:
+                rest.remove(next(
+                    (key for key in reversed(rest) if not set(contributors.get(key, [])) & floors),
+                    rest[-1],
+                ))
+            selected = (heads + lead + rest)[:cap]
 
     if groups and not activity_time_range:
         # Keep witnesses for the same conditions that admitted the query above.
@@ -6685,7 +6712,11 @@ def _build_summary_items_unfiltered(
     thread_sink: Optional[Dict[str, Any]] = None,
     commitment_sink: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
-    from ..features.signal.vector_settings import fusion_rrf_enabled, vector_evidence_min
+    from ..features.signal.vector_settings import (
+        fusion_rrf_enabled,
+        fusion_vector_head,
+        vector_evidence_min,
+    )
 
     hit_record_ids = {str(h.get("record_id")) for h in semantic_hits if h.get("record_id")}
     prefer_goals = "user_goals" in (manifest.signal_objects or [])
@@ -7489,6 +7520,7 @@ def _build_summary_items_unfiltered(
             goal_cap=_WORK_GOAL_FUSION_CAP if activity_window or (work_scope and goal_intent) else None,
             activity_time_range=activity_window,
             ledger=ledger,
+            vector_head=fusion_vector_head(),
         )
         return _annotate_index_message_roles(fused, bundle_conn, manifest, disclosure_tier=disclosure_tier)
 

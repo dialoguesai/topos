@@ -104,6 +104,23 @@ def fusion_recency_floor() -> float:
         return 0.2
 
 
+def fusion_vector_head() -> int:
+    """How many of the vector lane's own best evidence hits the fused list keeps at its head.
+
+    Weighted RRF ranks the vector lane (1.0, recency-decayed) behind every undecayed lane
+    weighted 1.5-2.0, so its first hit could not reach the 25-item list, let alone the
+    first 12 that home chat's synthesis reads. Measured on an owner snapshot 2026-10-21
+    (counts only, 300 known-item turns outside iMessage): the vector lane's FIRST hit was
+    the answering record in 121 of them and its second in 22; the fused list held the
+    answer in 14. 0 disables the head.
+    """
+    raw = os.environ.get("TOPOS_FUSION_VECTOR_HEAD", "2").strip()
+    try:
+        return max(0, min(10, int(raw)))
+    except ValueError:
+        return 2
+
+
 def vector_evidence_min() -> float:
     """Cosine floor above which a vector hit counts as *evidence* (can justify a
     non-empty result on its own). Hits between the retrieval min-similarity and
