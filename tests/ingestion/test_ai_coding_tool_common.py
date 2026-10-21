@@ -372,23 +372,85 @@ def test_keyboard_origin_rule_rows_are_the_spike_a_fields_in_order() -> None:
 # ---------------------------------------------------------------------------
 
 
+# Owner ruling 20 Oct 2026: a READ of Topos excludes the session's later replies; a SYSTEM touch (status,
+# health, setup, logs) is recorded and counted and excludes nothing. Unknown Topos surfaces fail closed (read).
+_SOCK = "curl -s --unix-socket ~/.topos/engine.sock"
+
+
 @pytest.mark.parametrize(
-    "name,command",
+    "name,command,surface",
     [
-        ("mcp__plugin_topos_topos__query_scope", None),
-        ("mcp__topos__query_scope", None),
-        ("mcp__topos__remote__topos-gmail__search_gmail_messages", None),
-        ("mcp__acme__remote__gdrive_search", None),
-        ("Topos", None),
-        ("Bash", "curl --unix-socket ~/.topos/engine.sock http://x/healthcheck"),
-        ("Bash", "sqlite3 /Users/fake/.topos/database.db 'select 1'"),
-        ("Bash", "ls engine.sock"),
-        ("Bash", "topos-node status --json"),
-        (None, "cat ~/.topos/.env"),
+        ("mcp__plugin_topos_topos__query_scope", None, "topos_data_tool"),
+        ("mcp__topos__query_scope", None, "topos_data_tool"),
+        ("topos query_scope", None, "topos_data_tool"),
+        ("mcp__topos__get_table_rows", None, "topos_data_tool"),
+        ("mcp__topos__remote__topos-gmail__search_gmail_messages", None, "connector_tool"),
+        ("mcp__acme__remote__gdrive_search", None, "connector_tool"),
+        ("Topos", None, "topos_data_tool"),
+        ("mcp__topos__some_tool_added_later", None, "topos_data_tool"),
+        ("Bash", "sqlite3 /Users/fake/.topos/database.db 'select 1'", "topos_database"),
+        ("Read", '{"file_path": "/Users/fake/.topos/database.db"}', "topos_database"),
+        (None, "cat ~/.topos/.env", "topos_private_files"),
+        ("Bash", "ls ~/.topos/agents/", "topos_private_files"),
+        ("Bash", "topos-node mcp --stdio", "topos_cli_data"),
+        ("Bash", "topos-node some-new-command", "topos_cli_data"),
+        ("Bash", '{"command": "cd /tmp && ~/.local/bin/topos-node export-all"}', "topos_cli_data"),
+        ("Bash", '{"command": "TOPOS_HOME=/x uv run topos-node dump"}', "topos_cli_data"),
+        ("Bash", '{"command": "echo hi; topos-node mcp"}', "topos_cli_data"),
+        ("Bash", '{"command": ["bash", "-lc", "topos-node dump-everything"]}', "topos_cli_data"),
+        ("Agent", '{"prompt": "start topos-node mcp and query it"}', "topos_cli_data"),
+        ("Bash", '{"command": "find ~/.topos -name x -exec cat {} +"}', "topos_private_files"),
+        ("Bash", '{"command": "ls ~/.topos | xargs cat"}', "topos_private_files"),
+        ("Bash", f"{_SOCK} http://localhost/api/local/owner/query -d '{{}}'", "topos_socket_data"),
+        ("Bash", f"{_SOCK} http://localhost/healthcheck http://localhost/v1/messages", "topos_socket_data"),
+        ("Bash", "python3 -c 'c.connect(\"/Users/fake/.topos/engine.sock\"); c.request(\"GET\", \"/v1/messages\")'",
+         "topos_socket_data"),
+        ("Bash", "python3 script.py --socket ~/.topos/engine.sock", "topos_socket_data"),
+        ("Bash", "topos-node status --json && sqlite3 ~/.topos/database.db 'select 1'", "topos_database"),
+        ("Grep", '{"pattern": "key", "path": "/Users/fake/.topos/"}', "topos_private_files"),
+        ("Bash", "grep -r key ~/.topos", "topos_private_files"),
+        ("Bash", "cd ~/.topos && cat .env", "topos_private_files"),
+        ("Bash", "ls ~/.topos; cat .env", "topos_private_files"),
     ],
 )
-def test_topos_surfaces_taint(name, command) -> None:
+def test_topos_reads_taint(name, command, surface) -> None:
+    assert common.topos_touch(name, command) == (common.TOUCH_READ, surface)
     assert taints(name, command) is True
+
+
+@pytest.mark.parametrize(
+    "name,command,surface",
+    [
+        ("mcp__plugin_topos_topos__mcp_session_context", None, "topos_meta_tool"),
+        ("mcp__topos__list_scopes", None, "topos_meta_tool"),
+        ("mcp__plugin_topos_topos__sources_status", None, "topos_meta_tool"),
+        ("mcp__topos__get_table_schema", None, "topos_meta_tool"),
+        ("topos mcp_session_context", None, "topos_meta_tool"),  # Codex mcp_attribution: "server tool"
+        ("topos/list_scopes", None, "topos_meta_tool"),
+        ("Bash", "curl --unix-socket ~/.topos/engine.sock http://x/healthcheck", "topos_socket_admin"),
+        ("Bash", f"{_SOCK} http://localhost/api/local/owner/sources/claude_code_sessions/preview", "topos_socket_admin"),
+        ("Bash", "topos-node status --json", "topos_cli_admin"),
+        ("Bash", "topos-node --version", "topos_cli_admin"),
+        ("Bash", "topos-node doctor", "topos_cli_admin"),
+        ("Bash", "topos-node setup --client claude-code --json", "topos_cli_admin"),
+        ("Bash", "tail -n 50 ~/.topos/logs/node.log", "topos_files"),
+        ("Bash", "ls ~/.topos", "topos_files"),
+        ("Bash", '{"command": "ls -la /Users/fake/.topos", "description": "List the Topos home"}', "topos_files"),
+        ("Bash", "du -sh ~/.topos", "topos_files"),
+        ("Bash", '{"command": "ls -la ~/.topos/ 2>/dev/null | head -20"}', "topos_files"),
+        ("Bash", '{"command": "find ~/.topos -maxdepth 1 -type f | wc -l"}', "topos_files"),
+        ("Bash", '{"command": "pgrep -fl topos-node", "description": "Check whether topos-node is running"}',
+         "topos_cli_mention"),
+        ("Bash", '{"command": "grep -rn \"topos-node process\" docs/"}', "topos_cli_mention"),
+        ("Bash", '{"command": "echo topos-node is up"}', "topos_cli_mention"),
+        ("Bash", '{"command": "topos-node --version"}', "topos_cli_admin"),
+        ("Bash", "ls engine.sock", "topos_socket_admin"),
+        ("Bash", '{"command": "ls -la ~/.topos/engine.sock"}', "topos_socket_admin"),
+    ],
+)
+def test_topos_system_touches_are_recorded_but_do_not_taint(name, command, surface) -> None:
+    assert common.topos_touch(name, command) == (common.TOUCH_SYSTEM, surface)
+    assert taints(name, command) is False
 
 
 @pytest.mark.parametrize(
@@ -400,10 +462,30 @@ def test_topos_surfaces_taint(name, command) -> None:
         ("mcp__slack__read_channel", None),
         (None, None),
         ("Bash", "git log --oneline"),
+        ("Bash", "cd ~/developer/topos-control-plane && git status"),
+        ("Bash", "python -c 'import pkg.topos.module'"),
+        ("Bash", "sqlite3 ~/other-app/database.db 'select 1'"),
     ],
 )
-def test_other_surfaces_do_not_taint(name, command) -> None:
+def test_other_surfaces_do_not_touch(name, command) -> None:
+    assert common.topos_touch(name, command) is None
     assert taints(name, command) is False
+
+
+def test_ledger_records_each_touch_once_and_persists_counts_only() -> None:
+    ledger = Ledger()
+    read = (common.TOUCH_READ, "topos_data_tool")
+    system = (common.TOUCH_SYSTEM, "topos_cli_admin")
+    assert ledger.note_touch(tool="codex", session_id="s1", touch=read, at=1_760_000_000.0, anchor="call_1") is True
+    # The same call seen twice (Codex logs the event and the response item) is one touch.
+    assert ledger.note_touch(tool="codex", session_id="s1", touch=read, at=1_760_000_000.0, anchor="call_1") is False
+    assert ledger.note_touch(tool="codex", session_id="s1", touch=system, at=1_760_000_001.0, anchor="call_2") is True
+    assert [t["kind"] for t in ledger.touches] == ["read", "system"]
+    assert ledger.touches[0]["touched_at"].startswith("2025-10-09T")
+    assert set(ledger.touches[0]) == {"touch_id", "tool", "session_id", "kind", "surface", "touched_at"}
+    as_dict = ledger.as_dict()
+    assert as_dict["topos_reads"] == 1 and as_dict["topos_system_touches"] == 1
+    assert "touches" not in as_dict
 
 
 # ---------------------------------------------------------------------------

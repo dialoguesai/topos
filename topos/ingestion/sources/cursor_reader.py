@@ -73,7 +73,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 from urllib.parse import unquote, urlparse
 
-from topos.ingestion.parsers.ai_coding_tool.common import Ledger, make_record, project_key_from_cwd, scrub_text, taints
+from topos.ingestion.parsers.ai_coding_tool.common import (
+    TOUCH_READ,
+    Ledger,
+    make_record,
+    project_key_from_cwd,
+    scrub_text,
+    topos_touch,
+)
 
 if TYPE_CHECKING:  # L4 owns the store; the reader only needs its two methods.
     from topos.ingestion.checkpoints.file_cursors import FileCursorStore
@@ -576,9 +583,35 @@ def _bubble_time(
     return datetime.fromtimestamp(db_mtime, tz=timezone.utc), "file_mtime"
 
 
+Touch = Tuple[str, str]
+
+
 def _tool_former_taints(tool_former: Any) -> bool:
+    touch = _tool_former_touch(tool_former)
+    return touch is not None and touch[0] == TOUCH_READ
+
+
+def _block_touch(block: Dict[str, Any]) -> Optional[Touch]:
+    name = block.get("name")
+    payload = block.get("input")
+    return topos_touch(
+        str(name) if name is not None else None,
+        json.dumps(payload, default=str) if payload is not None else None,
+    )
+
+
+def _note_touch(ledger: Ledger, state: "_ComposerState", touch: Optional[Touch], at: Optional[float],
+                anchor: Optional[str]) -> None:
+    if touch is None:
+        return
+    if touch[0] == TOUCH_READ:
+        state.tainted = True
+    ledger.note_touch(tool=TOOL, session_id=state.composer_id, touch=touch, at=at, anchor=anchor)
+
+
+def _tool_former_touch(tool_former: Any) -> Optional[Touch]:
     if not isinstance(tool_former, dict):
-        return False
+        return None
     name = tool_former.get("name") or tool_former.get("tool")
     name = str(name) if isinstance(name, (str, int)) else None
     command: Optional[str] = None
@@ -590,7 +623,7 @@ def _tool_former_taints(tool_former: Any) -> bool:
         if value is not None:
             command = json.dumps(value, default=str)
             break
-    return taints(name, command)
+    return topos_touch(name, command)
 
 
 def _emit(
@@ -654,11 +687,10 @@ def _prescan_transcript(path: Path, end: int, state: _ComposerState) -> None:
             continue
         for block in _transcript_blocks(line):
             kind = block.get("type")
-            if kind == "tool_use" and taints(
-                str(block.get("name")) if block.get("name") is not None else None,
-                json.dumps(block.get("input"), default=str) if block.get("input") is not None else None,
-            ):
-                state.tainted = True
+            if kind == "tool_use":
+                touch = _block_touch(block)
+                if touch is not None and touch[0] == TOUCH_READ:
+                    state.tainted = True
             elif kind == "text" and line.get("role") == "user" and state.first_prompt is None:
                 text = block.get("text")
                 typed = _typed_text(text)[0] if isinstance(text, str) else ""
@@ -773,19 +805,16 @@ def _read_transcript(
             # Text on each side of a Topos call in this line is judged on its own side: before it, the
             # session's state so far; after it, excluded.
             segments: List[Tuple[bool, List[str]]] = [(state.tainted, [])]
-            for block in blocks:
+            for position, block in enumerate(blocks):
                 kind = block.get("type")
                 if kind == "text" and isinstance(block.get("text"), str):
                     segments[-1][1].append(block["text"])
                 elif kind == "tool_use":
                     ledger.drop("tool_use")
-                    name = block.get("name")
-                    payload = block.get("input")
-                    if taints(
-                        str(name) if name is not None else None,
-                        json.dumps(payload, default=str) if payload is not None else None,
-                    ):
-                        state.tainted = True
+                    touch = _block_touch(block)
+                    anchor = block.get("id") if isinstance(block.get("id"), str) and block.get("id") else None
+                    _note_touch(ledger, state, touch, created_at.timestamp(), anchor or f"{begin}:{position}")
+                    if touch is not None and touch[0] == TOUCH_READ:
                         segments.append((True, []))
                 elif kind == "thinking":
                     ledger.drop("thinking")
@@ -965,8 +994,12 @@ def _read_composer(
         if bubble is None:
             continue
         ledger.message_nodes += 1
-        if bubble.get("type") == BUBBLE_ASSISTANT and _tool_former_taints(bubble.get("toolFormerData")):
-            state.tainted = True
+        if bubble.get("type") == BUBBLE_ASSISTANT:
+            touch = _tool_former_touch(bubble.get("toolFormerData"))
+            if touch is not None:
+                touched_at, _source = _bubble_time(bubble, entry, state, db_mtime)
+                anchor = entry.get("bubbleId") if isinstance(entry, dict) else None
+                _note_touch(ledger, state, touch, touched_at.timestamp(), anchor)
         if _ends_bubble_reply(bubble):
             flush()
         classified = _classify_bubble(bubble, ledger)

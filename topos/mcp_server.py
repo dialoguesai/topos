@@ -267,11 +267,13 @@ class NodeSocket:
         json_body: Optional[dict] = None,
         params: Optional[dict] = None,
         label: Optional[str] = None,
+        headers: Optional[dict] = None,
     ) -> dict:
         transport = httpx.HTTPTransport(uds=str(self.socket_path))
+        merged = {**self._headers(label), **(headers or {})}
         try:
             with httpx.Client(transport=transport, base_url="http://topos-node", timeout=self.timeout_s) as client:
-                response = client.request(method, path, json=json_body, params=params, headers=self._headers(label))
+                response = client.request(method, path, json=json_body, params=params, headers=merged)
         except (httpx.ConnectError, httpx.ConnectTimeout, OSError) as exc:
             raise NodeDown(NODE_DOWN) from exc
         return _decode(response)

@@ -195,3 +195,63 @@ def sources_sync(source_id: str, session_path: Optional[str], as_json: bool, qui
 
     body = {"session_path": session_path} if session_path else {}
     _door(source_id, "sync", body, as_json=as_json, quiet=quiet, project=project)
+
+
+@sources_group.command("reclassify-touches")
+@click.argument("source_id", type=SOURCE)
+@click.option("--apply", "apply", is_flag=True,
+              help="Clear the flag where no read of Topos came first. Asks you in this terminal first.")
+@_JSON_OPTION
+def sources_reclassify_touches(source_id: str, apply: bool, as_json: bool) -> None:
+    """Re-judge stored replies: only a READ of Topos keeps later replies private now; a status check, health
+    check or setup step is recorded as a system touch. Counts only, and a dry run unless --apply."""
+
+    def project(result: dict) -> tuple[dict, str]:
+        payload = {"source_id": source_id, "status": _word(result.get("status")) or "ok",
+                   "applied": bool(result.get("applied")), **_ints(result)}
+        if result.get("status") == "unsupported":
+            return payload, (f"{source_id}: not re-judged by this build; "
+                             f"its {payload.get('flagged_rows', 0)} kept replies stay kept.")
+        if result.get("applied"):
+            return payload, (
+                f"{source_id}: {payload.get('cleared', 0)} of {payload.get('flagged_rows', 0)} kept replies are "
+                f"shareable again; {payload.get('touches_recorded', 0)} touches recorded; derivation queued."
+            )
+        return payload, (
+            f"{source_id}: {payload.get('flagged_rows', 0)} replies are kept owner-only. Under the new rule "
+            f"{payload.get('would_clear', 0)} would be shareable again; {payload.get('kept_after_a_read', 0)} stay "
+            f"(after a read of Topos), {payload.get('kept_no_transcript', 0)} stay (transcript gone). "
+            f"Touches found: {payload.get('topos_reads', 0)} reads, {payload.get('topos_system_touches', 0)} system."
+        )
+
+    if not apply:
+        _door(source_id, "reclassify-touches", {"apply": False}, as_json=as_json, quiet=False, project=project)
+        return
+    # Making replies shareable is a dangerous change on the socket (owner_door_routes): it needs the human, asked
+    # here on a terminal, and a one-change confirmation token — never a flag an agent could pass.
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        click.echo("--apply makes replies shareable again, so it asks you first: run it in your own terminal.", err=True)
+        sys.exit(EXIT_REFUSED)
+    sock = NodeSocket()
+    path = f"/api/local/owner/sources/{source_id}/reclassify-touches"
+    try:
+        preview = sock.request_sync("POST", path, json_body={"apply": False})
+        click.echo(project(preview)[1])
+        if not int(preview.get("would_clear") or 0):
+            click.echo("Nothing to change.")
+            sys.exit(EXIT_OK)
+        if not click.confirm("Make those replies shareable again?", default=False):
+            sys.exit(EXIT_OK)
+        from topos.uds import write_owner_confirmation
+
+        result = sock.request_sync("POST", path, json_body={"apply": True},
+                                   headers={"X-Topos-Owner-Confirm": write_owner_confirmation()})
+    except NodeDown:
+        click.echo(NODE_DOWN, err=True)
+        sys.exit(EXIT_NODE_DOWN)
+    except NodeRefused as exc:
+        click.echo(f"Topos refused `reclassify-touches` for {source_id}: {exc.code}.", err=True)
+        sys.exit(EXIT_REFUSED)
+    payload, human = project(result)
+    click.echo(json.dumps(payload, indent=2, sort_keys=True) if as_json else human)
+    sys.exit(EXIT_OK)
