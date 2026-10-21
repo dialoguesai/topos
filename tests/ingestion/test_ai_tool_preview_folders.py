@@ -95,15 +95,15 @@ def codex_read(tmp_path: Path):
 
 def test_codex_preview_lists_project_basenames(codex_read, monkeypatch) -> None:
     result = _preview(monkeypatch, codex_read, "codex_sessions")
-    assert result["folders"] == ["alpha-project", "delta-project", "epsilon-project", "gamma-project"]
-    assert result["sessions"] == 5 and result["turns"] == 17
+    assert result["folders"] == ["alpha-project", "delta-project", "epsilon-project", "eta-project", "gamma-project"]
+    assert result["sessions"] == 6 and result["turns"] == 23  # test_codex_reader.TOTAL_ROWS
     _assert_listed_names_are_bare(result["folders"])
 
 
 def test_codex_preview_skip_takes_a_listed_name(codex_read, monkeypatch) -> None:
     result = _preview(monkeypatch, codex_read, "codex_sessions", skip=["alpha-project"])
-    assert result["folders"] == ["delta-project", "epsilon-project", "gamma-project"]
-    assert result["sessions"] == 3 and result["turns"] == 11
+    assert result["folders"] == ["delta-project", "epsilon-project", "eta-project", "gamma-project"]
+    assert result["sessions"] == 4 and result["turns"] == 17  # alpha's two threads hold 6 of the 23 rows
 
 
 def _real_reader(name: str):
@@ -125,8 +125,8 @@ def test_codex_preview_withholds_the_login_name_for_a_session_run_from_the_home_
     gamma.write_text("\n".join([json.dumps(meta)] + lines[1:]) + "\n", encoding="utf-8")
     reader = _real_reader("codex_reader")
     result = _preview(monkeypatch, lambda **kw: reader.read_codex_batch(**{**kw, "root_path": root}), "codex_sessions")
-    assert result["folders"] == ["alpha-project", "delta-project", "epsilon-project"]
-    assert result["sessions"] == 5 and result["turns"] == 17
+    assert result["folders"] == ["alpha-project", "delta-project", "epsilon-project", "eta-project"]
+    assert result["sessions"] == 6 and result["turns"] == 23
     assert "someone" not in json.dumps(result["folders"])
 
 
@@ -142,7 +142,7 @@ def test_cursor_preview_withholds_the_login_name_for_a_workspace_opened_on_the_h
     result = _preview(monkeypatch, lambda **kw: reader.read_cursor_batch(**{**kw, "root_path": home, "state_db_path": db}),
                       "cursor_sessions")
     assert result["folders"] == []
-    assert result["sessions"] == 3 and result["turns"] == 10
+    assert result["sessions"] == 4 and result["turns"] == 16
     assert "someone" not in json.dumps(result)
 
 
@@ -167,7 +167,7 @@ def cursor_read(tmp_path: Path):
 def test_cursor_preview_lists_project_basenames(cursor_read, monkeypatch) -> None:
     result = _preview(monkeypatch, cursor_read.read, "cursor_sessions")
     assert result["folders"] == ["beta-project"]
-    assert result["sessions"] == 3 and result["turns"] == 10
+    assert result["sessions"] == 4 and result["turns"] == 16  # test_cursor_reader.TOTAL_ROWS
     _assert_listed_names_are_bare(result["folders"])
 
 

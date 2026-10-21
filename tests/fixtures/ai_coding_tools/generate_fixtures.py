@@ -54,7 +54,8 @@ def user(n: int, parent: str | None, session: str, i: int, content, *, base: dat
     return record
 
 
-def assistant(n: int, parent: str | None, session: str, i: int, blocks, msg_id: str, *, base: datetime = BASE, **extra) -> dict:
+def assistant(n: int, parent: str | None, session: str, i: int, blocks, msg_id: str, *, base: datetime = BASE,
+              stop: str | None = None, **extra) -> dict:
     record = {
         "parentUuid": parent,
         "isSidechain": False,
@@ -75,8 +76,20 @@ def assistant(n: int, parent: str | None, session: str, i: int, blocks, msg_id: 
         "uuid": uid(n),
         "timestamp": ts(i, base),
     }
+    if stop is not None:
+        record["message"]["stop_reason"] = stop
     record.update(extra)
     return record
+
+
+def attachment(n: int, parent: str | None, session: str, i: int, payload: dict, *, base: datetime = BASE) -> dict:
+    return {"parentUuid": parent, "isSidechain": False, "type": "attachment", "attachment": payload,
+            "uuid": uid(n), "sessionId": session, "timestamp": ts(i, base)}
+
+
+def system(n: int, parent: str | None, session: str, i: int, subtype: str, *, base: datetime = BASE) -> dict:
+    return {"parentUuid": parent, "isSidechain": False, "type": "system", "subtype": subtype, "isMeta": False,
+            "uuid": uid(n), "sessionId": session, "timestamp": ts(i, base)}
 
 
 def text(t: str) -> dict:
@@ -431,6 +444,107 @@ def case_since_window() -> None:
     ])
 
 
+def case_agentic_reply() -> None:
+    # One agentic turn written the way Claude Code writes it: one record per content block, a new
+    # message.id per API call, tool calls and their results between the narration, meta records
+    # mid-turn, a stop-hook system record at the end. Then a second turn that a prompt typed
+    # mid-turn (a queued_command attachment) splits in two.
+    s = uid(0x117)
+    write_jsonl(session_file("agentic_reply", s), [
+        user(0x1B1, None, s, 0, "Fix the flaky upload test"),
+        assistant(0x1B2, uid(0x1B1), s, 1, [text("Let me look at the test first.")], "msg_ag1", stop="tool_use"),
+        assistant(0x1B3, uid(0x1B2), s, 2, [tool_use("Read", {"file_path": f"{CWD}/tests/test_upload.py"}, "toolu_ag1")],
+                  "msg_ag1", stop="tool_use"),
+        attachment(0x1B4, uid(0x1B3), s, 3, {"type": "total_tokens_reminder", "text": "Tokens used: 1200"}),
+        user(0x1B5, uid(0x1B4), s, 4, tool_result("def test_upload():\n    sleep(0.1)", "toolu_ag1")),
+        {"type": "custom-title", "customTitle": "Flaky upload test", "sessionId": s},
+        assistant(0x1B6, uid(0x1B5), s, 5, [thinking("It sleeps instead of waiting")], "msg_ag2", stop="tool_use"),
+        assistant(0x1B7, uid(0x1B6), s, 6, [text("The test sleeps instead of waiting for the upload.")], "msg_ag2",
+                  stop="tool_use"),
+        assistant(0x1B8, uid(0x1B7), s, 7, [tool_use("Edit", {"file_path": f"{CWD}/tests/test_upload.py"}, "toolu_ag2")],
+                  "msg_ag2", stop="tool_use"),
+        user(0x1B9, uid(0x1B8), s, 8, tool_result("The file has been updated.", "toolu_ag2")),
+        assistant(0x1BA, uid(0x1B9), s, 9, [text("Fixed: it now waits on the upload event.")], "msg_ag3", stop="end_turn"),
+        assistant(0x1BB, uid(0x1BA), s, 10, [text("The test passed ten runs in a row.")], "msg_ag3", stop="end_turn"),
+        system(0x1BC, uid(0x1BB), s, 11, "stop_hook_summary"),
+        user(0x1BD, uid(0x1BC), s, 12, "Thanks. Now the lint error?"),
+        assistant(0x1BE, uid(0x1BD), s, 13, [text("Checking the lint output.")], "msg_ag4", stop="tool_use"),
+        assistant(0x1BF, uid(0x1BE), s, 14, [tool_use("Bash", {"command": "ruff check ."}, "toolu_ag3")], "msg_ag4",
+                  stop="tool_use"),
+        user(0x1C0, uid(0x1BF), s, 15, tool_result("app.py:12: E501 line too long", "toolu_ag3")),
+        attachment(0x1C1, uid(0x1C0), s, 16, {"type": "queued_command", "prompt": "also fix the README typo",
+                                              "commandMode": "prompt", "origin": {"kind": "human"}}),
+        assistant(0x1C2, uid(0x1C1), s, 17, [text("Line 12 was too long; it is wrapped now.")], "msg_ag5", stop="tool_use"),
+        assistant(0x1C3, uid(0x1C2), s, 18, [text("And the README typo is fixed.")], "msg_ag5", stop="end_turn"),
+    ])
+
+
+OPEN_REPLY_SESSION = 0x118
+
+
+def case_open_reply() -> None:
+    # A turn still running when the reader gets there: the last record asked for a tool and nothing
+    # answered yet. ``open_reply_tail`` holds the records that arrive later; a test appends them.
+    s = uid(OPEN_REPLY_SESSION)
+    write_jsonl(session_file("open_reply", s), [
+        user(0x1D1, None, s, 0, "Run the slow suite"),
+        assistant(0x1D2, uid(0x1D1), s, 1, [text("Starting the slow suite.")], "msg_or1", stop="tool_use"),
+        assistant(0x1D3, uid(0x1D2), s, 2, [tool_use("Bash", {"command": "pytest -m slow"}, "toolu_or1")], "msg_or1",
+                  stop="tool_use"),
+    ])
+    write_jsonl(session_file("open_reply_tail", s), [
+        user(0x1D4, uid(0x1D3), s, 3, tool_result("12 passed", "toolu_or1")),
+        assistant(0x1D5, uid(0x1D4), s, 4, [text("All 12 slow tests passed.")], "msg_or2", stop="end_turn"),
+    ])
+
+
+def case_harness_trailing() -> None:
+    # Harness spans AFTER typed text: stripped when a complete span runs from the start of a line to the
+    # end of the text; an inline mention or a span with typed text after it is the person's own words.
+    s = uid(0x119)
+    write_jsonl(session_file("harness_trailing", s), [
+        user(0x1E1, None, s, 0, "Fix the flaky test\n\n<system-reminder>\nThe user opened tests/test_upload.py.\n</system-reminder>"),
+        assistant(0x1E2, uid(0x1E1), s, 1, [text("On it.")], "msg_ht1"),
+        user(0x1E3, uid(0x1E2), s, 2, "Why does `<command-name>` show up in my rows?"),
+        user(0x1E4, uid(0x1E3), s, 3, "Keep this:\n<system-reminder>pasted in the middle</system-reminder>\nand this line too"),
+        user(0x1E5, uid(0x1E4), s, 4, [text("Ship it"), text("<system-reminder>\nThe todo list is empty.\n</system-reminder>")]),
+        user(0x1E6, uid(0x1E5), s, 5, "Two notes\n<system-reminder>a</system-reminder>\n<local-command-stdout>b</local-command-stdout>\n"),
+        user(0x1E7, uid(0x1E6), s, 6, 'Look here\n<ide_selection path="app.py">\nline 3\n</ide_selection>'),
+        user(0x1E8, uid(0x1E7), s, 7, "Is it fine to end a note with <system-reminder>x</system-reminder>"),
+        user(0x1E9, uid(0x1E8), s, 8, "a\n<system-reminder>1</system-reminder>\nkeep me\n<system-reminder>2</system-reminder>"),
+    ])
+
+
+def case_reply_edges() -> None:
+    # Where a reply must end and where it must not: a system record ends it; sub-agent records inside the
+    # main file do not; a record holding text AND a Topos call starts an excluded row of its own, so the
+    # narration before it stays shareable.
+    s = uid(0x11A)
+    sub = {"isSidechain": True, "agentId": "e1f2"}
+    write_jsonl(session_file("reply_edges", s), [
+        user(0x201, None, s, 0, "Check the deploy"),
+        assistant(0x202, uid(0x201), s, 1, [text("Looking at the deploy log.")], "msg_re1", stop="tool_use"),
+        system(0x203, uid(0x202), s, 2, "api_error"),
+        assistant(0x204, uid(0x203), s, 3, [text("Retried: the deploy is green.")], "msg_re2", stop="end_turn"),
+        user(0x205, uid(0x204), s, 4, "Now the release notes"),
+        assistant(0x206, uid(0x205), s, 5, [text("Drafting them with a helper.")], "msg_re3", stop="tool_use"),
+        assistant(0x207, uid(0x206), s, 6, [tool_use("Agent", {"prompt": "draft notes"}, "toolu_re1")], "msg_re3",
+                  stop="tool_use"),
+        user(0x208, uid(0x207), s, 7, "draft notes", **sub),
+        assistant(0x209, uid(0x208), s, 8, [text("Helper draft ready.")], "msg_re4", stop="end_turn", **sub),
+        user(0x20A, uid(0x209), s, 9, tool_result("Notes drafted.", "toolu_re1")),
+        assistant(0x20B, uid(0x20A), s, 10, [text("The notes are in RELEASE.md.")], "msg_re5", stop="end_turn"),
+        user(0x20C, uid(0x20B), s, 11, "What did I ship last week?"),
+        assistant(0x20D, uid(0x20C), s, 12, [text("Let me check.")], "msg_re6", stop="tool_use"),
+        assistant(0x20E, uid(0x20D), s, 13,
+                  [text("Asking your Topos now."),
+                   tool_use("mcp__plugin_topos_topos__query_scope", {"scope_id": "work_context:read"}, "toolu_re2")],
+                  "msg_re7", stop="tool_use"),
+        user(0x20F, uid(0x20E), s, 14, tool_result('{"data": {}}', "toolu_re2")),
+        assistant(0x210, uid(0x20F), s, 15, [text("You shipped the uploader.")], "msg_re8", stop="end_turn"),
+    ])
+
+
 def main() -> None:
     if ROOT.exists():
         shutil.rmtree(ROOT)
@@ -451,6 +565,10 @@ def main() -> None:
         case_titles,
         case_no_title,
         case_since_window,
+        case_agentic_reply,
+        case_open_reply,
+        case_harness_trailing,
+        case_reply_edges,
     ):
         build()
     print(f"wrote {sum(1 for _ in ROOT.rglob('*') if _.is_file())} files under {ROOT}")
