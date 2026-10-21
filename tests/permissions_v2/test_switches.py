@@ -151,7 +151,10 @@ V188 = {**V183, P + "INDEX_NARROW_MEMBERS": True}
 #: opening connective off the first delivered sentence (+ 1). 57 + 4 = 61.
 V136 = {**V188, P + "ANSWER_PROTECTED_ITEM_FILTER": False, P + "ANSWER_TENSE_GUARD": False,
         P + "ANSWER_DENIED_DOMAIN_REFUSAL": False, P + "ANSWER_LEAD_CONNECTIVE_TRIM": False}
-TABLE = {**V166, **V136}
+#: verify-claim effort high (20 Oct 2026, the owner's rollout ruling): the interpreter's doors, off unbound and on
+#: bound, and each grant's hourly allowance of model readings (120). 61 + 2 = 63.
+VHIGH = {**V136, P + "TRUTH_INTERPRET_ENABLED": False, P + "TRUTH_INTERPRET_PER_GRANT_PER_HOUR": 120}
+TABLE = {**V166, **VHIGH}
 
 
 @pytest.fixture(autouse=True)
@@ -289,10 +292,26 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 61
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 60
+    assert len(switches.SWITCHES) == len(TABLE) == 63
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 62
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_effort_high_interpreter_is_off_unbound_on_bound_and_its_allowance_takes_a_floor(bound, state, monkeypatch):
+    from topos.permissions_v2 import truth_statement
+    state(bound)
+    need = lambda: monkeypatch.setenv(P + "MESSAGE_SEARCH_ENABLED", "true")
+    need()
+    assert switches.on(switches.TRUTH_INTERPRET) is bound and truth_statement.enabled() is bound
+    monkeypatch.setenv(P + "TRUTH_INTERPRET_ENABLED", "false" if bound else "true")
+    assert truth_statement.enabled() is not bound
+    monkeypatch.setenv(P + "MESSAGE_SEARCH_ENABLED", "false")
+    assert truth_statement.enabled() is False                               # needs knowledge search
+    assert switches.number(switches.TRUTH_INTERPRET_PER_GRANT_PER_HOUR) == 120
+    monkeypatch.setenv(P + "TRUTH_INTERPRET_PER_GRANT_PER_HOUR", "0")
+    assert switches.number(switches.TRUTH_INTERPRET_PER_GRANT_PER_HOUR) == 1
 
 
 def test_answer_switch_is_closed_unbound_and_on_when_bound(state, monkeypatch):

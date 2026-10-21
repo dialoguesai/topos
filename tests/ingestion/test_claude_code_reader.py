@@ -754,19 +754,22 @@ AGENTIC_REPLY = (
 def test_one_agentic_turn_is_one_row_across_its_tool_calls_and_meta_records(cursors) -> None:
     batch = read("agentic_reply", cursors)
     assert_record_shape(batch.rows)
-    assert [row["id"] for row in batch.rows] == [f"claude_code:{uid(n)}" for n in (0x1B1, 0x1B2, 0x1BD, 0x1BE, 0x1C2)]
-    assert roles(batch.rows) == ["user", "assistant", "user", "assistant", "assistant"]
+    assert [row["id"] for row in batch.rows] == [
+        f"claude_code:{uid(n)}" for n in (0x1B1, 0x1B2, 0x1BD, 0x1BE, 0x1C1, 0x1C2)
+    ]
+    assert roles(batch.rows) == ["user", "assistant", "user", "assistant", "user", "assistant"]
     # Id and stamp are the reply's FIRST text record's; text is every text block in order, nothing else.
     reply = by_uuid(batch.rows, 0x1B2)
     assert reply["content"] == AGENTIC_REPLY
     assert reply["created_at"] == "2026-10-01T09:00:00.250Z"
     assert "sleep(0.1)" not in reply["content"] and "It sleeps instead" not in reply["content"]
-    assert [row["_metadata"]["turn_index"] for row in batch.rows] == [0, 1, 2, 3, 4]
+    assert [row["_metadata"]["turn_index"] for row in batch.rows] == [0, 1, 2, 3, 4, 5]
     ledger = batch.ledger.as_dict()
     assert ledger["merged_blocks"] == 4
-    assert ledger["turns_emitted"] == 5
+    assert ledger["turns_emitted"] == 6
     assert ledger["dropped"] == {"system": 1, "thinking": 1, "tool_result": 3, "tool_use": 3}
-    assert ledger["meta_records"] == 3
+    # The token reminder and the title; the queued prompt is a row now, not a meta record.
+    assert ledger["meta_records"] == 2
     assert ledger["message_nodes"] == 20
 
 
@@ -777,6 +780,9 @@ def test_a_prompt_typed_mid_turn_splits_the_reply(cursors) -> None:
     second = by_uuid(batch.rows, 0x1C2)
     assert second["content"] == "Line 12 was too long; it is wrapped now.\n\nAnd the README typo is fixed."
     assert second["created_at"] == "2026-10-01T09:00:04.250Z"
+    queued = by_uuid(batch.rows, 0x1C1)
+    assert queued["role"] == "user" and queued["content"] == "also fix the README typo"
+    assert queued["created_at"] == "2026-10-01T09:00:04.000Z"
 
 
 def test_a_finished_reply_on_a_file_just_written_is_emitted_at_once(cursors, tmp_path) -> None:
@@ -921,3 +927,126 @@ def test_text_beside_a_topos_call_never_drags_earlier_narration_out_of_sharing(c
     )
     assert after["created_at"] == "2026-10-01T09:00:03.250Z"
     assert batch.ledger.as_dict()["tainted_turns"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Prompts queued mid-turn (queued_command attachments)
+# ---------------------------------------------------------------------------
+
+
+def _queued_root(tmp_path):
+    # The fork file is the newer one, so the original keeps its uuids (oldest first, as in the fork-copy case).
+    root = tmp_path / "queued_prompts"
+    shutil.copytree(FIXTURES / "queued_prompts", root)
+    original = root / SLUG / f"{uid(0x120)}.jsonl"
+    fork = root / SLUG / f"{uid(0x121)}.jsonl"
+    os.utime(original, (1_760_000_000, 1_760_000_000))
+    os.utime(fork, (1_760_000_100, 1_760_000_100))
+    return root
+
+
+def read_queued(tmp_path, cursors):
+    return read_claude_code_batch(root_path=_queued_root(tmp_path), cursors=cursors, hostnames=("fakebox-7",),
+                                  usernames=("fake",))
+
+
+def test_a_prompt_queued_mid_turn_is_a_user_row_at_its_own_id_and_stamp(cursors, tmp_path) -> None:
+    batch = read_queued(tmp_path, cursors)
+    assert_record_shape(batch.rows)
+    assert [row["id"] for row in batch.rows] == [
+        f"claude_code:{uid(n)}" for n in (0x221, 0x222, 0x224, 0x226, 0x22C, 0x234, 0x235, 0x239, 0x23C, 0x237)
+    ]
+    assert roles(batch.rows) == [
+        "user", "assistant", "user", "assistant", "user", "user", "assistant", "user", "user", "user"
+    ]
+    queued = by_uuid(batch.rows, 0x224)
+    # Same rules as a typed record: the trailing harness span goes, the home path is scrubbed.
+    assert queued["content"] == "Also update ~/dev/widget/README.md"
+    assert queued["created_at"] == "2026-10-01T09:00:00.750Z"
+    assert queued["thread_id"] == uid(0x120)
+    assert queued["_metadata"]["origin"] == "keyboard"
+    assert queued["_metadata"]["share_excluded"] is False
+    assert [row["_metadata"]["turn_index"] for row in batch.rows] == [0, 1, 2, 3, 4, 5, 6, 7, 8, 0]
+    assert "claude_code:None" not in {row["id"] for row in batch.rows}
+    # The reply around the queued prompt splits at it, as before.
+    assert by_uuid(batch.rows, 0x222)["content"] == "Reading the parser first."
+    assert by_uuid(batch.rows, 0x226)["content"] == "Parser split into two modules; README updated."
+    ledger = batch.ledger.as_dict()
+    assert ledger["scrubbed"] == {"home_path": 1}
+    assert ledger["harness_spans_stripped"] == 1
+
+
+def test_a_queued_prompt_given_as_blocks_keeps_only_its_text(cursors, tmp_path) -> None:
+    # On disk (20 Oct, counts only) a non-string prompt is a list of text and image blocks.
+    batch = read_queued(tmp_path, cursors)
+    assert by_uuid(batch.rows, 0x22C)["content"] == "What does this diagram show?"
+    assert by_uuid(batch.rows, 0x22C)["created_at"] == "2026-10-01T09:00:02.750Z"
+    assert by_uuid(batch.rows, 0x23C)["content"] == "Before the image\n\nafter the image"
+    blob = json.dumps(batch.rows)
+    assert "iVBORw0KGgo" not in blob and "base64" not in blob
+    assert "notes" not in blob and "neither text nor blocks" not in blob
+    assert "Stray item" not in blob and "stray" not in blob and "Queued with no uuid" not in blob
+    ids = {row["id"] for row in batch.rows}
+    for n in (0x22D, 0x230, 0x231, 0x236):
+        assert f"claude_code:{uid(n)}" not in ids
+
+
+def test_task_notifications_peer_messages_and_meta_queue_entries_stay_out_counted_by_origin(cursors, tmp_path) -> None:
+    batch = read_queued(tmp_path, cursors)
+    blob = json.dumps(batch.rows)
+    for absent in ("task-notification", "build done", "Peer lane", "Meta text", "ci-monitor", "checks green",
+                   "bash-input", "Queued inside a sub-agent", "Peer echo", "<"):
+        assert absent not in blob, absent
+    ledger = batch.ledger.as_dict()
+    assert ledger["dropped"] == {
+        "empty": 2,
+        "fork_duplicate": 2,
+        "harness_injected": 1,
+        "non_keyboard_origin:content_blocks": 2,
+        "non_keyboard_origin:queued_command:commandMode=task-notification": 2,
+        "non_keyboard_origin:queued_command:isMeta": 1,
+        "non_keyboard_origin:queued_command:origin.kind": 1,
+        "non_keyboard_origin:queued_command:origin.kind=peer": 2,
+        "queued_prompt_typed_copy": 2,
+        "subagent": 1,
+        "tool_result": 1,
+        "tool_use": 1,
+        "unparseable": 3,
+    }
+    assert ledger["origins"] == {
+        "bash-input": 1,
+        "content_blocks": 2,
+        "queued_command:commandMode=task-notification": 2,
+        "queued_command:isMeta": 1,
+        "queued_command:origin.kind": 1,
+        "queued_command:origin.kind=peer": 2,
+    }
+    assert ledger["turns_emitted"] == 10
+    assert ledger["message_nodes"] == 31
+    assert ledger["meta_records"] == 0 and ledger["merged_blocks"] == 0
+    assert ledger["message_nodes"] == (
+        ledger["turns_emitted"] + ledger["dropped_nodes_total"] + ledger["merged_blocks"] + ledger["meta_records"]
+    )
+
+
+def test_a_queued_copy_of_a_typed_record_is_never_a_second_row(cursors, tmp_path) -> None:
+    # source_uuid names a typed record in the file: before it (0x22F → 0x221) or after it (0x233 → 0x234).
+    batch = read_queued(tmp_path, cursors)
+    contents = [row["content"] for row in batch.rows if row["role"] == "user"]
+    assert contents.count("Refactor the parser") == 1
+    assert contents.count("Ship it") == 1
+    assert by_uuid(batch.rows, 0x221)["content"] == "Refactor the parser"
+    assert by_uuid(batch.rows, 0x234)["content"] == "Ship it"
+    ids = {row["id"] for row in batch.rows}
+    assert f"claude_code:{uid(0x22F)}" not in ids and f"claude_code:{uid(0x233)}" not in ids
+    # Anchor: a source_uuid that names no record in the file (the measured norm), or none at all beside a
+    # uuid-less typed record, is not a copy.
+    assert f"claude_code:{uid(0x224)}" in ids and f"claude_code:{uid(0x22C)}" in ids
+
+
+def test_a_fork_copy_of_a_queued_prompt_is_one_row(cursors, tmp_path) -> None:
+    batch = read_queued(tmp_path, cursors)
+    assert by_uuid(batch.rows, 0x224)["thread_id"] == uid(0x120)
+    fork_row = by_uuid(batch.rows, 0x237)
+    assert fork_row["thread_id"] == uid(0x121) and fork_row["content"] == "Fork-only follow-up"
+    assert [row["content"] for row in batch.rows].count("Also update ~/dev/widget/README.md") == 1

@@ -119,6 +119,19 @@ MESSAGE_SEARCH_BATCH = _switch(
 ANSWERS = _switch(
     "ANSWERS_ENABLED", "bool", False, True,
     "Local answer submit and fetch doors. Needs knowledge search and the pinned checking model.")
+# verify-claim `effort: high` (truth_interpret, truth_statement): the owner's ruling of 20 Oct 2026 is that its
+# measured near-miss acceptance is acceptable to roll out. Its doors answer only what a control plane that read the
+# heartbeat's `permissions_v2_truth_interpret_version` sends, so a bound node is on and the control plane decides.
+TRUTH_INTERPRET = _switch(
+    "TRUTH_INTERPRET_ENABLED", "bool", False, True,
+    "verify-claim effort high: a free statement the control plane's grammar refused is read here by the pinned "
+    "local model as one Icebreakers answer (or refused), then checked as that claim, or shown for the player to "
+    "confirm. Needs knowledge search and the pinned checking model; the heartbeat says 1 only then.")
+TRUTH_INTERPRET_PER_GRANT_PER_HOUR = _switch(
+    "TRUTH_INTERPRET_PER_GRANT_PER_HOUR", "int", 120, 120,
+    "verify-claim effort high: the most statements one grant may have the model read in any rolling hour, counted "
+    "in this process (a restart resets it); past it the door answers busy. Statements the guards refuse are free.",
+    floor=1)
 INDEX_RESTORE = _switch(
     "INDEX_RESTORE_ENABLED", "bool", False, True,
     "Refresh loop: rebuild a share's index that a change dropped, so the share keeps serving unattended.")
@@ -445,7 +458,8 @@ ANSWER_LEAD_CONNECTIVE_TRIM = _switch(
 
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
-    INGEST_SNAPSHOT_ROOT, MESSAGE_SEARCH, MESSAGE_SEARCH_BATCH, ANSWERS, INDEX_RESTORE,
+    INGEST_SNAPSHOT_ROOT, MESSAGE_SEARCH, MESSAGE_SEARCH_BATCH, ANSWERS, TRUTH_INTERPRET,
+    TRUTH_INTERPRET_PER_GRANT_PER_HOUR, INDEX_RESTORE,
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
