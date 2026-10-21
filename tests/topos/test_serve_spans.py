@@ -16,6 +16,7 @@ from topos.serve.spans import (
     flush_stages,
     publish_stages,
     start_request,
+    drain_for_shutdown,
     validate_span,
     wait_for_writes,
 )
@@ -198,3 +199,37 @@ async def test_the_writer_is_idle_before_a_fixture_closes_its_handle(shared_hand
         release.set()
         thread.join(5.0)
     # Deliberately no wait here: the teardown hook is what is under test.
+
+
+def test_shutdown_drain_is_bounded_and_lets_late_rows_land(caplog):
+    """A stop must not wait on a gate held for minutes; the rows still land once it is free."""
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    release, thread = _hold_gate()
+    try:
+        from topos.serve import spans
+
+        spans._enqueue(conn, dict(kind="request", name="query", duration_ms=5, outcome="ok",
+                                  parent_span_id=None, span_id=str(uuid4())))
+        with caplog.at_level(logging.INFO, logger="topos.serve.spans"):
+            before = time.perf_counter()
+            landed = drain_for_shutdown(0.1)
+            elapsed = time.perf_counter() - before
+        assert landed is False and elapsed < 1.0
+        assert any("still queued" in r.getMessage() for r in caplog.records)
+    finally:
+        release.set()
+        thread.join(5.0)
+    assert drain_for_shutdown(5.0) is True
+    assert [row[2] for row in _rows(conn)] == ["request"]
+
+
+def test_app_shutdown_drains_the_writer_off_the_loop():
+    """The call site is in shutdown_event, after the control-plane client stops and off the loop."""
+    import inspect
+
+    import topos.app as app_module
+
+    source = inspect.getsource(app_module.shutdown_event)
+    assert "await node_stop.stop_now(run)" in source
+    assert "asyncio.to_thread(drain_for_shutdown, 2.0)" in source
+    assert source.index("stop_now(run)") < source.index("drain_for_shutdown, 2.0")

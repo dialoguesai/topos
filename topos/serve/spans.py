@@ -246,6 +246,26 @@ def wait_for_writes(timeout: float = 5.0) -> bool:
     return True
 
 
+def drain_for_shutdown(timeout: float = 2.0) -> bool:
+    """Give queued spans ``timeout`` seconds to land at node shutdown, then let them drop.
+
+    The writer's connection is its own (per thread, resolved on the writer) and nothing closes it,
+    so this is not about a close under the writer: it is so a clean stop keeps the rows of the
+    last queries instead of losing them with the daemon thread. Bounded, because the gate the
+    writer waits for may be held for minutes, and a stop must not wait on that. Never raises.
+    """
+    try:
+        if wait_for_writes(timeout):
+            return True
+        with _idle:
+            left = _outstanding
+        logger.info("serve spans: %d row(s) still queued after %.1fs at shutdown; dropped", left, timeout)
+        return False
+    except Exception:
+        logger.debug("serve span drain failed", exc_info=True)
+        return False
+
+
 def _store_quietly(conn, **fields) -> None:
     """Write now when this thread is free to block; otherwise queue for the worker.
 

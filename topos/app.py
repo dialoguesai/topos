@@ -747,6 +747,15 @@ async def shutdown_event() -> None:
     # work stopped. The same task when a signal or the tray already began it.
     # Before end_runtime, so the queue is parked under THIS run's generation.
     await node_stop.stop_now(run)
+    # The control-plane client is closed, so no query can arrive: give the serve-span writer
+    # a bounded moment to land the last queries' rows (its own per-thread connection; nothing
+    # here closes it). Off the loop, because what it waits for is the write gate.
+    try:
+        from .serve.spans import drain_for_shutdown
+
+        await asyncio.to_thread(drain_for_shutdown, 2.0)
+    except Exception as exc:  # noqa: BLE001 — telemetry must never hold a stop
+        logger.debug("serve span drain at shutdown skipped: %s", exc)
     # end_runtime retires THIS run's generation — its workers stop for good —
     # and installs a fresh one, so anything that runs later in this process
     # (another app run, a CLI command, the next test) does not inherit a
