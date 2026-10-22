@@ -1163,8 +1163,8 @@
       ]
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.5.16",
+      "summary": "Release 1.5.16.",
       "steps": [
         {
           "id": "embed-imported-ai-chats",
@@ -1183,6 +1183,12 @@
           "order": 1
         }
       ],
+      "notes": []
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
       "notes": []
     }
   ]
