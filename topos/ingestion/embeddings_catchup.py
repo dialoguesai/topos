@@ -25,6 +25,8 @@ owed, including rows a failed batch left. What is owed is read from
 ``enrichment_record_progress``, which the canonical orchestrator writes only
 after a batch's vectors are committed, so a restart, a stopped node or a failed
 batch resumes at the first row still owed. Payloads hold record ids only.
+Batches run on a worker of their own (``job_runner._CATCHUP_KINDS``): in the
+general queue they waited behind every derive job, the next batch at the back.
 Execution rereads the rows and rechecks the source's current jobs, so a row
 flagged since, or an owner who detaches ``embeddings`` from a source, stops at
 the next batch. Each lane has a switch (``TOPOS_LOCAL_SYNC_CATCHUP``,
