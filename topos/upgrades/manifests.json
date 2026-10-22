@@ -1165,7 +1165,24 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
+      "steps": [
+        {
+          "id": "embed-imported-ai-chats",
+          "kind": "derived_rebuild",
+          "title": "Embed imported ChatGPT messages an import stored without a vector",
+          "why": "A ChatGPT export import stopped mid-run (the owner restarting the node for a newer build) keeps the canonical rows it committed, and nothing derived them afterwards. Measured read-only on one node 2026-10-22: 2,619 of 14,408 export rows (all imported in September) and 2 of 544 captured rows had no vector and no embeddings progress marker, so vector search could not reach them. This queues those rows; rows already in the index are left alone.",
+          "params": {
+            "targets": [
+              "imported_ai_chat_embeddings"
+            ]
+          },
+          "progress": "the step finishes once the first batch is queued; pipeline_jobs rows of kind imported_ai_chat_embeddings_catchup (500 record ids each) drain the rest, each queueing the next",
+          "idempotent": "rows are chosen by share_excluded = 0, no embeddings progress marker at the current spec_version and no stored vector; the marker is written only after the batch's vectors commit, and writes are (record_id, model, chunk_index)-keyed, so a restart, a failed batch or a rerun converges",
+          "consent": "prompt",
+          "cost": "local embedding model only (MiniLM on CPU, 2 threads), no network, no LLM. Measured through this code path on 2,621 synthetic rows with the lengths of one node's backlog (7.06M characters, ~4,030 chunks) on a loaded Apple-silicon Mac (load average 8-10): 105-110 s including the model load, about 24 rows/s (37 chunks/s), 18-24 s per 500-row batch, and about 38 MB of database growth (~14 KB a row). Nodes with no ChatGPT rows queue nothing.",
+          "order": 1
+        }
+      ],
       "notes": []
     }
   ]
