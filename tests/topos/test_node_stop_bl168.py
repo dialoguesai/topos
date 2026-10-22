@@ -151,6 +151,7 @@ async def test_parking_requeues_the_held_job_and_nothing_restarts_the_queue(conn
 
             job_runner.start_pipeline_worker(lambda: conn)   # a request during the drain
             assert job_runner._worker_task is None and job_runner._long_worker_task is None
+            assert job_runner._catchup_worker_task is None
             assert claim_next_job(conn, lease_owner="probe", kinds=["no-such-kind"]) is None
             assert ran == ["held"]
         finally:
