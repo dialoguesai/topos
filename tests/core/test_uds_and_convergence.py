@@ -165,8 +165,45 @@ def test_cp_base_derivation():
 import contextlib
 import shutil
 import socket as _s
+import stat
 import tempfile
+import threading
+import time
 from pathlib import Path
+
+
+def _owner_socket_threads() -> set:
+    """uds.py's threads: ``topos-uds`` (supervisor), ``topos-uds-serve`` (uvicorn), ``topos-uds-chmod`` (0600 clamp)."""
+    return {t for t in threading.enumerate() if t.name.startswith("topos-uds") and t.is_alive()}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def no_owner_socket_thread_outlives_this_file():
+    """A uvicorn left serving keeps an event loop ticking (``asyncio.sleep(0.1)``) on its thread for the rest of the
+    run, so a later test that patches ``asyncio.sleep`` records that tick as its own (test_nsfw_tags, 20 Oct)."""
+    before = _owner_socket_threads()
+    yield
+    assert not _owner_socket_threads() - before, "an owner socket thread started in this file is still running"
+
+
+@pytest.fixture
+def bound_servers():
+    """The servers a test binds for real: each is told to exit when the test ends, and its threads joined."""
+    before = _owner_socket_threads()
+    servers = []
+    yield servers
+    for server in servers:
+        if server is not None:
+            server.should_exit = True
+    for thread in _owner_socket_threads() - before:
+        thread.join(10)
+
+
+def _wait_for(predicate, seconds: float = 10.0) -> bool:
+    deadline = time.monotonic() + seconds
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return predicate()
 
 
 @contextlib.contextmanager
@@ -217,7 +254,7 @@ def test_start_refuses_to_clobber_a_live_socket(monkeypatch):
             srv.close()
 
 
-def test_dead_socket_file_is_reclaimable(monkeypatch):
+def test_dead_socket_file_is_reclaimable(monkeypatch, bound_servers):
     """A dead inode must not block the lane: _bind_once clears it first."""
     import topos.uds as uds_mod
 
@@ -227,6 +264,10 @@ def test_dead_socket_file_is_reclaimable(monkeypatch):
         monkeypatch.setattr(uds_mod, "socket_path", lambda: p)
         # Bind for real: uvicorn must be able to take the path back.
         server = uds_mod._bind_once(object(), p)
+        bound_servers.append(server)
         assert server is not None or not p.exists(), (
             "a dead socket file must be unlinked so the lane can rebind"
         )
+        assert _wait_for(lambda: uds_mod.socket_is_live(p)), "uvicorn did not take the path back"
+        # The clamp lands before the directory goes, so its thread ends here and never polls a path that is gone.
+        assert _wait_for(lambda: stat.S_IMODE(p.stat().st_mode) == 0o600), "the socket was not clamped to 0600"
