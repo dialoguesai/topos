@@ -356,6 +356,7 @@ async def test_the_pipeline_worker_does_not_inherit_the_request_that_started_it(
     monkeypatch.setattr(job_runner, "_worker_loop", _loop)
     monkeypatch.setattr(job_runner, "_worker_task", None)
     monkeypatch.setattr(job_runner, "_long_worker_task", None)
+    monkeypatch.setattr(job_runner, "_catchup_worker_task", None)
     monkeypatch.setenv("TOPOS_PIPELINE_WORKER", "on")
 
     principal_token = set_principal(Principal(OWNER_APP, "uds"))
@@ -363,10 +364,10 @@ async def test_the_pipeline_worker_does_not_inherit_the_request_that_started_it(
     defer_token = write_gate._defer_commit.set(True)
     try:
         job_runner.start_pipeline_worker(lambda: None)
-        tasks = [job_runner._worker_task, job_runner._long_worker_task]
+        tasks = [job_runner._worker_task, job_runner._long_worker_task, job_runner._catchup_worker_task]
     finally:
         write_gate._defer_commit.reset(defer_token)
         _transport.reset(transport_token)
         reset_principal(principal_token)
     await asyncio.gather(*tasks)
-    assert seen == [(None, "tcp", False), (None, "tcp", False)]
+    assert seen == [(None, "tcp", False)] * 3

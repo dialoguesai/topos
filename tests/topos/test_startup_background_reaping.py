@@ -247,17 +247,20 @@ async def test_stop_pipeline_worker_clears_the_global(monkeypatch):
     job_runner.start_pipeline_worker(lambda: None)
     assert job_runner._worker_task is not None
     assert job_runner._long_worker_task is not None, "the long-running lane never started"
+    assert job_runner._catchup_worker_task is not None, "the catch-up lane never started"
 
     await job_runner.stop_pipeline_worker()
     assert job_runner._worker_task is None, "the global still names a dead worker"
-    # Both lanes are cleared together: a teardown that stopped only the general
-    # loop would leave the long one running against a closed app.
+    # All lanes are cleared together: a teardown that stopped only the general
+    # loop would leave the others running against a closed app.
     assert job_runner._long_worker_task is None, "the long lane outlived its app"
+    assert job_runner._catchup_worker_task is None, "the catch-up lane outlived its app"
 
     # The slot is genuinely reusable.
     job_runner.start_pipeline_worker(lambda: None)
     assert job_runner._worker_task is not None
     assert job_runner._long_worker_task is not None
+    assert job_runner._catchup_worker_task is not None
     await job_runner.stop_pipeline_worker()
 
 
@@ -268,6 +271,7 @@ async def test_stop_pipeline_worker_is_safe_when_none_running():
     await job_runner.stop_pipeline_worker()  # must not raise
     assert job_runner._worker_task is None
     assert job_runner._long_worker_task is None
+    assert job_runner._catchup_worker_task is None
 
 
 # --- shutdown reaps what startup spawned ------------------------------------

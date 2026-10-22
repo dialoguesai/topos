@@ -13,6 +13,8 @@ including rows a failed sync-time batch left. What is owed is read from
 ``enrichment_record_progress``, which the canonical orchestrator writes only
 after a batch's vectors are committed, so a restart, a stopped node or a failed
 batch resumes at the first row still owed. Payloads hold record ids only.
+Batches run on a worker of their own (``job_runner._CATCHUP_KINDS``): in the
+general queue they waited behind every derive job, the next batch at the back.
 Execution rechecks the source's current jobs, so an owner who detaches
 ``embeddings`` from a source stops the queue at the next batch.
 ``TOPOS_LOCAL_SYNC_CATCHUP=off`` pauses it: the next batch ends without work and
