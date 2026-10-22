@@ -73,6 +73,10 @@ MUTANTS = [
     # The switch.
     ("switch_off_by_default", [
         (SWITCHES, '    "INDEX_NARROW_MEMBERS", "bool", True, True,\n', '    "INDEX_NARROW_MEMBERS", "bool", False, False,\n')]),
+    # DR-34 on by default since 1.5.16 (owner ruling 22 Oct 2026): flipping it back must turn a test red.
+    ("own_row_edit_switch_off_by_default", [
+        (SWITCHES, '    "INDEX_NARROW_OWN_ROW_EDITS", "bool", True, True,\n',
+                   '    "INDEX_NARROW_OWN_ROW_EDITS", "bool", False, False,\n')]),
     ("switch_ignored", [
         (INDEX, "        narrowing = narrowed is not None and _narrow_members()\n",
                 "        narrowing = narrowed is not None\n")]),

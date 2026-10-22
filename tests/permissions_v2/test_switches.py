@@ -156,7 +156,7 @@ V136 = {**V188, P + "ANSWER_PROTECTED_ITEM_FILTER": False, P + "ANSWER_TENSE_GUA
 VHIGH = {**V136, P + "TRUTH_INTERPRET_ENABLED": False, P + "TRUTH_INTERPRET_PER_GRANT_PER_HOUR": 120}
 #: Fix 192 (22 Oct 2026, DR-34, widens DR-31): an AI-chat line whose own stored row was rewritten stays withheld
 #: instead of its whole share index going; off bound and unbound alike until the owner rules the default. 63 + 1 = 64.
-VOWN = {**VHIGH, P + "INDEX_NARROW_OWN_ROW_EDITS": False}
+VOWN = {**VHIGH, P + "INDEX_NARROW_OWN_ROW_EDITS": True}
 TABLE = {**V166, **VOWN}
 
 
@@ -388,16 +388,17 @@ def test_the_nr188_narrow_members_switch_is_on_bound_or_not_and_off_is_one_envir
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
-def test_the_own_row_edit_switch_is_off_bound_or_not_and_on_is_one_environment_line(bound, state, monkeypatch):
-    """Fix 192 (DR-34): off with nothing set, bound or not, read without an `is_bound()` stat, so an own-row edit
-    removes the whole index as 1.5.15; on is one environment line (read only while INDEX_NARROW_MEMBERS is on)."""
+def test_the_own_row_edit_switch_is_on_bound_or_not_and_off_is_one_environment_line(bound, state, monkeypatch):
+    """Fix 192 (DR-34): on with nothing set, bound or not, since 1.5.16 (owner ruling 22 Oct 2026), read without an
+    `is_bound()` stat; off (1.5.15: an own-row edit removes the whole index) is one environment line. Read only while
+    INDEX_NARROW_MEMBERS is on."""
     state(bound)
     name = P + "INDEX_NARROW_OWN_ROW_EDITS"
     item = switches.lookup(name)
-    assert item.unbound == item.bound == VOWN[name] is False
-    assert switches.on(name) is False
-    monkeypatch.setenv(name, "true")
+    assert item.unbound == item.bound == VOWN[name] is True
     assert switches.on(name) is True
+    monkeypatch.setenv(name, "false")
+    assert switches.on(name) is False
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])

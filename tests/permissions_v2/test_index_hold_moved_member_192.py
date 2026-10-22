@@ -184,6 +184,24 @@ def test_an_own_row_edit_withholds_the_line_keeps_the_index_narrowed_and_owes_a_
     assert again.narrowed_files() == {_path(share).name}          # a restart still owes the rebuild
 
 
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_by_default_an_own_row_edit_withholds_the_line_and_keeps_the_index(ai_share_two, caplog, monkeypatch, bound):
+    """1.5.16 (owner ruling 22 Oct 2026, "Yes, on for everyone"): with nothing set, bound or not, DR-34 is on, so the
+    edited line is withheld and the rest of the share keeps serving. Fails if the default goes back to off."""
+    share = ai_share_two
+    monkeypatch.delenv(NARROW, raising=False)
+    monkeypatch.delenv(OWN, raising=False)
+    monkeypatch.setattr(switches, "is_bound", lambda env=None: bound)
+    assert switches.on(switches.INDEX_NARROW_MEMBERS) is True
+    assert switches.on(switches.INDEX_NARROW_OWN_ROW_EDITS) is True
+    other = _by_record(share)["m-other"]
+    _edit(share)
+    assert _sweep(share, caplog) == [DRIFT_OWN, DRIFT_FINGERPRINT, "message search index narrowed (1 withheld)"]
+    assert _members(share) == {other}
+    served = _served(share)
+    assert OTHER in served and not served & {LINE, EDITED}
+
+
 def test_the_withheld_line_is_never_returned_before_or_after_the_narrowing(ai_share_two, caplog, both, monkeypatch):
     share = ai_share_two
     line = _by_record(share)["m-line"]
@@ -259,7 +277,7 @@ def test_with_narrowing_off_an_own_row_edit_drops_the_whole_index_as_before(ai_s
 def test_with_the_own_row_switch_off_an_edit_drops_the_whole_index(ai_share_two, caplog, monkeypatch, bound):
     share = ai_share_two
     monkeypatch.setenv(NARROW, "true")
-    monkeypatch.delenv(OWN, raising=False)
+    monkeypatch.setenv(OWN, "false")  # on by default since 1.5.16 (owner ruling 22 Oct): name it off
     monkeypatch.setattr(switches, "is_bound", lambda env=None: bound)
     assert switches.on(switches.INDEX_NARROW_OWN_ROW_EDITS) is False
     _edit(share)
@@ -499,7 +517,7 @@ def _narrowing(share, monkeypatch, trigger):
         monkeypatch.setenv(OWN, "true")
         _edit(share)
     else:
-        monkeypatch.delenv(OWN, raising=False)
+        monkeypatch.setenv(OWN, "false")
         _ai(share, NEW_TURN, (EXPORT,))
 
 

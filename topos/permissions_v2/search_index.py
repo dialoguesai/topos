@@ -47,7 +47,7 @@ NARROW MEMBERS (NR188, DR-31; `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`, on by
 index dark. A member that fails only at its `dependencies` or its `classification_context`, as a clean revision
 mismatch, is withheld (`_members_current`); the sweep publishes the index without it (`_narrow`) and the request path
 refuses, without shredding, until it has. Every other failure still deletes the whole index, as above, except an
-own-row edit `_own_row_edit` admits (DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, off by default): an
+own-row edit `_own_row_edit` admits (DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, on by default since 1.5.16): an
 AI-chat line whose fingerprint is its own row alone, whose own-row dependency already moved as `row_revision`, stays
 withheld instead. The file a narrowed publish replaces is zero-overwritten, whatever that switch says; a reader that
 opened it first refuses as not served now and shreds nothing (`IndexReplaced`).
@@ -570,7 +570,7 @@ def _narrow_members() -> bool:
 
 
 def _narrow_own_row_edits() -> bool:
-    """DR-34 (widens DR-31; off by default, read only while INDEX_NARROW_MEMBERS is on): whether an AI-chat line whose
+    """DR-34 (widens DR-31; on by default since 1.5.16, read only while INDEX_NARROW_MEMBERS is on): whether an AI-chat line whose
     own stored row was rewritten stays withheld (`_own_row_edit`) instead of its whole index going."""
     from . import switches
     return switches.on(switches.INDEX_NARROW_OWN_ROW_EDITS)
@@ -2006,7 +2006,7 @@ class SearchIndexService:
         those two classes as a clean revision mismatch is added to it instead of failing the index; True then means
         every OTHER member checked is current, and the caller must never serve or keep serving the members it holds.
         With the switch off it stays empty and the check is main's. `fingerprint` always drops the whole index, except
-        an own-row edit `_own_row_edit` admits (DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, off by default).
+        an own-row edit `_own_row_edit` admits (DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, on by default since 1.5.16).
 
         NR187: `interest_before` (the daemon sweep only, with SWEEP_INTEREST_VERDICT on) is the canonical token the sweep
         read before `conn`'s snapshot was established (None when unreadable). The interest step then reuses this very
@@ -2494,7 +2494,7 @@ class SearchIndexService:
         return "row_revision"
 
     def _own_row_edit(self, member: dict, rows, facts, fingerprint, dependency_word, why: dict) -> bool:
-        """DR-34 (widens DR-31; `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, off by default): whether a member's
+        """DR-34 (widens DR-31; `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, on by default since 1.5.16): whether a member's
         fingerprint mismatch is exactly the edit of its own stored row that its own-row dependency check has already
         found moved (`row_revision`), so it stays withheld (`_members_current`) instead of its whole index going.
 
