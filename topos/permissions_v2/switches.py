@@ -218,9 +218,10 @@ INDEX_NARROW_MEMBERS = _switch(
     "its records leaving and coming back. Off: the whole index goes, as before 1.5.10.")
 INDEX_NARROW_OWN_ROW_EDITS = _switch(
     "INDEX_NARROW_OWN_ROW_EDITS", "bool", False, False,
-    "Fix a (DR-34, widens DR-31; read only while INDEX_NARROW_MEMBERS is on). A message line whose own stored row was "
+    "Fix a (DR-34, widens DR-31; read only while INDEX_NARROW_MEMBERS is on). An AI-chat line whose own stored row was "
     "rewritten, already withheld because its own-row dependency moved, stays withheld instead of its whole share "
-    "index going. Off: an own-row edit removes the whole index, as 1.5.15.")
+    "index going. Off: an own-row edit removes the whole index, as 1.5.15. The zeroing of the file a narrowed publish "
+    "replaces applies to every narrowed publish, whatever this switch says.")
 SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "

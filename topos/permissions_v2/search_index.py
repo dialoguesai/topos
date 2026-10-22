@@ -47,9 +47,10 @@ NARROW MEMBERS (NR188, DR-31; `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`, on by
 index dark. A member that fails only at its `dependencies` or its `classification_context`, as a clean revision
 mismatch, is withheld (`_members_current`); the sweep publishes the index without it (`_narrow`) and the request path
 refuses, without shredding, until it has. Every other failure still deletes the whole index, as above, except an
-own-row edit `_own_row_edit` admits (DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, off by default): a
-message line whose fingerprint is its own row alone, whose own-row dependency already moved as `row_revision`, stays
-withheld instead. The file a narrowed publish replaces is zero-overwritten.
+own-row edit `_own_row_edit` admits (DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, off by default): an
+AI-chat line whose fingerprint is its own row alone, whose own-row dependency already moved as `row_revision`, stays
+withheld instead. The file a narrowed publish replaces is zero-overwritten, whatever that switch says; a reader that
+opened it first refuses as not served now and shreds nothing (`IndexReplaced`).
 """
 from __future__ import annotations
 
@@ -526,6 +527,17 @@ def _file_state(path) -> tuple | None:
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns, info.st_mode, info.st_uid)
 
 
+class IndexReplaced(PolicyError):
+    """DR-34 (review): the index file a read opened was replaced or removed at its path before the read ended, and the
+    read failed. A narrowed publish zeroes the inode it replaces (`_narrow`, `_zero_open`), so a reader that opened
+    that inode first reads zeros. That says nothing about the file now at the path: it refuses as not served now
+    (`search_index_stale`, in answer_release's NOT_SERVED_NOW) and nothing is shredded for it; the next check reads the
+    file there. Raised only when the path's stat identity moved since the stat taken before the read."""
+
+    def __init__(self):
+        super().__init__("search_index_stale")
+
+
 def _lstat_state(path: Path) -> tuple | None:
     """A path's own identity and mode, not following a link, as `_snapshot`'s lstat checks (N5 review, R1).
 
@@ -558,15 +570,18 @@ def _narrow_members() -> bool:
 
 
 def _narrow_own_row_edits() -> bool:
-    """DR-34 (widens DR-31; off by default, read only while INDEX_NARROW_MEMBERS is on): whether a message line whose
+    """DR-34 (widens DR-31; off by default, read only while INDEX_NARROW_MEMBERS is on): whether an AI-chat line whose
     own stored row was rewritten stays withheld (`_own_row_edit`) instead of its whole index going."""
     from . import switches
     return switches.on(switches.INDEX_NARROW_OWN_ROW_EDITS)
 
 
-#: DR-34: the tables whose members `_own_row_edit` may admit: message lines, whose fingerprint is their own row alone
-#: when they carry no witness facts. Journal entries, projections and interests are never admitted.
-OWN_ROW_EDIT_TABLES = frozenset({"conversation_messages", "ai_chat_messages"})
+#: DR-34: the tables whose members `_own_row_edit` may admit: AI-chat lines, whose fingerprint is their own row alone
+#: when they carry no witness facts. Journal entries, projections and interests are never admitted. Review: not
+#: `conversation_messages` either. Its one shareable lane today is iMessage, whose native proof breaks before the
+#: fingerprint step (member_unavailable), so it was never exercised as admitted; it is added only with a test of an
+#: admitted line from a source proven without a native snapshot (edit withheld, NSFW and blank whole drops).
+OWN_ROW_EDIT_TABLES = frozenset({"ai_chat_messages"})
 
 
 #: NR188 (review #3): a narrowed copy carries this table, one row, nothing else: the index it holds withholds members
@@ -1703,10 +1718,13 @@ class SearchIndexService:
                             review_digest = self.reviews.current_authority_digest()
                     checked = _file_state(path)  # the file this check reads; None when it is already gone
                     withheld: set = set()        # NR188: filled only with the switch on (`_current`)
-                    if checked is not None and not self._current(path, grant_id, authority, clock, conn,
-                                                                 review_digest=review_digest, refresh=True,
-                                                                 narrowed=withheld,
-                                                                 interest_before=memo):
+                    try:
+                        verdict = checked is None or self._current(path, grant_id, authority, clock, conn,
+                                                                   review_digest=review_digest, refresh=True,
+                                                                   narrowed=withheld, interest_before=memo)
+                    except IndexReplaced:
+                        continue   # DR-34 (review): replaced under this check; the next sweep decides the file there
+                    if not verdict:
                         stale.append((path, grant_id, checked))
                     elif checked is not None and withheld:
                         narrow.append((path, grant_id, authority, checked, frozenset(withheld)))
@@ -1771,7 +1789,11 @@ class SearchIndexService:
         DR-34: the file it replaces is zero-overwritten. Under the gate, after the authority check, the index file is
         opened and its descriptor's identity must be the checked file's (else nothing is published); after the gate,
         that inode, now unlinked by `os.replace`, is zeroed through the descriptor (`_zero_open`), as `_shred` zeroes
-        a file it removes. Every narrowed publish does it, not only an own-row edit's: one rule, and strictly stronger."""
+        a file it removes. Every narrowed publish does it, not only an own-row edit's, and whatever
+        INDEX_NARROW_OWN_ROW_EDITS says: one rule, and strictly stronger. If that descriptor cannot be opened, this
+        index alone goes, as when the copy cannot be made (never the sweep's purge of every index). A reader that
+        opened the replaced inode first and then reads zeros refuses as not served now and shreds nothing
+        (`IndexReplaced`)."""
         from . import search_timing
         held = BUILD_SLOT.acquire(blocking=False)
         with self._published_lock:
@@ -1811,8 +1833,16 @@ class SearchIndexService:
                             again = None
                     if again is None or again != authority:
                         return False
-                    retired = open(path, "r+b", buffering=0)
-                    info = os.fstat(retired.fileno())
+                    try:
+                        retired = open(path, "r+b", buffering=0)
+                        info = os.fstat(retired.fileno())
+                    except OSError as exc:
+                        # DR-34 (review): as a copy that cannot be made, this index alone goes (never the sweep's
+                        # purge of every index); never published without the handle that zeroes what it replaces.
+                        _log.warning("message search index narrowing unavailable (%s)", type(exc).__name__)
+                        if _file_state(path) == checked:
+                            _shred(path)
+                        return False
                     if (info.st_dev, info.st_ino) != tuple(checked[:2]):
                         return False      # not the file the check read: nothing is published
                     os.replace(temporary, path)
@@ -1982,6 +2012,11 @@ class SearchIndexService:
         read before `conn`'s snapshot was established (None when unreadable). The interest step then reuses this very
         file's last True interest verdict while nothing it reads has changed (`_interests_current_kept`). Every other
         caller, and the sweep with the switch off, decides the interests in full as before.
+
+        DR-34 (review): an index file that cannot be read because it was replaced or removed at its path under this read
+        raises `IndexReplaced` (a `search_index_stale` refusal, said as `stale (index_replaced)`) instead of returning
+        False: False lets a caller shred the file now at the path, or the narrowed copy in its place, which is not the
+        file that failed. Read failures of the very file still at the path are `index_integrity`, as before.
         """
         def stale(stage, sub=None):
             _log.warning("message search index stale (%s)", stage)
@@ -2011,6 +2046,11 @@ class SearchIndexService:
         try:
             index = self._open(path)
         except PolicyError:
+            if _file_state(path) != opened_state:
+                # DR-34 (review): replaced or removed under this read (a narrowed publish zeroes the inode it
+                # replaces). Not a verdict about the file now there: refused, never shredded (`IndexReplaced`).
+                stale("index_replaced")
+                raise IndexReplaced() from None
             return stale("index_integrity")
         from . import search_timing
         search_timing.share_seen(path, members=index["count"])   # attribution only (NR166): for this share's lines
@@ -2458,7 +2498,7 @@ class SearchIndexService:
         fingerprint mismatch is exactly the edit of its own stored row that its own-row dependency check has already
         found moved (`row_revision`), so it stays withheld (`_members_current`) instead of its whole index going.
 
-        Only a message line (OWN_ROW_EDIT_TABLES) with exactly one live row and no witness facts, not a projection or
+        Only an AI-chat line (OWN_ROW_EDIT_TABLES) with exactly one live row and no witness facts, not a projection or
         an interest: its fingerprint is then sha256 of its own row's `_row_revision` alone, so the mismatch is that
         edit read twice; with witness facts the hash cannot tell a fact's move from it. Its own key must be the one
         moved as `row_revision`. A fingerprint of None (deleted, closed), an NSFW re-flag and an emptied or blank
@@ -2530,6 +2570,8 @@ class SearchIndexService:
                                                           narrowed=withheld)
             finally:
                 conn.close()
+        except IndexReplaced:
+            raise PolicyError("search_index_stale") from None   # DR-34 (review): replaced under the read, never shredded
         except (sqlite3.Error, PolicyError):
             raise PolicyError("search_index_unavailable") from None
         if not current:
@@ -2639,9 +2681,14 @@ class SearchIndexService:
             conn.close()
 
     def load(self, grant_id: str, authority) -> LoadedIndex:
-        """The grant's index, or a refusal. Reads only the index file."""
+        """The grant's index, or a refusal. Reads only the index file.
+
+        DR-34 (review): a read that fails because the file was replaced or removed at its path while it read (a
+        narrowed publish zeroes the inode it replaces) refuses as not served now (`IndexReplaced`,
+        `search_index_stale`), not `search_index_integrity`, so a written answer waiting on it is held, not dropped."""
         path = index_path(self.root, grant_id)
-        if not path.exists():
+        state = _file_state(path)   # taken before the read: what a failed read is compared with
+        if state is None:
             raise PolicyError("search_index_missing")
         try:
             conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
@@ -2667,6 +2714,8 @@ class SearchIndexService:
                 vectors.setdefault(opaque, []).append(_unf32(blob))
             return LoadedIndex(basis, meta[3], meta[4], members, vectors)
         except (sqlite3.Error, ValueError, TypeError, struct.error):
+            if _file_state(path) != state:
+                raise IndexReplaced() from None
             raise PolicyError("search_index_integrity") from None
         finally:
             conn.close()

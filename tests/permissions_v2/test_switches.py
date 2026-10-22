@@ -154,7 +154,7 @@ V136 = {**V188, P + "ANSWER_PROTECTED_ITEM_FILTER": False, P + "ANSWER_TENSE_GUA
 #: verify-claim effort high (20 Oct 2026, the owner's rollout ruling): the interpreter's doors, off unbound and on
 #: bound, and each grant's hourly allowance of model readings (120). 61 + 2 = 63.
 VHIGH = {**V136, P + "TRUTH_INTERPRET_ENABLED": False, P + "TRUTH_INTERPRET_PER_GRANT_PER_HOUR": 120}
-#: Fix 192 (22 Oct 2026, DR-34, widens DR-31): a message line whose own stored row was rewritten stays withheld
+#: Fix 192 (22 Oct 2026, DR-34, widens DR-31): an AI-chat line whose own stored row was rewritten stays withheld
 #: instead of its whole share index going; off bound and unbound alike until the owner rules the default. 63 + 1 = 64.
 VOWN = {**VHIGH, P + "INDEX_NARROW_OWN_ROW_EDITS": False}
 TABLE = {**V166, **VOWN}

@@ -10,7 +10,8 @@ rebuild's discard path, the refresh loop's cause, and the attribution words; and
 narrowed copy's successor record (#2), its on-disk mark, the restamp and restart carry and the busy-slot bound (#3), the
 authority at the present (#4), the send check's identity and the copy's integrity and identity checks (#6); and fix 192
 (DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`): every condition of `_own_row_edit`, its line said once, and
-the replaced file's zeroing. Each must be killed by at least one test.
+the replaced file's zeroing; after its review, the admitted line's own lineage, the table list, a reader of the replaced
+file (`IndexReplaced`), and a failed open of it. Each must be killed by at least one test.
 
 As `nr187_mutants.py` (and `n3c_mutants.py`): a scratch copy of the engine, one mutant at a time, the worktree never
 modified. A mutant is one or more exact edits; one whose text does not match exactly once counts as a failure, not a
@@ -54,9 +55,9 @@ MEMBER_EXCEPT = ('            except (PolicyError, sqlite3.Error, KeyError):\n'
                  '        if provenance is not None:\n')
 GATED_IDENTITY = ('                    if _file_state(path) != checked:\n'
                   '                        return False      # replaced by a publish, or removed, since the check read it\n')
+RETIRED_OPEN = '                    try:\n                        retired = open(path, "r+b", buffering=0)\n'
 GATED_AUTHORITY = ('                    if again is None or again != authority:\n'
-                   '                        return False\n'
-                   '                    retired = open(path, "r+b", buffering=0)\n')
+                   '                        return False\n' + RETIRED_OPEN)
 OWED = '                        self._narrowed_owed[path.name] = successor\n'
 #: Fix 192 (DR-34): the fingerprint step's one admitted mismatch, and `_own_row_edit`'s conditions.
 FINGERPRINT_SITE = ('                    if not (moved and narrowed is not None\n'
@@ -121,7 +122,7 @@ MUTANTS = [
         (INDEX, "        if not held and waited < NARROW_SLOT_WAITS:\n", "        if False:\n")]),
     ("file_identity_not_checked_under_the_gate", [(INDEX, GATED_IDENTITY, "")]),
     ("authority_not_checked_under_the_gate", [
-        (INDEX, GATED_AUTHORITY, '                    retired = open(path, "r+b", buffering=0)\n')]),
+        (INDEX, GATED_AUTHORITY, RETIRED_OPEN)]),
     ("narrowed_publish_reported_as_a_publish", [
         (INDEX, OWED, OWED + "                        self._published.add(path.name)\n")]),
     ("narrowed_publish_owes_no_rebuild", [(INDEX, OWED, "                        pass\n")]),
@@ -233,6 +234,27 @@ MUTANTS = [
                 "        except Exception:  # noqa: BLE001\n            return True\n")]),
     ("own_row_edit_said_every_time", [
         (INDEX, '                    if "fingerprint" not in said:\n', "                    if True:\n")]),
+    # Fix 192 review: only the admitted line's own lineage skipped; conversation_messages admitted; a reader of the
+    # replaced (zeroed) inode shredding the narrowed copy or reading as integrity; the sweep or a failed open of the
+    # replaced file reaching the purge of every index.
+    ("own_row_edit_skips_its_lineage", [
+        (INDEX, '                if deep and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:\n',
+                '                if deep and not (moved and fingerprint != member["fingerprint"]) and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:\n')]),
+    ("conversation_messages_admitted", [
+        (INDEX, 'OWN_ROW_EDIT_TABLES = frozenset({"ai_chat_messages"})\n',
+                'OWN_ROW_EDIT_TABLES = frozenset({"conversation_messages", "ai_chat_messages"})\n')]),
+    ("replaced_reader_reads_as_integrity", [
+        (INDEX, "            if _file_state(path) != opened_state:\n                # DR-34 (review)",
+                "            if False:\n                # DR-34 (review)")]),
+    ("load_of_a_replaced_file_reads_as_integrity", [
+        (INDEX, "            if _file_state(path) != state:\n                raise IndexReplaced() from None\n",
+                "            if False:\n                raise IndexReplaced() from None\n")]),
+    ("sweep_replaced_check_reaches_the_purge", [
+        (INDEX, "                    except IndexReplaced:\n                        continue",
+                "                    except ZeroDivisionError:\n                        continue")]),
+    ("retired_open_failure_reaches_the_purge", [
+        (INDEX, "                    except OSError as exc:\n                        # DR-34 (review)",
+                "                    except ZeroDivisionError as exc:\n                        # DR-34 (review)")]),
     ("retired_file_not_zeroed", [
         (INDEX, "                _zero_open(handle)        # DR-34: outside the gate; the unlinked inode the publish replaced\n",
                 "                handle.close()\n")]),

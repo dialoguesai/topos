@@ -21,9 +21,11 @@ holding one more owner line, so the rest of the share can be seen to keep servin
 """
 from __future__ import annotations
 
+import errno
 import logging
 import os
 import sqlite3
+from pathlib import Path
 
 import pytest
 
@@ -31,9 +33,9 @@ from tests.ingestion.test_ai_chat_writer_class import captured_jobs  # noqa: F40
 from tests.permissions_v2.test_fresh_node_message_tables import (  # noqa: F401 (fixture)
     EXPORT, LINE, NOW as AI_NOW, OWNER as AI_OWNER, _bound, _own_pass, _share_policy, ai_chat_only)
 from tests.permissions_v2.test_nr188_narrow_member_drop import (  # noqa: F401 (fixtures)
-    NARROW, _ai, _grant, _members, _path, _sweep, _write, events, node)
+    NARROW, NEW_TURN, _ai, _grant, _members, _path, _sweep, _write, events, node)
 from tests.permissions_v2.test_refresh_loop import Clock, loop_for
-from topos.permissions_v2 import search_index, switches
+from topos.permissions_v2 import answer_release, search_index, switches
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.search_index import SearchIndexService, _file_state
 
@@ -186,6 +188,20 @@ def test_the_withheld_line_is_never_returned_before_or_after_the_narrowing(ai_sh
     share = ai_share_two
     line = _by_record(share)["m-line"]
     _edit(share)
+    # Review: the hook is in place from the edit on, so it also sees the window before the sweep, while the file still
+    # holds the edited line: a member check that passed clean then would be recorded with the line in its file. The
+    # index load's basis-only check (`members=False`, N5) proves nothing about members and is not recorded: the gated
+    # recheck that follows it runs the member loop.
+    passed = []
+    original = SearchIndexService._current
+
+    def current(self, path, *args, **kwargs):
+        verdict = original(self, path, *args, **kwargs)
+        if (verdict and kwargs.get("members", True) and not kwargs.get("refresh")
+                and not kwargs.get("narrowed")):
+            passed.append({opaque for opaque, _sealed in self._open(path)["sealed"]})
+        return verdict
+    monkeypatch.setattr(SearchIndexService, "_current", current)
     state = _file_state(_path(share))
     output, refused = share.search_request(QUERY, k=10)
     assert output is None and refused is not None                 # before the sweep: refused, as not served now
@@ -193,18 +209,10 @@ def test_the_withheld_line_is_never_returned_before_or_after_the_narrowing(ai_sh
     with pytest.raises(PolicyError, match="search_index_stale"):
         share.index.check_own(_grant(share), _authority(share), now=share.now[0], released=frozenset({line}))
     assert _file_state(_path(share)) == state
+    assert passed == []                                           # nothing passed clean while the file held it
     assert _sweep(share, caplog)[-1] == "message search index narrowed (1 withheld)"
     with pytest.raises(PolicyError, match="search_index_stale"):
         share.index.check_own(_grant(share), _authority(share), now=share.now[0], released=frozenset({line}))
-    passed = []
-    original = SearchIndexService._current
-
-    def current(self, path, *args, **kwargs):
-        verdict = original(self, path, *args, **kwargs)
-        if verdict and not kwargs.get("refresh") and not kwargs.get("narrowed"):
-            passed.append({opaque for opaque, _sealed in self._open(path)["sealed"]})
-        return verdict
-    monkeypatch.setattr(SearchIndexService, "_current", current)
     for _ in range(3):
         output, refused = share.search_request(QUERY, k=10)
         assert refused is None
@@ -330,12 +338,20 @@ def test_an_edit_that_names_an_off_limits_person_drops_the_whole_index(ai_share_
     assert _gone(share, _sweep(share, caplog))[-1] == "message search index stale (member_unavailable)"
 
 
-def test_an_edited_line_whose_lineage_moved_drops_the_whole_index(ai_share_two, caplog, both):
+def test_an_edited_line_whose_own_lineage_moved_drops_the_whole_index(ai_share_two, caplog, both, monkeypatch):
     share = ai_share_two
-    _ai(share, "UPDATE ai_chat_messages SET content=? WHERE message_id='m-line'", (OTHER,))
-    # Lineage runs after the fingerprint step: an edited line met first is admitted there, and then fails its own
-    # lineage (its copy count moved), which takes the whole index all the same.
-    assert _gone(share, _sweep(share, caplog), admitted_first=True)[-1] == "message search index stale (lineage)"
+    original = search_index._lineage_fingerprint
+
+    def lineage(conn, member, content):
+        value = original(conn, member, content)
+        return "an invented lineage move" if member["record_id"] == "m-line" else value
+    monkeypatch.setattr(search_index, "_lineage_fingerprint", lineage)
+    _edit(share)
+    # Review: only the edited line's own lineage moves (the unedited line's is read as built). Lineage runs after the
+    # fingerprint step: the line is admitted there (its line is said), then fails its own lineage, which takes the
+    # whole index all the same, whichever member the check meets first.
+    lines = _gone(share, _sweep(share, caplog), admitted_first=True)
+    assert DRIFT_FINGERPRINT in lines and lines[-1] == "message search index stale (lineage)"
 
 
 def test_an_edited_line_whose_entity_context_moved_otherwise_drops_the_whole_index(ai_share_two, caplog, both,
@@ -378,6 +394,9 @@ def test_a_member_with_witness_facts_or_an_interest_or_a_journal_row_is_not_forg
     assert edit({**member, "facts": ["f"]}, rows, facts, fingerprint, "row_revision", why) is False
     assert edit(member, rows, [[{"object_id": "f"}]], fingerprint, "row_revision", why) is False
     assert edit({**member, "interest": {"kind": "x"}}, rows, facts, fingerprint, "row_revision", why) is False
+    messages = {**member, "table": "conversation_messages", "dataset_id": "an-invented-dataset"}   # review: not yet
+    assert edit(messages, rows, facts, fingerprint, "row_revision",
+                {"moved": {share.index._own_key(messages): "row_revision"}}) is False
     journal = {**member, "table": "journal_entries"}
     journal_why = {"moved": {share.index._own_key(journal): "row_revision"}}   # its own key, so only the table refuses
     assert journal_why != why
@@ -468,3 +487,106 @@ def test_the_rebuild_owed_brings_the_edited_line_back_only_with_a_review_of_its_
     assert _served(share) == {EDITED, OTHER}
     assert not search_index._narrowed_file(_path(share)) and share.index.narrowed_files() == set()
     assert share.index.take_narrowed() == set()
+
+
+# --- review: a reader of the replaced file, a replaced file that cannot be opened -----------------------------------
+
+def _narrowing(share, monkeypatch, trigger):
+    """Set the switches and make the change that the next sweep narrows away: the own-row edit (both switches on), or
+    a new turn next to the line (DR-31 alone, the DR-34 switch off: the zeroing runs there too)."""
+    monkeypatch.setenv(NARROW, "true")
+    if trigger == "own_row_edit":
+        monkeypatch.setenv(OWN, "true")
+        _edit(share)
+    else:
+        monkeypatch.delenv(OWN, raising=False)
+        _ai(share, NEW_TURN, (EXPORT,))
+
+
+def _sweep_after_the_next_index_open(share, caplog, monkeypatch) -> list:
+    """The next connection opened on the share's index file is opened first, then a sweep narrows that file away
+    (publishing the copy and zeroing the inode the connection holds), then the connection is handed back to read."""
+    real = sqlite3.connect
+    armed, lines = [True], []
+    prefix = _path(share).as_uri()
+
+    def connect(target, *args, **kwargs):
+        conn = real(target, *args, **kwargs)
+        if armed and isinstance(target, str) and target.startswith(prefix):
+            armed.clear()
+            lines.extend(_sweep(share, caplog))
+        return conn
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    return lines
+
+
+@pytest.mark.parametrize("trigger", ["own_row_edit", "new_turn"])
+def test_a_check_that_opened_the_replaced_file_refuses_and_never_shreds_the_narrowed_copy(ai_share_two, caplog,
+                                                                                         monkeypatch, trigger):
+    share = ai_share_two
+    other = _by_record(share)["m-other"]
+    _narrowing(share, monkeypatch, trigger)
+    lines = _sweep_after_the_next_index_open(share, caplog, monkeypatch)
+    with pytest.raises(PolicyError, match="search_index_stale"):
+        share.index.check_own(_grant(share), _authority(share), now=share.now[0])
+    assert lines[-1] == "message search index narrowed (1 withheld)"
+    assert _path(share).exists() and search_index._narrowed_file(_path(share))   # the copy is kept
+    assert _members(share) == {other}
+    assert _served(share) == {OTHER}
+
+
+@pytest.mark.parametrize("trigger", ["own_row_edit", "new_turn"])
+def test_a_load_that_opened_the_replaced_file_refuses_as_not_served_now(ai_share_two, caplog, monkeypatch, trigger):
+    share = ai_share_two
+    _narrowing(share, monkeypatch, trigger)
+    lines = _sweep_after_the_next_index_open(share, caplog, monkeypatch)
+    with pytest.raises(PolicyError, match="search_index_stale") as refused:
+        share.index.load(_grant(share), _authority(share))
+    assert lines[-1] == "message search index narrowed (1 withheld)"
+    assert refused.value.code in answer_release.NOT_SERVED_NOW      # a written answer waiting on it is held
+    assert _path(share).exists() and search_index._narrowed_file(_path(share))
+
+
+def test_a_corrupt_file_still_at_its_path_is_integrity_as_before(ai_share_two, caplog, both):
+    share = ai_share_two
+    path = _path(share)
+    size = path.stat().st_size
+    with open(path, "r+b") as handle:
+        handle.write(b"\0" * size)
+    with pytest.raises(PolicyError, match="search_index_integrity"):
+        share.index.load(_grant(share), _authority(share))
+    with pytest.raises(PolicyError, match="search_index_stale"):
+        share.index.check_own(_grant(share), _authority(share), now=share.now[0])
+    assert not path.exists()                                        # the file that failed is shredded, as before
+
+
+def test_a_sweep_check_of_a_file_replaced_under_it_leaves_every_index_to_the_next_sweep(ai_share_two, caplog, both,
+                                                                                       monkeypatch):
+    share = ai_share_two
+    state = _file_state(_path(share))
+
+    def replaced(self, *args, **kwargs):
+        raise search_index.IndexReplaced()
+    monkeypatch.setattr(SearchIndexService, "_current", replaced)
+    lines = _sweep(share, caplog)
+    assert not any("sweep unavailable" in line for line in lines), lines   # never the purge of every index
+    assert _file_state(_path(share)) == state
+
+
+def test_a_replaced_file_that_cannot_be_opened_drops_this_index_alone(ai_share_two, caplog, both, monkeypatch):
+    share = ai_share_two
+    _edit(share)
+    real, failed = open, []
+
+    def flaky(file, mode="r", *args, **kwargs):
+        if not failed and mode == "r+b" and Path(file) == _path(share):
+            failed.append(mode)
+            raise OSError(errno.EMFILE, "invented")
+        return real(file, mode, *args, **kwargs)
+    monkeypatch.setattr(search_index, "open", flaky, raising=False)
+    lines = _sweep(share, caplog)
+    assert failed and "message search index narrowing unavailable (OSError)" in lines, lines
+    assert not any("sweep unavailable" in line for line in lines)            # never the purge of every index
+    assert not any(line.startswith("message search index narrowed") for line in lines)
+    assert not _path(share).exists()                                          # this index went, as a failed copy
+    assert not [entry for entry in share.index.root.iterdir() if entry.name.startswith(".build-")]
