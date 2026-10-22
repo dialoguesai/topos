@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Automatic iMessage sync no longer waits for the owner to switch it on.** `[O]` The schedule shipped
+  opt-in on 29 Sep 2026 and nothing ever opted in: the owner's node had iMessage enabled since August, six syncs
+  in all, every one a button press, the last on 8 Oct, while the same scheduler ran the coding tools every hour
+  (they write their own hourly row when enabled; iMessage wrote none). The runner table now carries a
+  `default_schedule` (iMessage: hourly, `{enabled, interval_hours: 1}`), and every scheduler tick first writes
+  that row for each enabled `user_ingestion_sources` row of the source that has no schedule row at all
+  (`local_sync_schedule.ensure_default_schedules`): a node upgraded to this build creates the row on its first
+  tick (90 s after start), the slot just passed counts as done, and the next hour's slot runs a paced since-last
+  sync from the stored checkpoint, so the gap since the last sync fills on its own. A row the owner wrote, on
+  or off, is never touched; a dataset the sync itself would refuse (not the enrolled one) gets no row; a
+  disabled source gets none. No schema migration: the table is the same one the owner's switch creates.
+  Tests: `tests/ingestion/test_local_sync_schedule.py` (the default, the enrolled dataset only, off stays off,
+  iMessage alone).
+
 ## [1.5.15] — 2026-10-21
 
 - [O] A question that names a person reads their own thread. `messages:read` reached a contact's conversation only through rows whose text named them, so "what have I talked about with <contact> lately" contributed one message (one that mentioned the name elsewhere) beside cadence facts, stat insights and dossier lines, and the owner was told the messages held no content — while the thread held hundreds of rows from the last 30 days. The entity-thread lane now also joins by identity, on the owner's view only: the linked entity's contact, its identifiers, the conversations those identifiers sent to, and the newest rows of those conversations on both sides, labelled with who said them ("me" for the owner), newest first, up to sixteen, read through the same disclosed list page as every other lane (`CanonicalStore.list` takes `record_ids`; `get()` is still never called) and kept in the packet by a ten-slot fusion floor. A dated ask keeps the rows in its window when any exist; an undated one reads the newest. Below the owner's tier, for the owner's own entity, and for an entity bound to no contact, nothing changes. No migration, no reprocess.
