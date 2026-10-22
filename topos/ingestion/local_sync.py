@@ -117,7 +117,7 @@ def _run_local_sync_enrichment_if_enabled(
         # Run through the canonical orchestrator: EmbeddingsJob is the same
         # class in both lanes, it persists to signal_embeddings from either,
         # and this orchestrator writes the progress marker the catch-up
-        # (local_sync_catchup.py) reads.
+        # (embeddings_catchup.py) reads.
         job_names = sync_time_jobs(source_def)
         if not job_names:
             return

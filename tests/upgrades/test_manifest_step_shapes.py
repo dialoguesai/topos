@@ -37,7 +37,7 @@ _DERIVED_REBUILD_TARGETS = {
     "derived_object_index", "derived_objects",
     "closeness_fact_anchors", "closeness_anchors",
     "entity_mention_lineage", "mention_lineage",
-    "local_sync_embeddings",
+    "local_sync_embeddings", "imported_ai_chat_embeddings",
     "timeline",
 }
 
