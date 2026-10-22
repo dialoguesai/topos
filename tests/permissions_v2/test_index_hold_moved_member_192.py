@@ -5,7 +5,7 @@ re-capture, a metadata-only re-pointing) took a recipient's whole share index aw
 NR188 the line's own-row dependency was already found moved (`row_revision`) and withheld, and then its fingerprint,
 which is that same row's revision, failed and dropped every member.
 
-Behind `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS` (off by default, read only while INDEX_NARROW_MEMBERS is on):
+Behind `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS` (on by default since 1.5.16, read only while INDEX_NARROW_MEMBERS is on):
 
 - a message line whose fingerprint is its own row alone (no witness facts, not a projection, interest or journal row),
   whose own key moved as `row_revision`, stays withheld (`fingerprint: own_row_edit`, said once per check); the sweep
