@@ -9,8 +9,8 @@ retrieved.
 
 Deliberately NOT a temporal algebra. Two windows, both named, both relative, and only
 when the sentence asks for the difference. "my work this week and last week" is a
-two-period recall, not a difference, and stays on the single-window path it has always
-been on.
+two-period recall, not a difference: no comparison plan, and one union window
+(`test_relative_window_union.py`).
 
 The labels (`baseline` / `current`) are a closed set and are always earlier-then-later,
 whatever order the sentence used — synthesis differencing "current minus baseline" must

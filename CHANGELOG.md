@@ -23,6 +23,15 @@ The machine-readable twin of each release is
   disabled source gets none. No schema migration: the table is the same one the owner's switch creates.
   Tests: `tests/ingestion/test_local_sync_schedule.py` (the default, the enrolled dataset only, off stays off,
   iMessage alone).
+- **A question that names two time windows is searched over both.** `[O]` The planner resolved relative
+  windows in a fixed order (hours, past month, days, then this/last week and month) and kept the first it
+  found. A weekly recap routine that asks for "the past 7 days" and says "cover the past 24 hours separately"
+  was searched over the last 24 hours on every scope, whichever phrase came first (measured 22 Oct on
+  1.5.15). "My work this week and last week" searched this week only. A sentence that names two or more
+  distinct relative windows, and does not ask for their difference, now resolves to their union span
+  (`planner._relative_time_range`). A single window resolves exactly as before. A differenced ask ("compare
+  this week vs last week") keeps the same window pair, span and intent hash. Code only, no migration.
+  Tests: `tests/query/test_relative_window_union.py`.
 
 ### Security
 - **The development lock moves PyJWT 2.13.0 → 2.15.1 (Dependabot #41–#51, #55, #56, #58).** `[O]` Lock-only: PyJWT is not a direct dependency. It comes in through `mcp`, and the only importer in the node's environment is `mcp.client.auth.extensions.client_credentials`, a client-side OAuth extension the node never imports (the node uses only `mcp.server.fastmcp`). Nodes installed from PyPI already resolve 2.15.1. 2.15.0 is the first release that fixes all fourteen advisories. 2.15.1 adds one fix: it accepts trailing Base64URL padding again.
