@@ -18,7 +18,8 @@ from . import job_secrets
 # Safe at import time: derivation_recovery has no module-level heavy imports.
 from ..enrichment.derivation_recovery import SIGNAL_DERIVE_RETRY_KIND
 # Safe at import time too: stdlib only at module level.
-from ..ingestion.local_sync_catchup import KIND as LOCAL_SYNC_CATCHUP_KIND
+from ..ingestion.embeddings_catchup import CATCHUP_KINDS as EMBEDDINGS_CATCHUP_KINDS
+from ..ingestion.embeddings_catchup import CONTINUING_KINDS as EMBEDDINGS_CATCHUP_CONTINUING_KINDS
 from .job_store import (
     DEFAULT_LEASE_SECONDS,
     claim_matching_queued_jobs,
@@ -398,24 +399,24 @@ def _enqueue_ai_tool_catchup(conn: Any, source_id: Optional[str] = None, retry_f
         logger.warning("Coding-session catch-up discovery failed", exc_info=True)
 
 
-async def _execute_local_sync_catchup(payload: Dict[str, Any]) -> Dict[str, Any]:
-    from ..ingestion.local_sync_catchup import execute_catchup
+async def _execute_embeddings_catchup(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from ..ingestion.embeddings_catchup import execute_catchup
 
     return await execute_catchup(payload)
 
 
-def _enqueue_local_sync_catchup(conn: Any, source_id: Optional[str] = None) -> None:
-    from ..ingestion.local_sync_catchup import enqueue_catchup
+def _enqueue_embeddings_catchup(conn: Any, source_id: Optional[str] = None) -> None:
+    from ..ingestion.embeddings_catchup import enqueue_catchup
 
     try:
         enqueue_catchup(conn, source_id)
     except Exception:
-        logger.warning("Local-sync embeddings catch-up discovery failed", exc_info=True)
+        logger.warning("Embeddings catch-up discovery failed", exc_info=True)
 
 
 EXECUTORS: Dict[str, ExecutorFn] = {
     "ai_tool_enrichment_catchup": _execute_ai_tool_catchup,
-    LOCAL_SYNC_CATCHUP_KIND: _execute_local_sync_catchup,
+    **{kind: _execute_embeddings_catchup for kind in EMBEDDINGS_CATCHUP_KINDS},
     "inbox_deferred_enrichment": _execute_inbox_deferred_enrichment,
     "file_ingestion": _execute_file_ingestion,
     "enrichment_process_source": _execute_enrichment_process_source,
@@ -454,18 +455,20 @@ _LONG_IDLE_POLL_SECONDS = 1.0
 _LONG_MAX_POLL_SECONDS = 10.0
 
 #: Kinds that embed what was stored before, a bounded batch at a time, and get
-#: their own worker. A batch is local CPU work (MiniLM) of seconds, and nothing in
-#: the general lane is a reason for it to wait: on one node on 22 Oct 2026 the
-#: first approved batch sat queued over three hours behind ~26 coding-session
-#: derive jobs (the local model, minutes each), and each finished batch queued the
-#: next at the back of that oldest-first queue, behind whatever the hourly syncs
-#: had added meanwhile. Nor in the long lane, where it would wait out every sync,
-#: and a first iMessage sync runs for hours. Its own lane also means a batch
-#: slowed by a cold model load never holds up the general queue. One source's
-#: batches still run one at a time (``local_sync_catchup.enqueue_catchup`` queues
-#: the next only when none is in flight), and each batch takes the write gate only
-#: for its vectors and markers, as before.
-_CATCHUP_KINDS: frozenset[str] = frozenset({LOCAL_SYNC_CATCHUP_KIND})
+#: their own worker: every lane of ``embeddings_catchup`` (local sync, imported AI
+#: chat). A batch is local CPU work (MiniLM) of seconds, and nothing in the
+#: general lane is a reason for it to wait: on one node on 22 Oct 2026 the first
+#: approved local-sync batch sat queued over three hours behind ~26
+#: coding-session derive jobs (the local model, minutes each), and each finished
+#: batch queued the next at the back of that oldest-first queue, behind whatever
+#: the hourly syncs had added meanwhile. Nor in the long lane, where it would wait
+#: out every sync, and a first iMessage sync runs for hours. Its own lane also
+#: means a batch slowed by a cold model load never holds up the general queue.
+#: One source's batches still run one at a time, after its own ingest
+#: (``embeddings_catchup.enqueue_catchup`` queues the next only when none is in
+#: flight), and each batch takes the write gate only for its vectors and markers,
+#: as before.
+_CATCHUP_KINDS: frozenset[str] = frozenset(EMBEDDINGS_CATCHUP_KINDS)
 
 
 def _executable_kinds() -> list[str]:
@@ -712,7 +715,7 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
         return
     if kind == "inbox_deferred_enrichment":
         jobs, payload = await _run_db(conn_factory, _coalesce_inbox_jobs, job, payload)
-    if kind in ("enrichment_process_source", "ai_tool_enrichment_catchup", LOCAL_SYNC_KIND, LOCAL_SYNC_CATCHUP_KIND):
+    if kind in ("enrichment_process_source", "ai_tool_enrichment_catchup", LOCAL_SYNC_KIND, *EMBEDDINGS_CATCHUP_KINDS):
         payload["_progress_updater"] = _progress_updater
     if kind == LOCAL_SYNC_KIND:
         payload["_job_id"] = job_id
@@ -827,11 +830,11 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
     if kind in ("ai_tool_enrichment_catchup", "inbox_deferred_enrichment", LOCAL_SYNC_KIND):
         for sid in {entry.get("source_id") for entry in jobs if entry.get("source_id")}:
             await _run_db(conn_factory, _enqueue_ai_tool_catchup, sid, kind == LOCAL_SYNC_KIND)
-    if kind in (LOCAL_SYNC_CATCHUP_KIND, LOCAL_SYNC_KIND):
-        # A finished batch queues the next; a finished sync picks up what it
-        # left owed. Both only for a source whose catch-up the owner started.
+    if kind in EMBEDDINGS_CATCHUP_CONTINUING_KINDS:
+        # A finished batch queues the next; a finished sync or import picks up
+        # what it left owed. Both only for a source whose catch-up the owner started.
         for sid in {entry.get("source_id") for entry in jobs if entry.get("source_id")}:
-            await _run_db(conn_factory, _enqueue_local_sync_catchup, sid)
+            await _run_db(conn_factory, _enqueue_embeddings_catchup, sid)
     _release_secrets(jobs)
 
 
@@ -901,7 +904,7 @@ async def _worker_loop(
     next_debt_sweep = 0.0
     if sweep_debts and _enabled():
         await _run_db(conn_factory, _enqueue_ai_tool_catchup, None, True)
-        await _run_db(conn_factory, _enqueue_local_sync_catchup, None)
+        await _run_db(conn_factory, _enqueue_embeddings_catchup, None)
     while True:
         try:
             if not _enabled():

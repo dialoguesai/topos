@@ -19,14 +19,15 @@ from unittest.mock import patch
 
 import pytest
 
-from topos.ingestion import local_sync_catchup
-from topos.ingestion.local_sync_catchup import KIND as CATCHUP, enqueue_catchup
+from topos.ingestion import embeddings_catchup
+from topos.ingestion.embeddings_catchup import LOCAL_SYNC, enqueue_catchup
 from topos.pipeline import job_runner
 from topos.pipeline.job_store import enqueue_job, get_job
 from topos.storage.canonical.conversations_tables import ConversationsTablesManager
 from topos.storage.db.migrations import apply_all_migrations
 
 GENERAL = "inbox_deferred_enrichment"
+CATCHUP = LOCAL_SYNC.kind
 #: About 26 sat ahead of the first batch on that node; three show the shape.
 AHEAD = 3
 BATCHES = 4
@@ -69,7 +70,7 @@ def node(tmp_path, monkeypatch):
 
     monkeypatch.setattr("topos.core.state.get_db_connection", connection)
     monkeypatch.setattr("topos.enrichment.jobs.canonical.embeddings_job.run_engine_task", embed)
-    monkeypatch.setattr(local_sync_catchup, "BATCH_SIZE", BATCH_SIZE)
+    monkeypatch.setattr(embeddings_catchup, "BATCH_SIZE", BATCH_SIZE)
     monkeypatch.delenv("TOPOS_LOCAL_SYNC_CATCHUP", raising=False)
     monkeypatch.setenv("TOPOS_PIPELINE_WORKER", "on")
     for task in ("_worker_task", "_long_worker_task", "_catchup_worker_task"):
@@ -127,7 +128,7 @@ async def until(predicate, timeout: float = 10.0) -> bool:
 async def test_catchup_runs_while_the_derive_jobs_queued_ahead_of_it_still_wait(node):
     lanes = Lanes(node)
     ahead = [lanes.queue_derive() for _ in range(AHEAD)]
-    assert len(enqueue_catchup(node(), start=True)) == 1
+    assert len(enqueue_catchup(node(), start=LOCAL_SYNC.target)) == 1
 
     async def body():
         # The general lane holds the oldest derive job on the model and will not let it go.
@@ -149,7 +150,7 @@ async def test_the_next_batch_never_queues_behind_jobs_that_arrived_during_the_l
     lanes = Lanes(node)
     for _ in range(AHEAD):
         lanes.queue_derive()
-    enqueue_catchup(node(), start=True)
+    enqueue_catchup(node(), start=LOCAL_SYNC.target)
 
     async def body():
         # Let the general lane finish exactly the jobs that were ahead of the first batch. Each one that
@@ -172,7 +173,7 @@ async def test_the_next_batch_never_queues_behind_jobs_that_arrived_during_the_l
 async def test_a_slow_catchup_batch_never_holds_up_the_general_lane(node):
     lanes = Lanes(node)
     lanes.arrivals = False
-    first = enqueue_catchup(node(), start=True)[0]
+    first = enqueue_catchup(node(), start=LOCAL_SYNC.target)[0]
     behind = [lanes.queue_derive() for _ in range(AHEAD)]
     batch_started = asyncio.Event()
     release = asyncio.Event()
