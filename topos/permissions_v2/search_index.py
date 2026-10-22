@@ -46,7 +46,10 @@ guard is unchanged.
 NARROW MEMBERS (NR188, DR-31; `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`, on by default): new data never takes an
 index dark. A member that fails only at its `dependencies` or its `classification_context`, as a clean revision
 mismatch, is withheld (`_members_current`); the sweep publishes the index without it (`_narrow`) and the request path
-refuses, without shredding, until it has. Every other failure still deletes the whole index, as above.
+refuses, without shredding, until it has. Every other failure still deletes the whole index, as above, except an
+own-row edit `_own_row_edit` admits (DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, off by default): a
+message line whose fingerprint is its own row alone, whose own-row dependency already moved as `row_revision`, stays
+withheld instead. The file a narrowed publish replaces is zero-overwritten.
 """
 from __future__ import annotations
 
@@ -140,6 +143,29 @@ def _shred(path: Path) -> None:
                 candidate.unlink()
             except FileNotFoundError:
                 pass
+
+
+#: DR-34: the chunk `_zero_open` writes at a time, so zeroing a large index file never holds its size in memory.
+_ZERO_CHUNK = 1 << 20
+
+
+def _zero_open(handle) -> None:
+    """DR-34 (`_narrow`): zero-overwrite the file `handle` (opened "r+b", unbuffered) holds, through that descriptor, so
+    the inode a narrowed publish unlinked is zeroed even though its name now names the new file; fsync, close. Best
+    effort on a copy-on-write disk, as `_shred`. Never raises: the class name only is logged."""
+    try:
+        try:
+            remaining = os.fstat(handle.fileno()).st_size
+            handle.seek(0)
+            while remaining > 0:
+                step = min(remaining, _ZERO_CHUNK)
+                handle.write(b"\0" * step)
+                remaining -= step
+            os.fsync(handle.fileno())
+        finally:
+            handle.close()
+    except Exception as exc:  # noqa: BLE001 -- class name only; the file is already unlinked
+        _log.warning("message search index zeroing unavailable (%s)", type(exc).__name__)
 
 
 #: R-N154 L5: the build files this process is writing now (absolute paths). One process owns an index root (the
@@ -529,6 +555,18 @@ def _narrow_members() -> bool:
     instead of its whole index going."""
     from . import switches
     return switches.on(switches.INDEX_NARROW_MEMBERS)
+
+
+def _narrow_own_row_edits() -> bool:
+    """DR-34 (widens DR-31; off by default, read only while INDEX_NARROW_MEMBERS is on): whether a message line whose
+    own stored row was rewritten stays withheld (`_own_row_edit`) instead of its whole index going."""
+    from . import switches
+    return switches.on(switches.INDEX_NARROW_OWN_ROW_EDITS)
+
+
+#: DR-34: the tables whose members `_own_row_edit` may admit: message lines, whose fingerprint is their own row alone
+#: when they carry no witness facts. Journal entries, projections and interests are never admitted.
+OWN_ROW_EDIT_TABLES = frozenset({"conversation_messages", "ai_chat_messages"})
 
 
 #: NR188 (review #3): a narrowed copy carries this table, one row, nothing else: the index it holds withholds members
@@ -1728,7 +1766,12 @@ class SearchIndexService:
         (a build, a restamp, this) replaces it under the gate, and this one only over the very file it checked, so a
         build that publishes first is never overwritten and one that publishes after replaces the copy whole; the slot
         only spares writing a copy a running build will replace. Review #4: the authority is read again at the sweep's
-        `now` carried forward by the seconds the sweep has run (`started`), so an expiry while it ran is seen."""
+        `now` carried forward by the seconds the sweep has run (`started`), so an expiry while it ran is seen.
+
+        DR-34: the file it replaces is zero-overwritten. Under the gate, after the authority check, the index file is
+        opened and its descriptor's identity must be the checked file's (else nothing is published); after the gate,
+        that inode, now unlinked by `os.replace`, is zeroed through the descriptor (`_zero_open`), as `_shred` zeroes
+        a file it removes. Every narrowed publish does it, not only an own-row edit's: one rule, and strictly stronger."""
         from . import search_timing
         held = BUILD_SLOT.acquire(blocking=False)
         with self._published_lock:
@@ -1756,6 +1799,7 @@ class SearchIndexService:
                 return False
             temporary, remaining = made
             published = False
+            retired = None    # DR-34: the replaced file, held open to zero it once the gate is released
             try:
                 with _gated(holds):
                     if _file_state(path) != checked:
@@ -1767,6 +1811,10 @@ class SearchIndexService:
                             again = None
                     if again is None or again != authority:
                         return False
+                    retired = open(path, "r+b", buffering=0)
+                    info = os.fstat(retired.fileno())
+                    if (info.st_dev, info.st_ino) != tuple(checked[:2]):
+                        return False      # not the file the check read: nothing is published
                     os.replace(temporary, path)
                     os.chmod(path, 0o600)
                     published = True
@@ -1777,7 +1825,11 @@ class SearchIndexService:
                         chain[checked] = successor
                         while len(chain) > SUCCESSORS_KEPT:
                             chain.pop(next(iter(chain)))
+                handle, retired = retired, None
+                _zero_open(handle)        # DR-34: outside the gate; the unlinked inode the publish replaced
             finally:
+                if retired is not None:
+                    retired.close()
                 if not published:
                     _shred(temporary)
                 _built(temporary)
@@ -1923,7 +1975,8 @@ class SearchIndexService:
         `sub`. `narrowed` (a set): with `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS` on, a member that failed only at
         those two classes as a clean revision mismatch is added to it instead of failing the index; True then means
         every OTHER member checked is current, and the caller must never serve or keep serving the members it holds.
-        With the switch off it stays empty and the check is main's.
+        With the switch off it stays empty and the check is main's. `fingerprint` always drops the whole index, except
+        an own-row edit `_own_row_edit` admits (DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, off by default).
 
         NR187: `interest_before` (the daemon sweep only, with SWEEP_INTEREST_VERDICT on) is the canonical token the sweep
         read before `conn`'s snapshot was established (None when unreadable). The interest step then reuses this very
@@ -2244,8 +2297,9 @@ class SearchIndexService:
         of the same row on the same snapshot); only that duplicate is part of the same failure (`_same_drift`). Every
         other failure fails the index as before: any exception (an `entity_protected` veto, an unreadable row:
         `member_unavailable`), `missing`, `row_unavailable`, `live_rows`, `projection`, `projection_context`, any other
-        `context` move, `fingerprint`, `lineage`, `interest`, and the provenance pass's refusal. `withheld(stage, word)`
-        reports the first narrow failure of each class once per check.
+        `context` move, `fingerprint` (except an own-row edit `_own_row_edit` admits: DR-34, switch, said once per check
+        as `fingerprint: own_row_edit`), `lineage`, `interest`, and the provenance pass's refusal. `withheld(stage,
+        word)` reports the first narrow failure of each class once per check.
         """
         checked = {}
         interests = []
@@ -2281,11 +2335,13 @@ class SearchIndexService:
                     if laps is not None:
                         laps["dependencies"] = laps.get("dependencies", 0.0) + time.perf_counter() - lap
                 moved = False    # NR188: this member failed so far only as a narrow failure
+                dependency_word = None   # DR-34: the word of that dependency failure, for `_own_row_edit`
                 if not current:
                     word = self._dependency_word(conn, member, why)
                     if narrowed is None or word not in NARROW_DEPENDENCY_WORDS:
                         return stale("dependencies", word)
                     moved = True
+                    dependency_word = word
                     if "dependencies" not in said:
                         said.add("dependencies")
                         withheld("dependencies", word)
@@ -2334,8 +2390,16 @@ class SearchIndexService:
                         moved and self._same_drift(member, entity_context, why, checked)):
                     return stale("context")
                 lap = spent("entity_context", lap)
-                if _member_fingerprint(rows, facts, table=member["table"]) != member["fingerprint"]:
-                    return stale("fingerprint")
+                fingerprint = _member_fingerprint(rows, facts, table=member["table"])
+                if fingerprint != member["fingerprint"]:
+                    # DR-34: the one mismatch that stays withheld is the member's own row's edit, already found moved
+                    # by its own-row dependency; every other mismatch (and the switch off) drops the whole index.
+                    if not (moved and narrowed is not None
+                            and self._own_row_edit(member, rows, facts, fingerprint, dependency_word, why)):
+                        return stale("fingerprint")
+                    if "fingerprint" not in said:
+                        said.add("fingerprint")
+                        withheld("fingerprint", "own_row_edit")
                 lap = spent("fingerprint", lap)
                 if deep and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:
                     return stale("lineage")
@@ -2388,6 +2452,31 @@ class SearchIndexService:
         except Exception:  # noqa: BLE001 -- attribution only
             pass
         return "row_revision"
+
+    def _own_row_edit(self, member: dict, rows, facts, fingerprint, dependency_word, why: dict) -> bool:
+        """DR-34 (widens DR-31; `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, off by default): whether a member's
+        fingerprint mismatch is exactly the edit of its own stored row that its own-row dependency check has already
+        found moved (`row_revision`), so it stays withheld (`_members_current`) instead of its whole index going.
+
+        Only a message line (OWN_ROW_EDIT_TABLES) with exactly one live row and no witness facts, not a projection or
+        an interest: its fingerprint is then sha256 of its own row's `_row_revision` alone, so the mismatch is that
+        edit read twice; with witness facts the hash cannot tell a fact's move from it. Its own key must be the one
+        moved as `row_revision`. A fingerprint of None (deleted, closed), an NSFW re-flag and an emptied or blank
+        row (a scrub's shape) are restrictions: never admitted. What cannot be told is not an own-row edit."""
+        try:
+            if not _narrow_own_row_edits() or dependency_word != "row_revision" or fingerprint is None:
+                return False
+            if len(rows) != 1 or facts or member.get("facts") or member.get("projection") or member.get("interest"):
+                return False
+            if member.get("table") not in OWN_ROW_EDIT_TABLES:
+                return False
+            if (why.get("moved") or {}).get(self._own_key(member)) != "row_revision":
+                return False
+            row = dict(rows[0])
+            content = row.get("content")
+            return not is_record_nsfw(row) and isinstance(content, str) and bool(content.strip())
+        except Exception:  # noqa: BLE001 -- what cannot be told is not an own-row edit: the index goes
+            return False
 
     def _same_drift(self, member: dict, current_context, why: dict, checked: dict) -> bool:
         """NR188: whether a member's own `context` check found its context moved exactly as its own-row dependency

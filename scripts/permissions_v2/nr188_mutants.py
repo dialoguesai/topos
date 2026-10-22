@@ -8,8 +8,9 @@ keeping an index it could not narrow), the request path (serving or shredding on
 batch, answer and send-check doors, the send check not comparing what it sends, the transport not passing it), the
 rebuild's discard path, the refresh loop's cause, and the attribution words; and, after the independent review, the
 narrowed copy's successor record (#2), its on-disk mark, the restamp and restart carry and the busy-slot bound (#3), the
-authority at the present (#4), the send check's identity and the copy's integrity and identity checks (#6). Each must
-be killed by at least one test.
+authority at the present (#4), the send check's identity and the copy's integrity and identity checks (#6); and fix 192
+(DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`): every condition of `_own_row_edit`, its line said once, and
+the replaced file's zeroing. Each must be killed by at least one test.
 
 As `nr187_mutants.py` (and `n3c_mutants.py`): a scratch copy of the engine, one mutant at a time, the worktree never
 modified. A mutant is one or more exact edits; one whose text does not match exactly once counts as a failure, not a
@@ -36,7 +37,8 @@ LOOP = "topos/permissions_v2/refresh_loop.py"
 SWITCHES = "topos/permissions_v2/switches.py"
 TIMING = "topos/permissions_v2/search_timing.py"
 TESTS = ["tests/permissions_v2/test_nr188_narrow_member_drop.py", "tests/permissions_v2/test_switches.py",
-         "tests/permissions_v2/test_bl155_index_survives_bookkeeping.py"]
+         "tests/permissions_v2/test_bl155_index_survives_bookkeeping.py",
+         "tests/permissions_v2/test_index_hold_moved_member_192.py"]
 
 STALE_HERE = '                    raise PolicyError("search_index_stale")   # NR188: not served now; the sweep withholds, never here\n'
 BATCH_SITE = "                if withheld:\n" + STALE_HERE + "                read_now = self.clock()\n"
@@ -54,8 +56,17 @@ GATED_IDENTITY = ('                    if _file_state(path) != checked:\n'
                   '                        return False      # replaced by a publish, or removed, since the check read it\n')
 GATED_AUTHORITY = ('                    if again is None or again != authority:\n'
                    '                        return False\n'
-                   '                    os.replace(temporary, path)\n')
+                   '                    retired = open(path, "r+b", buffering=0)\n')
 OWED = '                        self._narrowed_owed[path.name] = successor\n'
+#: Fix 192 (DR-34): the fingerprint step's one admitted mismatch, and `_own_row_edit`'s conditions.
+FINGERPRINT_SITE = ('                    if not (moved and narrowed is not None\n'
+                    '                            and self._own_row_edit(member, rows, facts, fingerprint, dependency_word, why)):\n'
+                    '                        return stale("fingerprint")\n')
+OWN_FIRST = '            if not _narrow_own_row_edits() or dependency_word != "row_revision" or fingerprint is None:\n'
+OWN_SHAPE = ('            if len(rows) != 1 or facts or member.get("facts") or member.get("projection") '
+             'or member.get("interest"):\n')
+OWN_KEY = '            if (why.get("moved") or {}).get(self._own_key(member)) != "row_revision":\n                return False\n'
+OWN_LAST = '            return not is_record_nsfw(row) and isinstance(content, str) and bool(content.strip())\n'
 
 MUTANTS = [
     # The switch.
@@ -96,11 +107,9 @@ MUTANTS = [
     ("duplicate_rule_current_value_dropped", [
         (INDEX, "                and own in checked and checked[own][1] == current_context)\n",
                 "                and own in checked)\n")]),
+    # Fix 192 re-anchored: any fingerprint move of a moved member forgiven, not only the own-row edit DR-34 admits.
     ("fingerprint_move_of_a_moved_member_narrows", [
-        (INDEX, '                if _member_fingerprint(rows, facts, table=member["table"]) != member["fingerprint"]:\n'
-                '                    return stale("fingerprint")\n',
-                '                if _member_fingerprint(rows, facts, table=member["table"]) != member["fingerprint"] and not moved:\n'
-                '                    return stale("fingerprint")\n')]),
+        (INDEX, FINGERPRINT_SITE, '                    if not moved:\n                        return stale("fingerprint")\n')]),
     ("lineage_move_of_a_moved_member_narrows", [
         (INDEX, '                if deep and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:\n',
                 '                if deep and not moved and _lineage_fingerprint(conn, member, dict(rows[0]).get("content")) != member["lineage"]:\n')]),
@@ -112,7 +121,7 @@ MUTANTS = [
         (INDEX, "        if not held and waited < NARROW_SLOT_WAITS:\n", "        if False:\n")]),
     ("file_identity_not_checked_under_the_gate", [(INDEX, GATED_IDENTITY, "")]),
     ("authority_not_checked_under_the_gate", [
-        (INDEX, GATED_AUTHORITY, "                    os.replace(temporary, path)\n")]),
+        (INDEX, GATED_AUTHORITY, '                    retired = open(path, "r+b", buffering=0)\n')]),
     ("narrowed_publish_reported_as_a_publish", [
         (INDEX, OWED, OWED + "                        self._published.add(path.name)\n")]),
     ("narrowed_publish_owes_no_rebuild", [(INDEX, OWED, "                        pass\n")]),
@@ -201,6 +210,32 @@ MUTANTS = [
                 "        source = sqlite3.connect(path.as_uri()"),
         (INDEX, "        finally:\n            source.close()\n        if _file_state(path) != checked:\n            return None\n",
                 "        finally:\n            source.close()\n")]),
+    # Fix 192 (DR-34): what `_own_row_edit` admits, condition by condition; its line; the replaced file zeroed.
+    ("own_row_edit_switch_not_read", [
+        (INDEX, OWN_FIRST, OWN_FIRST.replace("not _narrow_own_row_edits() or ", ""))]),
+    ("dependency_word_not_required", [
+        (INDEX, OWN_FIRST, OWN_FIRST.replace('dependency_word != "row_revision" or ', ""))]),
+    ("fingerprint_none_condition_dropped", [
+        (INDEX, OWN_FIRST, OWN_FIRST.replace(" or fingerprint is None", ""))]),
+    ("own_key_not_required", [(INDEX, OWN_KEY, "")]),
+    ("row_count_condition_dropped", [(INDEX, OWN_SHAPE, OWN_SHAPE.replace("len(rows) != 1 or ", ""))]),
+    ("facts_condition_dropped", [
+        (INDEX, OWN_SHAPE, OWN_SHAPE.replace('facts or member.get("facts") or ', ""))]),
+    ("projection_condition_dropped", [(INDEX, OWN_SHAPE, OWN_SHAPE.replace(' or member.get("projection")', ""))]),
+    ("interest_condition_dropped", [(INDEX, OWN_SHAPE, OWN_SHAPE.replace(' or member.get("interest")', ""))]),
+    ("journal_rows_admitted", [
+        (INDEX, '            if member.get("table") not in OWN_ROW_EDIT_TABLES:\n                return False\n', "")]),
+    ("nsfw_condition_dropped", [(INDEX, OWN_LAST, OWN_LAST.replace("not is_record_nsfw(row) and ", ""))]),
+    ("blank_content_condition_dropped", [(INDEX, OWN_LAST, OWN_LAST.replace(" and bool(content.strip())", ""))]),
+    ("own_row_edit_exception_admits", [
+        (INDEX, "        except Exception:  # noqa: BLE001 -- what cannot be told is not an own-row edit: the index goes\n"
+                "            return False\n",
+                "        except Exception:  # noqa: BLE001\n            return True\n")]),
+    ("own_row_edit_said_every_time", [
+        (INDEX, '                    if "fingerprint" not in said:\n', "                    if True:\n")]),
+    ("retired_file_not_zeroed", [
+        (INDEX, "                _zero_open(handle)        # DR-34: outside the gate; the unlinked inode the publish replaced\n",
+                "                handle.close()\n")]),
     # The attribution words.
     ("inserted_neighbour_never_said", [
         (INDEX, '                    return "neighbour_inserted"\n', '                    return "neighbour_changed"\n')]),
