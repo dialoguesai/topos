@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.15] — 2026-10-21
+
 - [O] A question that names a person reads their own thread. `messages:read` reached a contact's conversation only through rows whose text named them, so "what have I talked about with <contact> lately" contributed one message (one that mentioned the name elsewhere) beside cadence facts, stat insights and dossier lines, and the owner was told the messages held no content — while the thread held hundreds of rows from the last 30 days. The entity-thread lane now also joins by identity, on the owner's view only: the linked entity's contact, its identifiers, the conversations those identifiers sent to, and the newest rows of those conversations on both sides, labelled with who said them ("me" for the owner), newest first, up to sixteen, read through the same disclosed list page as every other lane (`CanonicalStore.list` takes `record_ids`; `get()` is still never called) and kept in the packet by a ten-slot fusion floor. A dated ask keeps the rows in its window when any exist; an undated one reads the newest. Below the owner's tier, for the owner's own entity, and for an entity bound to no contact, nothing changes. No migration, no reprocess.
 
 ### Added

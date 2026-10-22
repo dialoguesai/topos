@@ -3054,7 +3054,7 @@ wheels = [
 
 [[package]]
 name = "topos-node"
-version = "1.5.14"
+version = "1.5.15"
 source = { editable = "." }
 dependencies = [
     { name = "asgi-lifespan" },
