@@ -10,8 +10,11 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
+import tempfile
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 from click.testing import CliRunner
@@ -34,8 +37,15 @@ NODE_KEYS = {"running", "version", "pid", "socket", "owner_key_persisted", "supe
 
 
 @pytest.fixture
-def home(tmp_path: Path, monkeypatch) -> Path:
+def home(tmp_path: Path, monkeypatch) -> Iterator[Path]:
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    # Each test gets its own owner-socket path. The session pins one shared path, and an app lifespan that an
+    # earlier test started leaves a daemon supervisor rebinding THAT path for the rest of the run (topos.uds
+    # keeps the path it started with and never stops); a test that removes the socket to model a stopped node
+    # then reads the leftover server as a running one. Short and under /tmp: a Unix socket path is capped
+    # near 104 bytes on macOS.
+    socket_dir = Path(tempfile.mkdtemp(prefix="tsc-", dir="/tmp")).resolve()
+    monkeypatch.setenv("TOPOS_UDS_PATH", str(socket_dir / "engine.sock"))
     topos_dir = tmp_path / ".topos"
     topos_dir.mkdir(mode=0o700)
     env = topos_dir / ".env"
@@ -67,7 +77,8 @@ def home(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setattr(status_cmd, "_supervisor_for_pid", lambda pid: "manual" if pid else None)
     # Whether this machine has a topos-node binary is not what these guards measure.
     monkeypatch.setattr(status_cmd, "_resolve_binary", lambda: "/fake/bin/topos-node")
-    return tmp_path
+    yield tmp_path
+    shutil.rmtree(socket_dir, ignore_errors=True)
 
 
 def _socket_path() -> Path:
