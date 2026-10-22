@@ -419,7 +419,33 @@ def test_a_rule_tagged_rows_score_and_id_are_operational_and_its_flag_is_not(tab
 
 # --- the node's own start -------------------------------------------------------------------------------------------
 
-def test_the_startup_task_sweeps_without_an_owner_command_and_stops_with_the_runtime(conn, monkeypatch):
+@pytest.fixture
+def neighbour():
+    """Another event loop on another thread, like the uvicorn an earlier test left serving (20 Oct: a leaked owner
+    socket server ticked inside the startup test's wait and its 0.1 s sleep was recorded as the task's). Calling it
+    runs one ``asyncio.sleep(0.1)`` on that loop, looked up on the module at call time as uvicorn's main loop does,
+    and answers whether it slept or was cancelled."""
+    import asyncio
+    import threading
+
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, name="test-neighbour-loop", daemon=True)
+    thread.start()
+
+    async def one_tick():
+        try:
+            await asyncio.sleep(0.1)
+        except asyncio.CancelledError:
+            return "cancelled"
+        return "slept"
+
+    yield lambda: asyncio.run_coroutine_threadsafe(one_tick(), loop).result(timeout=5)
+    loop.call_soon_threadsafe(loop.stop)
+    thread.join(5)
+    loop.close()
+
+
+def test_the_startup_task_sweeps_without_an_owner_command_and_stops_with_the_runtime(conn, monkeypatch, neighbour):
     import asyncio
 
     import topos.runtime_shutdown as runtime
@@ -431,15 +457,20 @@ def test_the_startup_task_sweeps_without_an_owner_command_and_stops_with_the_run
     assert dump(conn) == before and tag_generation(conn) is None
     monkeypatch.setattr(runtime, "is_shutdown_requested", lambda: False)
     ticks = []
+    other_loop = []
 
     async def stop_after_first_wait(seconds):
         ticks.append(seconds)
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(asyncio, "sleep", stop_after_first_wait)
+    def connect():
+        other_loop.append(neighbour())   # another loop's tick lands while the task runs
+        return conn
+
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(nsfw_tags.run_at_startup(lambda: conn, delay=0, interval=1800))
+        asyncio.run(nsfw_tags.run_at_startup(connect, delay=0, interval=1800, sleep=stop_after_first_wait))
     assert ticks == [1800] and tag_generation(conn) == 1
+    assert other_loop == ["slept"]   # the task's wait is its own: the other loop's sleep is untouched
     assert tags(conn, "journal_entries", "j-legacy-wrong") == (0, 0.0, RULE_ID)
 
 

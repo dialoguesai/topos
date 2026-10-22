@@ -52,7 +52,7 @@ import logging
 import sqlite3
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from ..sanitization.explicit_wording import RULE_FAMILY, RULE_ID, TIER_PHRASE, TIER_UNAMBIGUOUS, Verdict, evaluate
 from ..storage.db.write_gate import batched_writes, with_db_write
@@ -434,18 +434,21 @@ def run_sweep(connect: Callable[[], sqlite3.Connection], *, dry_run: bool = Fals
 
 
 async def run_at_startup(connect: Callable[[], Optional[sqlite3.Connection]], *, delay: float = 15.0,
-                         interval: float = RECHECK_SECONDS) -> None:
+                         interval: float = RECHECK_SECONDS,
+                         sleep: Optional[Callable[[float], Awaitable[None]]] = None) -> None:
     """The node's own repair: one sweep after startup, then a re-check every ``interval`` seconds.
 
     Runs on a worker thread off the event loop (the gate is a blocking lock). Stops between batches when the
-    runtime is shutting down, and the task's cancellation ends the wait between runs. Never raises.
+    runtime is shutting down, and the task's cancellation ends the wait between runs. Never raises. ``sleep`` is
+    the wait (``asyncio.sleep``); a test passes its own rather than patching the module every thread's loop shares.
     """
     import asyncio
 
     from ..runtime_shutdown import is_shutdown_requested
 
+    sleep = sleep or asyncio.sleep
     if delay:
-        await asyncio.sleep(delay)
+        await sleep(delay)
     while True:
         try:
             await asyncio.to_thread(run_sweep, connect, stop=is_shutdown_requested)
@@ -453,4 +456,4 @@ async def run_at_startup(connect: Callable[[], Optional[sqlite3.Connection]], *,
             logger.warning("NSFW tag sweep failed (%s)", type(exc).__name__)
         if is_shutdown_requested():
             return
-        await asyncio.sleep(interval)
+        await sleep(interval)
