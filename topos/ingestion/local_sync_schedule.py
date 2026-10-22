@@ -1,8 +1,11 @@
 """The node's own schedule for local syncs (iMessage, the AI coding tools): since-last, at a time the owner picks.
 
-The owner turns it on in the app (a daily time, optionally every N hours from
+The owner sets it in the app (a daily time, optionally every N hours from
 it); the node keeps the setting in ``local_sync_schedules`` and a background
-loop enqueues a since-last sync when a slot comes due. Each run goes through
+loop enqueues a since-last sync when a slot comes due. A source whose runner
+declares a ``default_schedule`` (iMessage: hourly) gets its row from the loop
+itself, for every enabled source row that has none, so an upgraded node syncs
+without an owner action; a row the owner wrote, on or off, is never touched. Each run goes through
 ``enqueue_local_sync_blocking``, the same door as the "Sync now" button, so it
 gets the same in-flight guard, the same enrolled-dataset guard and the same
 receipt, and a run that finds no trustworthy checkpoint stops at its plan
@@ -573,6 +576,68 @@ def describe_sync_settings(
         return {"sync_modes": list(SYNC_MODES)}
 
 
+# --- the default schedule -------------------------------------------------------
+
+
+def _enabled_source_datasets(conn: Any, source_id: str) -> List[str]:
+    """Datasets with an enabled ``user_ingestion_sources`` row for the source; [] without the table."""
+    from ..storage.source_settings import TABLE as SOURCES_TABLE
+
+    found = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (SOURCES_TABLE,)
+    ).fetchone()
+    if not found:
+        return []
+    rows = conn.execute(
+        f"SELECT dataset_id FROM {SOURCES_TABLE} WHERE source_id = ? AND enabled = 1 ORDER BY dataset_id",
+        (source_id,),
+    ).fetchall()
+    return [str(r[0]) for r in rows if r[0]]
+
+
+def ensure_default_schedules(conn: Any, *, now: Optional[datetime] = None) -> Dict[str, int]:
+    """Write the runner's default schedule for every enabled source row that has no schedule row.
+
+    The repair behind the 8 Oct 2026 stall: the schedule was opt-in, nothing opted iMessage in, and
+    the loop had nothing of iMessage's to run. Runs at the top of every tick (one table probe and one
+    small SELECT per source with a default), in the tick's worker thread, so a source the owner enables
+    later is scheduled within a minute. Idempotent: an existing row, enabled or not, is the owner's
+    and stays as it is. A dataset the sync itself would refuse (iMessage: not the enrolled dataset)
+    gets no row; ``put_schedule`` asks that question. Counts only, never raises into the tick.
+    """
+    from .local_sync_jobs import LOCAL_SYNC_RUNNERS
+
+    now = now or _utcnow()
+    summary = {"created": 0, "refused": 0}
+    for source_id, runner in LOCAL_SYNC_RUNNERS.items():
+        if not runner.schedulable or not runner.default_schedule:
+            continue
+        try:
+            datasets = _enabled_source_datasets(conn, source_id)
+        except Exception as exc:  # noqa: BLE001 — a sources table that cannot be read schedules nothing
+            logger.debug("default schedule: sources read failed source_id=%s: %s", source_id, type(exc).__name__)
+            continue
+        for dataset_id in datasets:
+            if get_schedule(conn, dataset_id, source_id) is not None:
+                continue
+            try:
+                put_schedule(conn, dataset_id, source_id, dict(runner.default_schedule), now=now)
+            except ValueError as exc:
+                summary["refused"] += 1
+                logger.debug("default schedule refused: source_id=%s reason=%s", source_id, exc)
+                continue
+            except Exception as exc:  # noqa: BLE001 — one dataset's failure must not stop the tick
+                summary["refused"] += 1
+                logger.warning("default schedule not written: source_id=%s error=%s", source_id, type(exc).__name__)
+                continue
+            summary["created"] += 1
+            logger.info(
+                "[PIPELINE:SYNC] default schedule created: source_id=%s interval_hours=%s",
+                source_id, runner.default_schedule.get("interval_hours"),
+            )
+    return summary
+
+
 # --- the tick -----------------------------------------------------------------
 
 
@@ -582,16 +647,21 @@ def run_schedule_tick(
     now: Optional[datetime] = None,
     enqueue: Optional[Callable[..., Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """One pass: settle finished runs, then enqueue a since-last sync for each due slot.
+    """One pass: write any missing default schedule, settle finished runs, then enqueue a since-last
+    sync for each due slot.
 
-    Runs in a worker thread with that thread's own connection. Never creates the
-    table: a node where nobody turned the schedule on reads one PRAGMA a minute.
+    Runs in a worker thread with that thread's own connection. Creates the table only to hold a
+    default schedule (``ensure_default_schedules``): a node with no enabled source that has one
+    reads two PRAGMA-sized probes a minute and writes nothing.
     """
     if enqueue is None:
         from .local_sync_jobs import enqueue_local_sync_blocking as enqueue
     now = now or _utcnow()
-    summary: Dict[str, Any] = {"enqueued": 0, "skipped": 0, "failed": 0, "settled": 0}
-    if conn is None or not _table_ready(conn):
+    summary: Dict[str, Any] = {"enqueued": 0, "skipped": 0, "failed": 0, "settled": 0, "created": 0}
+    if conn is None:
+        return summary
+    summary["created"] = ensure_default_schedules(conn, now=now)["created"]
+    if not _table_ready(conn):
         return summary
     rows = [_row(r) for r in conn.execute(f"{_SELECT} WHERE enabled = 1").fetchall()]
     for schedule in rows:
@@ -694,6 +764,7 @@ __all__ = [
     "TABLE",
     "describe_schedule",
     "describe_sync_settings",
+    "ensure_default_schedules",
     "ensure_schedule_table",
     "get_schedule",
     "latest_slot",
