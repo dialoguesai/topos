@@ -53,6 +53,7 @@ def test_general_lane_retains_existing_kinds_and_adds_bounded_coding_recovery() 
         "ai_tool_enrichment_catchup",
         "enrichment_process_source",
         "file_ingestion",
+        "imported_ai_chat_embeddings_catchup",
         "inbox_deferred_enrichment",
         "local_sync_embeddings_catchup",
         "signal_derive_retry",
