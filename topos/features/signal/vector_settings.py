@@ -225,7 +225,8 @@ def evidence_shaping_enabled() -> bool:
     identity and time, never from which connector a row came from:
 
     1. the vector lane groups its hits by conversation (or by a short session when a
-       row has no conversation), so one long session is one witness;
+       row has no conversation) and keeps at most two passages of each, so one long
+       session is one witness and the slots it held go to the next conversations;
     2. near-duplicate hits collapse to the better-ranked copy;
     3. a hit far below the best cosine does not pad the lane;
     4. derived items cannot take more than `derived_share_max` of any prefix of the
@@ -257,8 +258,22 @@ def evidence_group_passages() -> int:
         return 2
 
 
+def evidence_group_order() -> str:
+    """rank | groups. How the vector lane orders what grouping keeps.
+
+    rank (default): the ranker's own order, each conversation capped at
+    `evidence_group_passages`. groups: every conversation's best passage first, groups
+    ordered by their best hit plus `evidence_group_bonus` per supporting hit. Measured
+    21 Oct with the vector-head pin on (`fusion_vector_head`): `groups` moved the
+    ranker's second hit out of the pinned head whenever it was the first hit's
+    conversation's second passage, and AI-chat known-item answers were lost.
+    """
+    mode = os.environ.get("TOPOS_EVIDENCE_GROUP_ORDER", "rank").strip().lower()
+    return mode if mode in ("rank", "groups") else "rank"
+
+
 def evidence_group_bonus() -> float:
-    """Lift per distinct supporting hit in a group (at most three count)."""
+    """Lift per distinct supporting hit in a group (at most three count); `groups` order only."""
     raw = os.environ.get("TOPOS_EVIDENCE_GROUP_BONUS", "0.05").strip()
     try:
         return max(0.0, min(0.5, float(raw)))

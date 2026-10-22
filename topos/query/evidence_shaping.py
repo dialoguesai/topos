@@ -221,6 +221,32 @@ def group_by_conversation(
     return out
 
 
+def cap_per_conversation(
+    hits: List[Dict[str, Any]],
+    keys: Sequence[str],
+    *,
+    limit: int,
+    passages: int,
+) -> List[Dict[str, Any]]:
+    """The ranker's order, with each conversation capped at `passages` hits.
+
+    A long session keeps its best passages where the ranker put them; the rest of it
+    gives its slots to the next hits of other conversations, from deeper in the pool.
+    No hit moves ahead of a better-ranked one, so a lane head pinned downstream (the
+    fusion's vector head) still carries the ranker's best hits.
+    """
+    taken: Dict[str, int] = {}
+    out: List[Dict[str, Any]] = []
+    for hit, key in zip(hits, keys):
+        if taken.get(key, 0) >= passages:
+            continue
+        taken[key] = taken.get(key, 0) + 1
+        out.append(hit)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def shape_vector_hits(
     hits: List[Dict[str, Any]],
     *,
@@ -238,6 +264,7 @@ def shape_vector_hits(
         evidence_duplicate_jaccard,
         evidence_floor_margin,
         evidence_group_bonus,
+        evidence_group_order,
         evidence_group_passages,
         evidence_session_gap_minutes,
         evidence_shaping_enabled,
@@ -252,6 +279,8 @@ def shape_vector_hits(
         return kept[:limit]
     conversations = lookup_conversation_ids(conn, (h.get("record_id") for h in kept))
     keys = group_keys(kept, conversations, gap_minutes=evidence_session_gap_minutes())
+    if evidence_group_order() == "rank":
+        return cap_per_conversation(kept, keys, limit=limit, passages=passages)
     return group_by_conversation(
         kept,
         keys,

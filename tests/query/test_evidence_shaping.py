@@ -140,6 +140,54 @@ class TestConversationGrouping:
         assert [set(h) for h in out] == before
 
 
+class TestRankOrderCap:
+    """The default order: the ranker's order, each conversation capped at `passages`.
+
+    Measured with the vector-head pin on main (the lane's first two hits fused at the
+    head of the answer): ordering by group put every conversation's best passage before
+    any second one, so when the ranker's #2 hit was the same conversation's second
+    passage it left the pinned head, and AI-chat known-item answers were lost.
+    """
+
+    def test_the_rankers_order_is_kept(self):
+        hits = [_hit("a0"), _hit("a1"), _hit("b0"), _hit("c0")]
+        out = es.cap_per_conversation(hits, ["conv:a", "conv:a", "conv:b", "conv:c"], limit=10, passages=2)
+        assert _ids(out) == ["a0", "a1", "b0", "c0"]
+
+    def test_a_long_session_keeps_only_its_best_passages(self):
+        hits = [_hit(f"a{i}") for i in range(10)] + [_hit("b0"), _hit("c0")]
+        keys = ["conv:a"] * 10 + ["conv:b", "conv:c"]
+        out = es.cap_per_conversation(hits, keys, limit=20, passages=2)
+        assert _ids(out) == ["a0", "a1", "b0", "c0"]
+
+    def test_freed_slots_fill_from_deeper_in_the_pool(self):
+        hits = [_hit(f"a{i}") for i in range(25)] + [_hit(f"o{i}") for i in range(30)]
+        keys = ["conv:a"] * 25 + [f"conv:o{i}" for i in range(30)]
+        out = es.cap_per_conversation(hits, keys, limit=20, passages=2)
+        assert _ids(out) == ["a0", "a1"] + [f"o{i}" for i in range(18)]
+
+    def test_shaping_defaults_to_rank_order(self, monkeypatch):
+        monkeypatch.setenv("TOPOS_EVIDENCE_SHAPING", "on")
+        monkeypatch.delenv("TOPOS_EVIDENCE_GROUP_ORDER", raising=False)
+        monkeypatch.setenv("TOPOS_EVIDENCE_FLOOR_MARGIN", "0.2")
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE signal_embeddings (record_id TEXT, source_id TEXT, conversation_id TEXT, chunk_index INT)")
+        conn.executemany("INSERT INTO signal_embeddings VALUES (?,?,?,0)",
+                         [("a0", "src_a", "a"), ("a1", "src_a", "a"), ("b0", "src_a", "b")])
+        hits = [_hit("a0", similarity=0.7), _hit("a1", similarity=0.69), _hit("b0", similarity=0.6)]
+        assert _ids(es.shape_vector_hits(hits, conn=conn, limit=20)) == ["a0", "a1", "b0"]
+        monkeypatch.setenv("TOPOS_EVIDENCE_GROUP_ORDER", "groups")
+        assert _ids(es.shape_vector_hits(hits, conn=conn, limit=20)) == ["a0", "b0", "a1"]
+
+    def test_order_setting_defaults_and_rejects_unknown(self, monkeypatch):
+        monkeypatch.delenv("TOPOS_EVIDENCE_GROUP_ORDER", raising=False)
+        assert vector_settings.evidence_group_order() == "rank"
+        monkeypatch.setenv("TOPOS_EVIDENCE_GROUP_ORDER", "bogus")
+        assert vector_settings.evidence_group_order() == "rank"
+        monkeypatch.setenv("TOPOS_EVIDENCE_GROUP_ORDER", "GROUPS")
+        assert vector_settings.evidence_group_order() == "groups"
+
+
 class TestGroupKeys:
     def test_conversation_id_wins(self):
         hits = [_hit("r1"), _hit("r2"), _hit("r3")]
@@ -428,6 +476,17 @@ class TestBoundedDerivedShare:
         assert kinds.count("R") == 6
         assert sum(1 for i in fused if i["record_id"].startswith("goal")) >= 2
         assert kinds[:12].count("R") == 6
+
+    def test_rule_four_alone_reaches_the_crowded_answer(self, monkeypatch):
+        # The vector-head lane's red case (40 stat insights crowd a five-month-old first
+        # vector hit) reached through the orchestrator with that head switched OFF: the
+        # bound by itself brings the record into the answer step's first 12 summaries.
+        from tests.query.test_vector_head_reaches_the_answer import ANCHOR, ANSWER_STEP_SUMMARIES, _ask
+
+        monkeypatch.setenv("TOPOS_FUSION_VECTOR_HEAD", "0")
+        monkeypatch.setenv("TOPOS_EVIDENCE_SHAPING", "on")
+        public = _ask(monkeypatch)
+        assert ANCHOR in {item.get("record_id") for item in public["summaries"][:ANSWER_STEP_SUMMARIES]}
 
     def test_bound_selection_helper(self):
         ranked = ["d1", "d2", "d3", "r1", "d4", "r2", "c1"]
