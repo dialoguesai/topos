@@ -97,7 +97,9 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
 
 
 _V2_EFFORTS = frozenset({"low", "high"})
-_V2_MAX_DEADLINE_S = 20.0
+#: The longest wait a caller may ask for. 30 s: a verdict takes 11-15 s at the median on the owner's node and the
+#: p95 runs to 20-30 s (23 Oct 2026), and the Fun Camera lane keeps late verdicts rather than dropping them.
+_V2_MAX_DEADLINE_S = 30.0
 
 
 def _owner_claim_request(payload: Any):
