@@ -161,6 +161,7 @@ CENSUS: Tuple[RouteRule, ...] = (
     _x("POST", "/api/local/truth_prompts", "dispatcher: truth_prompts (a read)"),
     _x("POST", "/api/local/truth_seed_fact", "dispatcher: truth_seed_fact is in DANGEROUS_TYPES"),
     _x("POST", "/api/local/verify_claim", "dispatcher: verify_claim (a read)"),
+    _x("POST", "/api/local/verify_claim_owner", "dispatcher: verify_claim_owner (a read; owner class only at the truth door)"),
     # connected_apps.py — through the dispatcher (mcp_client_* types; enroll/revoke/decide/revoke_elevation are dangerous there)
     _x("POST", "/v1/signal/connected-apps/elevations/decide", "dispatcher: mcp_client_decide_elevation"),
     _x("POST", "/v1/signal/connected-apps/elevations/request", "dispatcher: mcp_client_request_elevation (a third party's request)"),

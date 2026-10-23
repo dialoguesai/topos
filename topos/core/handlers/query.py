@@ -96,6 +96,68 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
+_V2_EFFORTS = frozenset({"low", "high"})
+_V2_MAX_DEADLINE_S = 20.0
+
+
+def _owner_claim_request(payload: Any):
+    """Validate a verify_claim_owner payload into a ClaimRequest, or None. Never echoes the input back."""
+    from ...query.verify_v2 import DEFAULT_DEADLINE_S, ClaimRequest
+
+    if not isinstance(payload, dict) or not isinstance(payload.get("statement"), str):
+        return None
+    context = payload.get("context") or []
+    if not isinstance(context, list) or len(context) > 12 or not all(
+        isinstance(t, dict) and isinstance(t.get("text", ""), str) and isinstance(t.get("speaker", ""), str) for t in context
+    ):
+        return None
+    said_at, speaker = payload.get("said_at"), payload.get("speaker", "owner")
+    effort, deadline = payload.get("effort", "high"), payload.get("deadline_s", DEFAULT_DEADLINE_S)
+    if (said_at is not None and not isinstance(said_at, str)) or not isinstance(speaker, str) or effort not in _V2_EFFORTS:
+        return None
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not 0.5 <= float(deadline) <= _V2_MAX_DEADLINE_S:
+        return None
+    turns = [{"speaker": str(t.get("speaker") or "")[:60], "text": str(t.get("text") or "")[:1000]} for t in context]
+    return ClaimRequest(statement=payload["statement"], context=turns, said_at=said_at, speaker=speaker[:60] or "owner",
+                        effort=effort, deadline_s=float(deadline))
+
+
+@handles("verify_claim_owner")
+async def handle_verify_claim_owner(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """verify_claim v2: the owner's own check of a claim against all their data (VERIFY_CLAIM_V2_DESIGN.md).
+
+    Owner class only: the truth door admits an unlisted truth type for OWNER_APP alone, so neither the control-plane
+    relay nor an enrolled client reaches this. Model stages run in threads, retrieval on a DB worker's own
+    connection, all under one deadline; a timeout answers "unable", never a guess.
+    """
+    import asyncio
+
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    refused = _truth_door_refusal(req_id, "verify_claim_owner")
+    if refused:
+        return refused
+    request = _owner_claim_request(message.get("payload"))
+    if request is None:
+        return {"id": req_id, "status": "error", "error": "invalid_truth_request"}
+    from ...query.verify_v2 import VERSION, verify_owner_claim
+    from ...query.verify_v2_models import chat_for_setting
+    from .common import run_db_read
+
+    try:
+        result = await asyncio.wait_for(
+            verify_owner_claim(request, chat=chat_for_setting(), gather_in_worker=run_db_read, to_thread=asyncio.to_thread),
+            timeout=request.deadline_s + 2.0,
+        )
+    except asyncio.TimeoutError:
+        result = {"version": VERSION, "verdict": "unable", "reason": "deadline"}
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("owner claim check failed: %s", type(exc).__name__)
+        return {"id": req_id, "status": "error", "error": "verification_unavailable"}
+    return {"id": req_id, "status": "ok", "payload": result}
+
+
 @handles("truth_prompts")
 async def handle_truth_prompts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """"Things you can ask me" seeds from the fun aperture — same door policy
