@@ -1220,9 +1220,11 @@
     },
     {
       "version": "1.5.19",
-      "summary": "Release 1.5.19.",
+      "summary": "Release 1.5.19: the inbound truth lane (verify_claim on new messages, transcripts and journal entries; owner labels; weekly stats).",
       "steps": [],
-      "notes": []
+      "notes": [
+        "The inbound truth lane (topos/ingestion/truth_inbound.py): no step and no prompt. It is off until the owner turns it on (truth_inbound in engine_config); its two tables are created on first use, with no migration."
+      ]
     },
     {
       "version": "unreleased",
