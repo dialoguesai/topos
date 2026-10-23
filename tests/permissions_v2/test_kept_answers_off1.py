@@ -22,6 +22,7 @@ import hashlib
 import json
 import logging
 import re
+import secrets
 import time
 from types import SimpleNamespace
 
@@ -44,28 +45,31 @@ KEY = Ed25519PrivateKey.from_private_bytes(hashlib.sha256(b"off1n/kept-stamp/cp"
 PUBLIC = KEY.public_key().public_bytes_raw()
 OTHER = Ed25519PrivateKey.from_private_bytes(hashlib.sha256(b"off1n/kept-stamp/other").digest())
 KEEP = 2_000_000                     # an invented end of a keep window, in epoch seconds
+KQ = hashlib.sha256(b"off1n/kept-question/one").hexdigest()[:32]   # an invented kept question's opaque id
 LOGGER = "topos.permissions_v2.answer_release"
 DAY = 86_400
 
 
-def _stamp(keep_until=KEEP, msg_id="req-1", signer=KEY):
-    return ks.sign_stamp(keep_until, msg_id=msg_id, msg_type=ks.MESSAGE_TYPE, signer=signer)
+def _stamp(keep_until=KEEP, msg_id="req-1", signer=KEY, kq=KQ):
+    return ks.sign_stamp(keep_until, kq, msg_id=msg_id, msg_type=ks.MESSAGE_TYPE, signer=signer)
 
 
-def _raw_stamp(*, keep_until=KEEP, msg_id="req-1", msg_type=ks.MESSAGE_TYPE, signer=KEY):
+def _raw_stamp(*, keep_until=KEEP, kq=KQ, msg_id="req-1", msg_type=ks.MESSAGE_TYPE, signer=KEY):
     """A stamp signed over exactly these values, past the module's own checks: what a wrong signer would send."""
-    text = json.dumps({"v": 1, "keep_until": keep_until, "msg_id": msg_id, "msg_type": msg_type}, sort_keys=True,
-                      separators=(",", ":"))
+    text = json.dumps({"v": 1, "keep_until": keep_until, "kq": kq, "msg_id": msg_id, "msg_type": msg_type},
+                      sort_keys=True, separators=(",", ":"))
     signature = signer.sign(ks.DOMAIN + text.encode("ascii"))
-    return {"v": 1, "keep_until": keep_until, "sig": base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")}
+    return {"v": 1, "keep_until": keep_until, "kq": kq,
+            "sig": base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")}
 
 
 # --- the stamp --------------------------------------------------------------------------------------------------------
 
 def test_the_stamp_verifies_for_its_own_ask_only():
     stamp = _stamp()
-    assert set(stamp) == {"v", "keep_until", "sig"} and stamp["v"] == 1 and stamp["keep_until"] == KEEP
-    assert ks.verify_stamp(stamp, msg_id="req-1", msg_type=ks.MESSAGE_TYPE, key=PUBLIC) == KEEP
+    assert set(stamp) == {"v", "keep_until", "kq", "sig"} and (stamp["v"], stamp["keep_until"], stamp["kq"]) == (
+        1, KEEP, KQ)
+    assert ks.verify_stamp(stamp, msg_id="req-1", msg_type=ks.MESSAGE_TYPE, key=PUBLIC) == (KEEP, KQ)
     for kwargs in ({"msg_id": "req-2", "msg_type": ks.MESSAGE_TYPE, "key": PUBLIC},              # another ask
                    {"msg_id": "req-1", "msg_type": "permissions_v2_answer_fetch", "key": PUBLIC},  # a fetch
                    {"msg_id": "req-1", "msg_type": ks.MESSAGE_TYPE, "key": OTHER.public_key().public_bytes_raw()},
@@ -78,11 +82,12 @@ def test_the_stamp_verifies_for_its_own_ask_only():
 
 
 def test_the_signed_bytes_are_pinned():
-    assert ks.signing_bytes(KEEP, msg_id="req-1", msg_type=ks.MESSAGE_TYPE) == (
+    assert ks.signing_bytes(KEEP, KQ, msg_id="req-1", msg_type=ks.MESSAGE_TYPE) == (
         b'topos-kept-stamp/v1\n'
-        b'{"keep_until":2000000,"msg_id":"req-1","msg_type":"permissions_v2_answer_submit","v":1}')
+        b'{"keep_until":2000000,"kq":"' + KQ.encode("ascii") + b'","msg_id":"req-1",'
+        b'"msg_type":"permissions_v2_answer_submit","v":1}')
     assert _stamp()["sig"] == base64.urlsafe_b64encode(KEY.sign(ks.signing_bytes(
-        KEEP, msg_id="req-1", msg_type=ks.MESSAGE_TYPE))).decode().rstrip("=")
+        KEEP, KQ, msg_id="req-1", msg_type=ks.MESSAGE_TYPE))).decode().rstrip("=")
     assert (ks.FIELD, ks.VERSION, ks.MESSAGE_TYPE, ks.SKEW_SECONDS, ks.CAPABILITY_VERSION) == (
         "kept_stamp", 1, "permissions_v2_answer_submit", 300, 1)
     assert _raw_stamp() == _stamp()                       # the test's own signer signs the module's bytes
@@ -93,8 +98,8 @@ def test_a_stamp_reads_as_no_other_signed_thing():
     assert ks.DOMAIN != oaw.DOMAIN and not ks.DOMAIN.startswith(b"{")
     words = oaw.sign_stamp(["ivo"], msg_id="req-1", msg_type=oaw.MESSAGE_TYPE, signer=KEY)
     with pytest.raises(PolicyError):
-        ks.verify_stamp({"v": 1, "keep_until": KEEP, "sig": words["sig"]}, msg_id="req-1", msg_type=ks.MESSAGE_TYPE,
-                        key=PUBLIC)
+        ks.verify_stamp({"v": 1, "keep_until": KEEP, "kq": KQ, "sig": words["sig"]}, msg_id="req-1",
+                        msg_type=ks.MESSAGE_TYPE, key=PUBLIC)
 
 
 @pytest.mark.parametrize("value", [0, -1, True, False, "2000000", 2_000_000.0, None, [KEEP], 2**53], ids=repr)
@@ -103,14 +108,15 @@ def test_a_window_outside_the_grammar_is_refused(value):
         ks.parse_keep_until(value)
     assert refused.value.code == ks.INVALID
     with pytest.raises(PolicyError):
-        ks.signing_bytes(value, msg_id="req-1", msg_type=ks.MESSAGE_TYPE)
+        ks.signing_bytes(value, KQ, msg_id="req-1", msg_type=ks.MESSAGE_TYPE)
     with pytest.raises(PolicyError):
         ks.verify_stamp({**_stamp(), "keep_until": value}, msg_id="req-1", msg_type=ks.MESSAGE_TYPE, key=PUBLIC)
 
 
 def test_the_widest_window_is_accepted():
     assert ks.parse_keep_until(1) == 1 and ks.parse_keep_until(2**53 - 1) == 2**53 - 1
-    assert ks.verify_stamp(_stamp(2**53 - 1), msg_id="req-1", msg_type=ks.MESSAGE_TYPE, key=PUBLIC) == 2**53 - 1
+    assert ks.verify_stamp(_stamp(2**53 - 1), msg_id="req-1", msg_type=ks.MESSAGE_TYPE, key=PUBLIC) == (
+        2**53 - 1, KQ)
 
 
 @pytest.mark.parametrize("value", [0, -1, True, 2**53], ids=repr)
@@ -120,6 +126,29 @@ def test_a_window_outside_the_grammar_is_refused_even_when_the_key_signed_it(val
     assert refused.value.code == ks.INVALID
 
 
+def _bad_kq():
+    """Kept question ids outside the grammar: exactly 32 lowercase hex characters, nothing else."""
+    assert KQ != KQ.upper() and len(KQ) == 32
+    return {"upper-case": KQ.upper(), "short": KQ[:-1], "long": KQ + "a", "not-hex": KQ[:-1] + "g",
+            "leading-space": " " + KQ[1:], "trailing-newline": KQ[:-1] + "\n", "empty": "", "none": None, "number": 7,
+            "list": [KQ], "bytes": KQ.encode("ascii")}
+
+
+@pytest.mark.parametrize("name", sorted(_bad_kq()))
+def test_a_kept_question_id_outside_the_grammar_is_refused(name):
+    value = _bad_kq()[name]
+    with pytest.raises(PolicyError) as refused:
+        ks.parse_kq(value)
+    assert refused.value.code == ks.INVALID
+    with pytest.raises(PolicyError):
+        ks.signing_bytes(KEEP, value, msg_id="req-1", msg_type=ks.MESSAGE_TYPE)
+    with pytest.raises(PolicyError):
+        ks.verify_stamp({**_stamp(), "kq": value}, msg_id="req-1", msg_type=ks.MESSAGE_TYPE, key=PUBLIC)
+    if type(value) is str:                                 # the key itself signed it: still refused
+        with pytest.raises(PolicyError):
+            ks.verify_stamp(_raw_stamp(kq=value), msg_id="req-1", msg_type=ks.MESSAGE_TYPE, key=PUBLIC)
+
+
 def test_a_stamp_that_is_not_exactly_the_grammar_is_refused():
     good = _stamp()
     last = good["sig"][-1]
@@ -127,11 +156,13 @@ def test_a_stamp_that_is_not_exactly_the_grammar_is_refused():
     # The same signature bytes written another way: the last character's unused bits set.
     other_spelling = next(good["sig"][:-1] + char for char in alphabet if char != last and base64.urlsafe_b64decode(
         good["sig"][:-1] + char + "==") == base64.urlsafe_b64decode(good["sig"] + "=="))
+    another = hashlib.sha256(b"off1n/kept-question/two").hexdigest()[:32]
     for bad in (None, [], "stamp", {}, {**good, "extra": 1}, {k: v for k, v in good.items() if k != "v"},
-                {k: v for k, v in good.items() if k != "keep_until"}, {**good, "v": 2}, {**good, "v": True},
+                {k: v for k, v in good.items() if k != "keep_until"}, {k: v for k, v in good.items() if k != "kq"},
+                {**good, "v": 2}, {**good, "v": True},
                 {**good, "v": "1"}, {**good, "sig": good["sig"] + "="}, {**good, "sig": good["sig"][:-1]},
                 {**good, "sig": 7}, {**good, "sig": "A" * 86}, {**good, "sig": other_spelling},
-                {**good, "keep_until": KEEP + 60}):
+                {**good, "keep_until": KEEP + 60}, {**good, "kq": another}):
         with pytest.raises(PolicyError) as refused:
             ks.verify_stamp(bad, msg_id="req-1", msg_type=ks.MESSAGE_TYPE, key=PUBLIC)
         assert refused.value.code == ks.INVALID, bad
@@ -202,22 +233,25 @@ def test_an_ask_without_the_stamp_reaches_the_service_exactly_as_before(monkeypa
 def test_an_ask_with_a_verified_stamp_reaches_the_service_with_its_window(monkeypatch):
     frame, seen = _dispatch(monkeypatch, _submit(kept_stamp=_stamp()))
     assert frame["status"] == "ok"
-    assert seen[0][1]["keep_until"] == KEEP
+    assert (seen[0][1]["keep_until"], seen[0][1]["kept_question"]) == (KEEP, KQ)
 
 
 def test_the_stamp_rides_beside_the_owner_account_stamp(monkeypatch):
     words = oaw.sign_stamp(["ivo"], msg_id="req-1", msg_type=oaw.MESSAGE_TYPE, signer=KEY)
     frame, seen = _dispatch(monkeypatch, _submit(kept_stamp=_stamp(), owner_account_stamp=words))
     assert frame["status"] == "ok"
-    assert (seen[0][1]["keep_until"], seen[0][1]["owner_account_words"]) == (KEEP, frozenset({"ivo"}))
+    assert (seen[0][1]["keep_until"], seen[0][1]["kept_question"], seen[0][1]["owner_account_words"]) == (
+        KEEP, KQ, frozenset({"ivo"}))
 
 
 @pytest.mark.parametrize("stamp", [
-    None, {}, "kept", {"v": 1, "keep_until": KEEP, "sig": "A" * 86}, {**_stamp(), "keep_until": KEEP + 60},
+    None, {}, "kept", {"v": 1, "keep_until": KEEP, "kq": KQ, "sig": "A" * 86}, {**_stamp(), "keep_until": KEEP + 60},
     _stamp(msg_id="another-request"), _raw_stamp(msg_type="permissions_v2_answer_fetch"), _stamp(signer=OTHER),
     {**_stamp(), "more": True}, _raw_stamp(keep_until=0), _raw_stamp(keep_until=True),
+    {k: v for k, v in _stamp().items() if k != "kq"}, _raw_stamp(kq=KQ.upper()), _raw_stamp(kq=KQ[:-1]),
+    {**_stamp(), "kq": hashlib.sha256(b"off1n/kept-question/two").hexdigest()[:32]},
 ], ids=["null", "empty", "string", "unsigned", "other-window", "other-message", "signed-for-a-fetch", "other-key",
-        "extra-key", "zero", "boolean"])
+        "extra-key", "zero", "boolean", "no-question-id", "upper-case-id", "short-id", "other-question-id"])
 def test_an_ask_whose_stamp_is_malformed_or_does_not_verify_is_refused(monkeypatch, stamp):
     frame, seen = _dispatch(monkeypatch, _submit(kept_stamp=stamp))
     assert frame == REFUSED
@@ -247,10 +281,12 @@ def test_the_stamp_is_no_part_of_the_closed_payload(monkeypatch):
 
 # --- the keep window ----------------------------------------------------------------------------------------------
 
-def _ask(node, service, *, keep_until=None, question=QUESTION):
+def _ask(node, service, *, keep_until=None, kq=None, question=QUESTION):
+    """One ask; with `keep_until`, a kept one, for the kept question `kq` (a fresh one unless given)."""
     payload = {"question": question}
     signed = node._envelope("grant-search", ASK, payload, node.next_id("answer"))
-    kept = {} if keep_until is None else {"keep_until": keep_until}
+    kept = {} if keep_until is None else {"keep_until": keep_until,
+                                          "kept_question": secrets.token_hex(16) if kq is None else kq}
     with recipient():
         result, output = service.submit(envelope=signed.model_dump(), payload=payload, request_id=signed.request_id,
                                         **kept)
@@ -386,6 +422,26 @@ def test_the_service_checks_the_windows_grammar_again(answers_node, service, val
     node = answers_node
     with pytest.raises(PolicyError):
         _ask(node, service, keep_until=value)
+    assert service._jobs == {} and _questions(node) == 0
+
+
+@pytest.mark.parametrize("name", ["upper-case", "short", "not-hex", "empty", "number"])
+def test_the_service_checks_the_question_ids_grammar_again(answers_node, service, name):
+    node = answers_node
+    with pytest.raises(PolicyError):
+        _ask(node, service, keep_until=node.now[0] + DAY, kq=_bad_kq()[name])
+    assert service._jobs == {} and _questions(node) == 0
+
+
+@pytest.mark.parametrize("kept", [{"keep_until": 2 * DAY}, {"kept_question": "kq"}], ids=["window-alone", "id-alone"])
+def test_a_kept_ask_carries_its_window_and_its_question_id_together(answers_node, service, kept):
+    node = answers_node
+    if "kept_question" in kept:
+        kept = {"kept_question": KQ}
+    payload = {"question": QUESTION}
+    signed = node._envelope("grant-search", ASK, payload, node.next_id("answer"))
+    with recipient(), pytest.raises(PolicyError):
+        service.submit(envelope=signed.model_dump(), payload=payload, request_id=signed.request_id, **kept)
     assert service._jobs == {} and _questions(node) == 0
 
 
@@ -704,7 +760,7 @@ def test_a_kept_ask_and_its_deferred_fetch_on_the_wire(answers_node, service, mo
     asyncio.run(answer_transport.dispatch_answer(socket, {
         "id": signed.request_id, "type": answer_transport.SUBMIT_TYPE,
         "payload": {"envelope": signed.model_dump(), "intent": intent},
-        "kept_stamp": ks.sign_stamp(node.now[0] + DAY, msg_id=signed.request_id, msg_type=ks.MESSAGE_TYPE,
+        "kept_stamp": ks.sign_stamp(node.now[0] + DAY, KQ, msg_id=signed.request_id, msg_type=ks.MESSAGE_TYPE,
                                     signer=KEY)}))
     assert socket.frames[0]["status"] == "ok", socket.frames[0]
     answer_id = socket.frames[0]["payload"]["output"]["answer_id"]

@@ -228,54 +228,67 @@ def vector_v4():
 # the file is a long run of digits (the grammar takes any whole second from 1); `kept_stamp_vector` checks the file.
 KEPT_NOW = 10 * 86_400
 KEPT_KEY_LABELS = {"cp": "topos-kept-stamp-golden/cp/v1", "other": "topos-kept-stamp-golden/other/v1"}
+# The vector's kept question ids: invented, 32 lowercase hex, from labels (the control plane derives its own as a keyed
+# hash of its kept question's id; the node reads it as opaque).
+KEPT_KQ_LABELS = {"one": "topos-kept-stamp-golden/kq/one/v1", "two": "topos-kept-stamp-golden/kq/two/v1"}
+
+
+def kept_kq(name: str) -> str:
+    return hashlib.sha256(KEPT_KQ_LABELS[name].encode("ascii")).hexdigest()[:32]
 
 
 def kept_reading(case: dict, key: bytes, now: int) -> dict:
     """What the node does with one case's frame, in its own order: the transport refuses the field on any frame but
     an ask, then verifies it under the pinned key (`kept_stamp.verify_stamp`); the service refuses a window that
-    ended (`kept_stamp.expired`). {"kept": keep_until} for a kept ask, else {"refused": code}."""
+    ended (`kept_stamp.expired`). {"kept": {"keep_until", "kq"}} for a kept ask, else {"refused": code}."""
     message = case["message"]
     if message["type"] != kept_stamp.MESSAGE_TYPE:
         return {"refused": "permission_denied"}
     try:
-        keep_until = kept_stamp.verify_stamp(case["stamp"], msg_id=message["id"], msg_type=message["type"], key=key)
+        keep_until, kq = kept_stamp.verify_stamp(case["stamp"], msg_id=message["id"], msg_type=message["type"],
+                                                 key=key)
     except PolicyError as refused:
         return {"refused": refused.code}
-    return {"refused": kept_stamp.EXPIRED} if kept_stamp.expired(keep_until, now=now) else {"kept": keep_until}
+    if kept_stamp.expired(keep_until, now=now):
+        return {"refused": kept_stamp.EXPIRED}
+    return {"kept": {"keep_until": keep_until, "kq": kq}}
 
 
 def kept_stamp_vector():
     """The control plane's `kept_stamp` on an ask (lane OFF1N), signed with a key derived from a public label, and the
     node's reading of each case: a valid stamp, one at the edge of the clocks' skew, an expired window, values outside
-    the grammar (zero, negative, a boolean) that the key did sign, a stamp signed for a fetch, a stamp on a fetch, one
-    on another message id, one under another key, and one with its window changed after signing. The control plane
-    mirrors the file and signs exactly these bytes: Ed25519 is deterministic, so its signer must give each `sig`."""
+    the grammar (zero, negative, a boolean; a kept question id in upper case or one character short) that the key did
+    sign, a stamp signed for a fetch, a stamp on a fetch, one on another message id, one under another key, and ones
+    whose window or kept question id was changed after signing. The control plane mirrors the file and signs exactly
+    these bytes: Ed25519 is deterministic, so its signer must give each `sig`."""
     keys = {name: _key(label) for name, label in KEPT_KEY_LABELS.items()}
     submit, fetch = kept_stamp.MESSAGE_TYPE, "permissions_v2_answer_fetch"
     week = KEPT_NOW + 7 * 86_400
+    one, two = kept_kq("one"), kept_kq("two")
 
-    def signed(keep_until, msg_id, *, msg_type=submit, by="cp"):
+    def signed(keep_until, msg_id, *, kq=one, msg_type=submit, by="cp"):
         # Written as canonical JSON writes them, past the module's own grammar check: what a signer of a value outside
         # the grammar would sign. For a value inside it, these are `kept_stamp.signing_bytes`, checked below.
-        values = {"v": 1, "keep_until": keep_until, "msg_id": msg_id, "msg_type": msg_type}
+        values = {"v": 1, "keep_until": keep_until, "kq": kq, "msg_id": msg_id, "msg_type": msg_type}
         text = kept_stamp.DOMAIN + json.dumps(values, ensure_ascii=True, sort_keys=True,
                                               separators=(",", ":")).encode("ascii")
         signature = base64.urlsafe_b64encode(keys[by].sign(text)).decode("ascii").rstrip("=")
-        return {"stamp": {"v": 1, "keep_until": keep_until, "sig": signature},
+        return {"stamp": {"v": 1, "keep_until": keep_until, "kq": kq, "sig": signature},
                 "signed": {"text": text.decode("ascii"), "by": by}}
 
     def case(stamp, msg_id, expect, *, msg_type=submit):
         return {"message": {"id": msg_id, "type": msg_type}, **stamp, "expect": expect}
 
     valid = signed(week, "kept-ask-one")
-    if (valid["stamp"] != kept_stamp.sign_stamp(week, msg_id="kept-ask-one", msg_type=submit, signer=keys["cp"])
-            or valid["signed"]["text"].encode("ascii") != kept_stamp.signing_bytes(week, msg_id="kept-ask-one",
+    if (valid["stamp"] != kept_stamp.sign_stamp(week, one, msg_id="kept-ask-one", msg_type=submit, signer=keys["cp"])
+            or valid["signed"]["text"].encode("ascii") != kept_stamp.signing_bytes(week, one, msg_id="kept-ask-one",
                                                                                   msg_type=submit)):
         raise AssertionError("the vector's signer and the module's disagree")
     edge = KEPT_NOW - kept_stamp.SKEW_SECONDS
     cases = {
-        "valid": case(valid, "kept-ask-one", {"kept": week}),
-        "ended_within_the_skew": case(signed(edge, "kept-ask-two"), "kept-ask-two", {"kept": edge}),
+        "valid": case(valid, "kept-ask-one", {"kept": {"keep_until": week, "kq": one}}),
+        "ended_within_the_skew": case(signed(edge, "kept-ask-two", kq=two), "kept-ask-two",
+                                      {"kept": {"keep_until": edge, "kq": two}}),
         "expired": case(signed(edge - 1, "kept-ask-three"), "kept-ask-three", {"refused": kept_stamp.EXPIRED}),
         "zero": case(signed(0, "kept-ask-one"), "kept-ask-one", {"refused": kept_stamp.INVALID}),
         "negative": case(signed(-week, "kept-ask-one"), "kept-ask-one", {"refused": kept_stamp.INVALID}),
@@ -288,7 +301,14 @@ def kept_stamp_vector():
                                         {"refused": kept_stamp.INVALID}),
         "bad_signature_window_changed": case({**valid, "stamp": {**valid["stamp"], "keep_until": week + 60}},
                                              "kept-ask-one", {"refused": kept_stamp.INVALID}),
+        "kq_upper_case": case(signed(week, "kept-ask-one", kq=one.upper()), "kept-ask-one",
+                              {"refused": kept_stamp.INVALID}),
+        "kq_short": case(signed(week, "kept-ask-one", kq=one[:-1]), "kept-ask-one", {"refused": kept_stamp.INVALID}),
+        "kq_changed_after_signing": case({**valid, "stamp": {**valid["stamp"], "kq": two}}, "kept-ask-one",
+                                         {"refused": kept_stamp.INVALID}),
     }
+    if one == one.upper():
+        raise AssertionError("the vector's kept question id has no letter to upper-case: change its label")
     public = keys["cp"].public_key().public_bytes_raw()
     for name, item in cases.items():
         if kept_reading(item, public, KEPT_NOW) != item["expect"]:
@@ -299,6 +319,9 @@ def kept_stamp_vector():
              "capability": {"permissions_v2_kept_answers": kept_stamp.CAPABILITY_VERSION},
              "key_labels": KEPT_KEY_LABELS,
              "key_derivation": "Ed25519 private key: the 32 bytes of SHA-256 over the ASCII label (invented keys)",
+             "kq_labels": KEPT_KQ_LABELS,
+             "kq_derivation": "the first 32 hex characters of SHA-256 over the ASCII label (invented ids; the control "
+                              "plane derives its own as a keyed hash of its kept question's id)",
              "public_key_b64": base64.b64encode(public).decode("ascii"),
              "signature_encoding": "Ed25519 over the ASCII bytes of signed.text; base64url without padding, 86 chars",
              "cases": cases}

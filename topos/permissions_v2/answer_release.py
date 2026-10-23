@@ -440,7 +440,7 @@ class AnswerService:
         self._kept_over = kept > KEPT_ENDED_BOUND
 
     def submit(self, *, envelope, payload, request_id, owner_account_words=frozenset(),
-               accepted_version=LEGACY_ACCEPTED_VERSION, keep_until=None):
+               accepted_version=LEGACY_ACCEPTED_VERSION, keep_until=None, kept_question=None):
         intent = AskIntent.parse(payload)
         # The transport verified the control plane's signature over these words; the grammar is checked again here.
         if type(owner_account_words) is not frozenset:
@@ -449,10 +449,13 @@ class AnswerService:
         # value); a caller written before the keyword is served as a control plane from before the field.
         if type(accepted_version) is not int:
             raise PolicyError("permission_denied")
-        # Kept questions (lane OFF1N): the transport verified the control plane's signature over the window; its
-        # grammar is checked again here. None: a live ask, served exactly as before.
+        # Kept questions (lane OFF1N): the transport verified the control plane's signature over the window and the
+        # kept question's id, which come together; their grammar is checked again here. Neither: a live ask, served
+        # exactly as before.
+        if (keep_until is None) != (kept_question is None):
+            raise PolicyError("permission_denied")
         if keep_until is not None:
-            keep_until = kept_stamp.parse_keep_until(keep_until)
+            keep_until, kept_question = kept_stamp.parse_keep_until(keep_until), kept_stamp.parse_kq(kept_question)
         account_words = (frozenset(account_words_grammar.parse_words(sorted(owner_account_words, key=str)))
                          if owner_account_words else frozenset())
         _principal, signed, admission = self._verified(envelope, intent.model_dump(), request_id, ASK)

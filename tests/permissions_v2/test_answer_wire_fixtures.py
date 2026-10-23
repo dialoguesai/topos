@@ -146,11 +146,14 @@ def test_kept_stamp_golden_vectors_hold_and_the_answer_vectors_did_not_move():
         keys[signed["by"]].public_key().verify(base64.urlsafe_b64decode(case["stamp"]["sig"] + "=="),
                                                 signed["text"].encode("ascii"))
         if "kept" in case["expect"]:
+            stamp, message = case["stamp"], case["message"]
+            assert case["expect"]["kept"] == {"keep_until": stamp["keep_until"], "kq": stamp["kq"]}
             assert signed["text"].encode("ascii") == kept_stamp.signing_bytes(
-                case["stamp"]["keep_until"], msg_id=case["message"]["id"], msg_type=case["message"]["type"])
-            assert case["stamp"] == kept_stamp.sign_stamp(case["stamp"]["keep_until"], msg_id=case["message"]["id"],
-                                                          msg_type=case["message"]["type"], signer=keys["cp"])
-    assert {"valid", "wrong_type", "wrong_message_id", "expired", "bad_signature_other_key"} <= set(saved["cases"])
+                stamp["keep_until"], stamp["kq"], msg_id=message["id"], msg_type=message["type"])
+            assert stamp == kept_stamp.sign_stamp(stamp["keep_until"], stamp["kq"], msg_id=message["id"],
+                                                  msg_type=message["type"], signer=keys["cp"])
+    assert {"valid", "wrong_type", "wrong_message_id", "expired", "bad_signature_other_key", "kq_upper_case",
+            "kq_short", "kq_changed_after_signing"} <= set(saved["cases"])
     text = (ROOT / "kept-stamp-golden-v1.json").read_text()
     assert not re.search(r"\d{10}", text)                  # no long run of digits anywhere in the file
     for name in ("answer-golden-v1.json", "answer-golden-v2.json", "answer-golden-v3.json", "answer-golden-v4.json"):
