@@ -578,6 +578,13 @@ def _exec_engine_endpoint(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
 
         params = step.get("params") or {}
         return dict(repair_coding_conversation_ids(conn, dry_run=bool(params.get("dry_run", False))))
+    if path == "/v1/signal/provenance/repair-source-refs":
+        # Provenance refs naming the wrong table, a source label, or a retired GitHub commit id. The two
+        # writers still running cite the record's table now; refs already on disk only move if swept.
+        from ..features.lifecycle.source_ref_repair import repair_source_refs
+
+        params = step.get("params") or {}
+        return dict(repair_source_refs(conn, dry_run=bool(params.get("dry_run", False))))
     if path == "/v1/privacy/off-limits/carry-contact-excludes":
         # D24: the older sharing model's explicit per-person excludes become
         # Off-limits entries before that model is removed (contact_excludes).
@@ -693,14 +700,15 @@ def _exec_derived_rebuild(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
                 from ..features.signal.derived_index import index_derived_objects
 
                 detail["targets"][name] = dict(index_derived_objects(conn) or {})
-            elif name in ("local_sync_embeddings",):
+            elif name in ("local_sync_embeddings", "imported_ai_chat_embeddings"):
                 # Embeds what iMessage/Signal sync stored before sync embedded
-                # its batches. Queues each source's first bounded batch and
-                # returns; the pipeline queue drains the rest and resumes after
-                # a restart, so this step's "done" means started, not finished.
-                from ..ingestion.local_sync_catchup import start_catchup
+                # its batches, or what a stopped ChatGPT import stored and never
+                # derived. Queues each source's first bounded batch and returns;
+                # the pipeline queue drains the rest and resumes after a
+                # restart, so this step's "done" means started, not finished.
+                from ..ingestion.embeddings_catchup import start_catchup
 
-                detail["targets"][name] = dict(start_catchup(conn))
+                detail["targets"][name] = dict(start_catchup(conn, name))
             elif name in ("closeness_fact_anchors", "closeness_anchors"):
                 # Must run BEFORE entity_graph in the same step: the repair
                 # rewrites the facts, the rebuild is what turns them into

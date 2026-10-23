@@ -63,6 +63,9 @@ class LocalSyncRunner:
     ``schedulable`` — whether the node's scheduler may run it.
     ``after_settle(dataset_id, outcome)`` — the scheduler's hand-off once a scheduled run settled
     (iMessage: the owner's standing attestation). Beyond the six contract fields, optional.
+    ``default_schedule`` — the ``put_schedule`` changes the scheduler writes for an ENABLED source
+    row that has no schedule row at all (``local_sync_schedule.ensure_default_schedules``). None
+    means the source is scheduled only when the owner, or its own enable path, writes a row.
     """
 
     source_id: str
@@ -73,6 +76,7 @@ class LocalSyncRunner:
     default_options: Optional[Callable[[Optional[Dict[str, Any]]], Optional[Dict[str, Any]]]] = None
     pre_enqueue_refusal: Optional[Callable[[Any, str, Optional[Dict[str, Any]]], Optional[Dict[str, Any]]]] = None
     after_settle: Optional[Callable[[str, str], None]] = None
+    default_schedule: Optional[Dict[str, Any]] = None
 
 
 # --- iMessage and Signal, exactly as before --------------------------------------
@@ -143,6 +147,11 @@ LOCAL_SYNC_RUNNERS: Dict[str, LocalSyncRunner] = {
         default_options=_imessage_default_options,
         pre_enqueue_refusal=_lazy("topos.ingestion.local_sync", "enrolled_dataset_refusal"),
         after_settle=_imessage_after_settle,
+        # Hourly, like the coding tools, and without an owner action: the schedule shipped opt-in on
+        # 29 Sep 2026 and nothing ever opted in, so the owner's node synced iMessage only by the
+        # button (six runs, the last on 8 Oct) while the scheduler ran the coding tools every hour.
+        # The coding tools keep writing their own row at enable time (ai_tool_sync.enable_ai_tool_source).
+        default_schedule={"enabled": True, "interval_hours": 1},
     ),
     # Signal needs a key the node may not hold, so the node never schedules it; no checkpoint on the
     # settings screen, no enrollment guard, no default window.

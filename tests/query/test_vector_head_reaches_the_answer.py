@@ -111,6 +111,9 @@ def test_the_vector_lane_first_hit_is_in_what_the_answer_step_reads(monkeypatch)
 
 def test_the_switch_turns_the_head_off(monkeypatch):
     monkeypatch.setenv("TOPOS_FUSION_VECTOR_HEAD", "0")
+    # The old order this pins is the crowded one; TOPOS_EVIDENCE_SHAPING's derived-share
+    # bound also lifts the record, so this checks the head switch with that one off.
+    monkeypatch.delenv("TOPOS_EVIDENCE_SHAPING", raising=False)
     public = _ask(monkeypatch)
     assert ANCHOR not in {item.get("record_id") for item in public["summaries"][:ANSWER_STEP_SUMMARIES]}
 

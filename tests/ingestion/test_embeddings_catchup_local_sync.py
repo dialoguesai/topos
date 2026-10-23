@@ -8,13 +8,14 @@ import pytest
 
 from topos.enrichment.models.mvp_defaults import job_spec_version
 from topos.enrichment.record_progress import mark_records_processed
-from topos.ingestion import local_sync_catchup
-from topos.ingestion.local_sync_catchup import KIND, enqueue_catchup, execute_catchup, processing_status
+from topos.ingestion import embeddings_catchup
+from topos.ingestion.embeddings_catchup import enqueue_catchup, execute_catchup, processing_status
 from topos.pipeline.job_store import claim_next_job, enqueue_job, get_job
 from topos.storage.canonical.conversations_tables import ConversationsTablesManager
 from topos.storage.db.migrations import apply_all_migrations
 
 SPEC = job_spec_version("embeddings")
+KIND = embeddings_catchup.LOCAL_SYNC.kind
 
 
 @pytest.fixture
@@ -60,9 +61,9 @@ def mark(conn, ids, spec=SPEC):
 
 
 def test_owed_rows_are_queued_once_newest_first_as_ids_only(conn, monkeypatch):
-    monkeypatch.setattr(local_sync_catchup, "BATCH_SIZE", 2)
+    monkeypatch.setattr(embeddings_catchup, "BATCH_SIZE", 2)
     mark(conn, ["m4"])
-    ids = enqueue_catchup(conn, start=True)
+    ids = enqueue_catchup(conn, start="local_sync_embeddings")
     assert len(ids) == 1
     body = payload(conn, ids[0])
     assert body["record_ids"] == ["m3", "m2"]
@@ -78,12 +79,12 @@ def test_a_marker_from_an_older_spec_is_still_owed(conn):
     assert processing_status(conn, "imessage") == {
         "source_id": "imessage", "job_id": "embeddings", "eligible_records": 5,
         "processed_records": 5, "pending_records": 0}
-    assert enqueue_catchup(conn, start=True) == []
+    assert enqueue_catchup(conn, start="local_sync_embeddings") == []
 
 
 def test_a_running_sync_goes_first(conn):
     enqueue_job(conn, kind="local_sync", source_id="imessage", payload={})
-    assert enqueue_catchup(conn, start=True) == []
+    assert enqueue_catchup(conn, start="local_sync_embeddings") == []
 
 
 def test_installing_the_build_alone_queues_nothing(conn):
@@ -94,21 +95,21 @@ def test_installing_the_build_alone_queues_nothing(conn):
 
 def test_owner_detach_and_the_switch_both_stop_discovery(conn, monkeypatch):
     monkeypatch.setenv("TOPOS_LOCAL_SYNC_CATCHUP", "off")
-    assert enqueue_catchup(conn, start=True) == []
+    assert enqueue_catchup(conn, start="local_sync_embeddings") == []
     monkeypatch.delenv("TOPOS_LOCAL_SYNC_CATCHUP")
     from topos.enrichment.source_overrides import set_source_enrichment_override
 
     set_source_enrichment_override("imessage", "embeddings", False, conn=conn)
-    assert enqueue_catchup(conn, start=True) == []
+    assert enqueue_catchup(conn, start="local_sync_embeddings") == []
 
 
 @pytest.mark.asyncio
 async def test_batches_embed_mark_and_resume_until_nothing_is_owed(conn, model_calls, monkeypatch):
-    monkeypatch.setattr(local_sync_catchup, "BATCH_SIZE", 2)
+    monkeypatch.setattr(embeddings_catchup, "BATCH_SIZE", 2)
     seen = []
     while True:
         # Started once; every later batch is queued by discovery alone.
-        queued = enqueue_catchup(conn, start=not seen)
+        queued = enqueue_catchup(conn, start="local_sync_embeddings" if not seen else None)
         if not queued:
             break
         result = await execute_catchup(payload(conn, queued[0]))
@@ -125,7 +126,7 @@ async def test_batches_embed_mark_and_resume_until_nothing_is_owed(conn, model_c
 
 @pytest.mark.asyncio
 async def test_a_resumed_batch_skips_rows_marked_before_the_restart(conn, model_calls):
-    queued = enqueue_catchup(conn, start=True)
+    queued = enqueue_catchup(conn, start="local_sync_embeddings")
     body = payload(conn, queued[0])
     mark(conn, ["m4", "m3"])  # committed by the run a stop interrupted
     result = await execute_catchup(body)
@@ -137,7 +138,7 @@ async def test_a_resumed_batch_skips_rows_marked_before_the_restart(conn, model_
 async def test_detached_after_queueing_reads_nothing(conn, model_calls):
     from topos.enrichment.source_overrides import set_source_enrichment_override
 
-    body = payload(conn, enqueue_catchup(conn, start=True)[0])
+    body = payload(conn, enqueue_catchup(conn, start="local_sync_embeddings")[0])
     set_source_enrichment_override("imessage", "embeddings", False, conn=conn)
     result = await execute_catchup(body)
     assert result["status"] == "ok" and "skipped" in result
@@ -150,7 +151,7 @@ async def test_a_failed_model_batch_fails_the_job_and_stays_owed(conn, monkeypat
         return SimpleNamespace(status="failed", output={})
 
     monkeypatch.setattr("topos.enrichment.jobs.canonical.embeddings_job.run_engine_task", failed)
-    result = await execute_catchup(payload(conn, enqueue_catchup(conn, start=True)[0]))
+    result = await execute_catchup(payload(conn, enqueue_catchup(conn, start="local_sync_embeddings")[0]))
     assert result["status"] == "error"
     assert processing_status(conn, "imessage")["pending_records"] == 5
 
@@ -159,7 +160,7 @@ async def test_a_failed_model_batch_fails_the_job_and_stays_owed(conn, monkeypat
 async def test_done_means_marked(conn, model_calls, monkeypatch):
     monkeypatch.setattr("topos.enrichment.orchestrator.EnrichmentOrchestrator._mark_processed",
                         lambda self, job_name, messages: None)
-    result = await execute_catchup(payload(conn, enqueue_catchup(conn, start=True)[0]))
+    result = await execute_catchup(payload(conn, enqueue_catchup(conn, start="local_sync_embeddings")[0]))
     assert result["status"] == "error"
     assert "without a progress marker" in result["error"]
 
@@ -174,7 +175,7 @@ async def test_refuses_a_payload_it_did_not_write(conn, model_calls, bad):
 
 @pytest.mark.asyncio
 async def test_the_switch_pauses_a_queued_batch_without_work(conn, model_calls, monkeypatch):
-    body = payload(conn, enqueue_catchup(conn, start=True)[0])
+    body = payload(conn, enqueue_catchup(conn, start="local_sync_embeddings")[0])
     monkeypatch.setenv("TOPOS_LOCAL_SYNC_CATCHUP", "off")
     result = await execute_catchup(body)
     assert result["status"] == "ok" and "skipped" in result

@@ -47,6 +47,35 @@ async def _record_query_request(message: Dict[str, Any], payload: Dict[str, Any]
         logger.debug("query: audit record failed", exc_info=True)
 
 
+def _log_query_failure(
+    msg_type: str,
+    req_id: Any,
+    exc: BaseException,
+    *,
+    scope_id: str = "",
+    access_mode: str = "",
+) -> None:
+    """One line per failed query, with the error's class and where it was raised.
+
+    Never its text, never the intent: a query's error can quote what it was
+    handling, and the owner's data must not reach the log. The frames are code
+    locations only (the NR181 rule in control_plane_client). Before this the
+    handlers returned the error and logged nothing, so a routine's "database is
+    locked" on 2026-10-23 left no traceback to say which write raised it.
+    """
+    import traceback
+
+    logger.error(
+        "%s failed: id=%s scope=%r mode=%r error=%s\n%s",
+        msg_type,
+        req_id,
+        scope_id,
+        access_mode,
+        type(exc).__name__,
+        "".join(traceback.format_tb(exc.__traceback__)).rstrip(),
+    )
+
+
 def _truth_door_refusal(req_id: Any, msg_type: str) -> Optional[Dict[str, Any]]:
     """Who may use the truth door — topos/query/truth_door.py, decided from the
     channel-verified principal on every entry point (local HTTP, relay, any
@@ -93,6 +122,7 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
             return {"id": req_id, "status": "error", "error": str(result["error"])}
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
+        _log_query_failure("verify_claim", req_id, exc)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
@@ -191,6 +221,7 @@ async def handle_truth_prompts(message: Dict[str, Any]) -> Optional[Dict[str, An
             return {"id": req_id, "status": "error", "error": str(result["error"])}
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
+        _log_query_failure("truth_prompts", req_id, exc)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
@@ -221,6 +252,7 @@ async def handle_truth_seed_fact(message: Dict[str, Any]) -> Optional[Dict[str, 
             logger.info("truth_seed_fact audit: %s", audit)
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
+        _log_query_failure("truth_seed_fact", req_id, exc)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
@@ -257,10 +289,12 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # where a bag of words is actually needed. Callers that send only `intent`
     # (MCP clients) are unaffected — it is still the fallback.
     intent = str(payload.get("query") or payload.get("intent") or "")
+    access_mode = str(payload.get("access_mode") or "summary")
+    msg_type = str(message.get("type") or "query")
     logger.info(
         "query request: scope=%r mode=%r intent_chars=%d requester=%r",
         scope_id,
-        str(payload.get("access_mode") or "summary"),
+        access_mode,
         len(intent),
         str(payload.get("requester_id") or "mcp"),
     )
@@ -348,7 +382,7 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             ]
             or None,
             scope_id=scope_id,
-            access_mode=str(payload.get("access_mode") or "summary"),
+            access_mode=access_mode,
             manifest=manifest,
             now=query_now,
             query_session_id=payload.get("query_session_id") or payload.get("session_id"),
@@ -370,8 +404,10 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         outcome = "ok"
         return {"id": req_id, "status": "ok", "payload": result}
     except KeyError as exc:
+        _log_query_failure(msg_type, req_id, exc, scope_id=scope_id, access_mode=access_mode)
         return {"id": req_id, "status": "error", "error": f"Missing field: {exc}"}
     except Exception as exc:  # noqa: BLE001
+        _log_query_failure(msg_type, req_id, exc, scope_id=scope_id, access_mode=access_mode)
         return {"id": req_id, "status": "error", "error": str(exc)}
     finally:
         finish_request(started, outcome, span_token)

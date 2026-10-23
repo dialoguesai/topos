@@ -63,16 +63,21 @@ def hash_token(token: str) -> int:
 
 
 def embed_corpus(corpus: mc.Corpus, *, model: str = "fake-model", skip_every: int = 0) -> None:
-    """Write signal_embeddings rows for every message (hidden ones too), as the embeddings job would."""
+    """Write signal_embeddings rows for every message (hidden ones too), as the embeddings job would: each chunk
+    sealed with sha256(embeddable_content(record)), the hash a share index member checks (lane 194)."""
+    import hashlib
+    from topos.features.signal.embed_context import embeddable_content
     with sqlite3.connect(corpus.path) as conn:
         rows = conn.execute("SELECT message_id, source_id, content FROM conversation_messages").fetchall()
         for number, (message_id, source_id, content) in enumerate(rows):
             if skip_every and number % skip_every == 0:
                 continue
             vector = fake_embedder(content, model) or [0.0] * 32
+            content_hash = hashlib.sha256(embeddable_content({"content": content}).encode("utf-8")).hexdigest()
             conn.execute("INSERT INTO signal_embeddings(embedding_id, record_id, source_id, model, dims, vector_blob, "
-                         "vector_format, chunk_index, search_text) VALUES (?,?,?,?,?,?,?,?,?)",
-                         (f"emb-{number}", message_id, source_id, model, 32, json.dumps(vector), "json", 0, content))
+                         "vector_format, chunk_index, search_text, content_hash) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                         (f"emb-{number}", message_id, source_id, model, 32, json.dumps(vector), "json", 0, content,
+                          content_hash))
 
 
 class Node:

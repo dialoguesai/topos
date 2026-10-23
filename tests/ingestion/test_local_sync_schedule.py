@@ -419,3 +419,114 @@ def test_the_scheduler_starts_by_default(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert start_scheduler(_spawn, lambda: None) is True
     assert spawned == ["local-sync-scheduler"]
+
+
+# --- the default schedule: an enabled iMessage source syncs hourly without the owner ---------------
+#
+# The owner's live node (21 Oct 2026): iMessage enabled since August, six syncs in all, every one a
+# button press, the last on 8 Oct. The schedule was opt-in and nothing ever opted in: the AI-coding
+# tools get an hourly row when they are enabled, iMessage got none. So the scheduler, alive and
+# enqueuing the coding tools every hour, had nothing of iMessage's to run.
+
+
+def _migrated_node(tmp_path: Path, *rows: tuple[str, int]) -> sqlite3.Connection:
+    """A node with the job table and an iMessage source row per (dataset_id, enabled) given."""
+    from topos.storage.source_settings import ensure_table as ensure_source_settings_table
+
+    db = sqlite3.connect(str(tmp_path / "node.db"), check_same_thread=False)
+    apply_pipeline_jobs_v1_up(db)
+    ensure_source_settings_table(db)
+    for dataset_id, enabled in rows:
+        db.execute(
+            "INSERT INTO user_ingestion_sources (dataset_id, source_id, enabled, last_sync_at) "
+            "VALUES (?, 'imessage', ?, '2026-10-08T15:23:00+00:00')",
+            (dataset_id, enabled),
+        )
+    db.commit()
+    return db
+
+
+def _enroll(conn: sqlite3.Connection, dataset_id: str) -> None:
+    """An active owner-attested iMessage enrollment for one dataset (the sync guard's own schema)."""
+    from topos.permissions_v2.ingest_protocol import IMESSAGE_READER_CONTRACT
+    from topos.permissions_v2.ingest_provenance import IngestProvenanceService
+
+    schema = IngestProvenanceService._schema(None, conn, 2)
+    for name in ("ingest_provenance_state", "ingest_provenance_enrollments"):
+        conn.execute(schema[name])
+    conn.execute("INSERT INTO ingest_provenance_state VALUES (1, 'store', '{}', 'rev', 0)")
+    conn.execute(
+        "INSERT INTO ingest_provenance_enrollments VALUES (?, ?, ?, 1, 'active', 0, 'attested', 0, 'uds')",
+        ("enr-1", json.dumps({"reader_contract": IMESSAGE_READER_CONTRACT}), dataset_id),
+    )
+    conn.commit()
+
+
+def test_an_enabled_imessage_source_is_scheduled_hourly_without_the_owner(tmp_path: Path) -> None:
+    conn = _migrated_node(tmp_path, (DS, 1))
+    enqueue = _Enqueue()
+    assert get_schedule(conn, DS, "imessage") is None
+
+    # The first tick after start creates the row; the slot just passed counts as done, so nothing
+    # runs at once (the same rule as the owner turning it on).
+    run_schedule_tick(conn, now=_utc("2026-10-21T15:00:30"), enqueue=enqueue)
+    stored = get_schedule(conn, DS, "imessage")
+    assert stored is not None and stored["enabled"] is True
+    assert stored["interval_hours"] == 1
+    assert enqueue.calls == []
+
+    # The next hour's slot runs a paced since-last sync through the button's door.
+    summary = run_schedule_tick(conn, now=_utc("2026-10-21T16:00:30"), enqueue=enqueue)
+    assert summary["enqueued"] == 1
+    assert [c["source_id"] for c in enqueue.calls] == ["imessage"]
+    assert enqueue.calls[0]["dataset_id"] == DS
+    assert enqueue.calls[0]["sync_options"] == scheduled_sync_options()
+
+    # Once per slot, as ever.
+    run_schedule_tick(conn, now=_utc("2026-10-21T16:30:00"), enqueue=enqueue)
+    assert len(enqueue.calls) == 1
+
+
+def test_only_the_enrolled_imessage_dataset_gets_the_default_schedule(tmp_path: Path) -> None:
+    """Two enabled iMessage rows, one enrollment: the sync would refuse the other dataset, so no row for it."""
+    other = "owner:topos:older"
+    conn = _migrated_node(tmp_path, (DS, 1), (other, 1))
+    _enroll(conn, DS)
+    enqueue = _Enqueue()
+    run_schedule_tick(conn, now=_utc("2026-10-21T15:00:30"), enqueue=enqueue)
+    assert get_schedule(conn, DS, "imessage") is not None
+    assert get_schedule(conn, other, "imessage") is None
+    run_schedule_tick(conn, now=_utc("2026-10-21T16:00:30"), enqueue=enqueue)
+    assert [c["dataset_id"] for c in enqueue.calls] == [DS]
+
+
+def test_a_disabled_imessage_source_gets_no_default_schedule(tmp_path: Path) -> None:
+    conn = _migrated_node(tmp_path, (DS, 0))
+    run_schedule_tick(conn, now=_utc("2026-10-21T15:00:30"), enqueue=_Enqueue())
+    assert get_schedule(conn, DS, "imessage") is None
+
+
+def test_a_schedule_the_owner_switched_off_stays_off(tmp_path: Path) -> None:
+    """The default fills an absence; a row the owner wrote, on or off, is theirs."""
+    conn = _migrated_node(tmp_path, (DS, 1))
+    put_schedule(conn, DS, "imessage", {"enabled": False, "daily_time": "04:30"}, now=_utc("2026-10-20T10:00:00"))
+    enqueue = _Enqueue()
+    run_schedule_tick(conn, now=_utc("2026-10-21T15:00:30"), enqueue=enqueue)
+    run_schedule_tick(conn, now=_utc("2026-10-21T16:00:30"), enqueue=enqueue)
+    stored = get_schedule(conn, DS, "imessage")
+    assert stored["enabled"] is False and stored["daily_time"] == "04:30" and stored["interval_hours"] is None
+    assert enqueue.calls == []
+
+
+def test_the_default_schedule_is_imessages_alone(tmp_path: Path) -> None:
+    """The coding tools write their own hourly row when enabled; the default never reaches past iMessage."""
+    from topos.ingestion.local_sync_jobs import LOCAL_SYNC_RUNNERS
+
+    assert [sid for sid, r in LOCAL_SYNC_RUNNERS.items() if r.default_schedule] == ["imessage"]
+    conn = _migrated_node(tmp_path)
+    conn.execute(
+        "INSERT INTO user_ingestion_sources (dataset_id, source_id, enabled) VALUES (?, 'codex_sessions', 1)", (DS,)
+    )
+    conn.commit()
+    run_schedule_tick(conn, now=_utc("2026-10-21T15:00:30"), enqueue=_Enqueue())
+    assert get_schedule(conn, DS, "codex_sessions") is None

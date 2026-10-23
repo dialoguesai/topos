@@ -10,9 +10,11 @@ import sqlite3
 
 import pytest
 
+from topos.ingestion.embeddings_catchup import CATCHUP_KINDS
 from topos.pipeline.job_runner import (
     EXECUTORS,
     LOCAL_SYNC_KIND,
+    _catchup_kinds,
     _executable_kinds,
     _long_running_kinds,
 )
@@ -41,10 +43,11 @@ def test_local_sync_is_kept_out_of_the_general_lane() -> None:
     assert _long_running_kinds() == [LOCAL_SYNC_KIND]
 
 
-def test_the_two_lanes_together_cover_every_executor() -> None:
-    """No kind may fall between the lanes and sit queued forever."""
-    assert sorted(set(_executable_kinds()) | set(_long_running_kinds())) == sorted(EXECUTORS)
-    assert not set(_executable_kinds()) & set(_long_running_kinds())
+def test_the_lanes_together_cover_every_executor_once() -> None:
+    """No kind may fall between the lanes and sit queued forever, or be claimed by two."""
+    lanes = [set(_executable_kinds()), set(_long_running_kinds()), set(_catchup_kinds())]
+    assert sorted(set().union(*lanes)) == sorted(EXECUTORS)
+    assert sum(len(lane) for lane in lanes) == len(EXECUTORS)
 
 
 def test_general_lane_retains_existing_kinds_and_adds_bounded_coding_recovery() -> None:
@@ -54,10 +57,18 @@ def test_general_lane_retains_existing_kinds_and_adds_bounded_coding_recovery() 
         "enrichment_process_source",
         "file_ingestion",
         "inbox_deferred_enrichment",
-        "local_sync_embeddings_catchup",
         "signal_derive_retry",
         "topic_consolidation",
     ]
+
+
+def test_the_embeddings_catchup_has_a_lane_of_its_own() -> None:
+    """Behind the general lane's derive jobs its first batch waited hours and every next one queued at the back
+    (22 Oct 2026); in the long lane it would wait out a first iMessage sync. tests/pipeline/test_embedding_catchup_lane.py
+    runs the lanes."""
+    assert _catchup_kinds() == ["imported_ai_chat_embeddings_catchup", "local_sync_embeddings_catchup"]
+    assert sorted(CATCHUP_KINDS) == _catchup_kinds()
+    assert not set(CATCHUP_KINDS) & set(_executable_kinds() + _long_running_kinds())
 
 
 def test_a_queued_sync_is_invisible_to_a_general_lane_claim(conn: sqlite3.Connection) -> None:

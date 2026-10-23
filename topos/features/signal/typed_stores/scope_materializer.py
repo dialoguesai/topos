@@ -7,6 +7,7 @@ import sqlite3
 from collections import defaultdict
 from typing import Any, Dict, List
 
+from ...lifecycle.source_ref_repair import record_table
 from ..signal_object_store import SignalObjectStore
 from .aggregates import recompute_all_gate_aggregates
 from .commitments import recompute_commitments
@@ -149,12 +150,15 @@ def _materialize_table_rows(
             continue
         payload = {col: data.get(col) for col in available if data.get(col) not in (None, "")}
         ref_id = str(data.get(ref_id_col) or object_key)
+        # A declared ref table is the usual home, not the rule: message_entities and message_topics rows
+        # come from every source, so the ref names the table that holds the record when one does.
+        cited = (record_table(conn, ref_id) or ref_table) if ref_table else table
         store.upsert_object(
             dimension,
             object_type,
             object_key,
             payload,
-            source_refs=[_source_ref(ref_table or table, ref_id)],
+            source_refs=[_source_ref(cited, ref_id)],
             confidence=0.8,
             extractor_version="scope_materializer_v1",
         )

@@ -18,7 +18,8 @@ from . import job_secrets
 # Safe at import time: derivation_recovery has no module-level heavy imports.
 from ..enrichment.derivation_recovery import SIGNAL_DERIVE_RETRY_KIND
 # Safe at import time too: stdlib only at module level.
-from ..ingestion.local_sync_catchup import KIND as LOCAL_SYNC_CATCHUP_KIND
+from ..ingestion.embeddings_catchup import CATCHUP_KINDS as EMBEDDINGS_CATCHUP_KINDS
+from ..ingestion.embeddings_catchup import CONTINUING_KINDS as EMBEDDINGS_CATCHUP_CONTINUING_KINDS
 from .job_store import (
     DEFAULT_LEASE_SECONDS,
     claim_matching_queued_jobs,
@@ -39,6 +40,8 @@ logger = logging.getLogger("topos.pipeline.job_runner")
 _worker_task: Optional[asyncio.Task] = None
 #: Worker for _LONG_RUNNING_KINDS. Separate task, same lock and lifecycle.
 _long_worker_task: Optional[asyncio.Task] = None
+#: Worker for _CATCHUP_KINDS. Separate task, same lock and lifecycle.
+_catchup_worker_task: Optional[asyncio.Task] = None
 _worker_lock = threading.Lock()
 _lease_owner = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
@@ -396,24 +399,24 @@ def _enqueue_ai_tool_catchup(conn: Any, source_id: Optional[str] = None, retry_f
         logger.warning("Coding-session catch-up discovery failed", exc_info=True)
 
 
-async def _execute_local_sync_catchup(payload: Dict[str, Any]) -> Dict[str, Any]:
-    from ..ingestion.local_sync_catchup import execute_catchup
+async def _execute_embeddings_catchup(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from ..ingestion.embeddings_catchup import execute_catchup
 
     return await execute_catchup(payload)
 
 
-def _enqueue_local_sync_catchup(conn: Any, source_id: Optional[str] = None) -> None:
-    from ..ingestion.local_sync_catchup import enqueue_catchup
+def _enqueue_embeddings_catchup(conn: Any, source_id: Optional[str] = None) -> None:
+    from ..ingestion.embeddings_catchup import enqueue_catchup
 
     try:
         enqueue_catchup(conn, source_id)
     except Exception:
-        logger.warning("Local-sync embeddings catch-up discovery failed", exc_info=True)
+        logger.warning("Embeddings catch-up discovery failed", exc_info=True)
 
 
 EXECUTORS: Dict[str, ExecutorFn] = {
     "ai_tool_enrichment_catchup": _execute_ai_tool_catchup,
-    LOCAL_SYNC_CATCHUP_KIND: _execute_local_sync_catchup,
+    **{kind: _execute_embeddings_catchup for kind in EMBEDDINGS_CATCHUP_KINDS},
     "inbox_deferred_enrichment": _execute_inbox_deferred_enrichment,
     "file_ingestion": _execute_file_ingestion,
     "enrichment_process_source": _execute_enrichment_process_source,
@@ -451,13 +454,29 @@ LONG_JOB_LEASE_SECONDS = 1800
 _LONG_IDLE_POLL_SECONDS = 1.0
 _LONG_MAX_POLL_SECONDS = 10.0
 
+#: Kinds that embed what was stored before, a bounded batch at a time, and get
+#: their own worker: every lane of ``embeddings_catchup`` (local sync, imported AI
+#: chat). A batch is local CPU work (MiniLM) of seconds, and nothing in the
+#: general lane is a reason for it to wait: on one node on 22 Oct 2026 the first
+#: approved local-sync batch sat queued over three hours behind ~26
+#: coding-session derive jobs (the local model, minutes each), and each finished
+#: batch queued the next at the back of that oldest-first queue, behind whatever
+#: the hourly syncs had added meanwhile. Nor in the long lane, where it would wait
+#: out every sync, and a first iMessage sync runs for hours. Its own lane also
+#: means a batch slowed by a cold model load never holds up the general queue.
+#: One source's batches still run one at a time, after its own ingest
+#: (``embeddings_catchup.enqueue_catchup`` queues the next only when none is in
+#: flight), and each batch takes the write gate only for its vectors and markers,
+#: as before.
+_CATCHUP_KINDS: frozenset[str] = frozenset(EMBEDDINGS_CATCHUP_KINDS)
+
 
 def _executable_kinds() -> list[str]:
     """Kinds the general worker may claim. Computed per claim so tests that patch
     EXECUTORS are honored. A queued row of any other kind (e.g. written by a
     newer node version) stays queued and visible instead of being claimed and
     immediately failed as unknown."""
-    return sorted(set(EXECUTORS) - _LONG_RUNNING_KINDS)
+    return sorted(set(EXECUTORS) - _LONG_RUNNING_KINDS - _CATCHUP_KINDS)
 
 
 def _claimable_kinds(conn, kinds: list[str]) -> list[str]:
@@ -490,6 +509,11 @@ def _long_running_kinds() -> list[str]:
     claiming rows nothing can run.
     """
     return sorted(set(EXECUTORS) & _LONG_RUNNING_KINDS)
+
+
+def _catchup_kinds() -> list[str]:
+    """Kinds the catch-up worker may claim, intersected with EXECUTORS like the long lane's."""
+    return sorted(set(EXECUTORS) & _CATCHUP_KINDS)
 
 
 #: Upper bound on inbox jobs merged into one derive batch. A CP backlog after
@@ -691,7 +715,7 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
         return
     if kind == "inbox_deferred_enrichment":
         jobs, payload = await _run_db(conn_factory, _coalesce_inbox_jobs, job, payload)
-    if kind in ("enrichment_process_source", "ai_tool_enrichment_catchup", LOCAL_SYNC_KIND, LOCAL_SYNC_CATCHUP_KIND):
+    if kind in ("enrichment_process_source", "ai_tool_enrichment_catchup", LOCAL_SYNC_KIND, *EMBEDDINGS_CATCHUP_KINDS):
         payload["_progress_updater"] = _progress_updater
     if kind == LOCAL_SYNC_KIND:
         payload["_job_id"] = job_id
@@ -806,11 +830,11 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
     if kind in ("ai_tool_enrichment_catchup", "inbox_deferred_enrichment", LOCAL_SYNC_KIND):
         for sid in {entry.get("source_id") for entry in jobs if entry.get("source_id")}:
             await _run_db(conn_factory, _enqueue_ai_tool_catchup, sid, kind == LOCAL_SYNC_KIND)
-    if kind in (LOCAL_SYNC_CATCHUP_KIND, LOCAL_SYNC_KIND):
-        # A finished batch queues the next; a finished sync picks up what it
-        # left owed. Both only for a source whose catch-up the owner started.
+    if kind in EMBEDDINGS_CATCHUP_CONTINUING_KINDS:
+        # A finished batch queues the next; a finished sync or import picks up
+        # what it left owed. Both only for a source whose catch-up the owner started.
         for sid in {entry.get("source_id") for entry in jobs if entry.get("source_id")}:
-            await _run_db(conn_factory, _enqueue_local_sync_catchup, sid)
+            await _run_db(conn_factory, _enqueue_embeddings_catchup, sid)
     _release_secrets(jobs)
 
 
@@ -867,9 +891,10 @@ async def _worker_loop(
 ) -> None:
     """One serial claim-and-run loop over the kinds ``kinds_fn`` returns.
 
-    Two instances run: the general queue, and a lane for the long-running kinds
-    (see ``_LONG_RUNNING_KINDS``). ``sweep_debts`` belongs to the general loop
-    only — running the derivation-debt sweep from both would double its
+    Three instances run: the general queue, a lane for the long-running kinds
+    (see ``_LONG_RUNNING_KINDS``) and one for the embeddings catch-up (see
+    ``_CATCHUP_KINDS``). ``sweep_debts`` belongs to the general loop only —
+    running the derivation-debt sweep from more than one would multiply its
     database traffic for no benefit.
     """
     from ..features.entities.rebuild_subprocess import accepting as rebuild_children_accepted
@@ -879,7 +904,7 @@ async def _worker_loop(
     next_debt_sweep = 0.0
     if sweep_debts and _enabled():
         await _run_db(conn_factory, _enqueue_ai_tool_catchup, None, True)
-        await _run_db(conn_factory, _enqueue_local_sync_catchup, None)
+        await _run_db(conn_factory, _enqueue_embeddings_catchup, None)
     while True:
         try:
             if not _enabled():
@@ -999,13 +1024,13 @@ def _create_task_outside_the_request(loop: asyncio.AbstractEventLoop, coro: Awai
 def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
     """Start the async pipeline worker loops once per process.
 
-    Two loops: the general queue, and a lane dedicated to the long-running
-    kinds. They are started and stopped together and guarded by the same lock,
-    so every existing caller of this function keeps working unchanged — it just
-    now also gets the long lane. Both start outside the calling request's
-    context (see ``_create_task_outside_the_request``).
+    Three loops: the general queue, a lane dedicated to the long-running kinds,
+    and one for the embeddings catch-up. They are started and stopped together
+    and guarded by the same lock, so every existing caller of this function
+    keeps working unchanged. All start outside the calling request's context
+    (see ``_create_task_outside_the_request``).
     """
-    global _worker_task, _long_worker_task
+    global _worker_task, _long_worker_task, _catchup_worker_task
     if not _enabled() or pipeline_parked():
         return
     with _worker_lock:
@@ -1027,6 +1052,22 @@ def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
                     sweep_debts=False,
                     label="pipeline-long",
                     lease_seconds=LONG_JOB_LEASE_SECONDS,
+                    idle_seconds=_LONG_IDLE_POLL_SECONDS,
+                    max_idle_seconds=_LONG_MAX_POLL_SECONDS,
+                )
+            )
+        if _catchup_worker_task is None or _catchup_worker_task.done():
+            # The long lane's idle cadence: a catch-up is queued a few times in
+            # its life, and the next batch is claimed at once because a loop
+            # that just ran a job claims again without sleeping. The default
+            # lease covers a batch (seconds; a cold model load included).
+            _catchup_worker_task = _create_task_outside_the_request(
+                loop,
+                _worker_loop(
+                    conn_factory,
+                    kinds_fn=_catchup_kinds,
+                    sweep_debts=False,
+                    label="pipeline-catchup",
                     idle_seconds=_LONG_IDLE_POLL_SECONDS,
                     max_idle_seconds=_LONG_MAX_POLL_SECONDS,
                 )
@@ -1066,17 +1107,20 @@ async def stop_pipeline_worker() -> None:
     the part that matters; the cancel just stops a live loop from writing during
     the next app's startup.
 
-    Both loops are cleared under one lock acquisition, so a teardown can never
-    leave the long lane running against a closed app.
+    All loops are cleared under one lock acquisition, so a teardown can never
+    leave a lane running against a closed app.
     """
-    global _worker_task, _long_worker_task
+    global _worker_task, _long_worker_task, _catchup_worker_task
     with _worker_lock:
         task = _worker_task
         long_task = _long_worker_task
+        catchup_task = _catchup_worker_task
         _worker_task = None
         _long_worker_task = None
+        _catchup_worker_task = None
     await _cancel_worker_task(task)
     await _cancel_worker_task(long_task)
+    await _cancel_worker_task(catchup_task)
 
 
 #: BL-168: the runtime generation whose stop parked the queue (``park_pipeline_worker``), or None.

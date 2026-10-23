@@ -5021,6 +5021,14 @@ def _filter_calendar_rows(
     return filtered
 
 
+def _vector_fetch_limit() -> int:
+    """Hits fetched for the vector lane: its own 20, or the wider pool that
+    TOPOS_EVIDENCE_SHAPING groups and cuts back to 20 (`evidence_shaping`)."""
+    from ..features.signal.vector_settings import evidence_pool_limit, evidence_shaping_enabled
+
+    return evidence_pool_limit() if evidence_shaping_enabled() else _SEMANTIC_HIT_LIMIT
+
+
 def _semantic_hits(
     query_text: str,
     *,
@@ -5054,6 +5062,9 @@ def _semantic_hits(
                     # of 462 derived rows carried up to 850 characters of
                     # rendering that no answer could ever show.
                     "search_text": item.get("search_text"),
+                    # The parent record's hash this chunk was embedded from: below the owner's tier
+                    # `_index_hits_inside_grant` serves the stored text only while it still matches.
+                    "content_hash": item.get("content_hash"),
                     "similarity": item.get("similarity"),
                     "source_id": item.get("source_id"),
                     "signal_dimension": item.get("signal_dimension"),
@@ -5542,25 +5553,65 @@ def _index_row_unflagged(
 ) -> bool:
     """True only when the row exists, carries the NSFW column, and `is_record_nsfw` passes it."""
     from ..disclosure.content_policy import is_record_nsfw
+
+    row = _index_row(table, record_id, conn=conn, canonical=canonical)
+    return bool(row) and "content_nsfw" in row and not is_record_nsfw(row)
+
+
+def _index_row(table: str, record_id: str, *, conn: Optional[Any], canonical: Optional[Any]) -> Optional[Dict[str, Any]]:
+    """The canonical row an index hit stands for, or None when it cannot be read."""
     from ..storage.adapters.sqlite.stores import _NATIVE_ID_COL
 
     if not record_id:
-        return False
+        return None
     try:
         if canonical is not None:
             row = canonical.get(table, record_id)
-        elif conn is not None:
+            return dict(row) if row else None
+        if conn is not None:
             cursor = conn.execute(
                 f"SELECT * FROM {table} WHERE {_NATIVE_ID_COL[table]}=? LIMIT 1", (record_id,)
             )
             found = cursor.fetchone()
-            row = dict(zip([d[0] for d in cursor.description], found)) if found else None
-        else:
-            return False
-    except Exception as exc:  # noqa: BLE001 -- a flag that cannot be read is not a pass
-        logger.debug("index hit NSFW check failed for %s: %s", table, exc)
+            return dict(zip([d[0] for d in cursor.description], found)) if found else None
+    except Exception as exc:  # noqa: BLE001 -- a row that cannot be read is not a pass
+        logger.debug("index hit row read failed for %s: %s", table, exc)
+    return None
+
+
+def _index_current_texts(row: Dict[str, Any]) -> List[str]:
+    """The texts the embeddings job hashes for this row as it is NOW: `embeddable_content` of the row itself, and
+    of the row as `prepare_signal_record` hands it to the job. The two differ only for a row with no `content`
+    (a browser visit, a calendar event with a description or category, a profile record with an organization, a
+    location): the prepared copy carries the one-line summary (title alone, "[category] title", "@ place") where
+    the bare row joins its descriptive fields with " — ". Every ingest path prepares; the activity reload path
+    does not, so a stored hash may be either. Both are renderings of the current fields and nothing else, so a
+    match to either proves the stored text is current. A rendering that cannot be built is left out."""
+    from ..enrichment.jobs.canonical.brief_fallback import prepare_signal_record
+    from ..features.signal.embed_context import embeddable_content
+
+    texts: List[str] = []
+    for render in (dict, prepare_signal_record):
+        try:
+            text = embeddable_content(render(dict(row)))
+        except Exception:  # noqa: BLE001 -- a rendering that cannot be built proves nothing
+            continue
+        if text and text not in texts:
+            texts.append(text)
+    return texts
+
+
+def _index_text_current(row: Optional[Dict[str, Any]], content_hash: Any) -> bool:
+    """True only when the index hit's stored text was embedded from the row's current text: its `content_hash`
+    (the embeddings job's sha256 of `embeddable_content`) equals the hash of one of the row's current renderings
+    (`_index_current_texts`). A row rewritten since it was embedded (an edit, a re-capture, a re-import, a merged
+    reply) keeps its old chunk and stored text until something re-embeds it; below the owner's tier that text must
+    not be served (lane 194). No hash, no row, no text: no pass."""
+    import hashlib
+
+    if not row or not isinstance(content_hash, str) or not content_hash:
         return False
-    return bool(row) and "content_nsfw" in row and not is_record_nsfw(row)
+    return any(hashlib.sha256(text.encode("utf-8")).hexdigest() == content_hash for text in _index_current_texts(row))
 
 
 def _index_hits_inside_grant(
@@ -5582,26 +5633,41 @@ def _index_hits_inside_grant(
     named (no `record_type`), or whose row or flag cannot be read, cannot be shown to be
     inside the grant and is dropped. The owner's tier is unchanged. `canonical` (the
     bundle's store) answers the flag when given; otherwise `conn` does.
+
+    Lane 194: the stored text must also still be the row's text. A hit whose `content_hash` does
+    not match the row's current text (or that carries none) is dropped, so a grantee never reads
+    the pre-edit copy of a line rewritten after it was embedded.
     """
     if str(disclosure_tier or "") == "owner_raw" or not hits:
         return list(hits)
+    from ..disclosure.content_policy import is_record_nsfw
     from ..storage.adapters.sqlite.stores import _NSFW_TAGGED_TABLES
 
     tables = set(manifest.canonical_tables or [])
-    unflagged: Dict[Tuple[str, str], bool] = {}
+    rows: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
     kept: List[Dict[str, Any]] = []
     for hit in hits:
         table = _RECORD_TYPE_TABLE.get(str(hit.get("record_type") or ""))
         if not table or table not in tables:
             continue
-        if table in _NSFW_TAGGED_TABLES:
-            key = (table, str(hit.get("record_id") or ""))
-            if key not in unflagged:
-                unflagged[key] = _index_row_unflagged(table, key[1], conn=conn, canonical=canonical)
-            if not unflagged[key]:
-                continue
-        kept.append(hit)
+        key = (table, str(hit.get("record_id") or ""))
+        if key not in rows:
+            rows[key] = _index_row(table, key[1], conn=conn, canonical=canonical)
+        row = rows[key]
+        if table in _NSFW_TAGGED_TABLES and not (row and "content_nsfw" in row and not is_record_nsfw(row)):
+            continue
+        if not _index_text_current(row, hit.get("content_hash")):
+            continue
+        kept.append(_without_content_hash(hit))
     return kept
+
+
+def _without_content_hash(hit: Dict[str, Any]) -> Dict[str, Any]:
+    """The hit without the stored text's hash: it decides above and goes no further. A sha256 of a short line would
+    let whoever receives it confirm a guessed text, and no reader downstream needs it (lane 194)."""
+    if "content_hash" not in hit:
+        return hit
+    return {key: value for key, value in hit.items() if key != "content_hash"}
 
 
 def _load_recent_summary_items(
@@ -5631,10 +5697,12 @@ def _load_recent_summary_items(
     # the query, and the lane fault below returns nothing, rather than serving unchecked rows.
     index_columns = {row[1] for row in conn.execute("PRAGMA table_info(signal_embeddings)")}
     has_type = "record_type" in index_columns
-    # Grantees must have a typed index to prove the canonical row is in their grant.
-    if grantee and not has_type:
+    # Grantees must have a typed index to prove the canonical row is in their grant, and the
+    # chunk's content_hash to prove its stored text is still the row's (lane 194).
+    has_hash = "content_hash" in index_columns
+    if grantee and not (has_type and has_hash):
         return []
-    type_sql = ", record_type" if has_type else ""
+    type_sql = (", record_type" if has_type else "") + (", content_hash" if has_hash else "")
     event_clock = "e.event_at"
     if has_type:
         clauses = []
@@ -5673,13 +5741,13 @@ def _load_recent_summary_items(
             f"""
             WITH candidates AS MATERIALIZED (
                 SELECT e.record_id, e.source_id, e.signal_dimension, e.text_preview,
-                       e.event_at, e.chunk_index{', e.record_type' if has_type else ''}
+                       e.event_at, e.chunk_index{', e.record_type' if has_type else ''}{', e.content_hash' if has_hash else ''}
                 FROM signal_embeddings e
                 WHERE e.chunk_index = 0{prefilter_sql}
             ),
             dated_index AS (
                 SELECT e.record_id, e.source_id, e.signal_dimension, e.text_preview,
-                       {event_clock} AS event_at, e.chunk_index{', e.record_type' if has_type else ''}
+                       {event_clock} AS event_at, e.chunk_index{', e.record_type' if has_type else ''}{', e.content_hash' if has_hash else ''}
                 FROM candidates e
             )
             SELECT record_id, source_id, signal_dimension, text_preview, event_at{type_sql}
@@ -5696,7 +5764,7 @@ def _load_recent_summary_items(
         return []
     if grantee:
         kept = _index_hits_inside_grant(
-            [{"record_id": row[0], "record_type": row[5], "_row": row} for row in rows],
+            [{"record_id": row[0], "record_type": row[5], "content_hash": row[6], "_row": row} for row in rows],
             conn=conn,
             manifest=manifest,
             disclosure_tier=disclosure_tier,
@@ -5893,6 +5961,20 @@ _NO_DECAY_FUSION_SOURCES = frozenset(
     {"stat_insights", "facts_store", "entities", "briefs", "goals", "derived_objects", "graph"}
 )
 
+# Contributors whose items are derived from records rather than being records: stats,
+# facts, entity dossiers and edges, derived objects, graph edges, extracted goals and
+# emotions, briefs, clusters, dimension facts. With TOPOS_EVIDENCE_SHAPING on, their
+# share of the fused list is bounded while record lanes still have evidence (rule 4 in
+# `evidence_shaping`). The split is by kind of evidence, never by connector. One item
+# kind of the `entities` lane is not derived: an `entity_mention` names one source
+# record by id, so it counts as a reference to that record (`_record_reference_item`).
+_DERIVED_FUSION_SOURCES = frozenset(
+    {
+        "stat_insights", "facts_store", "entities", "derived_objects", "graph",
+        "goals", "emotions", "briefs", "clusters", "signal_facts",
+    }
+)
+
 
 def _recency_decay_factor(
     item: Dict[str, Any],
@@ -5923,6 +6005,7 @@ def _rrf_fuse_summary_lists(
     ledger: Optional[Any] = None,
     activity_time_range: Optional[Tuple[str, str]] = None,
     vector_head: int = 0,
+    derived_share: Optional[float] = None,
 ) -> List[Dict[str, Any]]:
     """Fuse ordered contributor lists with weighted reciprocal rank fusion.
 
@@ -5956,6 +6039,13 @@ def _rrf_fuse_summary_lists(
     not mention"; conflated they are both "no data", which is how a report came to
     tell the owner their journal "may not be synced" while it sat indexed. `ledger`
     (optional, never load-bearing) is where that distinction is written down.
+
+    `derived_share` (None or 1.0 = off) holds items that only derived lanes contributed
+    to that share of every prefix of the ranked selection while record evidence remains
+    (`evidence_shaping.bounded_derived_selection`). Without it, weights of 1.5–2.0 on
+    derived lanes that never decay put their first ~30 items above a record lane's best
+    item, and on the owner's snapshot vector items filled 0.2% of the fused top 20.
+    The dated-activity branch keeps its own day-coverage selection.
     """
     from ..features.signal.vector_settings import (
         fusion_recency_enabled,
@@ -6103,6 +6193,30 @@ def _rrf_fuse_summary_lists(
         return []
     max_score = max(scores.values()) or 1.0
     ranked = sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
+
+    bound_derived = derived_share is not None and derived_share < 1.0 and not activity_time_range
+
+    def _record_reference_item(key: str) -> bool:
+        # A pointer to one source record, not a summary computed from records. Measured on
+        # the owner's snapshot: every routed browser and iMessage answer the bound lost
+        # was one of these, demoted below derived items as if it were derived.
+        return str(best_item[key].get("retrieval_source") or "") == "entity_mention"
+
+    def _bounded_selection(keys: List[str], limit: int) -> List[str]:
+        from .evidence_shaping import bounded_derived_selection
+
+        return bounded_derived_selection(
+            keys,
+            is_derived=lambda key: not _record_reference_item(key) and all(
+                c in _DERIVED_FUSION_SOURCES for c in contributors.get(key) or ()
+            ),
+            is_record=lambda key: _record_reference_item(key) or any(
+                c not in _DERIVED_FUSION_SOURCES and c not in context_sources
+                for c in contributors.get(key) or ()
+            ),
+            share=float(derived_share or 0.0),
+            cap=limit,
+        )
     if activity_time_range:
         ranked.sort(key=lambda pair: _parse_instant(best_item[pair[0]].get("event_at") or best_item[pair[0]].get("occurred_at") or best_item[pair[0]].get("ts")), reverse=True)
         min_per_source = None
@@ -6157,7 +6271,10 @@ def _rrf_fuse_summary_lists(
             goal_keys.sort(key=lambda key: best_item[key].get("retrieval_source") != "user_goal")
             allowed_goals = set(goal_keys[:max(0, goal_cap)])
             selection_ranked = [(key, score) for key, score in ranked if not is_goal(key) or key in allowed_goals]
-        selected = [key for key, _ in selection_ranked[:cap]]
+        if bound_derived:
+            selected = _bounded_selection([key for key, _ in selection_ranked], cap)
+        else:
+            selected = [key for key, _ in selection_ranked[:cap]]
     if ledger is not None and len(ranked) > cap:
         ledger.record(
             _N.STAGE_RETRIEVAL,
@@ -6195,6 +6312,10 @@ def _rrf_fuse_summary_lists(
                 selected_set.discard(drop)
                 selected_set.add(promote)
         selected = [key for key, _ in ranked if key in selected_set][:cap]
+        if bound_derived:
+            # Same set; re-sorting by score alone would put every promoted record back
+            # behind the derived items it was promoted past.
+            selected = _bounded_selection(selected, cap)
 
     # Preserve the head of a primary source's own ranking. Cross-lane overlap
     # can boost lower-ranked rows above that head, so merely counting how many
@@ -6713,6 +6834,8 @@ def _build_summary_items_unfiltered(
     commitment_sink: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     from ..features.signal.vector_settings import (
+        derived_share_max,
+        evidence_shaping_enabled,
         fusion_rrf_enabled,
         fusion_vector_head,
         vector_evidence_min,
@@ -7521,6 +7644,7 @@ def _build_summary_items_unfiltered(
             activity_time_range=activity_window,
             ledger=ledger,
             vector_head=fusion_vector_head(),
+            derived_share=derived_share_max() if evidence_shaping_enabled() else None,
         )
         return _annotate_index_message_roles(fused, bundle_conn, manifest, disclosure_tier=disclosure_tier)
 
@@ -8056,17 +8180,22 @@ class DefaultSignalRetrievalAdapter:
         semantic_hits: List[Dict[str, Any]] = []
         vector_error: Optional[str] = None
         if query_text and global_layers_apply and request.access_mode in ("summary", "inference"):
+            vector_limit = _vector_fetch_limit()
             semantic_hits, vector_error = _semantic_hits(
-                semantic_query, source_id=source_filter, time_range=time_range
+                semantic_query, source_id=source_filter, time_range=time_range, limit=vector_limit
             )
             if not semantic_hits and time_range:
                 # Time scope can starve results (sparse corpora); retry unscoped.
-                semantic_hits, vector_error = _semantic_hits(semantic_query, source_id=source_filter)
+                semantic_hits, vector_error = _semantic_hits(
+                    semantic_query, source_id=source_filter, limit=vector_limit
+                )
             if not semantic_hits and source_ids:
                 for sid in source_ids:
                     if sid == source_filter:
                         continue
-                    semantic_hits, vector_error = _semantic_hits(semantic_query, source_id=sid)
+                    semantic_hits, vector_error = _semantic_hits(
+                        semantic_query, source_id=sid, limit=vector_limit
+                    )
                     if semantic_hits:
                         break
             if semantic_hits:
@@ -8112,6 +8241,19 @@ class DefaultSignalRetrievalAdapter:
                 manifest=manifest,
                 disclosure_tier=request.disclosure_tier,
                 canonical=self._adapters.canonical,
+            )
+            # Lane 194: the stored text's hash rode along on the hit for that gate alone. Dropped here at
+            # every tier, so the owner's packet is the one it was before the hash was carried.
+            semantic_hits = [_without_content_hash(hit) for hit in semantic_hits]
+            # TOPOS_EVIDENCE_SHAPING: the wider pool fetched above is cut back to the
+            # lane's size here, after the grant filter, so the packet and the fused list
+            # see the same hits. Off, this returns the list untouched.
+            from . import evidence_shaping
+
+            semantic_hits = evidence_shaping.shape_vector_hits(
+                semantic_hits,
+                conn=getattr(self._adapters.signal, "_conn", None),
+                limit=_SEMANTIC_HIT_LIMIT,
             )
             # NOT `semantic_query`. That is the residual — the query minus the
             # spans the entity and time planes already claimed — and the derived

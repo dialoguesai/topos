@@ -216,3 +216,110 @@ def cluster_max_records() -> int:
         return max(100, min(200_000, int(raw)))
     except ValueError:
         return 25_000
+
+
+def evidence_shaping_enabled() -> bool:
+    """Source-blind shaping of the evidence that reaches the answer. Default off.
+
+    One switch for four rules, each read only from relevance, text, conversation
+    identity and time, never from which connector a row came from:
+
+    1. the vector lane groups its hits by conversation (or by a short session when a
+       row has no conversation) and keeps at most two passages of each, so one long
+       session is one witness and the slots it held go to the next conversations;
+    2. near-duplicate hits collapse to the better-ranked copy;
+    3. a hit far below the best cosine does not pad the lane;
+    4. derived items cannot take more than `derived_share_max` of any prefix of the
+       fused list while source records remain to fill it.
+
+    Measured on the owner's snapshot (21 Oct 2026, 112 questions): the vector lane
+    held the answering record in its top five for 143 of the 164 known-item turns
+    that lost it, and vector items filled 0.2% of the fused top 20.
+    """
+    return _flag("TOPOS_EVIDENCE_SHAPING", "off")
+
+
+def evidence_pool_limit() -> int:
+    """Vector candidates fetched before rules 1–3 cut them back to the lane's 20."""
+    raw = os.environ.get("TOPOS_EVIDENCE_POOL", "60").strip()
+    try:
+        return max(20, min(100, int(raw)))
+    except ValueError:
+        return 60
+
+
+def evidence_group_passages() -> int:
+    """Passages one conversation may contribute; the second comes after every group's first.
+    0 turns grouping off (hits keep their order and are cut to the lane's size)."""
+    raw = os.environ.get("TOPOS_EVIDENCE_GROUP_PASSAGES", "2").strip()
+    try:
+        return max(0, min(10, int(raw)))
+    except ValueError:
+        return 2
+
+
+def evidence_group_order() -> str:
+    """rank | groups. How the vector lane orders what grouping keeps.
+
+    rank (default): the ranker's own order, each conversation capped at
+    `evidence_group_passages`. groups: every conversation's best passage first, groups
+    ordered by their best hit plus `evidence_group_bonus` per supporting hit. Measured
+    21 Oct with the vector-head pin on (`fusion_vector_head`): `groups` moved the
+    ranker's second hit out of the pinned head whenever it was the first hit's
+    conversation's second passage, and AI-chat known-item answers were lost.
+    """
+    mode = os.environ.get("TOPOS_EVIDENCE_GROUP_ORDER", "rank").strip().lower()
+    return mode if mode in ("rank", "groups") else "rank"
+
+
+def evidence_group_bonus() -> float:
+    """Lift per distinct supporting hit in a group (at most three count); `groups` order only."""
+    raw = os.environ.get("TOPOS_EVIDENCE_GROUP_BONUS", "0.05").strip()
+    try:
+        return max(0.0, min(0.5, float(raw)))
+    except ValueError:
+        return 0.05
+
+
+def evidence_session_gap_minutes() -> float:
+    """Hits with no conversation id chain into one session while each is within this
+    many minutes of the previous one from the same stream. 0 keeps every such hit apart."""
+    raw = os.environ.get("TOPOS_EVIDENCE_SESSION_GAP_MINUTES", "30").strip()
+    try:
+        return max(0.0, min(24 * 60.0, float(raw)))
+    except ValueError:
+        return 30.0
+
+
+def evidence_duplicate_jaccard() -> float:
+    """Word-shingle Jaccard at or above which two hits are one. 0 disables."""
+    raw = os.environ.get("TOPOS_EVIDENCE_DUPLICATE_JACCARD", "0.8").strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.8
+
+
+def evidence_floor_margin() -> float:
+    """Cosine distance below the best hit beyond which a hit is a far neighbour. 0 disables.
+
+    Calibrated 21 Oct 2026 for all-MiniLM-L6-v2 on the owner's snapshot, split half: on
+    the calibration half 0.15 was the smallest of 0.05/0.08/0.10/0.12/0.15/0.20 to keep
+    95% of the answering records found in the 60-hit pool (97.3%); on the held-out half
+    it kept 97.9% and cut 38% of pool hits. Re-calibrate after an embedding-model change.
+    """
+    raw = os.environ.get("TOPOS_EVIDENCE_FLOOR_MARGIN", "0.15").strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.15
+
+
+def derived_share_max() -> float:
+    """Largest share of any fused-list prefix derived items may hold while source
+    records remain. 1.0 is the plain fusion."""
+    raw = os.environ.get("TOPOS_DERIVED_SHARE_MAX", "0.5").strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.5
