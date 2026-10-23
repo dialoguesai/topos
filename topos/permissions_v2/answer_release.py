@@ -475,7 +475,7 @@ class AnswerService:
                 if len(active) >= MAX_JOBS or any(job.grant_id == signed.grant_id for job in active):
                     ledger.refuse(admission, now=now)
                     raise AnswerBusy()
-                ledger.admit_answer(admission, now=now, charge=True)
+                ledger.admit_answer(admission, now=now, charge=True, kept_question=kept_question)
                 answer_id = "ans_" + secrets.token_hex(16)
                 job = Job(answer_id, request_id, signed.grant_id, signed.assignment_id, signed.actor_id,
                           signed.client_id, parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields}), mode, intent.question,

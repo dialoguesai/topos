@@ -613,6 +613,98 @@ def test_deferred_asks_give_their_questions_back_and_an_answered_kept_ask_counts
     assert _questions(node) == 3
 
 
+def test_a_kept_question_delivered_again_the_same_day_counts_once(answers_node, service):
+    """R-OFF1 L1 (WS-OFF, 23 Oct): a redelivery (a lost answer, a restart) carries the same kept question id, and the
+    node counts the question against its share's day only the first time that day sees the id."""
+    node = answers_node
+    kq, other = secrets.token_hex(16), secrets.token_hex(16)
+    for _ in range(3):
+        assert _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq)).body.outcome == "answered"
+        assert _questions(node) == 1
+    assert _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=other)).body.outcome == "answered"
+    assert _questions(node) == 2                                   # another kept question counts
+    assert _ended(service, _ask(node, service)).body.outcome == "answered"
+    assert _questions(node) == 3                                   # a live ask counts, as before
+
+
+def test_a_deferral_gives_back_only_the_question_its_own_ask_counted(answers_node, service):
+    """A kept question deferred and delivered again counts once, on the delivery that is answered. A delivery that
+    did not count (the id was already counted that day) gives nothing back when it defers."""
+    node = answers_node
+    kq = secrets.token_hex(16)
+    _unserve(node)
+    for _ in range(2):
+        assert _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq)).deferred
+        assert _questions(node) == 0
+    rebuild(node)
+    assert _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq)).body.outcome == "answered"
+    assert _questions(node) == 1
+    _unserve(node)
+    assert _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq)).deferred
+    assert _questions(node) == 1                                   # this delivery counted nothing: nothing back
+
+
+def test_the_same_kept_question_counts_again_on_another_utc_day(answers_node, service):
+    from topos.permissions_v2.ledger import utc_day
+    node = answers_node
+    kq = secrets.token_hex(16)
+    first = _ended(service, _ask(node, service, keep_until=node.now[0] + 3 * DAY, kq=kq))
+    node.now[0] += DAY
+    second = _ended(service, _ask(node, service, keep_until=node.now[0] + 2 * DAY, kq=kq))
+    assert utc_day(first.accepted_at) != utc_day(second.accepted_at)
+    with node.ledger._transaction() as db:
+        days = dict(db.execute("SELECT utc_day, questions FROM p2a_question_days").fetchall())
+    assert days == {utc_day(first.accepted_at): 1, utc_day(second.accepted_at): 1}
+
+
+def test_the_ledger_keeps_only_a_hash_of_the_kept_question_id(answers_node, service):
+    node = answers_node
+    kq = secrets.token_hex(16)
+    job = _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq))
+    with node.ledger._transaction() as db:
+        rows = [tuple(row) for row in db.execute("SELECT * FROM p2a_kept_question_days").fetchall()]
+    assert len(rows) == 1
+    grant_id, _day, kq_hash, request_id = rows[0]
+    assert (grant_id, request_id) == ("grant-search", job.request_id)
+    assert re.fullmatch(r"[0-9a-f]{64}", kq_hash) and kq not in kq_hash
+    for stored in (node.ledger.path, node.ledger.path.with_name(node.ledger.path.name + "-wal")):
+        if stored.exists():
+            assert kq.encode("ascii") not in stored.read_bytes()
+
+
+def test_kept_question_rows_are_pruned_with_their_day(answers_node, service):
+    from topos.permissions_v2.ledger import QUESTION_DAY_RETENTION_DAYS, utc_day
+    node = answers_node
+    old = utc_day(node.now[0] - (QUESTION_DAY_RETENTION_DAYS + 2) * DAY)
+    with node.ledger._transaction() as db:
+        db.execute("INSERT INTO p2a_question_days VALUES ('grant-search', ?, 1)", (old,))
+        db.execute("INSERT INTO p2a_kept_question_days VALUES ('grant-search', ?, ?, 'answer-old')",
+                   (old, hashlib.sha256(b"an invented old kept question").hexdigest()))
+    _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))          # a counted ask prunes
+    with node.ledger._transaction() as db:
+        assert db.execute("SELECT COUNT(*) FROM p2a_question_days WHERE utc_day=?", (old,)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM p2a_kept_question_days WHERE utc_day=?", (old,)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM p2a_kept_question_days").fetchone()[0] == 1
+
+
+def test_a_redelivery_is_not_held_to_the_limit_its_question_was_counted_against(answers_node, service):
+    """The share allows one question a day. The kept question was counted, then its answer was lost and the control
+    plane delivers it again: the node answers it, and still refuses any other question that day."""
+    node = answers_node
+    node.activate({**node.search_raw, "read_budget_per_day": 1, "policy_version_id": "policy-grant-search-budget"},
+                  generation=2)
+    rebuild(node)
+    kq = secrets.token_hex(16)
+    assert _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq)).body.outcome == "answered"
+    assert _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq)).body.outcome == "answered"
+    assert _questions(node) == 1
+    with pytest.raises(PolicyError):
+        _ask(node, service, keep_until=node.now[0] + DAY)        # another kept question: over the day's limit
+    with pytest.raises(PolicyError):
+        _ask(node, service)                                      # and a live one
+    assert _questions(node) == 1
+
+
 def test_a_refund_never_takes_the_day_below_zero(answers_node, service, monkeypatch):
     """A day's row holds at least one question (its CHECK). A refund whose row is already gone changes nothing."""
     node = answers_node
