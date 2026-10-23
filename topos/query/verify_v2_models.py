@@ -34,6 +34,17 @@ class ModelUnavailable(Exception):
     """The model could not answer in time or in shape; the caller refuses."""
 
 
+class OutputSchema(dict):
+    """A JSON schema plus how to ask for it. ``plain_json`` asks for a JSON object with the schema in the prompt instead
+    of a strict grammar: Red Pill's grammar mode made llama stream whitespace after "{" for a short list schema (30 s
+    timeouts on most real rows, 23 Oct 2026) where plain JSON answered in ~0.6 s. ``max_tokens`` caps the reply so a
+    degenerate stream fails fast (unparseable -> unable) instead of running to the request deadline."""
+
+    def __init__(self, schema: Dict[str, Any], *, plain_json: bool = False, max_tokens: Optional[int] = None):
+        super().__init__(schema)
+        self.plain_json, self.max_tokens = bool(plain_json), max_tokens
+
+
 @dataclass
 class Usage:
     calls: int = 0
@@ -108,7 +119,10 @@ class HostedChat:
             raise ModelUnavailable("insufficient_credits")
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
         body: Dict[str, Any] = {"model": self.model, "temperature": 0, "seed": SEED, "messages": messages, **self._options}
-        if self._schema_mode:
+        cap = getattr(schema, "max_tokens", None)
+        if cap:
+            body["max_tokens"] = int(cap)
+        if self._schema_mode and not getattr(schema, "plain_json", False):
             body["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema, "strict": True}}
         else:
             body["messages"] = [{"role": "system", "content": system + "\n\nReply with ONLY a JSON object matching this "
@@ -141,9 +155,12 @@ class LocalChat:
     available = True
 
     def __call__(self, system: str, user: str, schema: Dict[str, Any], timeout: float, usage: Usage) -> Dict[str, Any]:
-        body = {"model": self.model, "stream": False, "format": schema, "think": False,
+        body = {"model": self.model, "stream": False, "format": dict(schema), "think": False,
                 "options": {"temperature": 0, "seed": SEED},
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+        cap = getattr(schema, "max_tokens", None)
+        if cap:
+            body["options"]["num_predict"] = int(cap)
         reply = _post_json(self._base + "/api/chat", body, {}, timeout)
         usage.add(reply.get("prompt_eval_count"), reply.get("eval_count"))
         try:

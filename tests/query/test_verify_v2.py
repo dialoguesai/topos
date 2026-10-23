@@ -378,3 +378,64 @@ def test_verify_names_its_hosted_models_directly():
     from topos.query.verify_v2_models import SECOND_JUDGE_MODEL, HostedChat
 
     assert HostedChat(model=SECOND_JUDGE_MODEL, api_key="k", base_url="https://example.invalid/v1").model == SECOND_JUDGE_MODEL
+
+
+class ListChat(FakeChat):
+    """A judge that answers with the numbers of the showing excerpts (the endpoint's default reply shape)."""
+
+    def __call__(self, system, user, schema, timeout, usage):
+        if system in (v2.READ_SYSTEM, v2.READ_SYSTEM_WITH_OTHERS):
+            return super().__call__(system, user, schema, timeout, usage)
+        assert system == v2.LIST_SYSTEM and schema is v2.LIST_SCHEMA
+        usage.add(10, 2)
+        return {"shows": [n for n, lab in self.labels.items() if lab == "shows"]}
+
+
+def test_the_list_judge_counts_only_the_numbers_both_calls_name():
+    out = run([rec(1, "authored"), rec(2, "authored")], ListChat(read_reply(), {1: "shows", 2: "related"}))
+    assert out["verdict"] == "supported" and [e["n"] for e in out["evidence"] if e["cited"]] == [1]
+    assert out["usage"]["model_calls"] == 3
+
+
+def test_a_judge_reply_is_read_in_either_shape():
+    assert v2.shows_in({"shows": [2, "3", True, 0.5, None, "x"]}) == {2, 3}
+    assert v2.shows_in({"labels": [{"n": 1, "label": "shows"}, {"n": 2, "label": "related"}, "junk"]}) == {1}
+    assert v2.shows_in({}) == set()
+
+
+def test_hosted_asks_for_plain_json_with_a_cap_when_the_schema_says_so(monkeypatch):
+    from topos.query import verify_v2_models as m
+
+    sent = []
+
+    def fake_post(url, body, headers, timeout):
+        sent.append(body)
+        return {"choices": [{"message": {"content": '{"shows": [1]}'}}], "usage": {"prompt_tokens": 5, "completion_tokens": 7}}
+
+    monkeypatch.setattr(m, "_post_json", fake_post)
+    chat = m.HostedChat(model=m.DEFAULT_HOSTED_MODEL, api_key="k", base_url="https://example.invalid/v1")
+    chat._wallet_allows = lambda: True
+    u = m.Usage()
+    assert chat("s", "u", v2.LIST_SCHEMA, 5.0, u) == {"shows": [1]}
+    assert sent[-1]["response_format"] == {"type": "json_object"} and sent[-1]["max_tokens"] == 64
+    assert '"shows"' in sent[-1]["messages"][0]["content"]  # the schema travels in the prompt instead
+    chat("s", "u", v2.LABEL_SCHEMA, 5.0, u)
+    assert sent[-1]["response_format"]["type"] == "json_schema" and "max_tokens" not in sent[-1]
+    assert u.calls == 2 and u.output_tokens == 14
+
+
+def test_local_caps_the_reply_the_same_way(monkeypatch):
+    from topos.query import verify_v2_models as m
+
+    sent = []
+
+    def fake_post(url, body, headers, timeout):
+        sent.append(body)
+        return {"message": {"content": '{"shows": []}'}, "prompt_eval_count": 5, "eval_count": 4}
+
+    monkeypatch.setattr(m, "_post_json", fake_post)
+    chat = m.LocalChat(model="qwen-test", base_url="http://127.0.0.1:1")
+    assert chat("s", "u", v2.LIST_SCHEMA, 5.0, m.Usage()) == {"shows": []}
+    assert sent[-1]["options"]["num_predict"] == 64 and sent[-1]["format"] == dict(v2.LIST_SCHEMA)
+    chat("s", "u", v2.LABEL_SCHEMA, 5.0, m.Usage())
+    assert "num_predict" not in sent[-1]["options"]

@@ -16,8 +16,9 @@ Stages, each timed and each with its own outcome:
              are dropped.
 3. qualify   each record's actor role from the node's resolver (``features.provenance.roles.record_role``):
              authored, addressed, participated, observed, ambient; ``derived`` when a fact's source cannot be found.
-4. judge     two calls label every shown record shows / related / unrelated, in opposite order, run in parallel.
-             A record counts only if both say "shows" and the role and period rules accept it.
+4. judge     two calls name the shown records that show the claim, in opposite order, run in parallel (the reply
+             is the numbers alone: output tokens are the judge's latency). A record counts only if both name it and
+             the role and period rules accept it; a record the two split on gets one call on its own.
 5. release   owner: verdict, the cited records with role, date and snippet.
 
 Contradictions are not produced (no labelled contradictions to measure against yet). Any model, retrieval or
@@ -34,7 +35,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from .verify_v2_models import ModelUnavailable, Usage
+from .verify_v2_models import ModelUnavailable, OutputSchema, Usage
 
 VERSION = "verify-claim/v2.0-dev"
 MAX_STATEMENT_CHARS = 1000  # the truth-mirror's own statement cap
@@ -147,6 +148,20 @@ LABEL_SCHEMA = {
         "required": ["n", "label"]}}},
     "required": ["labels"],
 }
+
+LIST_SYSTEM = """You check excerpts from a person's own records against one claim. Each excerpt is numbered and shows its
+source, its date (UTC) and who stands behind it. An excerpt shows the claim when the excerpt itself shows the claim's
+core is true: the same specific thing, consistent with the claim's time. For an opinion, the person's own words express
+the same opinion about the same thing. Being about the same topic, project or tool is not enough.
+Return the numbers of the excerpts that show the claim; an empty list when none does."""
+
+LIST_SCHEMA = OutputSchema({"type": "object", "properties": {"shows": {"type": "array", "items": {"type": "integer"}}}, "required": ["shows"]},
+                           plain_json=True, max_tokens=64)
+
+#: How the judge answers. "list": only the numbers of the showing excerpts (~7 output tokens, ~0.6 s a call on Red Pill);
+#: "labels": a label for every excerpt (~160 tokens for ten, ~4 s). The model writes about 40 tokens a second, so the
+#: reply length is the judge stage's latency; the two shapes agreed on the owner's development rows.
+JUDGE_OUTPUT = "list"
 
 #: Legacy table names in fact refs ("iMessage" -> conversation_messages, "Grow Journal" -> journal_entries).
 REF_TABLE_ALIASES = {"iMessage": "conversation_messages", "Grow Journal": "journal_entries"}
@@ -473,7 +488,23 @@ def judge(claim: Claim, evidence, chat, usage: Usage, timeout: float) -> Dict[st
             "judges": len(judges), "judges_failed": len(failures), "judge_cites": [len(r["cites"]) for r in results]}
 
 
+def judge_prompt() -> Tuple[str, Dict[str, Any]]:
+    return (LIST_SYSTEM, LIST_SCHEMA) if JUDGE_OUTPUT == "list" else (LABEL_SYSTEM, LABEL_SCHEMA)
+
+
+def shows_in(reply: Dict[str, Any]) -> set:
+    """The excerpt numbers a judge reply marks as showing the claim, in either answer shape."""
+    out = {x.get("n") for x in (reply.get("labels") or []) if isinstance(x, dict) and x.get("label") == "shows"}
+    for x in reply.get("shows") or []:
+        if isinstance(x, bool):
+            continue
+        if isinstance(x, int) or (isinstance(x, str) and x.strip().isdigit()):
+            out.add(int(x))
+    return out
+
+
 def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: float) -> Dict[str, Any]:
+    system, schema = judge_prompt()
     when = f"{claim.date_from} to {claim.date_to}" if claim.date_from else "not stated"
     about = "someone other than the owner" if claim.subject == "someone_else" else "the owner"
     head = f"Claim ({claim.kind}, about {about}): {claim.text}\nTime: {when}\n\nExcerpts:\n"
@@ -483,10 +514,10 @@ def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: fl
     backward = head + "\n".join(line(e) for e in reversed(evidence))
     ends = time.perf_counter() + timeout
     with ThreadPoolExecutor(max_workers=2) as pool:  # the two orders in parallel: half the judge latency
-        f1 = pool.submit(chat, LABEL_SYSTEM, forward, LABEL_SCHEMA, timeout, usage)
-        f2 = pool.submit(chat, LABEL_SYSTEM, backward, LABEL_SCHEMA, timeout, usage)
+        f1 = pool.submit(chat, system, forward, schema, timeout, usage)
+        f2 = pool.submit(chat, system, backward, schema, timeout, usage)
         first, second = f1.result(), f2.result()
-    shows = lambda reply: {x.get("n") for x in (reply.get("labels") or []) if isinstance(x, dict) and x.get("label") == "shows"}
+    shows = shows_in
     valid = lambda ns: {n for n in ns if isinstance(n, int) and 1 <= n <= len(evidence)}
     by_n = {e["n"]: e for e in evidence}
     agreed_set, split = valid(shows(first) & shows(second)), sorted(valid(shows(first) ^ shows(second)))
@@ -494,7 +525,7 @@ def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: fl
     if TIEBREAK and split and ends - time.perf_counter() > 1.0:
         def alone(n):  # the record on its own, so its place in a list cannot decide it
             try:
-                return 1 in shows(chat(LABEL_SYSTEM, head + line({**by_n[n], "n": 1}), LABEL_SCHEMA, ends - time.perf_counter(), usage))
+                return 1 in shows(chat(system, head + line({**by_n[n], "n": 1}), schema, ends - time.perf_counter(), usage))
             except ModelUnavailable:  # no third opinion: the record stays split, which never counts
                 return False
         with ThreadPoolExecutor(max_workers=min(4, len(split))) as pool:
