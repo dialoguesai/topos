@@ -307,6 +307,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "update_routine_run",
     "upsert_home_chat_session",
     "verify_claim",
+    "verify_claim_owner",
 ]
 
 
