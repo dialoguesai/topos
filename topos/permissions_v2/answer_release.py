@@ -9,7 +9,9 @@ Kept questions (lane OFF1N). An ask the control plane delivers for a question
 it kept while this node was offline carries a signed `kept_stamp`: the end of
 the window its asker may come back in. Such a kept job's ended body stays until
 then (`keep_end`: at most KEPT_MAX_SECONDS, never less than an unkept job's
-window), still only in this process, with every fetch-time re-check as before.
+window), still only in this process, with every fetch-time re-check as before;
+while one is in memory a sweep drops expired jobs every SWEEP_SECONDS, without
+waiting for the next ask or fetch.
 A kept job whose retrieval meets a share index not served now ends `deferred`:
 no body, its question given back, and its fetch answers `answer_deferred`, so
 the control plane asks again later.
@@ -69,6 +71,9 @@ KEPT_MAX_SECONDS = 14 * 86_400
 # More kept ended jobs than this in memory is logged as one counts-only line each time the count goes over it.
 KEPT_ENDED_BOUND = 500
 KEEP_LOG = "permissions answer keep: kept_ended=%d bound=%d"
+# While a kept job is in memory, a sweep runs `_clean` this often (`AnswerService._sweep`). A kept answer can stay for
+# days, and cleaned only at the next ask or fetch, it stayed in memory past its window on a node nobody asked again.
+SWEEP_SECONDS = 60
 # NR179 G2 (`ANSWER_JUDGE_RESERVE_SECONDS`): with a reserve set, every support-judge call is cut off this many seconds
 # before the job's deadline, which leaves the body's close, its re-check and its receipt that much time.
 JUDGE_RELEASE_MARGIN_SECONDS = 5
@@ -335,10 +340,31 @@ class AnswerService:
         # Lane OFF1N: whether the kept ended jobs were over KEPT_ENDED_BOUND at the last `_clean`, so the line is
         # written once each time the count goes over it, not on every ask and fetch.
         self._kept_over = False
+        # Lane OFF1N: the sweep that cleans while a kept job is in memory (`_sweep`; None while none runs), and the
+        # stop it waits on.
+        self._sweeper: threading.Thread | None = None
+        self._closed = threading.Event()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="permissions-answer")
 
     def close(self):
+        self._closed.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def _sweep(self):
+        """Lane OFF1N: `_clean` every SWEEP_SECONDS while a kept job is in memory, so an answer past its window leaves
+        this process without waiting for the next ask or fetch. Ends with the service, or once no kept job is left
+        (decided under the lock, so the next kept ask starts another). Nothing is read or written but this queue."""
+        try:
+            while not self._closed.wait(SWEEP_SECONDS):
+                with self._lock:
+                    self._clean(self.clock())
+                    if not any(job.keep_until is not None for job in self._jobs.values()):
+                        self._sweeper = None
+                        return
+        except Exception:  # noqa: BLE001 -- the next ask or fetch still cleans, as before the sweep
+            _log.warning("permissions answer keep: the sweep stopped")
+            with self._lock:
+                self._sweeper = None
 
     def _enabled(self):
         return switches.on(switches.ANSWERS) and switches.on(switches.MESSAGE_SEARCH)
@@ -397,7 +423,8 @@ class AnswerService:
 
     def _clean(self, now):
         """Drop every ended job past its keep window (`keep_end`), delivered or not: the only exit for a delivered
-        body. Then count the kept ones left (lane OFF1N): memory only, so a count over KEPT_ENDED_BOUND is logged."""
+        body. Run under the lock by every ask and fetch, and by the sweep while a kept job is in memory. Then count the
+        kept ones left (lane OFF1N): memory only, so a count over KEPT_ENDED_BOUND is logged."""
         kept = 0
         for key, job in list(self._jobs.items()):
             if job.state != "ended" or job.ended_at is None:
@@ -462,6 +489,14 @@ class AnswerService:
                     _active_delta(-1)
                     self._jobs.pop(answer_id, None)
                     raise
+                if keep_until is not None and self._sweeper is None and not self._closed.is_set():
+                    sweeper = threading.Thread(target=self._sweep, name="permissions-answer-keep", daemon=True)
+                    try:
+                        sweeper.start()
+                    except RuntimeError:   # no thread to be had: the ask is served, the next ask or fetch cleans
+                        _log.warning("permissions answer keep: the sweep did not start")
+                    else:
+                        self._sweeper = sweeper
             return self._signed(signed, AnswerPending(version=VERSION, state="pending", answer_id=answer_id))
         except AnswerBusy:
             raise

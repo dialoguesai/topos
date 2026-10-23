@@ -423,6 +423,84 @@ def test_more_than_five_hundred_kept_answers_log_one_counts_only_line(caplog):
         service.close()
 
 
+# --- the sweep ----------------------------------------------------------------------------------------------------
+
+def _gone(service, answer_id, seconds=5.0):
+    """Whether the job leaves the service within `seconds`, with no ask and no fetch in between."""
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if answer_id not in service._jobs:
+            return True
+        time.sleep(.01)
+    return False
+
+
+def test_an_expired_kept_answer_leaves_memory_without_another_ask_or_fetch(answers_node, service, monkeypatch):
+    """A kept answer can stay for days. Dropped only at the next ask or fetch, it stayed in memory past its window on
+    a node nobody asked again. The sweep drops it within SWEEP_SECONDS of its window's end (it was never served after
+    that either way: every ask and fetch cleans first)."""
+    monkeypatch.setattr(answer_release, "SWEEP_SECONDS", 0.02)
+    node = answers_node
+    keep_until = node.now[0] + DAY
+    answer_id = _ask(node, service, keep_until=keep_until)
+    job = _ended(service, answer_id)
+    assert _fetch(node, service, answer_id)["outcome"] == "answered"
+    node.now[0] = keep_until - 1
+    assert not _gone(service, answer_id, seconds=0.3)            # inside its window, many sweeps keep it
+    node.now[0] = keep_until
+    assert _gone(service, answer_id)                             # past it, with no ask and no fetch: dropped
+    assert job.body is None and job.question is None
+
+
+def test_the_sweep_runs_only_while_a_kept_job_is_in_memory(answers_node, service, monkeypatch):
+    monkeypatch.setattr(answer_release, "SWEEP_SECONDS", 0.02)
+    node = answers_node
+    live = _ask(node, service)
+    _ended(service, live)
+    assert service._sweeper is None                              # a live ask starts nothing: as before
+    kept = _ask(node, service, keep_until=node.now[0] + DAY)
+    sweeper = service._sweeper
+    assert sweeper is not None and sweeper.is_alive() and sweeper.daemon
+    _ended(service, kept)
+    node.now[0] += 2 * DAY                                       # both past their windows
+    assert _gone(service, kept) and _gone(service, live)
+    sweeper.join(timeout=5)
+    assert not sweeper.is_alive() and service._sweeper is None   # no kept job left: the sweep ended
+    _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))
+    assert service._sweeper is not None and service._sweeper is not sweeper and service._sweeper.is_alive()
+
+
+def test_a_sweep_that_cannot_start_leaves_the_kept_ask_served(answers_node, service, monkeypatch, caplog):
+    """Out of threads, the ask the ledger already admitted is still answered; cleaning waits for the next ask or
+    fetch, as before the sweep."""
+    import threading as real
+
+    class NoThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(answer_release, "threading", SimpleNamespace(Thread=NoThread, Lock=real.Lock, Event=real.Event))
+    caplog.set_level(logging.WARNING, logger=LOGGER)
+    node = answers_node
+    answer_id = _ask(node, service, keep_until=node.now[0] + DAY)
+    assert _fetch(node, service, _ended(service, answer_id).answer_id)["outcome"] == "answered"
+    assert service._sweeper is None
+    assert "permissions answer keep: the sweep did not start" in [record.getMessage() for record in caplog.records]
+
+
+def test_closing_the_service_ends_its_sweep(answers_node, service):
+    node = answers_node
+    _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))
+    sweeper = service._sweeper
+    assert sweeper.is_alive()
+    service.close()
+    sweeper.join(timeout=5)
+    assert not sweeper.is_alive()
+
+
 # --- deferred -----------------------------------------------------------------------------------------------------
 
 FETCH_LINE = re.compile(r"permissions answer fetch: outcome=([a-z_]+) reason=([a-z0-9_]+|-) seconds=\d+\.\d")
