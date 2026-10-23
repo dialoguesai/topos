@@ -294,7 +294,8 @@
   "truth_seed_fact",
   "update_routine_run",
   "upsert_home_chat_session",
-  "verify_claim"
+  "verify_claim",
+  "verify_claim_owner"
  ],
  "owner_only_message_types": [
   "calibration_answer",

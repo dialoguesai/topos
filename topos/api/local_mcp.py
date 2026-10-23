@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
 
 from ..auth import resolve_request_principal
 from ..core.handlers import handle_control_plane_request
@@ -66,6 +67,29 @@ async def local_verify_claim(
         "type": "verify_claim",
         "payload": {"statement": statement, "mode": "fun", "caller_app_id": app_id},
     }
+    out = await handle_control_plane_request(msg, principal=principal)
+    if out.get("status") == "error":
+        return {"status": "error", "error": out.get("error", "unknown")}
+    return out.get("payload", {})
+
+
+@router.post("/verify_claim_owner")
+async def local_verify_claim_owner(
+    request: Request,
+    response: Response,
+    principal=Depends(_truth_door("verify_claim_owner")),  # noqa: B008
+) -> dict:
+    """verify_claim v2, owner socket only (VERIFY_CLAIM_V2_DESIGN.md). Body: {"statement": "...", "context":
+    [{"speaker": "...", "text": "..."}], "said_at": "ISO 8601 with offset", "speaker": "owner", "effort": "high",
+    "deadline_s": 10}. The body is read only after the door has admitted the caller; errors never echo it."""
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(422, "invalid_truth_request", headers={"Cache-Control": "no-store"}) from None
+    response.headers["Cache-Control"] = "no-store"
+    correlation_id = str(uuid.uuid4())
+    response.headers["X-Request-ID"] = correlation_id
+    msg = {"id": correlation_id, "type": "verify_claim_owner", "payload": body if isinstance(body, dict) else {}}
     out = await handle_control_plane_request(msg, principal=principal)
     if out.get("status") == "error":
         return {"status": "error", "error": out.get("error", "unknown")}

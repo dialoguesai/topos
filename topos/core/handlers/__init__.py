@@ -457,6 +457,9 @@ OWNER_DOOR_OPEN_TYPES = frozenset({
     "ollama_install_status", "ollama_list_models", "ollama_pull_status",
     "routine_has_active_run", "tools_index_status", "tools_retrieve", "truth_prompts",
     "verify_claim", "llm_cancel",
+    # verify_claim v2: reads only; fixed node-written prompts (not an instruction sink); hosted model calls are
+    # wallet-gated; owner class only at the truth door.
+    "verify_claim_owner",
     # NOT here: tools_index rebuilds the tool index (INSERT OR REPLACE + DELETE with prune_missing,
     # features/signal/tool_index.py) — a write, and an instruction sink (security re-check N1).
 })
