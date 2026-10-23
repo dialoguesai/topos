@@ -1181,6 +1181,22 @@
           "consent": "prompt",
           "cost": "local embedding model only (MiniLM on CPU, 2 threads), no network, no LLM. Measured through this code path on 2,621 synthetic rows with the lengths of one node's backlog (7.06M characters, ~4,030 chunks) on a loaded Apple-silicon Mac (load average 8-10): 105-110 s including the model load, about 24 rows/s (37 chunks/s), 18-24 s per 500-row batch, and about 38 MB of database growth (~14 KB a row). Nodes with no ChatGPT rows queue nothing.",
           "order": 1
+        },
+        {
+          "id": "repair-derived-source-refs",
+          "kind": "engine_endpoint",
+          "title": "Point provenance refs that miss their record table at the table that holds the record",
+          "why": "A derived object (signal_objects) cites its evidence as source_refs [{table, record_id or id}]. Read-only on one node on 22 Oct 2026, refs to records that exist failed to resolve in the record table they name, and none of the misses was messages re-ingested under new ids: the scope materializer stamps every message_entities row conversation_messages whatever its source (696 refs whose record is in ai_chat_messages, activity_events or journal_entries); and facts extracted in July 2026 cite grow-journal location rows and GitHub commits as journal_entries, the commits as github:<repo>:<sha>, an id no table holds, where activity_events holds the same commit as github:push:<repo>:<sha> (255 refs in 6 facts). A follower that looks a ref up where it says found nothing and treated the object as untraceable. The sweep moves a ref naming a record table (conversation_messages, ai_chat_messages, journal_entries, activity_events, location_events, calendar_events, profile_records) that does not hold its id to the one record table that does, and a github: ref that resolves nowhere to the one GitHub event naming the same commit; only the table, and for a commit the id, change. A source label used as a table name (\"iMessage\" for conversation_messages, \"Grow Journal\" for journal_entries) is read as that table and never rewritten. It leaves alone, and counts, a ref that resolves, names another label or a derived table (a second hop, not a repair), has no id, matches in two places, names a source the matched row is not from, or matches nowhere. Nothing is deleted, closed or re-dated (updated_at stays). The scope materializer now cites the record's table, so it does not put the old name back. Review surface: source_refs_json stays in it (no REVIEW_SURFACE_EXCLUSIONS change), so a review pinning a rewritten object reads stale until its next pass and a share index naming a rewritten fact as a witness rebuilds once; on the measured node no active review pinned a rewritten object.",
+          "params": {
+            "method": "POST",
+            "path": "/v1/signal/provenance/repair-source-refs"
+          },
+          "consent": "auto",
+          "cost": "no LLM, no network; one read of signal_objects and point lookups by primary key, then one UPDATE per rewritten object inside one write transaction under the node's write gate (the permissions lineage-key triggers re-key each row)",
+          "progress": "GET /v1/upgrade/status; the CLI door is `python -m topos.features.lifecycle.source_ref_repair --db PATH [--dry-run]` (counts only; --dry-run opens the database read-only)",
+          "idempotent": "a moved ref resolves in its new table, so a second run finds nothing to do (tests/features/test_source_ref_repair.py); each UPDATE is compare-and-set on the stored refs",
+          "estimated_duration": "measured read-only on one live node (41,748 objects, 46,260 refs): the plan reads in ~0.3 s and would rewrite 951 refs in 702 objects (696 scope-mirror refs, 255 refs in 6 facts); seconds in all",
+          "order": 2
         }
       ],
       "notes": []
