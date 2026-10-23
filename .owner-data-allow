@@ -1,0 +1,5 @@
+# Exemptions from scripts/scan_repo_for_owner_data.py: hashes of (path, kind, term), never the term itself.
+# Each line needs a reason. Generate entries with --emit-allow.
+44a3662213aea547  generic engineering phrase about applying a database migration, in this repo's own public text since Sep-Oct 2026; it began matching on 23 Oct when a goal drawn from the owner's coding sessions on this repo joined the protected terms; not personal data
+775b01f76a925481  generic engineering phrase about applying a database migration, in this repo's own public text since Sep-Oct 2026; it began matching on 23 Oct when a goal drawn from the owner's coding sessions on this repo joined the protected terms; not personal data
+6cbfcced42f825d9  generic engineering phrase about applying a database migration, in this repo's own public text since Sep-Oct 2026; it began matching on 23 Oct when a goal drawn from the owner's coding sessions on this repo joined the protected terms; not personal data
