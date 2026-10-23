@@ -489,6 +489,73 @@ def sqlite_retry_busy(
     raise last
 
 
+#: A busy error faster than this did not wait out busy_timeout (30s), so it was
+#: never contention: SQLite skips the busy handler for a stale snapshot.
+_STALE_SNAPSHOT_MAX_S = 1.0
+
+
+def _main_database_file(conn: sqlite3.Connection) -> str:
+    """The file behind ``conn``'s main schema; "" for an in-memory or temp database."""
+    for row in conn.execute("PRAGMA database_list").fetchall():
+        if row[1] == "main":
+            return str(row[2] or "")
+    return ""
+
+
+def retry_stale_snapshot(
+    conn: sqlite3.Connection, fn: Callable[[sqlite3.Connection], T]
+) -> T:
+    """Run a gated write ``fn(conn)``; after an instant busy error, run it once on a fresh connection.
+
+    In WAL a connection's read snapshot lives as long as any statement on it is
+    unfinished, which includes a half-read cursor nobody can reach until the
+    cyclic GC frees it. When that connection then writes after another gated
+    writer has committed, SQLite cannot upgrade the stale snapshot and returns
+    SQLITE_BUSY_SNAPSHOT at once, without consulting busy_timeout, and Python
+    reports it as "database is locked". Holding the write gate does not help,
+    and neither does retrying on the same connection: the snapshot is still
+    pinned. ``rollback()`` releases it only on Python 3.10, where it resets
+    every statement on the connection; from 3.11 the pending read survives the
+    rollback. Reproduced on 2026-10-23 (3.10/SQLite 3.47 and 3.11–3.13/3.49);
+    an owner query lost its session row this way.
+
+    So the failed write's transaction is rolled back, and the write runs once
+    more on a new connection to the same file, which reads a current snapshot.
+    Not retried: a busy error that waited (that is contention), an error inside
+    a transaction the connection already had (a caller's batch the rollback
+    would discard), or an in-memory database (nothing to reopen). Call it with
+    the write gate held.
+    """
+    was_in_transaction = getattr(conn, "in_transaction", False)
+    started = time.monotonic()
+    try:
+        return fn(conn)
+    except sqlite3.OperationalError as exc:
+        if (
+            was_in_transaction
+            or not is_busy_error(exc)
+            or time.monotonic() - started >= _STALE_SNAPSHOT_MAX_S
+        ):
+            raise
+        conn.rollback()
+        path = _main_database_file(conn)
+        if not path:
+            raise
+        logger.warning(
+            "[WRITE_GATE] write at %s failed at once with a busy error (stale read snapshot on its "
+            "own connection); retrying once on a fresh connection",
+            _caller_site(),
+        )
+        busy_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+        fresh = sqlite3.connect(path, timeout=busy_ms / 1000.0, check_same_thread=False)
+        fresh.row_factory = conn.row_factory
+        register_connection(fresh)
+        try:
+            return fn(fresh)
+        finally:
+            unregister_connection(fresh)
+            fresh.close()
+
 def begin_immediate(conn: sqlite3.Connection) -> None:
     """``BEGIN IMMEDIATE`` with busy retry, clearing any leaked implicit transaction.
 
