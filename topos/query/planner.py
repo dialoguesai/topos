@@ -228,7 +228,10 @@ def _normalize_temporal_phrases(text: str) -> str:
 
 
 def _relative_match(query_text: str) -> Optional["re.Match[str]"]:
-    """The phrase `_relative_time_range` resolved, found in the same precedence order."""
+    """The phrase `_single_relative_time_range` resolved, found in the same precedence order.
+
+    When the sentence names several windows, the boundary word governing this phrase moves
+    their union span."""
     query_text = _normalize_temporal_phrases(query_text)
     match = re.search(r"\b(?:last|past) (\d{1,3}) (?:days|hours?)\b|\bpast month\b", query_text, re.I)
     if match:
@@ -298,6 +301,25 @@ def _explicit_time_range(query_text: str) -> Optional[Tuple[str, str]]:
 
 
 def _relative_time_range(query_text: str, now: datetime) -> Optional[Tuple[str, str]]:
+    """The relative window the sentence names, or the union span when it names several.
+
+    The single-window resolver below checks hours before days, so "the past 7 days ... the
+    past 24 hours separately" resolved to the last 24 hours wherever each phrase sat, and a
+    weekly recap was written from one day of evidence (measured 2026-10-22 on 1.5.15). A
+    sentence that names two or more distinct windows without asking for their difference
+    is a recall over all of them. A differenced ask keeps the first-match window here:
+    `build_query_plan` widens it from `_comparison_windows`, which this does not touch.
+    """
+    if not _COMPARE_RE.search(query_text):
+        windows = _all_relative_ranges(query_text, now)
+        if len(windows) >= 2:
+            return _union_span(windows)
+    return _single_relative_time_range(query_text, now)
+
+
+def _single_relative_time_range(query_text: str, now: datetime) -> Optional[Tuple[str, str]]:
+    """The first window the sentence names, in precedence order (hours, past month, days, then
+    the named periods). Right for one phrase; `_relative_time_range` decides when there are more."""
     query_text = _normalize_temporal_phrases(query_text)
     hours = re.search(r"\b(?:last|past) (\d{1,3}) hours?\b", query_text, re.I)
     if hours:
@@ -352,13 +374,13 @@ _WINDOW_LABELS = (WINDOW_BASELINE, WINDOW_CURRENT)
 def _all_relative_ranges(query_text: str, now: datetime) -> List[Tuple[str, str]]:
     """Every distinct relative window the sentence names, earliest first.
 
-    `_relative_time_range` returns the FIRST match and stops, which is right for a
+    `_single_relative_time_range` returns the FIRST match and stops, which is right for a
     single-window ask and is exactly why a differenced ask lost its other half.
     """
     query_text = _normalize_temporal_phrases(query_text)
     found: List[Tuple[str, str]] = []
     for match in re.finditer(r"\b(?:last|past) \d{1,3} hours?\b|\bpast month\b", query_text, re.I):
-        window = _relative_time_range(match.group(), now)
+        window = _single_relative_time_range(match.group(), now)
         if window:
             found.append(window)
     for match in re.finditer(r"\b(?:last|past) (\d{1,3}) days\b", query_text, re.I):
