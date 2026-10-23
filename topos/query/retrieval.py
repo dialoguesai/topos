@@ -5579,22 +5579,39 @@ def _index_row(table: str, record_id: str, *, conn: Optional[Any], canonical: Op
     return None
 
 
+def _index_current_texts(row: Dict[str, Any]) -> List[str]:
+    """The texts the embeddings job hashes for this row as it is NOW: `embeddable_content` of the row itself, and
+    of the row as `prepare_signal_record` hands it to the job. The two differ only for a row with no `content`
+    (a browser visit, a calendar event with a description or category, a profile record with an organization, a
+    location): the prepared copy carries the one-line summary (title alone, "[category] title", "@ place") where
+    the bare row joins its descriptive fields with " — ". Every ingest path prepares; the activity reload path
+    does not, so a stored hash may be either. Both are renderings of the current fields and nothing else, so a
+    match to either proves the stored text is current. A rendering that cannot be built is left out."""
+    from ..enrichment.jobs.canonical.brief_fallback import prepare_signal_record
+    from ..features.signal.embed_context import embeddable_content
+
+    texts: List[str] = []
+    for render in (dict, prepare_signal_record):
+        try:
+            text = embeddable_content(render(dict(row)))
+        except Exception:  # noqa: BLE001 -- a rendering that cannot be built proves nothing
+            continue
+        if text and text not in texts:
+            texts.append(text)
+    return texts
+
+
 def _index_text_current(row: Optional[Dict[str, Any]], content_hash: Any) -> bool:
     """True only when the index hit's stored text was embedded from the row's current text: its `content_hash`
-    (the embeddings job's sha256 of `embeddable_content`) equals the row's. A row rewritten since it was embedded
-    (an edit, a re-capture, a re-import, a merged reply) keeps its old chunk and stored text until something
-    re-embeds it; below the owner's tier that text must not be served (lane 194). No hash, no pass."""
+    (the embeddings job's sha256 of `embeddable_content`) equals the hash of one of the row's current renderings
+    (`_index_current_texts`). A row rewritten since it was embedded (an edit, a re-capture, a re-import, a merged
+    reply) keeps its old chunk and stored text until something re-embeds it; below the owner's tier that text must
+    not be served (lane 194). No hash, no row, no text: no pass."""
     import hashlib
-
-    from ..features.signal.embed_context import embeddable_content
 
     if not row or not isinstance(content_hash, str) or not content_hash:
         return False
-    try:
-        text = embeddable_content(row)
-    except Exception:  # noqa: BLE001 -- a row whose text cannot be read is not a pass
-        return False
-    return bool(text) and hashlib.sha256(text.encode("utf-8")).hexdigest() == content_hash
+    return any(hashlib.sha256(text.encode("utf-8")).hexdigest() == content_hash for text in _index_current_texts(row))
 
 
 def _index_hits_inside_grant(
@@ -8225,6 +8242,9 @@ class DefaultSignalRetrievalAdapter:
                 disclosure_tier=request.disclosure_tier,
                 canonical=self._adapters.canonical,
             )
+            # Lane 194: the stored text's hash rode along on the hit for that gate alone. Dropped here at
+            # every tier, so the owner's packet is the one it was before the hash was carried.
+            semantic_hits = [_without_content_hash(hit) for hit in semantic_hits]
             # TOPOS_EVIDENCE_SHAPING: the wider pool fetched above is cut back to the
             # lane's size here, after the grant filter, so the packet and the fused list
             # see the same hits. Off, this returns the list untouched.

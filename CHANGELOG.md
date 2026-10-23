@@ -18,7 +18,11 @@ The machine-readable twin of each release is
   sha256 of the record's embeddable text) matches the row's current text; otherwise the node embeds the current
   text within its per-build budget, or the line is matched by its words alone. No stored vector lacks a hash
   today. Below the owner's tier the vector and recent lanes of a query also drop a hit whose stored text no longer
-  matches its row, so a grantee never reads a line's pre-edit words (the stored copy those lanes hand out). Every
+  matches its row, so a grantee never reads a line's pre-edit words (the stored copy those lanes hand out). A row
+  with no `content` (a browser visit, a calendar event, a profile record, a location) is embedded from its one-line
+  summary, or from its bare fields on an activity reload: the check accepts the hash of either rendering of the
+  row's current fields, so an unedited row of those kinds keeps its vector and recent lanes. The owner's lanes are
+  unchanged, and the hash never leaves the gate at any tier. Every
   share index carries the new rule in its basis (`search_index.MEMBER_VECTORS`): after the upgrade each share's index
   is stale once and rebuilt, and the share answers nothing for those minutes. Still open: a vector also encodes the
   record's header (people, place, date), which the hash does not cover; re-embedding rows whose text changed after
