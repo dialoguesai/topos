@@ -48,9 +48,20 @@ KINDS = ("did_or_made", "setup", "opinion", "not_checkable")
 #: What kind of thing the turn asserts (VERIFY_CLAIM_CATEGORIES.md). "meta" and "world" are refused at the reader.
 CATEGORIES = ("did", "state", "view", "feel", "people", "plan", "have", "count", "meta", "world")
 MAX_CLAIMS = 3
-#: Effort: "low" checks the main claim with one judge call and no tie-break; "high" checks every claim (up to
-#: MAX_CLAIMS, in parallel) with both orders and the tie-break.
-EFFORTS = {"low": {"claims": 1, "orders": 1, "tiebreak": False}, "high": {"claims": MAX_CLAIMS, "orders": 2, "tiebreak": True}}
+#: Effort: "low" checks the main claim; "high" checks every claim (up to MAX_CLAIMS, in parallel). Each claim gets one
+#: judge look plus the role and period rules. The stage ladder on the owner's development rows (23 Oct 2026) showed
+#: the rules are the only layer that removes wrong support, while requiring two looks to agree removed true support
+#: only (yes 15 -> 9 of 34) and the tie-break handed back the wrong supports agreement had removed.
+#: ``AGREEMENT`` restores the old shape at effort high: both orders must agree, a split record gets one call alone.
+AGREEMENT = False
+
+
+def efforts() -> Dict[str, Dict[str, Any]]:
+    high = {"claims": MAX_CLAIMS, "orders": 2, "tiebreak": True} if AGREEMENT else {"claims": MAX_CLAIMS, "orders": 1, "tiebreak": False}
+    return {"low": {"claims": 1, "orders": 1, "tiebreak": False}, "high": high}
+
+
+EFFORTS = efforts()
 WHY_NOT = ("question", "not_about_the_owner", "plan_or_intention", "about_the_call_itself", "fragment", "too_vague")
 SUBJECTS = ("owner", "someone_else", "both")
 ROLES = ("authored", "addressed", "participated", "observed", "ambient", "derived")
@@ -690,8 +701,9 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
     deadline = started + max(0.5, float(req.deadline_s or DEFAULT_DEADLINE_S))
     left = lambda: deadline - time.perf_counter()
     usage = Usage()
-    effort = EFFORTS.get(req.effort) or EFFORTS["high"]
-    out: Dict[str, Any] = {"version": VERSION, "model": getattr(chat, "name", "custom"), "effort": req.effort if req.effort in EFFORTS else "high",
+    levels = efforts()
+    effort = levels.get(req.effort) or levels["high"]
+    out: Dict[str, Any] = {"version": VERSION, "model": getattr(chat, "name", "custom"), "effort": req.effort if req.effort in levels else "high",
                            "verdict": None, "reason": None, "category": None, "claim": None, "claims": [], "evidence": [], "cited_roles": [],
                            "stages": {}, "timings_ms": {}}
     t = time.perf_counter()

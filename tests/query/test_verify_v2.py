@@ -104,10 +104,14 @@ def test_select_evidence_as_of_quote_and_dedupe():
     assert [e["ref"] for e in shown] == ["journal_entries:r2"] and dropped == {"as_of": 1, "quoting": 1}
 
 
-def test_supported_with_role_and_both_calls_agreeing():
+def test_supported_with_role_and_both_calls_agreeing(monkeypatch):
+    monkeypatch.setattr(v2, "AGREEMENT", True)
     out = run([rec(1, "ambient"), rec(2, "authored")], FakeChat(read_reply(), {1: "shows", 2: "shows"}))
     assert out["verdict"] == "supported" and out["cited_roles"] == ["ambient", "authored"]
     assert out["claim"]["kind"] == "did_or_made" and out["usage"]["model_calls"] == 3
+    monkeypatch.setattr(v2, "AGREEMENT", False)
+    out = run([rec(1, "ambient"), rec(2, "authored")], FakeChat(read_reply(), {1: "shows", 2: "shows"}))
+    assert out["verdict"] == "supported" and out["usage"]["model_calls"] == 2  # one look per claim
     assert set(out["timings_ms"]) >= {"gate", "read", "retrieve", "judge", "total"}
 
 
@@ -148,7 +152,17 @@ def test_effort_low_checks_the_main_claim_with_one_judge_call():
     assert out["verdict"] == "supported" and out["effort"] == "low" and out["usage"]["model_calls"] == 2  # read + one order
     assert len(out["claims"]) == 1 and out["stages"]["judge"]["orders"] == 1
     out = run([rec(1, "authored")], FakeChat(reply, {1: "shows"}), effort="high")
-    assert out["usage"]["model_calls"] == 5 and len(out["claims"]) == 2 and out["stages"]["judge"]["orders"] == 2
+    assert out["usage"]["model_calls"] == 3 and len(out["claims"]) == 2 and out["stages"]["judge"]["orders"] == 1  # read + one look per claim
+
+
+def test_agreement_switch_restores_two_orders_and_the_tie_break_at_effort_high(monkeypatch):
+    monkeypatch.setattr(v2, "AGREEMENT", True)
+    out = run([rec(1, "authored"), rec(2, "authored")], SplitChat("shows"), effort="high")
+    assert out["verdict"] == "supported" and out["stages"]["judge"]["orders"] == 2 and out["stages"]["judge"]["tiebroken"] == 1
+    assert out["usage"]["model_calls"] == 4
+    monkeypatch.setattr(v2, "AGREEMENT", False)
+    out = run([rec(1, "authored"), rec(2, "authored")], SplitChat("shows"), effort="high")
+    assert out["stages"]["judge"]["orders"] == 1 and out["stages"]["judge"]["tiebroken"] == 0 and out["usage"]["model_calls"] == 2
 
 
 def test_no_records_is_no_evidence():
@@ -264,7 +278,8 @@ class SplitChat(FakeChat):
 
 
 @pytest.mark.parametrize("alone, verdict, reason", [("shows", "supported", None), ("related", "no_evidence", "judges_disagree")])
-def test_a_split_record_is_decided_by_one_call_on_it_alone(alone, verdict, reason):
+def test_a_split_record_is_decided_by_one_call_on_it_alone(alone, verdict, reason, monkeypatch):
+    monkeypatch.setattr(v2, "AGREEMENT", True)
     out = run([rec(1, "authored"), rec(2, "authored")], SplitChat(alone))
     assert out["verdict"] == verdict and out.get("reason") == reason
     assert out["usage"]["model_calls"] == 4 and out["stages"]["judge"]["tiebroken"] == (1 if alone == "shows" else 0)
@@ -406,6 +421,7 @@ class ListChat(FakeChat):
 
 def test_the_list_judge_counts_only_the_numbers_both_calls_name(monkeypatch):
     monkeypatch.setattr(v2, "JUDGE_OUTPUT", "list")
+    monkeypatch.setattr(v2, "AGREEMENT", True)
     out = run([rec(1, "authored"), rec(2, "authored")], ListChat(read_reply(), {1: "shows", 2: "related"}))
     assert out["verdict"] == "supported" and [e["n"] for e in out["evidence"] if e["cited"]] == [1]
     assert out["usage"]["model_calls"] == 3
@@ -457,6 +473,7 @@ def test_local_caps_the_reply_the_same_way(monkeypatch):
 
 def test_sharded_judge_labels_every_record_across_parallel_calls(monkeypatch):
     monkeypatch.setattr(v2, "JUDGE_SHARD", 2)
+    monkeypatch.setattr(v2, "AGREEMENT", True)
     seen = []
 
     class Recording(FakeChat):
