@@ -9,6 +9,25 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **A shared line that was edited no longer ranks by its old words.** `[P]` A share's search index took every
+  vector stored for a line, whatever text it was built from. A line rewritten after it was embedded (an edit, a
+  re-capture, a re-import, a merged reply) came back into the index with its old chunks, so a recipient's query
+  made only of words the line no longer holds still found it. On a copy of a live store on 22 Oct, 309 of 4,000
+  sampled AI-chat rows with a vector and 168 of 597 journal rows carried chunks for text they no longer hold
+  (iMessage: 0 of 3,998). The index now takes a stored chunk only when its `content_hash` (the embeddings job's
+  sha256 of the record's embeddable text) matches the row's current text; otherwise the node embeds the current
+  text within its per-build budget, or the line is matched by its words alone. No stored vector lacks a hash
+  today. Below the owner's tier the vector and recent lanes of a query also drop a hit whose stored text no longer
+  matches its row, so a grantee never reads a line's pre-edit words (the stored copy those lanes hand out). A row
+  with no `content` (a browser visit, a calendar event, a profile record, a location) is embedded from its one-line
+  summary, or from its bare fields on an activity reload: the check accepts the hash of either rendering of the
+  row's current fields, so an unedited row of those kinds keeps its vector and recent lanes. The owner's lanes are
+  unchanged, and the hash never leaves the gate at any tier. Every
+  share index carries the new rule in its basis (`search_index.MEMBER_VECTORS`): after the upgrade each share's index
+  is stale once and rebuilt, and the share answers nothing for those minutes. Still open: a vector also encodes the
+  record's header (people, place, date), which the hash does not cover; re-embedding rows whose text changed after
+  they were embedded is a separate change.
+
 - **Retrieval: source-blind evidence shaping, behind a switch that is off by default** (`TOPOS_EVIDENCE_SHAPING`). `[O]` Four rules that read relevance, text, conversation identity and time, never which connector a row came from, and set no per-source quota. (1) The vector lane fetches 60 hits (`TOPOS_EVIDENCE_POOL`) and groups them by conversation, or by a 30-minute session when a row has none; it keeps the ranker's order and at most two passages of each conversation, and fills the freed slots from deeper in the pool. `TOPOS_EVIDENCE_GROUP_ORDER=groups` instead puts every conversation's best passage first, ordered by best hit plus a small lift per supporting hit; measured with the vector-head pin on, that moved the ranker's second hit out of the pin when it shared the first hit's conversation, and AI-chat known-item answers were lost, so it is not the default. (2) Near-duplicate hits (word-shingle Jaccard ≥ 0.8) keep the better-ranked copy. (3) A hit the wider pool adds beyond the lane's own 20 is dropped when its cosine is more than 0.15 below the best (calibrated split-half for all-MiniLM-L6-v2); the ranker's own 20 are never cut. (4) In the fused summary list, items only derived lanes contributed (stats, facts, dossiers, edges, derived objects, goals, briefs, clusters) hold at most half of every prefix while record evidence remains; derived items keep their order, with no records left they fill the list, and an entity mention counts as a reference to its record. Conversation ids are looked up inside the module and never put on a hit. Measured on the owner's snapshot (112 questions, 548 turns, k = 20, on top of the vector-head pin): no family lost a known-item hit or conversation on any scope, at k = 20 or the answer step's 12; cross-source known-item hit@20 rose from 0.36 to 0.39–0.40 (AI coding on facts and topics 0.50 to 0.60), browser on `activity:read` from 0.45 to 0.50, iMessage conversations found on `messages:read` from 0.20 to 0.30; week-window conversations found rose or held in every cell; every top-5 derived item stayed in the top 20; record items went from 19% to 41% of the top 20. The vector lane's own list, which no answer reads, drops a third passage of a kept conversation in 4 of 548 turns. Off, the code path is unchanged (a scored run before the vector-head pin landed matched main on all 548 ranked lists). iMessage known-item answers cannot move until its rows are embedded. No migration or reprocess.
 
 ### Fixed

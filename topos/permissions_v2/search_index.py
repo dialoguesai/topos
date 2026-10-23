@@ -350,11 +350,17 @@ def light_change(old: dict, new: dict) -> bool:
     return heavy(old) == heavy(new)
 
 
+#: Lane 194: which stored vectors a member may carry. In every basis, so an index built before the rule (when a member
+#: took any stored chunk, including one embedded from text its row no longer holds) is stale once and rebuilt.
+MEMBER_VECTORS = "text-hash/194"
+
+
 def basis_of(authority, *, clock, boundary_revision=None) -> dict:
     return {"format": FORMAT, "grant_id": authority.grant_id, "assignment_id": authority.assignment_id,
             "grant_generation": authority.grant_generation, "assignment_generation": authority.assignment_generation,
             "policy_hash": authority.policy_hash, "protection_revision": authority.protection_revision,
-            "clock_id": clock[0], "clock_generation": clock[1], "entity_boundary_revision": boundary_revision}
+            "clock_id": clock[0], "clock_generation": clock[1], "entity_boundary_revision": boundary_revision,
+            "member_vectors": MEMBER_VECTORS}
 
 
 def seal(key: bytes, opaque_id: str, value: dict) -> bytes:
@@ -432,6 +438,18 @@ def _live_journal_rows(conn, member: dict):
     facts = [conn.execute("SELECT * FROM signal_objects WHERE object_id=?", (fact_id,)).fetchmany(2)
              for fact_id in member.get("facts", ())]
     return rows, facts
+
+
+def _embedded_content_hash(row) -> str | None:
+    """The `signal_embeddings.content_hash` a vector of this row's current text carries: the embeddings job's
+    sha256 of `embeddable_content` (embeddings_job._content_hash). None when the row has no embeddable text, so no
+    stored vector can match it."""
+    from topos.features.signal.embed_context import embeddable_content
+    try:
+        text = embeddable_content(dict(row))
+    except Exception:  # noqa: BLE001 -- an unreadable row has no vector it can claim
+        return None
+    return hashlib.sha256(text.encode("utf-8")).hexdigest() if text else None
 
 
 def _member_fingerprint(rows, facts, table: str = "conversation_messages") -> str | None:
@@ -1511,10 +1529,18 @@ class SearchIndexService:
             vectors = []
             if has_embeddings and model and not projection and interest is None:
                 from topos.features.signal.vector_codec import decode_vector
-                for blob, fmt in conn.execute(
-                        "SELECT vector_blob, vector_format FROM signal_embeddings WHERE source_id=? AND record_id=? "
-                        "AND model=? AND vector_blob IS NOT NULL ORDER BY chunk_index", (identity.source_id,
-                        identity.record_id, model)):
+                # A stored vector serves only the text it was built from: the embeddings job seals each chunk with
+                # sha256(embeddable_content(record)) of its parent. A row rewritten since (an edit, a re-capture, a
+                # re-import, a merged reply) keeps its old chunks until something re-embeds it, and a member built on
+                # them would rank by words the row no longer holds (review of 22 Oct 2026, DR-34 residual (i)). Old
+                # chunks past the new text's count carry the old hash too. No hash, no vector.
+                current_hash = _embedded_content_hash(row)
+                for blob, fmt, stored_hash in conn.execute(
+                        "SELECT vector_blob, vector_format, content_hash FROM signal_embeddings WHERE source_id=? "
+                        "AND record_id=? AND model=? AND vector_blob IS NOT NULL ORDER BY chunk_index",
+                        (identity.source_id, identity.record_id, model)):
+                    if current_hash is None or stored_hash != current_hash:
+                        continue
                     try:
                         vectors.append([float(value) for value in decode_vector(blob, fmt or "json")])
                     except Exception:  # noqa: BLE001 -- an undecodable vector is simply absent
