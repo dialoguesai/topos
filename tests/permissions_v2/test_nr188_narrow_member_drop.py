@@ -85,6 +85,13 @@ def narrow(monkeypatch):
 
 
 @pytest.fixture
+def own_row_edits_off(monkeypatch):
+    # DR-34 is on by default since 1.5.16 (owner ruling 22 Oct 2026). The two pins that use this keep 1.5.15's
+    # whole-index drop for an own-row edit, with the switch named off; their assertions are unchanged.
+    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS", "false")
+
+
+@pytest.fixture
 def off(monkeypatch):
     """The switch set off: main's whole-index drop (the default is on since the owner's ruling of 16 Oct)."""
     monkeypatch.setenv(NARROW, "false")
@@ -814,7 +821,7 @@ def test_ai_chat_a_new_owner_turn_withholds_the_line_next_to_it(ai_share, caplog
     assert refused is None and output["records"] == []          # served, holding nothing it may not
 
 
-def test_ai_chat_a_rewritten_stored_row_still_drops_the_whole_index(ai_share, caplog, narrow):
+def test_ai_chat_a_rewritten_stored_row_still_drops_the_whole_index(ai_share, caplog, narrow, own_row_edits_off):
     """A re-sent row whose stored columns moved (here its metadata) is a change to indexed evidence: its dependency
     moved, and so did its own fingerprint, which no narrowing forgives."""
     _ai(ai_share, "UPDATE ai_chat_messages SET metadata_json='{\"captured\": 2}' WHERE message_id='m-line'")
@@ -1011,7 +1018,8 @@ def test_ai_chat_a_posture_change_withholds_every_line_of_its_source_at_once(ai_
     ("UPDATE ai_chat_messages SET content_nsfw=1 WHERE message_id='m-line'",
      ["message search index member drift (dependencies: row_revision)", "message search index stale (fingerprint)"]),
 ], ids=["edit", "delete", "reflag"])
-def test_ai_chat_an_edited_deleted_or_reflagged_line_drops_the_whole_index(ai_share, caplog, narrow, change, said):
+def test_ai_chat_an_edited_deleted_or_reflagged_line_drops_the_whole_index(ai_share, caplog, narrow, own_row_edits_off,
+                                                                             change, said):
     """The edit and the re-flag move the line's dependency cleanly (a narrow failure so far) and then its own
     fingerprint, which no narrowing forgives; the delete fails its dependency's load. All three drop the index."""
     _ai(ai_share, change)
