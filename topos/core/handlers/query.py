@@ -145,12 +145,13 @@ async def handle_verify_claim_owner(message: Dict[str, Any]) -> Optional[Dict[st
     if request is None:
         return {"id": req_id, "status": "error", "error": "invalid_truth_request"}
     from ...query.verify_v2 import VERSION, verify_owner_claim
-    from ...query.verify_v2_models import chat_for_setting
+    from ...query.verify_v2_models import chat_for_setting, judges_for_setting
     from .common import run_db_read
 
     try:
         result = await asyncio.wait_for(
-            verify_owner_claim(request, chat=chat_for_setting(), gather_in_worker=run_db_read, to_thread=asyncio.to_thread),
+            verify_owner_claim(request, chat=chat_for_setting(), judges=judges_for_setting(), gather_in_worker=run_db_read,
+                               to_thread=asyncio.to_thread),
             timeout=request.deadline_s + 2.0,
         )
     except asyncio.TimeoutError:

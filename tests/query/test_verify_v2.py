@@ -334,3 +334,47 @@ def test_the_reader_is_told_the_scope_the_request_asked_for():
     (own, own_enum), (others, others_enum) = seen  # one reader call each; no records, no judge
     assert own is v2.READ_SYSTEM and "not_about_the_owner" in own_enum
     assert others is v2.READ_SYSTEM_WITH_OTHERS and "not_about_the_owner" not in others_enum
+
+
+class LabelChat(FakeChat):
+    """A judge that labels only; ``fail`` makes it unavailable."""
+
+    def __init__(self, labels=None, fail=False):
+        super().__init__(None, labels, fail=fail)
+
+
+@pytest.mark.parametrize("first, second, verdict, reason", [
+    (LabelChat({1: "shows"}), LabelChat({1: "related"}), "supported", None),         # either judge's agreed pair counts
+    (LabelChat({1: "related"}), LabelChat({1: "related"}), "no_evidence", "no_record_shows_it"),
+    (LabelChat(fail=True), LabelChat({1: "shows"}), "supported", None),             # one judge down: the other decides
+    (LabelChat(fail=True), LabelChat(fail=True), "unable", "model_unavailable:http_503"),
+])
+def test_two_judges_count_a_record_either_one_shows(first, second, verdict, reason):
+    async def gather(fn):
+        return [rec(1, "authored")], {"candidates": 1, "aggregates_skipped": 0, "facts_expanded": 0, "derived": 0}
+    request = v2.ClaimRequest(statement=SENTENCE, said_at="2026-10-07T19:47:36-05:00")
+    out = asyncio.run(v2.verify_owner_claim(request, chat=FakeChat(read_reply()), judges=[first, second], gather_in_worker=gather,
+                                            to_thread=asyncio.to_thread))
+    assert out["verdict"] == verdict and out.get("reason") == reason
+    if verdict != "unable":
+        assert out["stages"]["judge"]["judges"] == 2
+
+
+def test_hosted_setting_adds_a_second_judge_only_when_configured(monkeypatch):
+    from topos.query import verify_v2_models as m
+
+    monkeypatch.setattr(m.HostedChat, "__init__", lambda self, model=None, **k: setattr(self, "model", model or m.DEFAULT_HOSTED_MODEL)
+                        or setattr(self, "_key", "k"))
+    monkeypatch.delenv("TOPOS_VERIFY_V2_MODEL", raising=False)
+    monkeypatch.delenv("TOPOS_VERIFY_V2_SECOND_JUDGE", raising=False)
+    assert [j.model for j in m.judges_for_setting()] == [m.DEFAULT_HOSTED_MODEL]
+    monkeypatch.setenv("TOPOS_VERIFY_V2_SECOND_JUDGE", m.SECOND_JUDGE_MODEL)
+    assert [j.model for j in m.judges_for_setting()] == [m.DEFAULT_HOSTED_MODEL, m.SECOND_JUDGE_MODEL]
+    monkeypatch.setenv("TOPOS_VERIFY_V2_MODEL", "local")
+    assert [type(j).__name__ for j in m.judges_for_setting()] == ["LocalChat"]
+
+
+def test_verify_names_its_hosted_models_directly():
+    from topos.query.verify_v2_models import SECOND_JUDGE_MODEL, HostedChat
+
+    assert HostedChat(model=SECOND_JUDGE_MODEL, api_key="k", base_url="https://example.invalid/v1").model == SECOND_JUDGE_MODEL

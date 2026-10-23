@@ -20,6 +20,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 DEFAULT_HOSTED_MODEL = "meta-llama/llama-3.3-70b-instruct"
+#: An optional second hosted judge: the owner's Topos Secure replacement for the unrouted gpt-oss-20b (OD-55,
+#: 30 Sep 2026). Off unless ``TOPOS_VERIFY_V2_SECOND_JUDGE`` names it: on the owner's development rows it added true
+#: and false support at about the same rate and cost ~2 s of judge time.
+SECOND_JUDGE_MODEL = "openai/gpt-oss-120b"
+#: Hosted models verify may name directly; anything else goes through the enrichment adapter's own allowlist.
+VERIFY_HOSTED_MODELS = frozenset({DEFAULT_HOSTED_MODEL, SECOND_JUDGE_MODEL})
 DEFAULT_LOCAL_MODEL = "qwen3.5:9b-mlx"
 SEED = 7
 
@@ -69,7 +75,9 @@ class HostedChat:
 
     name = "hosted"
 
-    def __init__(self, model: Optional[str] = None, api_key: Optional[str] = None, base_url: Optional[str] = None):
+    def __init__(self, model: Optional[str] = None, api_key: Optional[str] = None, base_url: Optional[str] = None,
+                 options: Optional[Dict[str, Any]] = None):
+        self._options = dict(options or {})  # extra request fields, e.g. {"reasoning_effort": "low"}
         if api_key is None or base_url is None:
             from ..config.settings import settings
 
@@ -77,7 +85,7 @@ class HostedChat:
             base_url = base_url or str(getattr(settings, "red_pill_api_base", None) or "https://api.redpill.ai/v1")
         from ..engine.backends.redpill import resolve_redpill_model
 
-        self.model = resolve_redpill_model(model or DEFAULT_HOSTED_MODEL)
+        self.model = model if model in VERIFY_HOSTED_MODELS else resolve_redpill_model(model or DEFAULT_HOSTED_MODEL)
         self._key, self._base = api_key.strip(), base_url.rstrip("/")
         self._schema_mode = True
 
@@ -99,7 +107,7 @@ class HostedChat:
         if not self._wallet_allows():
             raise ModelUnavailable("insufficient_credits")
         messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-        body: Dict[str, Any] = {"model": self.model, "temperature": 0, "seed": SEED, "messages": messages}
+        body: Dict[str, Any] = {"model": self.model, "temperature": 0, "seed": SEED, "messages": messages, **self._options}
         if self._schema_mode:
             body["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema, "strict": True}}
         else:
@@ -142,6 +150,15 @@ class LocalChat:
             return _parse(reply["message"]["content"])
         except (KeyError, TypeError):
             raise ModelUnavailable("bad_reply") from None
+
+
+def judges_for_setting() -> list:
+    """The judges for the owner's setting: the reader's own model, plus a second hosted model when one is configured."""
+    reader = chat_for_setting()
+    if not isinstance(reader, HostedChat):
+        return [reader]
+    second = os.environ.get("TOPOS_VERIFY_V2_SECOND_JUDGE", "").strip()
+    return [reader] + ([HostedChat(model=second)] if second and second != reader.model else [])
 
 
 def chat_for_setting() -> Any:

@@ -447,7 +447,33 @@ def select_evidence(records, sentence: str, claim: Claim, now: datetime):
 
 
 # --- stage 4: judge -------------------------------------------------------------------------------------------------
-def judge(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: float) -> Dict[str, Any]:
+def judge(claim: Claim, evidence, chat, usage: Usage, timeout: float) -> Dict[str, Any]:
+    """One judge (a chat callable) or several (a sequence of them). With several, each runs its own opposite-order pair
+    in parallel and a record counts when any judge's own pair agrees and the rules accept it: different models miss
+    different records, so the union finds more without loosening any one judge's agreement rule."""
+    judges = list(chat) if isinstance(chat, (list, tuple)) else [chat]
+    if len(judges) == 1:
+        return _judge_one(claim, evidence, judges[0], usage, timeout)
+    results, failures = [], []
+    with ThreadPoolExecutor(max_workers=len(judges)) as pool:
+        futures = [pool.submit(_judge_one, claim, evidence, j, usage, timeout) for j in judges]
+        for f in futures:
+            try:
+                results.append(f.result())
+            except ModelUnavailable as exc:
+                failures.append(exc)
+    if not results:  # every judge failed: refuse, never guess
+        raise failures[0]
+    cites = sorted(set().union(*(r["cites"] for r in results)))
+    agreed = sorted(set().union(*(r["agreed_ns"] for r in results)))
+    reasons = {r["reason"] for r in results}
+    reason = None if cites else next(x for x in ("shows_failed_rules", "judges_disagree", "no_record_shows_it") if x in reasons)
+    return {"cites": cites, "agreed_ns": agreed, "agreed": len(agreed), "tiebroken": sum(r["tiebroken"] for r in results),
+            "rejections": sorted(x for r in results for x in r["rejections"]), "reason": reason,
+            "judges": len(judges), "judges_failed": len(failures), "judge_cites": [len(r["cites"]) for r in results]}
+
+
+def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: float) -> Dict[str, Any]:
     when = f"{claim.date_from} to {claim.date_to}" if claim.date_from else "not stated"
     about = "someone other than the owner" if claim.subject == "someone_else" else "the owner"
     head = f"Claim ({claim.kind}, about {about}): {claim.text}\nTime: {when}\n\nExcerpts:\n"
@@ -503,9 +529,10 @@ def respond(out: Dict[str, Any], started: float, usage: Usage) -> Dict[str, Any]
     return out
 
 
-async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_thread) -> Dict[str, Any]:
+async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_thread, judges=None) -> Dict[str, Any]:
     """Run the stages under one deadline. ``gather_in_worker(fn)`` runs ``fn(conn)`` on a DB worker's own connection
-    (the node passes ``run_db_read``); ``to_thread(fn, *a)`` runs a blocking model call off the loop."""
+    (the node passes ``run_db_read``); ``to_thread(fn, *a)`` runs a blocking model call off the loop. ``chat`` reads the
+    claim; ``judges`` (default: ``chat`` alone) labels the evidence."""
     started = time.perf_counter()
     deadline = started + max(0.5, float(req.deadline_s or DEFAULT_DEADLINE_S))
     left = lambda: deadline - time.perf_counter()
@@ -544,9 +571,10 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
         if left() <= 1.0:
             return respond(unable("deadline", out), started, usage)
         t = time.perf_counter()
-        verdict = await to_thread(judge, claim, evidence, chat, usage, left())
+        verdict = await to_thread(judge, claim, evidence, judges or chat, usage, left())
         out["timings_ms"]["judge"] = round((time.perf_counter() - t) * 1000, 1)
-        out["stages"]["judge"] = {"agreed": verdict["agreed"], "tiebroken": verdict["tiebroken"], "rejections": verdict["rejections"]}
+        out["stages"]["judge"] = {"agreed": verdict["agreed"], "tiebroken": verdict["tiebroken"], "rejections": verdict["rejections"],
+                                  "judges": verdict.get("judges", 1), "judges_failed": verdict.get("judges_failed", 0)}
         cited = set(verdict["cites"])
         agreed = set(verdict["agreed_ns"])
         out["evidence"] = [{**e, "cited": e["n"] in cited, "agreed": e["n"] in agreed} for e in evidence]
