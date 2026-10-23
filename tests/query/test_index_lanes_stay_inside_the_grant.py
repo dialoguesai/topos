@@ -30,6 +30,13 @@ import topos.core.handlers as hub
 from topos.core.handlers import handle_control_plane_request
 from topos.principal import OWNER_APP, THIRD_PARTY, Principal
 
+
+def _hash(text: str) -> str:
+    """The content_hash the embeddings job seals a chunk of `text` with (lane 194)."""
+    import hashlib
+    from topos.features.signal.embed_context import embeddable_content
+    return hashlib.sha256(embeddable_content({"content": text}).encode("utf-8")).hexdigest()
+
 #: A journal export installed for the journal and its place children, as a runtime source.
 SHARED_SOURCE = "fieldnotes_journal_export"
 TOKENS = ("INDEXPLAIN", "INDEXFLAGGED", "INDEXJOURNAL", "INDEXPLACE")
@@ -221,12 +228,15 @@ def test_a_hit_is_kept_only_when_its_row_shows_it_is_unflagged():
     from topos.storage.adapters.fakes import InMemoryCanonicalStore
 
     store = InMemoryCanonicalStore()
-    store.upsert("conversation_messages", {"record_id": "plain", "content_nsfw": 0})
-    store.upsert("conversation_messages", {"record_id": "flagged", "content_nsfw": 1})
-    store.upsert("conversation_messages", {"record_id": "no-flag-column"})
+    # Lane 194: every row has text and every hit the content_hash of it, as a real index chunk does, so this test
+    # still reaches the flag branches; the stale-text branch is pinned in tests/query/test_index_text_current_194.py.
+    text = "an invented line for the flag branches"
+    store.upsert("conversation_messages", {"record_id": "plain", "content_nsfw": 0, "content": text})
+    store.upsert("conversation_messages", {"record_id": "flagged", "content_nsfw": 1, "content": text})
+    store.upsert("conversation_messages", {"record_id": "no-flag-column", "content": text})
     manifest = ScopeResolutionManifest(scope_id="messages:read", primary_dimensions=[],
                                        canonical_tables=["conversation_messages"])
-    hits = [{"record_id": rid, "record_type": "conversation_message"}
+    hits = [{"record_id": rid, "record_type": "conversation_message", "content_hash": _hash(text)}
             for rid in ("plain", "flagged", "no-flag-column", "no-row")]
     kept = _index_hits_inside_grant(hits, conn=None, manifest=manifest, disclosure_tier="default_disclosure",
                                     canonical=store)

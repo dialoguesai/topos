@@ -5062,6 +5062,9 @@ def _semantic_hits(
                     # of 462 derived rows carried up to 850 characters of
                     # rendering that no answer could ever show.
                     "search_text": item.get("search_text"),
+                    # The parent record's hash this chunk was embedded from: below the owner's tier
+                    # `_index_hits_inside_grant` serves the stored text only while it still matches.
+                    "content_hash": item.get("content_hash"),
                     "similarity": item.get("similarity"),
                     "source_id": item.get("source_id"),
                     "signal_dimension": item.get("signal_dimension"),
@@ -5550,25 +5553,48 @@ def _index_row_unflagged(
 ) -> bool:
     """True only when the row exists, carries the NSFW column, and `is_record_nsfw` passes it."""
     from ..disclosure.content_policy import is_record_nsfw
+
+    row = _index_row(table, record_id, conn=conn, canonical=canonical)
+    return bool(row) and "content_nsfw" in row and not is_record_nsfw(row)
+
+
+def _index_row(table: str, record_id: str, *, conn: Optional[Any], canonical: Optional[Any]) -> Optional[Dict[str, Any]]:
+    """The canonical row an index hit stands for, or None when it cannot be read."""
     from ..storage.adapters.sqlite.stores import _NATIVE_ID_COL
 
     if not record_id:
-        return False
+        return None
     try:
         if canonical is not None:
             row = canonical.get(table, record_id)
-        elif conn is not None:
+            return dict(row) if row else None
+        if conn is not None:
             cursor = conn.execute(
                 f"SELECT * FROM {table} WHERE {_NATIVE_ID_COL[table]}=? LIMIT 1", (record_id,)
             )
             found = cursor.fetchone()
-            row = dict(zip([d[0] for d in cursor.description], found)) if found else None
-        else:
-            return False
-    except Exception as exc:  # noqa: BLE001 -- a flag that cannot be read is not a pass
-        logger.debug("index hit NSFW check failed for %s: %s", table, exc)
+            return dict(zip([d[0] for d in cursor.description], found)) if found else None
+    except Exception as exc:  # noqa: BLE001 -- a row that cannot be read is not a pass
+        logger.debug("index hit row read failed for %s: %s", table, exc)
+    return None
+
+
+def _index_text_current(row: Optional[Dict[str, Any]], content_hash: Any) -> bool:
+    """True only when the index hit's stored text was embedded from the row's current text: its `content_hash`
+    (the embeddings job's sha256 of `embeddable_content`) equals the row's. A row rewritten since it was embedded
+    (an edit, a re-capture, a re-import, a merged reply) keeps its old chunk and stored text until something
+    re-embeds it; below the owner's tier that text must not be served (lane 194). No hash, no pass."""
+    import hashlib
+
+    from ..features.signal.embed_context import embeddable_content
+
+    if not row or not isinstance(content_hash, str) or not content_hash:
         return False
-    return bool(row) and "content_nsfw" in row and not is_record_nsfw(row)
+    try:
+        text = embeddable_content(row)
+    except Exception:  # noqa: BLE001 -- a row whose text cannot be read is not a pass
+        return False
+    return bool(text) and hashlib.sha256(text.encode("utf-8")).hexdigest() == content_hash
 
 
 def _index_hits_inside_grant(
@@ -5590,26 +5616,41 @@ def _index_hits_inside_grant(
     named (no `record_type`), or whose row or flag cannot be read, cannot be shown to be
     inside the grant and is dropped. The owner's tier is unchanged. `canonical` (the
     bundle's store) answers the flag when given; otherwise `conn` does.
+
+    Lane 194: the stored text must also still be the row's text. A hit whose `content_hash` does
+    not match the row's current text (or that carries none) is dropped, so a grantee never reads
+    the pre-edit copy of a line rewritten after it was embedded.
     """
     if str(disclosure_tier or "") == "owner_raw" or not hits:
         return list(hits)
+    from ..disclosure.content_policy import is_record_nsfw
     from ..storage.adapters.sqlite.stores import _NSFW_TAGGED_TABLES
 
     tables = set(manifest.canonical_tables or [])
-    unflagged: Dict[Tuple[str, str], bool] = {}
+    rows: Dict[Tuple[str, str], Optional[Dict[str, Any]]] = {}
     kept: List[Dict[str, Any]] = []
     for hit in hits:
         table = _RECORD_TYPE_TABLE.get(str(hit.get("record_type") or ""))
         if not table or table not in tables:
             continue
-        if table in _NSFW_TAGGED_TABLES:
-            key = (table, str(hit.get("record_id") or ""))
-            if key not in unflagged:
-                unflagged[key] = _index_row_unflagged(table, key[1], conn=conn, canonical=canonical)
-            if not unflagged[key]:
-                continue
-        kept.append(hit)
+        key = (table, str(hit.get("record_id") or ""))
+        if key not in rows:
+            rows[key] = _index_row(table, key[1], conn=conn, canonical=canonical)
+        row = rows[key]
+        if table in _NSFW_TAGGED_TABLES and not (row and "content_nsfw" in row and not is_record_nsfw(row)):
+            continue
+        if not _index_text_current(row, hit.get("content_hash")):
+            continue
+        kept.append(_without_content_hash(hit))
     return kept
+
+
+def _without_content_hash(hit: Dict[str, Any]) -> Dict[str, Any]:
+    """The hit without the stored text's hash: it decides above and goes no further. A sha256 of a short line would
+    let whoever receives it confirm a guessed text, and no reader downstream needs it (lane 194)."""
+    if "content_hash" not in hit:
+        return hit
+    return {key: value for key, value in hit.items() if key != "content_hash"}
 
 
 def _load_recent_summary_items(
@@ -5639,10 +5680,12 @@ def _load_recent_summary_items(
     # the query, and the lane fault below returns nothing, rather than serving unchecked rows.
     index_columns = {row[1] for row in conn.execute("PRAGMA table_info(signal_embeddings)")}
     has_type = "record_type" in index_columns
-    # Grantees must have a typed index to prove the canonical row is in their grant.
-    if grantee and not has_type:
+    # Grantees must have a typed index to prove the canonical row is in their grant, and the
+    # chunk's content_hash to prove its stored text is still the row's (lane 194).
+    has_hash = "content_hash" in index_columns
+    if grantee and not (has_type and has_hash):
         return []
-    type_sql = ", record_type" if has_type else ""
+    type_sql = (", record_type" if has_type else "") + (", content_hash" if has_hash else "")
     event_clock = "e.event_at"
     if has_type:
         clauses = []
@@ -5681,13 +5724,13 @@ def _load_recent_summary_items(
             f"""
             WITH candidates AS MATERIALIZED (
                 SELECT e.record_id, e.source_id, e.signal_dimension, e.text_preview,
-                       e.event_at, e.chunk_index{', e.record_type' if has_type else ''}
+                       e.event_at, e.chunk_index{', e.record_type' if has_type else ''}{', e.content_hash' if has_hash else ''}
                 FROM signal_embeddings e
                 WHERE e.chunk_index = 0{prefilter_sql}
             ),
             dated_index AS (
                 SELECT e.record_id, e.source_id, e.signal_dimension, e.text_preview,
-                       {event_clock} AS event_at, e.chunk_index{', e.record_type' if has_type else ''}
+                       {event_clock} AS event_at, e.chunk_index{', e.record_type' if has_type else ''}{', e.content_hash' if has_hash else ''}
                 FROM candidates e
             )
             SELECT record_id, source_id, signal_dimension, text_preview, event_at{type_sql}
@@ -5704,7 +5747,7 @@ def _load_recent_summary_items(
         return []
     if grantee:
         kept = _index_hits_inside_grant(
-            [{"record_id": row[0], "record_type": row[5], "_row": row} for row in rows],
+            [{"record_id": row[0], "record_type": row[5], "content_hash": row[6], "_row": row} for row in rows],
             conn=conn,
             manifest=manifest,
             disclosure_tier=disclosure_tier,

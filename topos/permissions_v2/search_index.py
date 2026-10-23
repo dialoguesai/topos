@@ -323,11 +323,17 @@ def light_change(old: dict, new: dict) -> bool:
     return heavy(old) == heavy(new)
 
 
+#: Lane 194: which stored vectors a member may carry. In every basis, so an index built before the rule (when a member
+#: took any stored chunk, including one embedded from text its row no longer holds) is stale once and rebuilt.
+MEMBER_VECTORS = "text-hash/194"
+
+
 def basis_of(authority, *, clock, boundary_revision=None) -> dict:
     return {"format": FORMAT, "grant_id": authority.grant_id, "assignment_id": authority.assignment_id,
             "grant_generation": authority.grant_generation, "assignment_generation": authority.assignment_generation,
             "policy_hash": authority.policy_hash, "protection_revision": authority.protection_revision,
-            "clock_id": clock[0], "clock_generation": clock[1], "entity_boundary_revision": boundary_revision}
+            "clock_id": clock[0], "clock_generation": clock[1], "entity_boundary_revision": boundary_revision,
+            "member_vectors": MEMBER_VECTORS}
 
 
 def seal(key: bytes, opaque_id: str, value: dict) -> bytes:

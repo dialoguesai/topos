@@ -1183,7 +1183,9 @@
           "order": 1
         }
       ],
-      "notes": []
+      "notes": [
+        "Share index members carry only vectors built from their row's current text (lane 194; search_index.MEMBER_VECTORS in every index basis): no step. Only a node with the permissions beta is affected. At the first index check after the upgrade every share's search index reads as stale once and is rebuilt by the restore loop (one build at a time), so each share answers nothing until its index is ready again, minutes per share; a member whose stored chunks were embedded from text its row no longer holds is rebuilt with a fresh vector (within the per-build embedding budget) or with its words alone. Below the owner's tier the vector and recent lanes also drop a hit whose stored text no longer matches its row."
+      ]
     }
   ]
 }

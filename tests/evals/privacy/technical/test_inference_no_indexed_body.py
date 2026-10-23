@@ -92,7 +92,12 @@ _HIT_SIGNAL = {
     "event_at": "2026-09-01T18:30:00Z",
     "record_type": "conversation_message",
 }
-_HIT = {**_HIT_SIGNAL, "text_preview": PREVIEW, "search_text": BODY}
+# The index row's content_hash, as every stored chunk carries one (lane 194): the hash of the canonical row's
+# text below, so the grant gate can show the stored copy is current. The gate drops it before anything is released.
+_HIT = {**_HIT_SIGNAL, "text_preview": PREVIEW, "search_text": BODY,
+        "content_hash": __import__("hashlib").sha256(
+            __import__("topos.features.signal.embed_context", fromlist=["embeddable_content"])
+            .embeddable_content({"content": PREVIEW}).encode("utf-8")).hexdigest()}
 
 _CLUSTER = {
     "cluster_id": "tc-move",
