@@ -48,6 +48,8 @@ ROLES = ("authored", "addressed", "participated", "observed", "ambient", "derive
 AGGREGATE_LANES = frozenset({"stat_insights", "goals", "topic_clusters"})
 #: Search with the claim worded as the owner's own records would word it (first person), not "The owner ...".
 QUERY_AS_WRITTEN = True
+#: The reader's own cap inside the request deadline.
+READ_TIMEOUT_S = 8.0
 #: When the two list orders disagree on a record, one more call on that record alone decides it (2 of 3).
 TIEBREAK = True
 PREFIXED_SOURCES = ("canonical", "entity_thread", "commitment_evidence", "overheard")
@@ -321,17 +323,6 @@ class NodeEvidence:
             return tbl
         return self._table_of.get(item.get("record_type")) or item.get("canonical_table") or ""
 
-    def _embedded_type(self, item) -> str:
-        """A vector hit carries its record id but not its table; the embedding row keeps the record's type."""
-        if item.get("retrieval_source") != "vector" or not item.get("record_id"):
-            return ""
-        try:
-            row = self.conn.execute("SELECT record_type FROM signal_embeddings WHERE record_id = ? LIMIT 1",
-                                    (item["record_id"],)).fetchone()
-        except sqlite3.OperationalError:
-            return ""
-        return str(row[0] or "") if row else ""
-
     def _row(self, table, rid):
         if table not in SOURCE_ROWS or not rid:
             return None
@@ -390,7 +381,7 @@ class NodeEvidence:
         finally:
             MATERIALIZE_MISSING_DOSSIERS.reset(token)
         packet = packet if isinstance(packet, dict) else {}
-        stats = {"candidates": 0, "aggregates_skipped": 0, "facts_expanded": 0, "vector_resolved": 0, "derived": 0}
+        stats = {"candidates": 0, "aggregates_skipped": 0, "facts_expanded": 0, "derived": 0}
         records: List[Dict[str, Any]] = []
         for lane in ("summaries", "semantic_hits"):
             for it in packet.get(lane) or []:
@@ -402,11 +393,7 @@ class NodeEvidence:
                 if not table and set(lanes) <= AGGREGATE_LANES:
                     stats["aggregates_skipped"] += 1
                     continue
-                kind = "" if table else self._embedded_type(it)
-                if kind:
-                    table = self._table_of.get(kind, "")
-                    stats["vector_resolved"] += bool(table)
-                if not table and ("facts_store" in lanes or kind == "derived_fact"):
+                if not table and "facts_store" in lanes:
                     srcs = self._expand_fact(it)
                     if srcs:
                         stats["facts_expanded"] += 1
@@ -536,7 +523,7 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
         return respond(unable("effort_low", out), started, usage)
     try:
         t = time.perf_counter()
-        claim, why = await to_thread(read_claim, req, chat, usage, min(8.0, left()))
+        claim, why = await to_thread(read_claim, req, chat, usage, min(READ_TIMEOUT_S, left()))
         out["timings_ms"]["read"] = round((time.perf_counter() - t) * 1000, 1)
         if claim is None:
             out["stages"]["read"] = f"not_checkable:{why}"

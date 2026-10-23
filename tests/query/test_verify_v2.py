@@ -297,8 +297,7 @@ def test_gather_turns_dossier_writes_off_only_for_its_own_retrieval():
     ev = v2.NodeEvidence.__new__(v2.NodeEvidence)
     ev.adapter, ev.manifest, ev._Request, ev._Ledger = Adapter(), None, (lambda **kw: kw), (lambda: None)
     assert ev.gather("q", "", datetime(2026, 10, 8, tzinfo=timezone.utc)) == ([], {"candidates": 0, "aggregates_skipped": 0,
-                                                                                  "facts_expanded": 0, "vector_resolved": 0,
-                                                                                  "derived": 0})
+                                                                                  "facts_expanded": 0, "derived": 0})
     assert seen == [False] and MATERIALIZE_MISSING_DOSSIERS.get() is True
 
 
@@ -335,34 +334,3 @@ def test_the_reader_is_told_the_scope_the_request_asked_for():
     (own, own_enum), (others, others_enum) = seen  # one reader call each; no records, no judge
     assert own is v2.READ_SYSTEM and "not_about_the_owner" in own_enum
     assert others is v2.READ_SYSTEM_WITH_OTHERS and "not_about_the_owner" not in others_enum
-
-
-def test_a_vector_hit_is_traced_to_its_record_through_the_embedding_row():
-    import sqlite3
-    from types import SimpleNamespace
-
-    class Roles:
-        ROLES = ("authored", "addressed", "participated", "observed", "ambient")
-
-        @staticmethod
-        def record_role(row, table):
-            return "authored"
-
-    conn = sqlite3.connect(":memory:")
-    conn.executescript("""CREATE TABLE signal_embeddings (record_id TEXT, record_type TEXT);
-        CREATE TABLE journal_entries (entry_id TEXT PRIMARY KEY, entry_at TEXT, content TEXT);
-        INSERT INTO signal_embeddings VALUES ('j1', 'journal_entry'), ('d1', 'derived_goal');
-        INSERT INTO journal_entries VALUES ('j1', '2026-10-06T21:00:00', 'restyled the pinwheel sidebar');""")
-    hits = [{"record_id": "j1", "retrieval_source": "vector", "fusion_sources": ["vector"], "summary_text": "restyled"},
-            {"record_id": "d1", "retrieval_source": "vector", "fusion_sources": ["vector"], "summary_text": "a goal"}]
-
-    class Adapter:
-        def retrieve(self, req):
-            return SimpleNamespace(context_packet={"semantic_hits": hits})
-
-    ev = v2.NodeEvidence.__new__(v2.NodeEvidence)
-    ev.conn, ev.roles, ev.adapter, ev.manifest = conn, Roles, Adapter(), None
-    ev._Request, ev._Ledger, ev._table_of = (lambda **kw: kw), (lambda: None), {"journal_entry": "journal_entries"}
-    records, stats = ev.gather("q", "", datetime(2026, 10, 8, tzinfo=timezone.utc))
-    assert [(r["table"], r["record_id"], r["role"]) for r in records] == [("journal_entries", "j1", "authored"), ("derived", "d1", "derived")]
-    assert stats["vector_resolved"] == 1 and stats["derived"] == 1
