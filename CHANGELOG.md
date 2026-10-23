@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.19] — 2026-10-23
+
 ## [1.5.18] — 2026-10-23
 
 ### Added
