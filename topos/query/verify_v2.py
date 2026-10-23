@@ -27,6 +27,7 @@ deadline failure yields ``unable``, never a guess. Nothing on this path is writt
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sqlite3
@@ -44,6 +45,12 @@ DEFAULT_DEADLINE_S = 10.0
 SHOWN = 10
 SNIPPET = 400
 KINDS = ("did_or_made", "setup", "opinion", "not_checkable")
+#: What kind of thing the turn asserts (VERIFY_CLAIM_CATEGORIES.md). "meta" and "world" are refused at the reader.
+CATEGORIES = ("did", "state", "view", "feel", "people", "plan", "have", "count", "meta", "world")
+MAX_CLAIMS = 3
+#: Effort: "low" checks the main claim with one judge call and no tie-break; "high" checks every claim (up to
+#: MAX_CLAIMS, in parallel) with both orders and the tie-break.
+EFFORTS = {"low": {"claims": 1, "orders": 1, "tiebreak": False}, "high": {"claims": MAX_CLAIMS, "orders": 2, "tiebreak": True}}
 WHY_NOT = ("question", "not_about_the_owner", "plan_or_intention", "about_the_call_itself", "fragment", "too_vague")
 SUBJECTS = ("owner", "someone_else", "both")
 ROLES = ("authored", "addressed", "participated", "observed", "ambient", "derived")
@@ -95,10 +102,24 @@ against the records of the person who owns them (their coding sessions, GitHub p
 messages). You get the conversation's date, who said it, the turns just before it, and what was said. Call the records'
 owner "the owner".
 
-Speech is loose: one turn can hold fillers, asides, a question and several assertions. Take its ONE most specific
-checkable assertion (a named thing, a change made, how something is set up, an opinion about a specific thing) and
-prepare that. {scope}
+Speech is loose: one turn can hold fillers, asides, a question and several assertions. Take its checkable assertions
+(a named thing, a change made, how something is set up, an opinion about a specific thing): up to three distinct ones,
+the most specific first, each as its own entry in "claims"; the first is the main one. Do not split one assertion into
+pieces. {scope}
 
+"category" - what kind of thing the turn mainly asserts:
+- "did": something the speaker did, made, built or sent, past or under way.
+- "state": how a thing of the speaker's is set up, what it is, where it came from.
+- "view": a position, belief or framing the speaker holds.
+- "feel": a feeling or sentiment about something.
+- "people": an interaction with, or a fact about, a specific other person.
+- "plan": an intention or upcoming action.
+- "have": a possession or resource.
+- "count": a quantity, frequency or comparison.
+- "meta": only about the call, the screen or this conversation itself; fillers; what the speaker is doing on the call.
+- "world": about the world or other people, with nothing about the speaker or the speaker's things.
+"claims": empty when the turn is "meta", "world", or asserts nothing checkable; then "not_checkable_because" gives
+the reason. Each entry has:
 "type" - what that assertion says:
 - "did_or_made": something someone did, made, changed, adopted, built or worked on (past or ongoing).
 - "setup": how the owner's tools, data or system are set up or work now.
@@ -106,7 +127,6 @@ prepare that. {scope}
 - "not_checkable": nothing said asserts anything checkable: it is only a question, only a future plan or intention,
   only a remark about the call itself happening right now (audio, loading, screen sharing), or a fragment that asserts
   nothing even with context.
-"not_checkable_because": for not_checkable, one of the listed reasons; otherwise "".
 "subject": who the claim is about: "owner" (the speaker, or their own projects, tools and things), "someone_else"
 (another person or group, or their things), or "both".
 "reported_speech": true if the sentence reports what someone said rather than stating it directly.
@@ -116,7 +136,8 @@ project" and similar with the thing meant, and to turn relative dates into absol
 (a project, repo, character, tool, product, company, site or person's name). Not generic words like project, app or repo.
 "date_from"/"date_to": the dates the claim is about (YYYY-MM-DD), from the conversation's date; "" if none.
 "as_written": the claim worded the way the owner's own notes, messages or coding sessions would put it: first person for
-the owner's own actions ("I ..."), the same facts and names, plain words, at most 25 words; "" for not_checkable."""
+the owner's own actions ("I ..."), the same facts and names, plain words, at most 25 words.
+"not_checkable_because" (top level): when "claims" is empty, one of the listed reasons; otherwise ""."""
 
 #: The request's ``about_others`` option picks the reader's scope. Off (the default): only what the speaker says about
 #: themself (alone or with others) is checked. On: a claim about someone else may be checked against the owner's
@@ -130,11 +151,10 @@ READ_SYSTEM_WITH_OTHERS = _READ_TEMPLATE.format(scope=(
     "speaker. A claim about someone else is still checkable: the owner's messages may show it."))
 
 def _read_schema(why_not) -> Dict[str, Any]:
-    return {
+    claim = {
         "type": "object",
         "properties": {
-            "type": {"type": "string", "enum": list(KINDS)},
-            "not_checkable_because": {"type": "string", "enum": [""] + list(why_not)},
+            "type": {"type": "string", "enum": [k for k in KINDS if k != "not_checkable"]},
             "subject": {"type": "string", "enum": list(SUBJECTS)},
             "reported_speech": {"type": "boolean"},
             "claim": {"type": "string"},
@@ -143,8 +163,16 @@ def _read_schema(why_not) -> Dict[str, Any]:
             "date_to": {"type": "string"},
             "as_written": {"type": "string"},
         },
-        "required": ["type", "not_checkable_because", "subject", "reported_speech", "claim", "names", "date_from", "date_to",
-                     "as_written"],
+        "required": ["type", "subject", "reported_speech", "claim", "names", "date_from", "date_to", "as_written"],
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "category": {"type": "string", "enum": list(CATEGORIES)},
+            "claims": {"type": "array", "items": claim, "maxItems": MAX_CLAIMS},
+            "not_checkable_because": {"type": "string", "enum": [""] + list(why_not)},
+        },
+        "required": ["category", "claims", "not_checkable_because"],
     }
 
 
@@ -320,23 +348,39 @@ def retrieval_query(claim: "Claim") -> str:
 
 # --- stage 1: read --------------------------------------------------------------------------------------------------
 def read_claim(req: ClaimRequest, chat: Callable, usage: Usage, timeout: float) -> Tuple[Optional[Claim], Optional[str]]:
+    """The main claim alone (the first the reader lists)."""
+    _, claims, why = read_claims(req, chat, usage, timeout)
+    return (claims[0], None) if claims else (None, why)
+
+
+def _claim_from(item: Dict[str, Any], fallback: str) -> Optional[Claim]:
+    if not isinstance(item, dict) or item.get("type") not in KINDS or item.get("type") == "not_checkable":
+        return None
+    return Claim(kind=item["type"], subject=item.get("subject") if item.get("subject") in SUBJECTS else "owner",
+                 reported_speech=item.get("reported_speech") is True, text=str(item.get("claim") or fallback)[:300],
+                 names=clean_names(item.get("names")), date_from=str(item.get("date_from") or ""), date_to=str(item.get("date_to") or ""),
+                 as_written=str(item.get("as_written") or "")[:300])
+
+
+def read_claims(req: ClaimRequest, chat: Callable, usage: Usage, timeout: float) -> Tuple[str, List[Claim], Optional[str]]:
+    """One model call: the turn's category and its checkable claims (main one first). Empty claims carry a reason."""
     turns = "\n".join((f"{t['speaker']}: " if t.get("speaker") else "- ") + str(t.get("text") or "")
                       for t in req.context[-6:]) or "(none)"
     user = (f"Conversation date: {conversation_time(req.said_at).date().isoformat()}\nSaid by: {req.speaker}\n\n"
             f"Earlier turns:\n{turns}\n\nWhat was said: {req.statement.strip()}")
     system, schema = (READ_SYSTEM_WITH_OTHERS, READ_SCHEMA_WITH_OTHERS) if req.about_others else (READ_SYSTEM, READ_SCHEMA)
     out = chat(system, user, schema, timeout, usage)
-    kind = out.get("type") if out.get("type") in KINDS else "not_checkable"
-    if kind == "not_checkable":
-        why = out.get("not_checkable_because")
-        return None, why if why in WHY_NOT else "too_vague"
-    subject = out.get("subject") if out.get("subject") in SUBJECTS else "owner"
-    if subject == "someone_else" and not req.about_others:  # the option holds even when the model strays
-        return None, "not_about_the_owner"
-    return Claim(kind=kind, subject=subject, reported_speech=out.get("reported_speech") is True,
-                 text=str(out.get("claim") or req.statement)[:300], names=clean_names(out.get("names")),
-                 date_from=str(out.get("date_from") or ""), date_to=str(out.get("date_to") or ""),
-                 as_written=str(out.get("as_written") or "")[:300]), None
+    category = out.get("category") if out.get("category") in CATEGORIES else "did"
+    why = out.get("not_checkable_because") if out.get("not_checkable_because") in WHY_NOT else None
+    if category == "meta":
+        return category, [], "about_the_call_itself"
+    if category == "world":
+        return category, [], "not_about_the_owner"
+    claims = [c for c in (_claim_from(x, req.statement) for x in (out.get("claims") or [])[:MAX_CLAIMS]) if c]
+    kept = [c for c in claims if c.subject != "someone_else" or req.about_others]  # the option holds even when the model strays
+    if not kept:
+        return category, [], ("not_about_the_owner" if claims else (why or "too_vague"))
+    return category, kept, None
 
 
 # --- stages 2-3: retrieve and qualify (inside a DB worker, on its own connection) -----------------------------------
@@ -522,16 +566,17 @@ def select_evidence(records, sentence: str, claim: Claim, now: datetime):
 
 
 # --- stage 4: judge -------------------------------------------------------------------------------------------------
-def judge(claim: Claim, evidence, chat, usage: Usage, timeout: float) -> Dict[str, Any]:
+def judge(claim: Claim, evidence, chat, usage: Usage, timeout: float, orders: int = 2, tiebreak: Optional[bool] = None) -> Dict[str, Any]:
     """One judge (a chat callable) or several (a sequence of them). With several, each runs its own opposite-order pair
     in parallel and a record counts when any judge's own pair agrees and the rules accept it: different models miss
-    different records, so the union finds more without loosening any one judge's agreement rule."""
+    different records, so the union finds more without loosening any one judge's agreement rule. ``orders`` = 1 asks
+    one order only (low effort: no agreement, no split); ``tiebreak`` defaults to the module switch."""
     judges = list(chat) if isinstance(chat, (list, tuple)) else [chat]
     if len(judges) == 1:
-        return _judge_one(claim, evidence, judges[0], usage, timeout)
+        return _judge_one(claim, evidence, judges[0], usage, timeout, orders, tiebreak)
     results, failures = [], []
     with ThreadPoolExecutor(max_workers=len(judges)) as pool:
-        futures = [pool.submit(_judge_one, claim, evidence, j, usage, timeout) for j in judges]
+        futures = [pool.submit(_judge_one, claim, evidence, j, usage, timeout, orders, tiebreak) for j in judges]
         for f in futures:
             try:
                 results.append(f.result())
@@ -545,7 +590,9 @@ def judge(claim: Claim, evidence, chat, usage: Usage, timeout: float) -> Dict[st
     reason = None if cites else next(x for x in ("shows_failed_rules", "judges_disagree", "no_record_shows_it") if x in reasons)
     return {"cites": cites, "agreed_ns": agreed, "agreed": len(agreed), "tiebroken": sum(r["tiebroken"] for r in results),
             "rejections": sorted(x for r in results for x in r["rejections"]), "reason": reason,
-            "judges": len(judges), "judges_failed": len(failures), "judge_cites": [len(r["cites"]) for r in results]}
+            "judges": len(judges), "judges_failed": len(failures), "judge_cites": [len(r["cites"]) for r in results],
+            "first_ns": sorted(set().union(*(r["first_ns"] for r in results))), "second_ns": sorted(set().union(*(r["second_ns"] for r in results))),
+            "tiebroken_ns": sorted(set().union(*(r["tiebroken_ns"] for r in results)))}
 
 
 def judge_prompt() -> Tuple[str, Dict[str, Any]]:
@@ -572,8 +619,10 @@ def apply_rules(claim: Claim, by_n: Dict[int, Dict[str, Any]], agreed) -> Tuple[
     return sorted(n for n, (ok, _) in verdicts.items() if ok), verdicts
 
 
-def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: float) -> Dict[str, Any]:
+def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: float, orders: int = 2,
+               tiebreak: Optional[bool] = None) -> Dict[str, Any]:
     system, schema = judge_prompt()
+    tiebreak = TIEBREAK if tiebreak is None else tiebreak
     when = f"{claim.date_from} to {claim.date_to}" if claim.date_from else "not stated"
     about = "someone other than the owner" if claim.subject == "someone_else" else "the owner"
     head = f"Claim ({claim.kind}, about {about}): {claim.text}\nTime: {when}\n\nExcerpts:\n"
@@ -587,15 +636,15 @@ def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: fl
     ends = time.perf_counter() + timeout
     with ThreadPoolExecutor(max_workers=2 * len(shards)) as pool:  # every call in parallel: the judge takes one call's time
         forward = [pool.submit(chat, system, head + "\n".join(line(e) for e in s), schema, timeout, usage) for s in shards]
-        backward = [pool.submit(chat, system, head + "\n".join(line(e) for e in reversed(s)), schema, timeout, usage) for s in shards]
+        backward = [pool.submit(chat, system, head + "\n".join(line(e) for e in reversed(s)), schema, timeout, usage) for s in shards] if orders > 1 else []
         first = set().union(*(shows_in(f.result()) for f in forward))
-        second = set().union(*(shows_in(f.result()) for f in backward))
+        second = set().union(*(shows_in(f.result()) for f in backward)) if orders > 1 else set(first)
     shows = shows_in
     valid = lambda ns: {n for n in ns if isinstance(n, int) and 1 <= n <= len(evidence)}
     by_n = {e["n"]: e for e in evidence}
     agreed_set, split = valid(first & second), sorted(valid(first ^ second))
-    tiebroken = 0
-    if TIEBREAK and split and ends - time.perf_counter() > 1.0:
+    tiebroken, tiebroken_ns = 0, []
+    if tiebreak and split and ends - time.perf_counter() > 1.0:
         def alone(n):  # the record on its own, so its place in a list cannot decide it
             try:
                 return 1 in shows(chat(system, head + line({**by_n[n], "n": 1}), schema, ends - time.perf_counter(), usage))
@@ -606,6 +655,7 @@ def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: fl
                 if ok:
                     agreed_set.add(n)
                     tiebroken += 1
+                    tiebroken_ns.append(n)
     agreed = sorted(agreed_set)
     cites, verdicts = apply_rules(claim, by_n, agreed)
     if cites:
@@ -616,7 +666,8 @@ def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: fl
         reason = "judges_disagree"
     else:
         reason = "no_record_shows_it"
-    return {"cites": cites, "agreed_ns": agreed, "agreed": len(agreed), "tiebroken": tiebroken, "rejections": sorted(r for ok, r in verdicts.values() if not ok), "reason": reason}
+    return {"cites": cites, "agreed_ns": agreed, "agreed": len(agreed), "tiebroken": tiebroken, "rejections": sorted(r for ok, r in verdicts.values() if not ok),
+            "reason": reason, "first_ns": sorted(valid(first)), "second_ns": sorted(valid(second)), "tiebroken_ns": sorted(tiebroken_ns)}
 
 
 # --- orchestration --------------------------------------------------------------------------------------------------
@@ -633,13 +684,16 @@ def respond(out: Dict[str, Any], started: float, usage: Usage) -> Dict[str, Any]
 async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_thread, judges=None) -> Dict[str, Any]:
     """Run the stages under one deadline. ``gather_in_worker(fn)`` runs ``fn(conn)`` on a DB worker's own connection
     (the node passes ``run_db_read``); ``to_thread(fn, *a)`` runs a blocking model call off the loop. ``chat`` reads the
-    claim; ``judges`` (default: ``chat`` alone) labels the evidence."""
+    claims; ``judges`` (default: ``chat`` alone) labels the evidence. The reader's claims (main one first) are checked
+    in parallel, as many as the effort allows; the turn is supported when any claim is."""
     started = time.perf_counter()
     deadline = started + max(0.5, float(req.deadline_s or DEFAULT_DEADLINE_S))
     left = lambda: deadline - time.perf_counter()
     usage = Usage()
-    out: Dict[str, Any] = {"version": VERSION, "model": getattr(chat, "name", "custom"), "verdict": None, "reason": None,
-                           "claim": None, "evidence": [], "cited_roles": [], "stages": {}, "timings_ms": {}}
+    effort = EFFORTS.get(req.effort) or EFFORTS["high"]
+    out: Dict[str, Any] = {"version": VERSION, "model": getattr(chat, "name", "custom"), "effort": req.effort if req.effort in EFFORTS else "high",
+                           "verdict": None, "reason": None, "category": None, "claim": None, "claims": [], "evidence": [], "cited_roles": [],
+                           "stages": {}, "timings_ms": {}}
     t = time.perf_counter()
     refused = gate(req.statement)
     out["timings_ms"]["gate"] = round((time.perf_counter() - t) * 1000, 2)
@@ -647,42 +701,60 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
         out["stages"]["gate"] = refused
         return respond(unable(f"not_checkable:{refused}", out), started, usage)
     out["stages"]["gate"] = "passed"
-    if req.effort == "low":
-        return respond(unable("effort_low", out), started, usage)
     try:
         t = time.perf_counter()
-        claim, why = await to_thread(read_claim, req, chat, usage, min(READ_TIMEOUT_S, left()))
+        category, claims, why = await to_thread(read_claims, req, chat, usage, min(READ_TIMEOUT_S, left()))
         out["timings_ms"]["read"] = round((time.perf_counter() - t) * 1000, 1)
-        if claim is None:
+        out["category"] = category
+        if not claims:
             out["stages"]["read"] = f"not_checkable:{why}"
             return respond(unable(f"not_checkable:{why}", out), started, usage)
-        out["stages"]["read"] = "ok"
-        out["claim"] = {"kind": claim.kind, "subject": claim.subject, "reported_speech": claim.reported_speech,
-                        "text": claim.text, "period": {"from": claim.date_from, "to": claim.date_to}}
+        claims = claims[:effort["claims"]]
+        out["stages"]["read"] = {"claims": len(claims)}
+        as_dict = lambda c: {"kind": c.kind, "subject": c.subject, "reported_speech": c.reported_speech, "text": c.text,
+                             "period": {"from": c.date_from, "to": c.date_to}}
+        out["claim"] = as_dict(claims[0])
         if left() <= 1.0:
             return respond(unable("deadline", out), started, usage)
-        t = time.perf_counter()
         now = conversation_time(req.said_at)
-        records, stats = await gather_in_worker(lambda conn: NodeEvidence(conn).gather(retrieval_query(claim), " ".join(claim.names), now))
-        evidence, dropped = select_evidence(records, req.statement, claim, now)
-        out["timings_ms"]["retrieve"] = round((time.perf_counter() - t) * 1000, 1)
-        out["stages"]["retrieve"] = {**stats, **{f"dropped_{k}": v for k, v in dropped.items()}, "shown": len(evidence)}
-        if not evidence:
-            return respond({**out, "verdict": "no_evidence", "reason": "no_records"}, started, usage)
-        if left() <= 1.0:
-            return respond(unable("deadline", out), started, usage)
+
+        async def check(claim: Claim) -> Dict[str, Any]:
+            r: Dict[str, Any] = {**as_dict(claim), "verdict": None, "reason": None, "evidence": [], "stages": {}, "timings_ms": {}}
+            t = time.perf_counter()
+            records, stats = await gather_in_worker(lambda conn: NodeEvidence(conn).gather(retrieval_query(claim), " ".join(claim.names), now))
+            evidence, dropped = select_evidence(records, req.statement, claim, now)
+            r["timings_ms"]["retrieve"] = round((time.perf_counter() - t) * 1000, 1)
+            r["stages"]["retrieve"] = {**stats, **{f"dropped_{k}": v for k, v in dropped.items()}, "shown": len(evidence)}
+            if not evidence:
+                return {**r, "verdict": "no_evidence", "reason": "no_records"}
+            if left() <= 1.0:
+                return {**r, "verdict": "unable", "reason": "deadline"}
+            t = time.perf_counter()
+            verdict = await to_thread(judge, claim, evidence, judges or chat, usage, left(), effort["orders"], effort["tiebreak"])
+            r["timings_ms"]["judge"] = round((time.perf_counter() - t) * 1000, 1)
+            r["stages"]["judge"] = {"agreed": verdict["agreed"], "tiebroken": verdict["tiebroken"], "rejections": verdict["rejections"],
+                                    "judges": verdict.get("judges", 1), "judges_failed": verdict.get("judges_failed", 0), "orders": effort["orders"]}
+            cited, agreed = set(verdict["cites"]), set(verdict["agreed_ns"])
+            r["evidence"] = [{**e, "cited": e["n"] in cited, "agreed": e["n"] in agreed} for e in evidence]
+            r["cited_roles"] = [e["role"] for e in evidence if e["n"] in cited]
+            return {**r, "verdict": "supported" if cited else "no_evidence", "reason": None if cited else verdict["reason"]}
+
         t = time.perf_counter()
-        verdict = await to_thread(judge, claim, evidence, judges or chat, usage, left())
-        out["timings_ms"]["judge"] = round((time.perf_counter() - t) * 1000, 1)
-        out["stages"]["judge"] = {"agreed": verdict["agreed"], "tiebroken": verdict["tiebroken"], "rejections": verdict["rejections"],
-                                  "judges": verdict.get("judges", 1), "judges_failed": verdict.get("judges_failed", 0)}
-        cited = set(verdict["cites"])
-        agreed = set(verdict["agreed_ns"])
-        out["evidence"] = [{**e, "cited": e["n"] in cited, "agreed": e["n"] in agreed} for e in evidence]
-        out["cited_roles"] = [e["role"] for e in evidence if e["n"] in cited]
-        if cited:
+        results = await asyncio.gather(*(check(c) for c in claims))
+        out["timings_ms"]["retrieve"] = max(r["timings_ms"].get("retrieve", 0) for r in results)
+        out["timings_ms"]["judge"] = max(r["timings_ms"].get("judge", 0) for r in results)
+        out["timings_ms"]["check"] = round((time.perf_counter() - t) * 1000, 1)
+        out["claims"] = [{k: v for k, v in r.items() if k not in ("evidence", "stages", "timings_ms")} for r in results]
+        lead = next((r for r in results if r["verdict"] == "supported"), results[0])
+        out["stages"]["retrieve"] = lead["stages"].get("retrieve")
+        if lead["stages"].get("judge"):
+            out["stages"]["judge"] = lead["stages"]["judge"]
+        out["evidence"], out["cited_roles"] = lead["evidence"], lead.get("cited_roles", [])
+        if lead["verdict"] == "supported":
             return respond({**out, "verdict": "supported"}, started, usage)
-        return respond({**out, "verdict": "no_evidence", "reason": verdict["reason"]}, started, usage)
+        if all(r["verdict"] == "unable" for r in results):
+            return respond(unable(lead["reason"], out), started, usage)
+        return respond({**out, "verdict": "no_evidence", "reason": lead["reason"]}, started, usage)
     except ModelUnavailable as exc:
         return respond(unable(f"model_unavailable:{exc}", out), started, usage)
     except Exception as exc:  # noqa: BLE001 — retrieval or parse trouble refuses, never guesses

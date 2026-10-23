@@ -43,9 +43,15 @@ class FakeChat:
 
 
 def read_reply(**over):
-    r = {"type": "did_or_made", "not_checkable_because": "", "subject": "owner", "reported_speech": False,
-         "claim": "The owner restyled the pinwheel sidebar.", "names": ["pinwheel"], "date_from": "2026-10-06", "date_to": "2026-10-06"}
-    return {**r, **over}
+    """A reader reply in the category + claims shape. Claim-level overrides go into the main claim; ``claims`` replaces
+    the list; ``type="not_checkable"`` empties it."""
+    top = {"category": over.pop("category", "did"), "not_checkable_because": over.pop("not_checkable_because", "")}
+    claims = over.pop("claims", None)
+    c = {"type": "did_or_made", "subject": "owner", "reported_speech": False, "claim": "The owner restyled the pinwheel sidebar.",
+         "names": ["pinwheel"], "date_from": "2026-10-06", "date_to": "2026-10-06", **over}
+    if c["type"] == "not_checkable":
+        return {**top, "claims": []}
+    return {**top, "claims": claims if claims is not None else [c]}
 
 
 def run(records, chat, **req):
@@ -134,9 +140,15 @@ def test_deadline_is_unable():
     assert out["verdict"] == "unable" and out["reason"] == "deadline"
 
 
-def test_effort_low_never_calls_a_model():
-    out = run([rec(1, "authored")], FakeChat(fail=True), effort="low")
-    assert out["verdict"] == "unable" and out["reason"] == "effort_low"
+def test_effort_low_checks_the_main_claim_with_one_judge_call():
+    second = {"type": "did_or_made", "subject": "owner", "reported_speech": False, "claim": "The owner also wrote the docs.",
+              "names": ["docs"], "date_from": "", "date_to": "", "as_written": ""}
+    reply = read_reply(claims=[read_reply()["claims"][0], second])
+    out = run([rec(1, "authored")], FakeChat(reply, {1: "shows"}), effort="low")
+    assert out["verdict"] == "supported" and out["effort"] == "low" and out["usage"]["model_calls"] == 2  # read + one order
+    assert len(out["claims"]) == 1 and out["stages"]["judge"]["orders"] == 1
+    out = run([rec(1, "authored")], FakeChat(reply, {1: "shows"}), effort="high")
+    assert out["usage"]["model_calls"] == 5 and len(out["claims"]) == 2 and out["stages"]["judge"]["orders"] == 2
 
 
 def test_no_records_is_no_evidence():
@@ -574,3 +586,39 @@ def test_grounding_resolves_signal_object_refs_and_embedding_rows_only_when_aske
     assert [(r["record_id"], r["role"], r["grounded_role"]) for r in records] == [("f1", "derived", "authored"), ("c1", "derived", "observed" if vector else ""),
                                                                                   ("nothing", "derived", "")]
     assert stats["derived"] == 3 and stats["derived_grounded"] == (2 if vector else 1)
+
+
+def test_the_turn_is_supported_when_any_claim_is():
+    main = read_reply()["claims"][0]
+    other = {**main, "claim": "The owner painted the fence.", "names": ["fence"]}
+
+    class ByClaim(FakeChat):
+        def __call__(self, system, user, schema, timeout, usage):
+            if system in (v2.READ_SYSTEM, v2.READ_SYSTEM_WITH_OTHERS):
+                return super().__call__(system, user, schema, timeout, usage)
+            usage.add(10, 2)
+            return {"labels": [{"n": 1, "label": "shows" if "painted the fence" in user else "related"}]}  # the claim head
+
+    out = run([rec(1, "authored")], ByClaim(read_reply(claims=[main, other])))
+    assert out["verdict"] == "supported" and [c["verdict"] for c in out["claims"]] == ["no_evidence", "supported"]
+    assert out["claim"]["text"] == main["claim"] and out["category"] == "did" and out["evidence"][0]["cited"]
+
+
+@pytest.mark.parametrize("category, reason", [("meta", "about_the_call_itself"), ("world", "not_about_the_owner")])
+def test_meta_and_world_turns_are_refused_at_the_reader(category, reason):
+    out = run([rec(1, "authored")], FakeChat(read_reply(category=category), {1: "shows"}))
+    assert out["verdict"] == "unable" and out["reason"] == f"not_checkable:{reason}" and out["category"] == category
+    assert out["usage"]["model_calls"] == 1
+
+
+def test_the_reader_schema_carries_the_categories_and_up_to_three_claims():
+    assert v2.READ_SCHEMA["properties"]["category"]["enum"] == list(v2.CATEGORIES)
+    assert v2.READ_SCHEMA["properties"]["claims"]["maxItems"] == 3
+    assert "not_checkable" not in v2.READ_SCHEMA["properties"]["claims"]["items"]["properties"]["type"]["enum"]
+
+
+def test_the_judge_reports_each_orders_marks():
+    out = v2.judge(claim(), [{**rec(1, "authored"), "n": 1, "ref": "r1", "source": "journal_entries", "date": "2026-10-06",
+                              "snippet": "x", "context": "", "origin": "journal_entries", "via": "", "grounded_role": ""}],
+                   LabelChat({1: "shows"}), Usage(), 5.0)
+    assert out["first_ns"] == [1] and out["second_ns"] == [1] and out["tiebroken_ns"] == [] and out["cites"] == [1]
