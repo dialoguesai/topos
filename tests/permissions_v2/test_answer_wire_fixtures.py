@@ -1,11 +1,17 @@
 """The checked-in answer wire is generated from the actual models and keys derived from public labels."""
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
+import re
 
 import pytest
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-from tests.permissions_v2.answer_wire_fixtures import MODELS, ROOT, vector, vector_v2, vector_v3, vector_v4
+from tests.permissions_v2.answer_wire_fixtures import (MODELS, ROOT, kept_reading, kept_stamp_vector, vector, vector_v2,
+    vector_v3, vector_v4)
+from topos.permissions_v2 import kept_stamp
 from topos.permissions_v2.answer_protocol import (ANSWER_PROTOCOL_VERSION, K_ANSWER, K_ANSWER_LEGACY, K_ANSWER_V4,
     LEGACY_ACCEPTED_VERSION, MAX_ANSWER_BYTES_V4, MAX_ANSWER_CHARS, MAX_ANSWER_CHARS_V4,
     MAX_ANSWER_WITH_SOURCES_BYTES_V4, verify_node_answer)
@@ -117,3 +123,35 @@ def test_answer_golden_v4_carries_thirty_records_and_a_long_answer_to_a_v4_asker
                                    "records": [*body["records"], extra]})
     for name in ("answer-golden-v1.json", "answer-golden-v2.json", "answer-golden-v3.json"):
         assert "thirty" not in (ROOT / name).read_text() and "answer-golden-v4" not in (ROOT / name).read_text()
+
+
+def test_kept_stamp_golden_vectors_hold_and_the_answer_vectors_did_not_move():
+    """Lane OFF1N: the control plane's `kept_stamp`, signed with a key derived from a public label, is kept exactly
+    where the vector says, and every other case is refused with the code it states; each signature really is the
+    stated key's over the stated text, so a refusal is the binding's, the grammar's or the window's, never a broken
+    vector. The answer vectors v1 to v4 did not move (their own tests above), and none of them carries the field."""
+    saved = json.loads((ROOT / "kept-stamp-golden-v1.json").read_text())
+    assert saved == kept_stamp_vector()
+    assert (saved["field"], saved["domain"], saved["message_type"], saved["skew_seconds"]) == (
+        kept_stamp.FIELD, kept_stamp.DOMAIN.decode("ascii"), kept_stamp.MESSAGE_TYPE, kept_stamp.SKEW_SECONDS)
+    assert saved["capability"] == {"permissions_v2_kept_answers": kept_stamp.CAPABILITY_VERSION}
+    keys = {name: Ed25519PrivateKey.from_private_bytes(hashlib.sha256(label.encode("ascii")).digest())
+            for name, label in saved["key_labels"].items()}
+    public = base64.b64decode(saved["public_key_b64"], validate=True)
+    assert keys["cp"].public_key().public_bytes_raw() == public
+    assert {"kept", "refused"} == {next(iter(case["expect"])) for case in saved["cases"].values()}
+    for name, case in saved["cases"].items():
+        assert kept_reading(case, public, saved["now"]) == case["expect"], name
+        signed = case["signed"]
+        keys[signed["by"]].public_key().verify(base64.urlsafe_b64decode(case["stamp"]["sig"] + "=="),
+                                                signed["text"].encode("ascii"))
+        if "kept" in case["expect"]:
+            assert signed["text"].encode("ascii") == kept_stamp.signing_bytes(
+                case["stamp"]["keep_until"], msg_id=case["message"]["id"], msg_type=case["message"]["type"])
+            assert case["stamp"] == kept_stamp.sign_stamp(case["stamp"]["keep_until"], msg_id=case["message"]["id"],
+                                                          msg_type=case["message"]["type"], signer=keys["cp"])
+    assert {"valid", "wrong_type", "wrong_message_id", "expired", "bad_signature_other_key"} <= set(saved["cases"])
+    text = (ROOT / "kept-stamp-golden-v1.json").read_text()
+    assert not re.search(r"\d{10}", text)                  # no long run of digits anywhere in the file
+    for name in ("answer-golden-v1.json", "answer-golden-v2.json", "answer-golden-v3.json", "answer-golden-v4.json"):
+        assert kept_stamp.FIELD not in (ROOT / name).read_text()

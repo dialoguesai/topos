@@ -1,0 +1,218 @@
+{
+  "capability": {
+    "permissions_v2_kept_answers": 1
+  },
+  "cases": {
+    "bad_signature_other_key": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "other",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "sig": "ta6phxWK_2Ay-l2sGG2SO6pVcI0sudN2Z02YlS-VDo_H3OfrI1WVxvZCdvQJY1MbHxMB5ev8ByT5tMKNdHQqBQ",
+        "v": 1
+      }
+    },
+    "bad_signature_window_changed": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468860,
+        "sig": "UBA3mRJ6ggawTQ5MWJfRnWsIcW0-_3-cGgpVWlAIj2o9lMeVzxmYLuBItoWHZpnIpuHG5gJ-xwlU1WusL_IQCA",
+        "v": 1
+      }
+    },
+    "boolean": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":true,\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": true,
+        "sig": "mW0TKwSMGPIvGhRYv8FbohAMuRB9Fx_02yr3L-Dqlnx9mmOtlPJb9zkLNB9uXMmJhJtXWdWh-e4UEibiNCgSCQ",
+        "v": 1
+      }
+    },
+    "ended_within_the_skew": {
+      "expect": {
+        "kept": 863700
+      },
+      "message": {
+        "id": "kept-ask-two",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":863700,\"msg_id\":\"kept-ask-two\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 863700,
+        "sig": "-sPAyuDEsjKztb9Dpuuym-l78t6uYhB1CULxJIlWNqgOT4Rl0V0A5dLxpR0ORU9iYU-q-QHJ2SqXYczOZM7SAQ",
+        "v": 1
+      }
+    },
+    "expired": {
+      "expect": {
+        "refused": "kept_stamp_expired"
+      },
+      "message": {
+        "id": "kept-ask-three",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":863699,\"msg_id\":\"kept-ask-three\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 863699,
+        "sig": "QAha0_6ON-wmwNbFavL6Bpu7KMiPAIH2O25lqq7mxE3XDp8hyGC1qTBUqwXVL-xggQusCAs2TTzvRlfUQTaOAw",
+        "v": 1
+      }
+    },
+    "negative": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":-1468800,\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": -1468800,
+        "sig": "aJX5KJQIgZDT9J8Q3nsr4nxKE5fAMTWL3vfS8f0MxcmLJHC-_w5KXDCGRYWbmUMGwzV1LaQfKygQ32kNkq7pCA",
+        "v": 1
+      }
+    },
+    "on_a_fetch": {
+      "expect": {
+        "refused": "permission_denied"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_fetch"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "sig": "UBA3mRJ6ggawTQ5MWJfRnWsIcW0-_3-cGgpVWlAIj2o9lMeVzxmYLuBItoWHZpnIpuHG5gJ-xwlU1WusL_IQCA",
+        "v": 1
+      }
+    },
+    "valid": {
+      "expect": {
+        "kept": 1468800
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "sig": "UBA3mRJ6ggawTQ5MWJfRnWsIcW0-_3-cGgpVWlAIj2o9lMeVzxmYLuBItoWHZpnIpuHG5gJ-xwlU1WusL_IQCA",
+        "v": 1
+      }
+    },
+    "wrong_message_id": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-other",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "sig": "UBA3mRJ6ggawTQ5MWJfRnWsIcW0-_3-cGgpVWlAIj2o9lMeVzxmYLuBItoWHZpnIpuHG5gJ-xwlU1WusL_IQCA",
+        "v": 1
+      }
+    },
+    "wrong_type": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_fetch\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "sig": "ZPsv3k5jGWda2aoHyYVNolaVnBdhZdtTDAfP-slWdxlGfFu8dvuOBx0OLY8Zxt5S23hN591umpMWtMRhygc-Cg",
+        "v": 1
+      }
+    },
+    "zero": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":0,\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 0,
+        "sig": "WQXEsmpUEmS04ToXBp017DU_qkJklG7bc-9LaxxCx42ol2RddfpsxyQ4mObenV2vWYQh6prPe6vwu1Oug_T8CQ",
+        "v": 1
+      }
+    }
+  },
+  "domain": "topos-kept-stamp/v1\n",
+  "field": "kept_stamp",
+  "key_derivation": "Ed25519 private key: the 32 bytes of SHA-256 over the ASCII label (invented keys)",
+  "key_labels": {
+    "cp": "topos-kept-stamp-golden/cp/v1",
+    "other": "topos-kept-stamp-golden/other/v1"
+  },
+  "message_type": "permissions_v2_answer_submit",
+  "now": 864000,
+  "public_key_b64": "vjdaJSAdPo5qklnXwBPwyE7A5bh04YmT8Ge2GWntGhQ=",
+  "signature_encoding": "Ed25519 over the ASCII bytes of signed.text; base64url without padding, 86 chars",
+  "skew_seconds": 300,
+  "version": "kept-stamp-golden-v1"
+}
