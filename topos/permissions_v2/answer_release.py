@@ -5,6 +5,14 @@ counts; a restart loses pending work. An ended body stays for its keep window
 (UNFETCHED_SECONDS from the job's end, fetched or not), so the same signed
 authority can fetch it again after a lost reply; `_clean` drops it then.
 
+Kept questions (lane OFF1N). An ask the control plane delivers for a question
+it kept while this node was offline carries a signed `kept_stamp`: the end of
+the window its asker may come back in. Such a kept job's ended body stays until
+then (`keep_end`: at most KEPT_MAX_SECONDS, never less than an unkept job's
+window), still only in this process, with every fetch-time re-check as before.
+A kept job whose retrieval meets a share index not served now ends `deferred`:
+no body, and its fetch is busy, so the control plane asks again later.
+
 Fix A (`ANSWER_PROTECTED_ITEM_FILTER`, off by default), security note. With the
 switch on, a released record whose own text as the prompt shows it carries an
 Off-limits term (`answer_generation.withhold_protected_items`) is withheld from
@@ -34,7 +42,8 @@ from dataclasses import dataclass
 from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
-from . import answer_domain, answer_gate, answer_time, owner_account_words as account_words_grammar, switches
+from . import (answer_domain, answer_gate, answer_time, kept_stamp, owner_account_words as account_words_grammar,
+    switches)
 from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, JudgeOutOfTime, account_words_as_asked, build_prompt,
     close_answer, judge_sentences, node_name_words, owner_name_words, owner_party_words, people_words,
     question_lacks_permitted_anchor, sieve_answer, tense_guard_on, withhold_protected_items)
@@ -54,6 +63,11 @@ MAX_END_SECONDS = 110
 # the reply, so a delivered body is not popped: the same authority fetching the same answer id again inside this window
 # gets the same body after the same re-checks. `_clean` drops the job at the window's end.
 UNFETCHED_SECONDS = 600
+# Kept questions (lane OFF1N): the longest a kept job's ended body stays after its end, whatever its stamp says.
+KEPT_MAX_SECONDS = 14 * 86_400
+# More kept ended jobs than this in memory is logged as one counts-only line each time the count goes over it.
+KEPT_ENDED_BOUND = 500
+KEEP_LOG = "permissions answer keep: kept_ended=%d bound=%d"
 # NR179 G2 (`ANSWER_JUDGE_RESERVE_SECONDS`): with a reserve set, every support-judge call is cut off this many seconds
 # before the job's deadline, which leaves the body's close, its re-check and its receipt that much time.
 JUDGE_RELEASE_MARGIN_SECONDS = 5
@@ -133,8 +147,9 @@ def _unresolved_refuses(method):
 # code is a bounded machine reason, never data; anything else is logged as `refused` or `error`) and the seconds the
 # node took. Never a question, an answer, an id or a record. Outcomes: `answered` / `no_answer` (the body handed out),
 # `pending` (still being written), `held` (written, kept while the share's index is not served; the code says why),
-# `refused` (the uniform refusal went back; the code says why). A `pending` that took under SLOW_FETCH_SECONDS is
-# logged at debug level, so the steady polls of one ask do not fill the log.
+# `deferred` (lane OFF1N: a kept ask that met an index not served now, answered busy; the code says why), `refused`
+# (the uniform refusal went back; the code says why). A `pending` that took under SLOW_FETCH_SECONDS is logged at
+# debug level, so the steady polls of one ask do not fill the log.
 FETCH_LOG = "permissions answer fetch: outcome=%s reason=%s seconds=%.1f"
 SLOW_FETCH_SECONDS = 5.0
 _CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
@@ -211,6 +226,23 @@ class Job:
     # G1: the job was refused before the model because its question asks about a domain the grant denies
     # (`answer_domain`). The private receipt carries it only while ANSWER_DENIED_DOMAIN_REFUSAL is on.
     refused_denied_domain: bool = False
+    # Kept questions (lane OFF1N): the end of the window the control plane signed for a kept question (`kept_stamp`),
+    # in epoch seconds; None for a live ask. In this process only, as the question is.
+    keep_until: int | None = None
+    # The not-served-now code a kept job's retrieval was refused with (`NOT_SERVED_NOW`); never set for a live ask.
+    not_served: str | None = None
+    # The kept job ended `deferred`: no body, and every fetch of it is busy (`AnswerDeferred`) until `keep_end`.
+    deferred: bool = False
+
+
+def keep_end(job) -> int:
+    """When `_clean` drops an ended job. A live job, and a deferred one (it holds no body): UNFETCHED_SECONDS after its
+    end. A kept job (lane OFF1N): the end of the window its stamp signed, at most KEPT_MAX_SECONDS after its end and
+    never before a live job's, so being kept only ever lengthens the stay."""
+    floor = job.ended_at + UNFETCHED_SECONDS
+    if job.keep_until is None or job.deferred:
+        return floor
+    return max(floor, min(job.keep_until, job.ended_at + KEPT_MAX_SECONDS))
 
 
 def answer_template() -> str:
@@ -278,6 +310,15 @@ class AnswerBusy(Exception):
     """The only answer failure the control plane reports as busy, after issuance."""
 
 
+class AnswerDeferred(AnswerBusy):
+    """Lane OFF1N: the fetch of a kept job that ended `deferred`. On the wire it is busy, as AnswerBusy is (lane 190's
+    429 `answer_busy`): retryable, never a refusal. `reason` is the not-served code, for the node's own log only."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 class AnswerService:
     def __init__(self, runtime, *, clock=None, generate=None, judge=None):
         self.runtime = runtime
@@ -288,6 +329,9 @@ class AnswerService:
         self.judge = judge or _judge_local
         self._lock = threading.Lock()
         self._jobs: dict[str, Job] = {}
+        # Lane OFF1N: whether the kept ended jobs were over KEPT_ENDED_BOUND at the last `_clean`, so the line is
+        # written once each time the count goes over it, not on every ask and fetch.
+        self._kept_over = False
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="permissions-answer")
 
     def close(self):
@@ -349,15 +393,24 @@ class AnswerService:
                 effective_disclosure(policy))
 
     def _clean(self, now):
-        """Drop every ended job past its keep window, delivered or not: the only exit for a delivered body."""
+        """Drop every ended job past its keep window (`keep_end`), delivered or not: the only exit for a delivered
+        body. Then count the kept ones left (lane OFF1N): memory only, so a count over KEPT_ENDED_BOUND is logged."""
+        kept = 0
         for key, job in list(self._jobs.items()):
-            if job.state == "ended" and job.ended_at is not None and now >= job.ended_at + UNFETCHED_SECONDS:
+            if job.state != "ended" or job.ended_at is None:
+                continue
+            if now >= keep_end(job):
                 job.question = None
                 job.body = None
                 del self._jobs[key]
+            elif job.keep_until is not None:
+                kept += 1
+        if kept > KEPT_ENDED_BOUND and not self._kept_over:
+            _log.warning(KEEP_LOG, kept, KEPT_ENDED_BOUND)
+        self._kept_over = kept > KEPT_ENDED_BOUND
 
     def submit(self, *, envelope, payload, request_id, owner_account_words=frozenset(),
-               accepted_version=LEGACY_ACCEPTED_VERSION):
+               accepted_version=LEGACY_ACCEPTED_VERSION, keep_until=None):
         intent = AskIntent.parse(payload)
         # The transport verified the control plane's signature over these words; the grammar is checked again here.
         if type(owner_account_words) is not frozenset:
@@ -366,6 +419,10 @@ class AnswerService:
         # value); a caller written before the keyword is served as a control plane from before the field.
         if type(accepted_version) is not int:
             raise PolicyError("permission_denied")
+        # Kept questions (lane OFF1N): the transport verified the control plane's signature over the window; its
+        # grammar is checked again here. None: a live ask, served exactly as before.
+        if keep_until is not None:
+            keep_until = kept_stamp.parse_keep_until(keep_until)
         account_words = (frozenset(account_words_grammar.parse_words(sorted(owner_account_words, key=str)))
                          if owner_account_words else frozenset())
         _principal, signed, admission = self._verified(envelope, intent.model_dump(), request_id, ASK)
@@ -376,6 +433,9 @@ class AnswerService:
             if mode not in ("only", "with_sources") or policy.versions.capability != "permissions-beta/p2c-v3":
                 raise PolicyError("answers_mode_mismatch")
             now = self.clock()
+            if keep_until is not None and kept_stamp.expired(keep_until, now=now):
+                # A kept question delivered past its window is no kept ask: the uniform refusal, and no question.
+                raise PolicyError(kept_stamp.EXPIRED)
             with self._lock:
                 self._clean(now)
                 active = [job for job in self._jobs.values() if job.state in ("queued", "running")]
@@ -388,7 +448,8 @@ class AnswerService:
                           signed.client_id, parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields}), mode, intent.question,
                           signed.request_hash, now, disclosure=effective_disclosure(policy),
                           account_words=account_words, records_cap=records_cap(accepted_version),
-                          chars_cap=answer_chars_cap(accepted_version), accepted_version=accepted_version)
+                          chars_cap=answer_chars_cap(accepted_version), accepted_version=accepted_version,
+                          keep_until=keep_until)
                 self._jobs[answer_id] = job
                 _active_delta(1)
                 try:
@@ -409,6 +470,9 @@ class AnswerService:
         started = time.perf_counter()
         try:
             result, outcome, reason = self._fetch(envelope=envelope, payload=payload, request_id=request_id)
+        except AnswerDeferred as deferred:
+            _log_fetch("deferred", _fetch_reason(PolicyError(deferred.reason)), started)
+            raise
         except BaseException as exc:
             inner = exc.__context__ if isinstance(exc, PolicyError) and exc.__suppress_context__ else exc
             _log_fetch("refused", _fetch_reason(inner if inner is not None else exc), started)
@@ -434,6 +498,12 @@ class AnswerService:
                     job.body = None
                     self._jobs.pop(intent.answer_id, None)
                     raise PolicyError("authority_stale")
+                if job.state == "ended" and job.deferred:
+                    # Lane OFF1N: no answer was written; the share's index was not served. Nothing is released and
+                    # the fetch's id is spent as refused, but the fetch is busy, so the control plane asks the kept
+                    # question again later instead of ending it.
+                    ledger.refuse(admission, now=self.clock())
+                    raise AnswerDeferred(job.not_served)
                 body = job.body if job.state == "ended" else AnswerPending(version=VERSION, state="pending",
                                                                              answer_id=job.answer_id)
                 if body is None:
@@ -463,6 +533,8 @@ class AnswerService:
                 # after the same re-checks, until `_clean` drops the job UNFETCHED_SECONDS past its end. The only
                 # pops are a final refusal, a moved authority, and that window.
                 return result, outcome, reason
+        except AnswerBusy:
+            raise
         except Exception:
             ledger.refuse(admission, now=self.clock())
             raise PolicyError("permission_denied") from None
@@ -525,17 +597,23 @@ class AnswerService:
             ended = self.clock()
             if ended >= job.accepted_at + MAX_END_SECONDS:
                 checked, reason = None, "deadline"
-            body = checked.body if checked is not None else NoAnswer(version=VERSION, outcome="no_answer")
+            # Lane OFF1N: a kept job whose retrieval met a share index not served now (`_compute` keeps the code)
+            # wrote no answer at all. It ends `deferred`, with no body and a receipt that says so, and its fetch is
+            # busy, so the control plane asks the kept question again later. A live job ends `no_answer`, as before.
+            deferred = checked is None and reason != "deadline" and job.not_served is not None
+            body = (None if deferred else checked.body if checked is not None
+                    else NoAnswer(version=VERSION, outcome="no_answer"))
             if checked is not None and body.outcome == "answered" and job.disclosure != "none":
                 # The writer rides on the body only at the policy's level; the receipt keeps its own full record.
                 body = type(body).parse({**body.model_dump(), "writer": writer_for(job.disclosure, job.template)})
-            try:
-                parse_answer_output(body, request_type=FETCH, mode=job.mode, disclosure=job.disclosure,
-                                    accepted_version=job.accepted_version)
-            except PolicyError:
-                checked, reason = None, "body_invalid"
-                body = NoAnswer(version=VERSION, outcome="no_answer")
-            receipt = self._receipt(job, checked, reason, started, ended)
+            if not deferred:
+                try:
+                    parse_answer_output(body, request_type=FETCH, mode=job.mode, disclosure=job.disclosure,
+                                        accepted_version=job.accepted_version)
+                except PolicyError:
+                    checked, reason = None, "body_invalid"
+                    body = NoAnswer(version=VERSION, outcome="no_answer")
+            receipt = self._receipt(job, checked, reason, started, ended, deferred=deferred)
             # A body is never available to fetch unless its counts-only receipt committed.
             self.runtime.protocol.ledger.checkpoint_answer_receipt(job.request_id, receipt,
                 decision=job.set_decision, now=ended)
@@ -544,6 +622,9 @@ class AnswerService:
                     job.body = body
                     job.state = "ended"
                     job.ended_at = ended
+                    if deferred:
+                        job.question = None       # nothing re-checks a deferred job: its question goes now
+                        job.deferred = True
             if split is not None:
                 split.end(reason if checked is None else getattr(checked, "reason", None), started - job.accepted_at)
         except Exception:
@@ -711,6 +792,9 @@ class AnswerService:
         except PolicyError as exc:
             # BL-156: the refusal's own code (the index missing, stale or not ready; the grant inactive; the
             # authority stale), never `authority_moved` for all of them. `receipt_reason` keeps it counts-only.
+            if job.keep_until is not None and exc.code in NOT_SERVED_NOW:
+                # Lane OFF1N: for a kept job this decided nothing; it ends deferred (`_run`), the question asked again.
+                job.not_served = exc.code
             return None, receipt_reason(exc.code)
         except Unresolved as exc:
             # NR185: the final PolicyError it is (its code is neither "not served now" nor `answer_evidence_moved`).
@@ -719,7 +803,9 @@ class AnswerService:
             return None, "model_error"
 
     @staticmethod
-    def _receipt(job, checked, reason, started, ended):
+    def _receipt(job, checked, reason, started, ended, *, deferred=False):
+        """The counts-only receipt. Its outcome is `answered` or `no_answer`, or (lane OFF1N) `deferred` for a kept job
+        that wrote nothing because the share's index was not served: no answer the owner's week counts."""
         from .shadow_labeler_local import MODEL, MODEL_REVISION
         return {"version": "topos-local-receipt/answer-v1", "request_id": job.request_id,
             "answer_id": job.answer_id, "grant_id": job.grant_id,
@@ -733,7 +819,8 @@ class AnswerService:
             **({"items_withheld_protected": job.items_withheld_protected}
                if switches.on(switches.ANSWER_PROTECTED_ITEM_FILTER) else {}),
             "model": {"tag": MODEL, "digest": MODEL_REVISION}, "template_version": job.template or answer_template(),
-            "outcome": "answered" if checked is not None and checked.body.outcome == "answered" else "no_answer",
+            "outcome": ("deferred" if deferred
+                        else "answered" if checked is not None and checked.body.outcome == "answered" else "no_answer"),
             "reason": reason, "sentences": {"generated": 0 if checked is None else checked.generated,
                 "kept": 0 if checked is None else checked.kept,
                 "dropped_citation": 0 if checked is None else checked.dropped_citation,

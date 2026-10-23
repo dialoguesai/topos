@@ -8,7 +8,7 @@ import logging
 from topos.principal import THIRD_PARTY, reset_principal, set_principal
 from topos.relay_stamp import verify_relay_stamp
 
-from . import owner_account_words
+from . import kept_stamp, owner_account_words
 from .answer_protocol import ACCEPTS_FIELD, LEGACY_ACCEPTED_VERSION, parse_accepted_version
 from .answer_release import AnswerBusy
 from .canonical import PolicyError, canonical_bytes
@@ -50,6 +50,22 @@ def _owner_account_words(message, kind, request_id) -> frozenset:
                                             key=relay_stamp._load_public_key_bytes())
 
 
+def _keep_until(message, kind, request_id):
+    """The end of the keep window the control plane signed for a kept question (lane OFF1N, `kept_stamp`), or None.
+
+    The field rides beside the principal stamp, outside the closed payload, as the owner's account words do. Absent (a
+    live ask, or a control plane from before the field): None, and the ask is served exactly as before. Present on a
+    fetch, not exactly the grammar, or not verified under the pinned relay stamp key for this very message: the
+    request is refused."""
+    if kept_stamp.FIELD not in message:
+        return None
+    if kind != SUBMIT_TYPE:
+        raise PolicyError("permission_denied")
+    from topos import relay_stamp
+    return kept_stamp.verify_stamp(message[kept_stamp.FIELD], msg_id=request_id, msg_type=kind,
+                                   key=relay_stamp._load_public_key_bytes())
+
+
 def _accepted_version(message, kind) -> int:
     """The answer protocol version the asker's control plane says it accepts (A2A-4 amendment 13), from the ask frame.
 
@@ -80,6 +96,7 @@ async def dispatch_answer(ws, message):
             raise PolicyError("permission_denied")
         account_words = _owner_account_words(message, kind, request_id)
         accepted_version = _accepted_version(message, kind)
+        keep_until = _keep_until(message, kind, request_id)
         waiting_key = None
         if kind == FETCH_TYPE:
             waiting_key = _fetch_waiting_key(principal, payload)
@@ -100,9 +117,11 @@ async def dispatch_answer(ws, message):
             def _work():
                 service = get_runtime().answers()
                 if kind == SUBMIT_TYPE:
+                    # A live ask reaches the service exactly as before; only a kept one carries its window.
+                    kept = {} if keep_until is None else {"keep_until": keep_until}
                     result, output = service.submit(envelope=payload["envelope"], payload=payload["intent"],
                                                     request_id=request_id, owner_account_words=account_words,
-                                                    accepted_version=accepted_version)
+                                                    accepted_version=accepted_version, **kept)
                 else:
                     result, output = service.fetch(envelope=payload["envelope"], payload=payload["intent"],
                                                    request_id=request_id)
