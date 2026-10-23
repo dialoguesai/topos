@@ -9,9 +9,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextvars import ContextVar
 from typing import Any, Dict, List
 
 from .resolver import normalize_name
+
+#: False on a request path that must not write (verify_claim_owner): a missing dossier is skipped instead of
+#: materialised, so the request never waits on the write gate. The entity's mention lines still come through.
+MATERIALIZE_MISSING_DOSSIERS: ContextVar[bool] = ContextVar("materialize_missing_dossiers", default=True)
 
 _MAX_LINKED = 5
 
@@ -182,7 +187,7 @@ def entity_context_items(
         # SIGNIFICANT_MENTIONS) or supersede left no active revision, materialize
         # so named person asks stay on entity_dossier rather than thin graph.
         dossier = load_dossier_for_entity(conn, entity_id)
-        if dossier is None:
+        if dossier is None and MATERIALIZE_MISSING_DOSSIERS.get():
             try:
                 dossier = ensure_dossier(conn, entity)
             except Exception:

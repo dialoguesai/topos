@@ -37,7 +37,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .verify_v2_models import ModelUnavailable, Usage
 
 VERSION = "verify-claim/v2.0-dev"
-MAX_STATEMENT_CHARS = 500
+MAX_STATEMENT_CHARS = 1000  # the truth-mirror's own statement cap
 DEFAULT_DEADLINE_S = 10.0
 SHOWN = 10
 SNIPPET = 400
@@ -46,8 +46,13 @@ WHY_NOT = ("question", "not_about_the_owner", "plan_or_intention", "about_the_ca
 SUBJECTS = ("owner", "someone_else", "both")
 ROLES = ("authored", "addressed", "participated", "observed", "ambient", "derived")
 AGGREGATE_LANES = frozenset({"stat_insights", "goals", "topic_clusters"})
+#: Search with the claim worded as the owner's own records would word it (first person), not "The owner ...".
+QUERY_AS_WRITTEN = True
+#: When the two list orders disagree on a record, one more call on that record alone decides it (2 of 3).
+TIEBREAK = True
 PREFIXED_SOURCES = ("canonical", "entity_thread", "commitment_evidence", "overheard")
 _QUESTION = re.compile(r"\?\s*$")
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+(?=\S)")
 _STOP = frozenset("the a an and or of to in on at for with it this that thing stuff project app code work today yesterday "
                   "tomorrow week month year morning evening night".split())
 _GENERIC = frozenset("""project projects app apps application repo repository code codebase interface ui extension feature
@@ -64,39 +69,66 @@ ROLE_TEXT = {"authored": "written by the owner", "addressed": "an assistant's re
              "participated": "someone else's message in the owner's thread", "observed": "someone else's message",
              "ambient": "observed activity, not anyone's statement", "derived": "a fact derived from the owner's records (source not found)"}
 
-READ_SYSTEM = """You prepare one sentence from a conversation for a fact check against the records of the person who owns
-them (their coding sessions, GitHub pushes, browser history, journal and messages). You get the conversation's date, who
-said the sentence, the turns just before it, and the sentence. Call the records' owner "the owner".
+_READ_TEMPLATE = """You prepare what someone just said in a conversation (a sentence or a short passage) for a fact check
+against the records of the person who owns them (their coding sessions, GitHub pushes, browser history, journal and
+messages). You get the conversation's date, who said it, the turns just before it, and what was said. Call the records'
+owner "the owner".
 
-"type" - what the sentence itself asserts:
+Speech is loose: one turn can hold fillers, asides, a question and several assertions. Take its ONE most specific
+checkable assertion (a named thing, a change made, how something is set up, an opinion about a specific thing) and
+prepare that. {scope}
+
+"type" - what that assertion says:
 - "did_or_made": something someone did, made, changed, adopted, built or worked on (past or ongoing).
 - "setup": how the owner's tools, data or system are set up or work now.
 - "opinion": an opinion about a specific thing ("that would be cool", "its UI was terrible").
-- "not_checkable": a question, a future plan or intention, a remark about the call itself happening right now (audio,
-  loading, screen sharing), or a fragment that asserts nothing even with context.
+- "not_checkable": nothing said asserts anything checkable: it is only a question, only a future plan or intention,
+  only a remark about the call itself happening right now (audio, loading, screen sharing), or a fragment that asserts
+  nothing even with context.
 "not_checkable_because": for not_checkable, one of the listed reasons; otherwise "".
-"subject": who the claim is about: "owner", "someone_else" (another person or group), or "both".
+"subject": who the claim is about: "owner" (the speaker, or their own projects, tools and things), "someone_else"
+(another person or group, or their things), or "both".
 "reported_speech": true if the sentence reports what someone said rather than stating it directly.
-"claim": the sentence's one core assertion, at most 20 words. Use the earlier turns ONLY to replace "it", "this", "that
+"claim": that one assertion, at most 20 words. Use the earlier turns ONLY to replace "it", "this", "that
 project" and similar with the thing meant, and to turn relative dates into absolute ones. Add no other details.
-"names": 1 to 4 distinctive names or words from the sentence or the earlier turns that identify what the claim is about
+"names": 1 to 4 distinctive names or words from what was said or the earlier turns that identify what the claim is about
 (a project, repo, character, tool, product, company, site or person's name). Not generic words like project, app or repo.
-"date_from"/"date_to": the dates the claim is about (YYYY-MM-DD), from the conversation's date; "" if none."""
+"date_from"/"date_to": the dates the claim is about (YYYY-MM-DD), from the conversation's date; "" if none.
+"as_written": the claim worded the way the owner's own notes, messages or coding sessions would put it: first person for
+the owner's own actions ("I ..."), the same facts and names, plain words, at most 25 words; "" for not_checkable."""
 
-READ_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "type": {"type": "string", "enum": list(KINDS)},
-        "not_checkable_because": {"type": "string", "enum": [""] + list(WHY_NOT)},
-        "subject": {"type": "string", "enum": list(SUBJECTS)},
-        "reported_speech": {"type": "boolean"},
-        "claim": {"type": "string"},
-        "names": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
-        "date_from": {"type": "string"},
-        "date_to": {"type": "string"},
-    },
-    "required": ["type", "not_checkable_because", "subject", "reported_speech", "claim", "names", "date_from", "date_to"],
-}
+#: The request's ``about_others`` option picks the reader's scope. Off (the default): only what the speaker says about
+#: themself (alone or with others) is checked. On: a claim about someone else may be checked against the owner's
+#: messages, under the same actor-role rules.
+READ_SYSTEM = _READ_TEMPLATE.format(scope=(
+    "Take an assertion about the speaker or the speaker's own things: what they did, made, set up, use or think, alone\n"
+    "or with others, including their projects, tools and data. Only when everything said is about another person or\n"
+    'group is the type "not_checkable" because "not_about_the_owner".'))
+READ_SYSTEM_WITH_OTHERS = _READ_TEMPLATE.format(scope=(
+    "Prefer an assertion about the speaker themself; take one about someone else only when nothing said is about the\n"
+    "speaker. A claim about someone else is still checkable: the owner's messages may show it."))
+
+def _read_schema(why_not) -> Dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "enum": list(KINDS)},
+            "not_checkable_because": {"type": "string", "enum": [""] + list(why_not)},
+            "subject": {"type": "string", "enum": list(SUBJECTS)},
+            "reported_speech": {"type": "boolean"},
+            "claim": {"type": "string"},
+            "names": {"type": "array", "items": {"type": "string"}, "maxItems": 4},
+            "date_from": {"type": "string"},
+            "date_to": {"type": "string"},
+            "as_written": {"type": "string"},
+        },
+        "required": ["type", "not_checkable_because", "subject", "reported_speech", "claim", "names", "date_from", "date_to",
+                     "as_written"],
+    }
+
+
+READ_SCHEMA = _read_schema(WHY_NOT)
+READ_SCHEMA_WITH_OTHERS = _read_schema(w for w in WHY_NOT if w != "not_about_the_owner")
 
 LABEL_SYSTEM = """You check excerpts from a person's own records against one claim. Each excerpt is numbered and shows its
 source, its date (UTC) and who stands behind it. Label EVERY excerpt:
@@ -127,6 +159,7 @@ class ClaimRequest:
     context: List[Dict[str, str]] = field(default_factory=list)  # [{"speaker", "text"}], oldest first
     said_at: Optional[str] = None                                  # ISO 8601 with offset; None -> now
     speaker: str = "owner"
+    about_others: bool = False  # also check claims about someone else (see READ_SYSTEM_WITH_OTHERS)
     effort: str = "high"
     deadline_s: float = DEFAULT_DEADLINE_S
 
@@ -140,6 +173,7 @@ class Claim:
     names: List[str]
     date_from: str
     date_to: str
+    as_written: str = ""
 
 
 # --- small pure helpers --------------------------------------------------------------------------------------------
@@ -166,7 +200,7 @@ def gate(statement: str) -> Optional[str]:
         return "empty"
     if len(s) > MAX_STATEMENT_CHARS:
         return "too_long"
-    if _QUESTION.search(s):
+    if _QUESTION.search(s) and not _SENTENCE_BREAK.search(s):  # a passage that ends on a question may still assert
         return "question"
     if len(s.split()) < 4:
         return "fragment"
@@ -229,7 +263,7 @@ def accept(role: str, record_day: Optional[date], claim: Claim, window, authored
 def retrieval_query(claim: "Claim") -> str:
     """The claim with its period spelled out, so the node's planner applies its own time window instead of the
     period being filtered afterwards (measured 22 Oct: 25/29 items in the period with the date, 0/39 without)."""
-    q = claim.text.strip()
+    q = (claim.as_written.strip() if QUERY_AS_WRITTEN else "") or claim.text.strip()
     lo, hi = claim.date_from.strip(), claim.date_to.strip()
     if lo and lo not in q:
         q = q.rstrip(".") + (f" between {lo} and {hi}." if hi and hi != lo else f" on {lo}.")
@@ -238,18 +272,23 @@ def retrieval_query(claim: "Claim") -> str:
 
 # --- stage 1: read --------------------------------------------------------------------------------------------------
 def read_claim(req: ClaimRequest, chat: Callable, usage: Usage, timeout: float) -> Tuple[Optional[Claim], Optional[str]]:
-    turns = "\n".join(f"{t.get('speaker') or 'someone'}: {t.get('text') or ''}" for t in req.context[-6:]) or "(none)"
+    turns = "\n".join((f"{t['speaker']}: " if t.get("speaker") else "- ") + str(t.get("text") or "")
+                      for t in req.context[-6:]) or "(none)"
     user = (f"Conversation date: {conversation_time(req.said_at).date().isoformat()}\nSaid by: {req.speaker}\n\n"
-            f"Earlier turns:\n{turns}\n\nSentence to prepare: {req.statement.strip()}")
-    out = chat(READ_SYSTEM, user, READ_SCHEMA, timeout, usage)
+            f"Earlier turns:\n{turns}\n\nWhat was said: {req.statement.strip()}")
+    system, schema = (READ_SYSTEM_WITH_OTHERS, READ_SCHEMA_WITH_OTHERS) if req.about_others else (READ_SYSTEM, READ_SCHEMA)
+    out = chat(system, user, schema, timeout, usage)
     kind = out.get("type") if out.get("type") in KINDS else "not_checkable"
     if kind == "not_checkable":
         why = out.get("not_checkable_because")
         return None, why if why in WHY_NOT else "too_vague"
     subject = out.get("subject") if out.get("subject") in SUBJECTS else "owner"
+    if subject == "someone_else" and not req.about_others:  # the option holds even when the model strays
+        return None, "not_about_the_owner"
     return Claim(kind=kind, subject=subject, reported_speech=out.get("reported_speech") is True,
                  text=str(out.get("claim") or req.statement)[:300], names=clean_names(out.get("names")),
-                 date_from=str(out.get("date_from") or ""), date_to=str(out.get("date_to") or "")), None
+                 date_from=str(out.get("date_from") or ""), date_to=str(out.get("date_to") or ""),
+                 as_written=str(out.get("as_written") or "")[:300]), None
 
 
 # --- stages 2-3: retrieve and qualify (inside a DB worker, on its own connection) -----------------------------------
@@ -332,7 +371,13 @@ class NodeEvidence:
         ledger = self._Ledger()
         req = self._Request(manifest=self.manifest, access_mode="summary", query_text=query, needle_text=needles or None,
                             disclosure_tier="owner_raw", owner_mode=True, packet_resolution="facts_all", now=now, ledger=ledger)
-        packet = self.adapter.retrieve(req).context_packet
+        from ..features.entities.linking import MATERIALIZE_MISSING_DOSSIERS
+
+        token = MATERIALIZE_MISSING_DOSSIERS.set(False)  # a read: never materialise a dossier on this path
+        try:
+            packet = self.adapter.retrieve(req).context_packet
+        finally:
+            MATERIALIZE_MISSING_DOSSIERS.reset(token)
         packet = packet if isinstance(packet, dict) else {}
         stats = {"candidates": 0, "aggregates_skipped": 0, "facts_expanded": 0, "derived": 0}
         records: List[Dict[str, Any]] = []
@@ -363,7 +408,8 @@ class NodeEvidence:
                 if text:
                     stats["derived"] += 1
                     records.append({"table": table or "derived", "record_id": str(it.get("record_id") or it.get("entity_id") or ""),
-                                    "event_at": str(it.get("event_at") or ""), "role": "derived", "lanes": lanes, "lane": lane, "text": text})
+                                    "event_at": str(it.get("event_at") or ""), "role": "derived", "lanes": lanes, "lane": lane, "text": text,
+                                    "origin": str(it.get("object_type") or it.get("retrieval_source") or "")[:40]})
         return records, stats
 
 
@@ -394,7 +440,7 @@ def select_evidence(records, sentence: str, claim: Claim, now: datetime):
         start = max(0, min(hits) - SNIPPET // 4) if hits else 0
         shown.append({"n": i + 1, "ref": f"{r['table']}:{r['record_id']}", "source": r["table"], "date": r["event_at"][:10],
                       "role": r["role"] if r["role"] in ROLES else "derived", "lane": r["lane"], "snippet": text[start:start + SNIPPET],
-                      "context": r.get("context") or ""})
+                      "context": r.get("context") or "", "origin": r.get("origin") or r["table"]})
     return shown, dropped
 
 
@@ -407,13 +453,28 @@ def judge(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: float) 
                       + f", {e['date'] or 'undated'}, {ROLE_TEXT[e['role']]}: {e['snippet']}")
     forward = head + "\n".join(line(e) for e in evidence)
     backward = head + "\n".join(line(e) for e in reversed(evidence))
+    ends = time.perf_counter() + timeout
     with ThreadPoolExecutor(max_workers=2) as pool:  # the two orders in parallel: half the judge latency
         f1 = pool.submit(chat, LABEL_SYSTEM, forward, LABEL_SCHEMA, timeout, usage)
         f2 = pool.submit(chat, LABEL_SYSTEM, backward, LABEL_SCHEMA, timeout, usage)
         first, second = f1.result(), f2.result()
     shows = lambda reply: {x.get("n") for x in (reply.get("labels") or []) if isinstance(x, dict) and x.get("label") == "shows"}
-    agreed = sorted(n for n in shows(first) & shows(second) if isinstance(n, int) and 1 <= n <= len(evidence))
+    valid = lambda ns: {n for n in ns if isinstance(n, int) and 1 <= n <= len(evidence)}
     by_n = {e["n"]: e for e in evidence}
+    agreed_set, split = valid(shows(first) & shows(second)), sorted(valid(shows(first) ^ shows(second)))
+    tiebroken = 0
+    if TIEBREAK and split and ends - time.perf_counter() > 1.0:
+        def alone(n):  # the record on its own, so its place in a list cannot decide it
+            try:
+                return 1 in shows(chat(LABEL_SYSTEM, head + line({**by_n[n], "n": 1}), LABEL_SCHEMA, ends - time.perf_counter(), usage))
+            except ModelUnavailable:  # no third opinion: the record stays split, which never counts
+                return False
+        with ThreadPoolExecutor(max_workers=min(4, len(split))) as pool:
+            for n, ok in zip(split, pool.map(alone, split)):
+                if ok:
+                    agreed_set.add(n)
+                    tiebroken += 1
+    agreed = sorted(agreed_set)
     window = window_of(claim)
     authored_ok = any(accept("authored", _day(by_n[n]["date"]), claim, window, False)[0] for n in agreed if by_n[n]["role"] == "authored")
     verdicts = {n: accept(by_n[n]["role"], _day(by_n[n]["date"]), claim, window, authored_ok) for n in agreed}
@@ -422,11 +483,11 @@ def judge(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: float) 
         reason = None
     elif agreed:
         reason = "shows_failed_rules"
-    elif shows(first) or shows(second):
+    elif split:
         reason = "judges_disagree"
     else:
         reason = "no_record_shows_it"
-    return {"cites": cites, "agreed": len(agreed), "rejections": sorted(r for ok, r in verdicts.values() if not ok), "reason": reason}
+    return {"cites": cites, "agreed_ns": agreed, "agreed": len(agreed), "tiebroken": tiebroken, "rejections": sorted(r for ok, r in verdicts.values() if not ok), "reason": reason}
 
 
 # --- orchestration --------------------------------------------------------------------------------------------------
@@ -483,9 +544,10 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
         t = time.perf_counter()
         verdict = await to_thread(judge, claim, evidence, chat, usage, left())
         out["timings_ms"]["judge"] = round((time.perf_counter() - t) * 1000, 1)
-        out["stages"]["judge"] = {"agreed": verdict["agreed"], "rejections": verdict["rejections"]}
+        out["stages"]["judge"] = {"agreed": verdict["agreed"], "tiebroken": verdict["tiebroken"], "rejections": verdict["rejections"]}
         cited = set(verdict["cites"])
-        out["evidence"] = [{**e, "cited": e["n"] in cited} for e in evidence]
+        agreed = set(verdict["agreed_ns"])
+        out["evidence"] = [{**e, "cited": e["n"] in cited, "agreed": e["n"] in agreed} for e in evidence]
         out["cited_roles"] = [e["role"] for e in evidence if e["n"] in cited]
         if cited:
             return respond({**out, "verdict": "supported"}, started, usage)

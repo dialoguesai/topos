@@ -37,7 +37,7 @@ class FakeChat:
             raise ModelUnavailable("http_503")
         time.sleep(self.delay)
         usage.add(10, 2)
-        if system is v2.READ_SYSTEM:
+        if system in (v2.READ_SYSTEM, v2.READ_SYSTEM_WITH_OTHERS):
             return self.read
         return {"labels": [{"n": n, "label": lab} for n, lab in self.labels.items()]}
 
@@ -55,8 +55,9 @@ def run(records, chat, **req):
     return asyncio.run(v2.verify_owner_claim(request, chat=chat, gather_in_worker=gather, to_thread=asyncio.to_thread))
 
 
-@pytest.mark.parametrize("text, reason", [("", "empty"), ("x" * 501, "too_long"), ("Did you change it?", "question"),
-                                          ("Yeah, totally.", "fragment"), ("The sidebar is cramped today.", None)])
+@pytest.mark.parametrize("text, reason", [("", "empty"), ("x" * 1001, "too_long"), ("Did you change it?", "question"),
+                                          ("Yeah, totally.", "fragment"), ("The sidebar is cramped today.", None),
+                                          ("I restyled the sidebar last week. Have you seen it?", None)])
 def test_gate(text, reason):
     assert v2.gate(text) == reason
 
@@ -160,6 +161,8 @@ def test_truth_door_admits_owner_only(cls, channel, admitted, monkeypatch):
     ({"statement": SENTENCE, "effort": "max"}, False),
     ({"statement": SENTENCE, "deadline_s": 60}, False),
     ({"statement": SENTENCE, "deadline_s": True}, False),
+    ({"statement": SENTENCE, "about_others": True}, True),
+    ({"statement": SENTENCE, "about_others": "yes"}, False),
     ({"statement": SENTENCE, "context": "turns"}, False),
     ({"statement": SENTENCE, "context": [{"speaker": 1, "text": "x"}]}, False),
     ("not a dict", False),
@@ -223,3 +226,111 @@ def test_session_title_reaches_the_judge_line():
     r = {**rec(1, "authored", table="ai_chat_messages"), "context": "pinwheel sidebar polish"}
     out = run([r], Recording(read_reply(), {1: "shows"}))
     assert out["verdict"] == "supported" and any("(session: pinwheel sidebar polish)" in u for u in seen)
+
+
+def test_retrieval_query_prefers_the_owners_own_wording():
+    c = claim(as_written="I restyled the pinwheel sidebar")
+    assert v2.retrieval_query(c) == "I restyled the pinwheel sidebar on 2026-10-06."
+
+
+class SplitChat(FakeChat):
+    """Record 1 is "shows" only when it is listed first; on its own it gets ``alone``."""
+
+    def __init__(self, alone):
+        super().__init__(read_reply())
+        self.alone = alone
+
+    def __call__(self, system, user, schema, timeout, usage):
+        if system in (v2.READ_SYSTEM, v2.READ_SYSTEM_WITH_OTHERS):
+            return super().__call__(system, user, schema, timeout, usage)
+        usage.add(10, 2)
+        excerpts = [l for l in user.splitlines() if l.startswith("[")]
+        if len(excerpts) == 1:
+            return {"labels": [{"n": 1, "label": self.alone}]}
+        return {"labels": [{"n": 1, "label": "shows" if excerpts[0].startswith("[1]") else "related"}]}
+
+
+@pytest.mark.parametrize("alone, verdict, reason", [("shows", "supported", None), ("related", "no_evidence", "judges_disagree")])
+def test_a_split_record_is_decided_by_one_call_on_it_alone(alone, verdict, reason):
+    out = run([rec(1, "authored"), rec(2, "authored")], SplitChat(alone))
+    assert out["verdict"] == verdict and out.get("reason") == reason
+    assert out["usage"]["model_calls"] == 4 and out["stages"]["judge"]["tiebroken"] == (1 if alone == "shows" else 0)
+
+
+def test_a_missing_dossier_is_not_materialised_when_the_path_must_not_write(monkeypatch):
+    import sqlite3
+    from types import SimpleNamespace
+
+    from topos.features.entities import dossier, edges, linking
+
+    built = []
+    monkeypatch.setattr(dossier, "ensure_dossier", lambda conn, entity: built.append(entity["entity_id"]))
+    monkeypatch.setattr(dossier, "load_dossier_for_entity", lambda conn, eid: None)
+    monkeypatch.setattr(edges, "top_edges", lambda *a, **k: [])
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE entity_mentions (entity_id TEXT, canonical_table TEXT, record_id TEXT, surface_text TEXT, "
+                 "event_at TEXT, source_id TEXT, created_at TEXT)")
+    ask = lambda: linking.entity_context_items(conn, [{"entity_id": "e1", "canonical_name": "Pinwheel"}],
+                                               manifest=SimpleNamespace(canonical_tables=["journal_entries"]))
+    token = linking.MATERIALIZE_MISSING_DOSSIERS.set(False)
+    try:
+        ask()
+    finally:
+        linking.MATERIALIZE_MISSING_DOSSIERS.reset(token)
+    assert built == []
+    ask()  # every other path keeps materialising
+    assert built == ["e1"]
+
+
+def test_gather_turns_dossier_writes_off_only_for_its_own_retrieval():
+    from topos.features.entities.linking import MATERIALIZE_MISSING_DOSSIERS
+
+    seen = []
+
+    class Adapter:
+        def retrieve(self, req):
+            seen.append(MATERIALIZE_MISSING_DOSSIERS.get())
+            return SimpleNamespace(context_packet={})
+
+    from types import SimpleNamespace
+
+    ev = v2.NodeEvidence.__new__(v2.NodeEvidence)
+    ev.adapter, ev.manifest, ev._Request, ev._Ledger = Adapter(), None, (lambda **kw: kw), (lambda: None)
+    assert ev.gather("q", "", datetime(2026, 10, 8, tzinfo=timezone.utc)) == ([], {"candidates": 0, "aggregates_skipped": 0,
+                                                                                  "facts_expanded": 0, "derived": 0})
+    assert seen == [False] and MATERIALIZE_MISSING_DOSSIERS.get() is True
+
+
+def test_reader_sees_unknown_speakers_as_plain_lines():
+    seen = []
+
+    class Recording(FakeChat):
+        def __call__(self, system, user, schema, timeout, usage):
+            seen.append(user)
+            return super().__call__(system, user, schema, timeout, usage)
+
+    run([], Recording(read_reply()), context=[{"speaker": "", "text": "how is the sidebar?"}, {"speaker": "guest", "text": "nice"}])
+    assert "- how is the sidebar?\nguest: nice" in seen[0] and "someone" not in seen[0]
+
+
+@pytest.mark.parametrize("about_others, verdict, reason", [(False, "unable", "not_checkable:not_about_the_owner"),
+                                                           (True, "supported", None)])
+def test_claims_about_someone_else_are_checked_only_when_asked(about_others, verdict, reason):
+    reply = read_reply(subject="someone_else")
+    out = run([rec(1, "observed")], FakeChat(reply, {1: "shows"}), about_others=about_others)
+    assert out["verdict"] == verdict and out.get("reason") == reason
+
+
+def test_the_reader_is_told_the_scope_the_request_asked_for():
+    seen = []
+
+    class Recording(FakeChat):
+        def __call__(self, system, user, schema, timeout, usage):
+            seen.append((system, schema["properties"]["not_checkable_because"]["enum"]))
+            return super().__call__(system, user, schema, timeout, usage)
+
+    run([], Recording(read_reply()))
+    run([], Recording(read_reply()), about_others=True)
+    (own, own_enum), (others, others_enum) = seen  # one reader call each; no records, no judge
+    assert own is v2.READ_SYSTEM and "not_about_the_owner" in own_enum
+    assert others is v2.READ_SYSTEM_WITH_OTHERS and "not_about_the_owner" not in others_enum

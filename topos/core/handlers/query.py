@@ -117,9 +117,12 @@ def _owner_claim_request(payload: Any):
         return None
     if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not 0.5 <= float(deadline) <= _V2_MAX_DEADLINE_S:
         return None
+    about_others = payload.get("about_others", False)
+    if not isinstance(about_others, bool):
+        return None
     turns = [{"speaker": str(t.get("speaker") or "")[:60], "text": str(t.get("text") or "")[:1000]} for t in context]
     return ClaimRequest(statement=payload["statement"], context=turns, said_at=said_at, speaker=speaker[:60] or "owner",
-                        effort=effort, deadline_s=float(deadline))
+                        effort=effort, deadline_s=float(deadline), about_others=about_others)
 
 
 @handles("verify_claim_owner")
