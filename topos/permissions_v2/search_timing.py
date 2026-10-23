@@ -102,7 +102,9 @@ closed names, counts and durations.
   ``row_binding``, ``row_revision``, ``missing``; ``neighbour_inserted``, ``neighbour_changed``, ``row_unavailable``);
   with ``TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS`` on, ``scope=member`` marks the first member a check withheld
   rather than the whole index going, and the sweep's narrowed publish is an ``index_rebuild`` line with
-  ``state=narrowed`` and the members the narrowed index holds.
+  ``state=narrowed`` and the members the narrowed index holds. DR-34 (``TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS``,
+  on by default since 1.5.16): class ``fingerprint`` with ``sub=own_row_edit`` and ``scope=member`` marks the first member a check
+  withheld because its own stored row was rewritten.
 """
 from __future__ import annotations
 
