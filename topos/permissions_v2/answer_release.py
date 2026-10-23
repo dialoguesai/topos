@@ -12,9 +12,11 @@ then (`keep_end`: at most KEPT_MAX_SECONDS, never less than an unkept job's
 window), still only in this process, with every fetch-time re-check as before;
 while one is in memory a sweep drops expired jobs every SWEEP_SECONDS, without
 waiting for the next ask or fetch.
-A kept job whose retrieval meets a share index not served now ends `deferred`:
-no body, its question given back, and its fetch answers `answer_deferred`, so
-the control plane asks again later.
+A kept job that cannot be answered now ends `deferred`: its retrieval met a
+share index not served now, or (R-OFF1 I3) the model or judge host was not up,
+the job waited too long in the queue, or it ran out of time. No body, its
+question given back, and its fetch answers `answer_deferred`, so the control
+plane asks again later (and caps how often).
 
 Fix A (`ANSWER_PROTECTED_ITEM_FILTER`, off by default), security note. With the
 switch on, a released record whose own text as the prompt shows it carries an
@@ -109,6 +111,13 @@ RECEIPT_REASONS = frozenset({
     "labeler_rubric_mismatch",
 })
 REASON_OTHER = "refused"
+# R-OFF1 I3 (WS-OFF, 23 Oct): for a kept question these receipt reasons mean "not now", not "never". A kept question is
+# delivered just after the owner's Topos comes back, when the model host may not be up yet (`model_unavailable`,
+# `judge_unavailable`), others' live asks may fill the queue (`queue_deadline`), or the job may run out of time
+# (`deadline`). A kept job that ends with one of them is deferred, as for an index not served now; the control plane
+# caps how often one kept question defers. A live ask ends `no_answer` with them, as before. A model that answered
+# badly (`model_error`) is no answer for a kept question too.
+KEPT_LATER = frozenset({"model_unavailable", "judge_unavailable", "queue_deadline", "deadline"})
 
 # BL-159: the refusals of a written answer's re-check that say only "the share's index is not served right now"
 # (dropped by a sweep, being rebuilt, a verification pass closed under it). They decide nothing about the items the
@@ -154,7 +163,7 @@ def _unresolved_refuses(method):
 # code is a bounded machine reason, never data; anything else is logged as `refused` or `error`) and the seconds the
 # node took. Never a question, an answer, an id or a record. Outcomes: `answered` / `no_answer` (the body handed out),
 # `pending` (still being written), `held` (written, kept while the share's index is not served; the code says why),
-# `deferred` (lane OFF1N: a kept ask that met an index not served now, `answer_deferred`; the code says why), `refused`
+# `deferred` (lane OFF1N: a kept ask that could not be answered now, `answer_deferred`; the code says why), `refused`
 # (the uniform refusal went back; the code says why). A `pending` that took under SLOW_FETCH_SECONDS is logged at
 # debug level, so the steady polls of one ask do not fill the log.
 FETCH_LOG = "permissions answer fetch: outcome=%s reason=%s seconds=%.1f"
@@ -236,8 +245,9 @@ class Job:
     # Kept questions (lane OFF1N): the end of the window the control plane signed for a kept question (`kept_stamp`),
     # in epoch seconds; None for a live ask. In this process only, as the question is.
     keep_until: int | None = None
-    # The not-served-now code a kept job's retrieval was refused with (`NOT_SERVED_NOW`); never set for a live ask.
-    not_served: str | None = None
+    # Why a kept job was deferred: the not-served-now code its retrieval was refused with (`NOT_SERVED_NOW`), or the
+    # receipt reason of a "not now" failure (`KEPT_LATER`). Never set for a live ask.
+    deferred_by: str | None = None
     # The kept job ended `deferred`: no body, and every fetch of it is `AnswerDeferred` until `keep_end`.
     deferred: bool = False
 
@@ -581,7 +591,7 @@ class AnswerService:
                     # the fetch's id is spent as refused, but the fetch answers `answer_deferred`, so the control
                     # plane asks the kept question again later instead of ending it.
                     ledger.refuse(admission, now=self.clock())
-                    raise AnswerDeferred(job.not_served)
+                    raise AnswerDeferred(job.deferred_by)
                 body = job.body if job.state == "ended" else AnswerPending(version=VERSION, state="pending",
                                                                              answer_id=job.answer_id)
                 if body is None:
@@ -675,11 +685,14 @@ class AnswerService:
             ended = self.clock()
             if ended >= job.accepted_at + MAX_END_SECONDS:
                 checked, reason = None, "deadline"
-            # Lane OFF1N: a kept job whose retrieval met a share index not served now (`_compute` keeps the code)
-            # wrote no answer at all. It ends `deferred`, with no body and a receipt that says so (filing it gives the
-            # ask's question back, `checkpoint_answer_receipt`), and its fetch answers `answer_deferred`, so the
-            # control plane asks the kept question again later. A live job ends `no_answer`, as before.
-            deferred = checked is None and reason != "deadline" and job.not_served is not None
+            # Lane OFF1N: a kept job that wrote no answer because its share's index was not served now (`_compute`
+            # keeps the code), or (R-OFF1 I3) for one of the "not now" reasons of KEPT_LATER, ends `deferred`, with no
+            # body and a receipt that says so (filing it gives the ask's question back, `checkpoint_answer_receipt`),
+            # and its fetch answers `answer_deferred`, so the control plane asks the kept question again later. A
+            # live job ends `no_answer`, as before.
+            if job.keep_until is not None and checked is None and reason in KEPT_LATER:
+                job.deferred_by = reason
+            deferred = checked is None and job.deferred_by is not None
             body = (None if deferred else checked.body if checked is not None
                     else NoAnswer(version=VERSION, outcome="no_answer"))
             if checked is not None and body.outcome == "answered" and job.disclosure != "none":
@@ -873,7 +886,7 @@ class AnswerService:
             # authority stale), never `authority_moved` for all of them. `receipt_reason` keeps it counts-only.
             if job.keep_until is not None and exc.code in NOT_SERVED_NOW:
                 # Lane OFF1N: for a kept job this decided nothing; it ends deferred (`_run`), the question asked again.
-                job.not_served = exc.code
+                job.deferred_by = exc.code
             return None, receipt_reason(exc.code)
         except Unresolved as exc:
             # NR185: the final PolicyError it is (its code is neither "not served now" nor `answer_evidence_moved`).
@@ -884,7 +897,7 @@ class AnswerService:
     @staticmethod
     def _receipt(job, checked, reason, started, ended, *, deferred=False):
         """The counts-only receipt. Its outcome is `answered` or `no_answer`, or (lane OFF1N) `deferred` for a kept job
-        that wrote nothing because the share's index was not served: no answer the owner's week counts."""
+        that wrote nothing and is asked again (`Job.deferred_by`): no answer the owner's week counts."""
         from .shadow_labeler_local import MODEL, MODEL_REVISION
         return {"version": "topos-local-receipt/answer-v1", "request_id": job.request_id,
             "answer_id": job.answer_id, "grant_id": job.grant_id,

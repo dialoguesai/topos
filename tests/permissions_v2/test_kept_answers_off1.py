@@ -648,7 +648,7 @@ def test_a_kept_ask_that_meets_an_index_not_served_now_ends_deferred(answers_nod
     _unserve(node)
     answer_id = _ask(node, service, keep_until=node.now[0] + DAY)
     job = _ended(service, answer_id)
-    assert (job.deferred, job.body, job.question, job.not_served) == (True, None, None, "search_index_stale")
+    assert (job.deferred, job.body, job.question, job.deferred_by) == (True, None, None, "search_index_stale")
     receipt, decision = _receipt(node, job)
     assert (receipt["outcome"], receipt["reason"], receipt["records_used"]) == ("deferred", "search_index_stale", 0)
     assert decision == {"version": "answer-decision/v1", "outcome": "deferred", "reason": "search_index_stale"}
@@ -812,7 +812,7 @@ def test_an_unkept_ask_that_meets_an_index_not_served_now_ends_no_answer_as_befo
     _unserve(node)
     answer_id = _ask(node, service)
     job = _ended(service, answer_id)
-    assert job.deferred is False and job.not_served is None and job.body.outcome == "no_answer"
+    assert job.deferred is False and job.deferred_by is None and job.body.outcome == "no_answer"
     receipt, decision = _receipt(node, job)
     assert (receipt["outcome"], receipt["reason"]) == ("no_answer", "search_index_stale")
     assert decision == {"version": "answer-decision/v1", "outcome": "no_answer", "reason": "search_index_stale"}
@@ -860,6 +860,54 @@ def test_a_refusal_waiting_cannot_cure_ends_a_kept_ask_no_answer(answers_node, s
     kept = _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))
     assert not kept.deferred and kept.body.outcome == "no_answer"
     assert _receipt(node, kept)[0]["outcome"] == "no_answer"
+
+
+def _host_cannot_serve(node, service, monkeypatch, code):
+    """The four ways the owner's machine fails a job just after it comes back (R-OFF1 I3), without a model."""
+    if code == "model_unavailable":
+        async def unavailable(_prompt, *, deadline):
+            raise PolicyError("model_unavailable")
+        service.generate = unavailable
+    elif code == "judge_unavailable":
+        monkeypatch.setattr(service, "_compute", lambda job: (None, "judge_unavailable"))
+    elif code == "queue_deadline":
+        monkeypatch.setattr(answer_release, "MAX_WAIT_SECONDS", -1)         # every job waited too long to start
+    else:
+        monkeypatch.setattr(answer_release, "MAX_END_SECONDS", 0)           # every job ran out of time
+
+
+@pytest.mark.parametrize("code", ["model_unavailable", "judge_unavailable", "queue_deadline", "deadline"])
+def test_a_kept_ask_the_machine_could_not_serve_then_ends_deferred(answers_node, service, monkeypatch, code):
+    """R-OFF1 I3 (WS-OFF, 23 Oct): a kept question arrives just after the owner's Topos comes back, when the model
+    host may not be up yet, others' live asks may fill the queue, or the job may run out of time. For a kept ask
+    those are "later", not "never": it ends deferred (its question given back, its fetch 429 answer_deferred), and
+    the control plane caps how often one kept question defers. A live ask ends no_answer, as before."""
+    node = answers_node
+    _host_cannot_serve(node, service, monkeypatch, code)
+    kept = _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))
+    assert (kept.deferred, kept.deferred_by, kept.body, kept.question) == (True, code, None, None)
+    assert (_receipt(node, kept)[0]["outcome"], _receipt(node, kept)[0]["reason"]) == ("deferred", code)
+    assert _questions(node) == 0
+    with pytest.raises(AnswerDeferred):
+        _fetch(node, service, kept.answer_id)
+    live = _ended(service, _ask(node, service))
+    assert not live.deferred and live.deferred_by is None and live.body.outcome == "no_answer"
+    assert (_receipt(node, live)[0]["outcome"], _receipt(node, live)[0]["reason"]) == ("no_answer", code)
+    assert _questions(node) == 1
+
+
+def test_a_model_that_answers_badly_still_ends_a_kept_ask_no_answer(answers_node, service):
+    """Only the four "not now" failures defer: a model that answered, badly, is no answer for a kept ask too."""
+    node = answers_node
+
+    async def broken(_prompt, *, deadline):
+        raise PolicyError("model_error")
+
+    service.generate = broken
+    kept = _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))
+    assert not kept.deferred and kept.body.outcome == "no_answer"
+    assert (_receipt(node, kept)[0]["outcome"], _receipt(node, kept)[0]["reason"]) == ("no_answer", "model_error")
+    assert _questions(node) == 1
 
 
 def test_a_deferred_receipt_adds_nothing_to_the_owners_week(answers_node, service):
