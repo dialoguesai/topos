@@ -321,6 +321,17 @@ class NodeEvidence:
             return tbl
         return self._table_of.get(item.get("record_type")) or item.get("canonical_table") or ""
 
+    def _embedded_type(self, item) -> str:
+        """A vector hit carries its record id but not its table; the embedding row keeps the record's type."""
+        if item.get("retrieval_source") != "vector" or not item.get("record_id"):
+            return ""
+        try:
+            row = self.conn.execute("SELECT record_type FROM signal_embeddings WHERE record_id = ? LIMIT 1",
+                                    (item["record_id"],)).fetchone()
+        except sqlite3.OperationalError:
+            return ""
+        return str(row[0] or "") if row else ""
+
     def _row(self, table, rid):
         if table not in SOURCE_ROWS or not rid:
             return None
@@ -379,7 +390,7 @@ class NodeEvidence:
         finally:
             MATERIALIZE_MISSING_DOSSIERS.reset(token)
         packet = packet if isinstance(packet, dict) else {}
-        stats = {"candidates": 0, "aggregates_skipped": 0, "facts_expanded": 0, "derived": 0}
+        stats = {"candidates": 0, "aggregates_skipped": 0, "facts_expanded": 0, "vector_resolved": 0, "derived": 0}
         records: List[Dict[str, Any]] = []
         for lane in ("summaries", "semantic_hits"):
             for it in packet.get(lane) or []:
@@ -391,7 +402,11 @@ class NodeEvidence:
                 if not table and set(lanes) <= AGGREGATE_LANES:
                     stats["aggregates_skipped"] += 1
                     continue
-                if not table and "facts_store" in lanes:
+                kind = "" if table else self._embedded_type(it)
+                if kind:
+                    table = self._table_of.get(kind, "")
+                    stats["vector_resolved"] += bool(table)
+                if not table and ("facts_store" in lanes or kind == "derived_fact"):
                     srcs = self._expand_fact(it)
                     if srcs:
                         stats["facts_expanded"] += 1
