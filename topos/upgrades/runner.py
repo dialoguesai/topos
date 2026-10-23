@@ -578,6 +578,13 @@ def _exec_engine_endpoint(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
 
         params = step.get("params") or {}
         return dict(repair_coding_conversation_ids(conn, dry_run=bool(params.get("dry_run", False))))
+    if path == "/v1/signal/provenance/repair-source-refs":
+        # Provenance refs naming the wrong table, a source label, or a retired GitHub commit id. The two
+        # writers still running cite the record's table now; refs already on disk only move if swept.
+        from ..features.lifecycle.source_ref_repair import repair_source_refs
+
+        params = step.get("params") or {}
+        return dict(repair_source_refs(conn, dry_run=bool(params.get("dry_run", False))))
     if path == "/v1/privacy/off-limits/carry-contact-excludes":
         # D24: the older sharing model's explicit per-person excludes become
         # Off-limits entries before that model is removed (contact_excludes).
