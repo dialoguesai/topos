@@ -271,3 +271,46 @@ def test_dead_socket_file_is_reclaimable(monkeypatch, bound_servers):
         assert _wait_for(lambda: uds_mod.socket_is_live(p)), "uvicorn did not take the path back"
         # The clamp lands before the directory goes, so its thread ends here and never polls a path that is gone.
         assert _wait_for(lambda: stat.S_IMODE(p.stat().st_mode) == 0o600), "the socket was not clamped to 0600"
+
+
+def test_the_clamp_lands_after_uvicorns_own_chmod(monkeypatch, bound_servers):
+    """uvicorn binds the socket, chmods it 0666 itself, and only then listens. A clamp that
+    lands between that bind and that chmod is undone by it, and the owner socket stays
+    world-writable: the exact interleaving CI runners under load produced on 23 Oct 2026
+    (test_dead_socket_file_is_reclaimable red on main with the code untouched). The clamp
+    must wait for a listener, which is what proves uvicorn's chmod is behind it."""
+    import os as _os
+
+    import uvicorn
+
+    import topos.uds as uds_mod
+
+    class _UvicornWithAWindow:
+        """uvicorn's bind → chmod 0666 → listen, with the window between the first two held open."""
+
+        def __init__(self, config):
+            self.config = config
+            self.should_exit = False
+
+        def run(self):
+            sock = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+            sock.bind(self.config.uds)
+            time.sleep(0.3)  # the file exists, nothing listens, uvicorn's chmod is still to come
+            _os.chmod(self.config.uds, 0o666)
+            sock.listen(8)
+            try:
+                while not self.should_exit:
+                    time.sleep(0.02)
+            finally:
+                sock.close()
+
+    monkeypatch.setattr(uvicorn, "Server", _UvicornWithAWindow)
+    with _short_sock_dir() as p:
+        monkeypatch.setattr(uds_mod, "socket_path", lambda: p)
+        server = uds_mod._bind_once(object(), p)
+        bound_servers.append(server)
+        assert server is not None
+        assert _wait_for(lambda: uds_mod.socket_is_live(p)), "the stand-in never listened"
+        assert _wait_for(lambda: stat.S_IMODE(p.stat().st_mode) == 0o600), "the socket was not clamped to 0600"
+        time.sleep(0.2)  # nothing may loosen it afterwards
+        assert stat.S_IMODE(p.stat().st_mode) == 0o600
