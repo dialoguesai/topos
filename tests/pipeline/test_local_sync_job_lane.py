@@ -11,6 +11,7 @@ import sqlite3
 import pytest
 
 from topos.ingestion.embeddings_catchup import CATCHUP_KINDS
+from topos.ingestion.stale_text_catchup import KIND as STALE_TEXT_KIND
 from topos.pipeline.job_runner import (
     EXECUTORS,
     LOCAL_SYNC_KIND,
@@ -69,8 +70,8 @@ def test_the_embeddings_catchup_has_a_lane_of_its_own() -> None:
     # The owner's inbound truth lane shares the catch-up worker: a background check of stored rows, a bounded batch
     # at a time, never on the request path (ingestion/truth_inbound.py).
     assert _catchup_kinds() == ["imported_ai_chat_embeddings_catchup", "local_sync_embeddings_catchup",
-                                "truth_inbound_check"]
-    assert sorted((*CATCHUP_KINDS, "truth_inbound_check")) == _catchup_kinds()
+                                "stale_text_embeddings_catchup", "truth_inbound_check"]
+    assert sorted((*CATCHUP_KINDS, STALE_TEXT_KIND, "truth_inbound_check")) == _catchup_kinds()
     assert not set(_catchup_kinds()) & set(_executable_kinds() + _long_running_kinds())
 
 
