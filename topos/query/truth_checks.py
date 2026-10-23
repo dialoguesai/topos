@@ -1,0 +1,528 @@
+"""The inbound truth lane's owner-only tables, and the owner's three reads and one write over them.
+
+``truth_checks`` holds one row per checked record: what verify_claim v2 made of it (the reader's main claim, the
+verdict, the cited records by table, id, role and date, never their text). ``truth_labels`` holds the owner's
+judgement of a claim (true / partly / false and an optional note), one per check; a new submit replaces it. Both
+are created lazily on first write, as ``ai_chat_message_facets`` is, so a node that never turns the lane on keeps
+neither (no migration). Both are in ``data_explorer_tables.OWNER_ONLY_TABLES``: the legacy table tools serve them to
+the owner's own app only.
+
+A label also writes one ``verified_claim`` signal object (dimension ``memory``) with the label as its confidence
+(1.0 true, 0.5 partly, 0.0 false), the checked record as its source ref and that record's time as ``valid_from``.
+It is owner-only with no switch (DISCLOSURE_RULES DR-49): ``disclosure: owner_only`` in its payload, refused below
+the owner tier whatever a scope grants (``retrieval._NEVER_BELOW_OWNER``), not indexed for search
+(``derived_index.DERIVED_RECORD_TYPES`` does not name it), never read by a share path (they read ``fact`` objects
+only), and withheld from the legacy table tools for every caller but the owner's own app. A claim about a contact
+is the owner's judgement and never becomes a shareable fact.
+
+The owner's reads (VERIFY_CLAIM_WEEKLY_PROGRAM.md §2a): ``weekly_stats`` answers counts only, never claim text;
+``claim_cards`` answers the claims with snippets cut from the cited records' own text at read time, so a record the
+owner deleted since stops appearing.
+"""
+from __future__ import annotations
+
+import json
+import sqlite3
+import statistics
+import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, Iterable, List, Optional
+
+from ..storage.db.write_gate import commit_connection, with_db_write
+
+CHECKS_TABLE = "truth_checks"
+LABELS_TABLE = "truth_labels"
+TABLES = (CHECKS_TABLE, LABELS_TABLE)
+
+VERDICTS = ("supported", "no_evidence", "unable", "not_checkable")
+LABELS = ("true", "partly", "false")
+LABEL_CONFIDENCE = {"true": 1.0, "partly": 0.5, "false": 0.0}
+OBJECT_TYPE = "verified_claim"
+OBJECT_DIMENSION = "memory"
+EXTRACTOR_VERSION = "truth_inbound_v1"
+SNIPPET_CHARS = 400
+STATEMENT_CHARS = 1000
+MAX_CARDS = 50
+MAX_WEEKS = 8
+MAX_NOTE_CHARS = 1000
+
+#: The truth sources and where their rows live. ``transcripts`` is the owner's voice transcripts (VoxTerm, stored as
+#: conversation rows) and transcript segments that are someone's speech; an ``ambient`` segment (a YouTube caption,
+#: a room the owner only overheard) is nobody's statement to the owner and is not checked.
+CONVERSATION_SOURCE_IDS = {"imessage": ("imessage",), "signal": ("signal",), "transcripts": ("voxterm_transcripts",)}
+#: Checked table -> (id column, time column, conversation column or None).
+CHECKED_TABLES = {
+    "conversation_messages": ("message_id", "event_at", "conversation_id"),
+    "journal_entries": ("entry_id", "entry_at", None),
+    "transcript_segments": ("segment_id", "event_at", "transcript_id"),
+}
+_TEXT_COLUMNS = ("content", "summary_text", "title", "description", "text")
+
+_DDL = (
+    f"""CREATE TABLE IF NOT EXISTS {CHECKS_TABLE} (
+        check_id TEXT PRIMARY KEY,
+        record_table TEXT NOT NULL,
+        record_id TEXT NOT NULL,
+        conversation_id TEXT,
+        source TEXT NOT NULL,
+        speaker_kind TEXT NOT NULL CHECK (speaker_kind IN ('owner', 'contact')),
+        week TEXT NOT NULL,
+        category TEXT,
+        claim_text TEXT,
+        verdict TEXT NOT NULL CHECK (verdict IN ('supported', 'no_evidence', 'unable', 'not_checkable')),
+        reason TEXT,
+        cited_refs_json TEXT NOT NULL DEFAULT '[]',
+        effort TEXT,
+        model TEXT,
+        latency_ms REAL,
+        created_at TEXT NOT NULL
+    )""",
+    f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{CHECKS_TABLE}_record ON {CHECKS_TABLE}(record_table, record_id)",
+    f"CREATE INDEX IF NOT EXISTS idx_{CHECKS_TABLE}_week ON {CHECKS_TABLE}(week, created_at)",
+    f"""CREATE TABLE IF NOT EXISTS {LABELS_TABLE} (
+        label_id TEXT PRIMARY KEY,
+        check_id TEXT NOT NULL UNIQUE,
+        label TEXT NOT NULL CHECK (label IN ('true', 'partly', 'false')),
+        note TEXT,
+        labelled_at TEXT NOT NULL
+    )""",
+)
+
+
+class TruthRequestError(ValueError):
+    """A request the store refuses; ``str(exc)`` is a fixed code, never the input."""
+
+
+# --- tables ---------------------------------------------------------------------------------------------------------
+def _present(conn: sqlite3.Connection, table: str) -> bool:
+    return conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
+
+
+def tables_present(conn: sqlite3.Connection) -> bool:
+    return all(_present(conn, t) for t in TABLES)
+
+
+def ensure_tables(conn: sqlite3.Connection) -> None:
+    """Create both tables on first use. The probe is a read, so a node that has them takes no write gate."""
+    if tables_present(conn):
+        return
+    with with_db_write():
+        for statement in _DDL:
+            conn.execute(statement)
+        commit_connection(conn)
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def iso_week(when: Optional[datetime] = None) -> str:
+    """The ISO week (Monday start) in the node's local time, e.g. ``2026-W43``."""
+    local = (when or now_utc()).astimezone()
+    year, week, _ = local.isocalendar()
+    return f"{year}-W{week:02d}"
+
+
+def _aware(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        when = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)  # a naive time is UTC, the engine's rule
+
+
+def with_offset(value: Any) -> Optional[str]:
+    """A stored time as ISO 8601 with the node's local offset (``said_at``)."""
+    when = _aware(value)
+    return when.astimezone().isoformat() if when else None
+
+
+# --- records --------------------------------------------------------------------------------------------------------
+def _columns(conn: sqlite3.Connection, table: str) -> List[str]:
+    return [str(r[1]) for r in conn.execute(f'PRAGMA table_info("{table}")').fetchall()]
+
+
+def _row(conn: sqlite3.Connection, table: str, id_column: str, record_id: str) -> Optional[Dict[str, Any]]:
+    """One row by id. ``table`` and ``id_column`` come only from closed registries, never from a caller."""
+    if not _present(conn, table):
+        return None
+    cursor = conn.execute(f'SELECT * FROM "{table}" WHERE "{id_column}"=? LIMIT 1', (record_id,))
+    found = cursor.fetchone()
+    if found is None:
+        return None
+    return dict(zip([d[0] for d in cursor.description], found))
+
+
+def _written_by_owner_door(row: Dict[str, Any]) -> bool:
+    from ..features.provenance.writer_class import is_owner_writer
+
+    return is_owner_writer(row.get("writer_class")) if "writer_class" in row else True
+
+
+def _owner_row(table: str, row: Dict[str, Any]) -> bool:
+    """Whether the owner said this row, by the rule retrieval applies to a whole row: a journal entry is the owner's
+    by construction; a message or segment is the owner's only when typed so (``is_from_self``) and written by an
+    owner door. Anything else is not the owner's: never guess authored."""
+    if table == "journal_entries":
+        return True
+    if row.get("is_from_self") in (1, True, "1"):
+        return _written_by_owner_door(row)
+    if table == "conversation_messages" and str(row.get("sender_id") or "").strip().lower() == "self":
+        return _written_by_owner_door(row)
+    return False
+
+
+def _contact_name(conn: sqlite3.Connection, sender_id: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
+    """A sender's display name through the owner's contacts, or None. A raw identifier is never a name here: it
+    would reach the reader (and, on the hosted model, a provider) and the owner's screen as a phone number."""
+    if not sender_id:
+        return None
+    if sender_id not in cache:
+        name = None
+        try:
+            found = conn.execute(
+                "SELECT c.display_name FROM contact_identifiers ci JOIN contacts c ON c.contact_id = ci.contact_id "
+                "WHERE ci.identifier = ? AND c.display_name IS NOT NULL AND TRIM(c.display_name) != '' LIMIT 1",
+                (sender_id,),
+            ).fetchone()
+            name = str(found[0]).strip() if found else None
+        except sqlite3.Error:
+            name = None
+        cache[sender_id] = name
+    return cache[sender_id]
+
+
+def truth_source(table: str, row: Dict[str, Any]) -> Optional[str]:
+    """Which truth source a checked row belongs to, or None when the lane does not check it."""
+    if table == "journal_entries":
+        return "journal"
+    if table == "transcript_segments":
+        return "transcripts" if str(row.get("actor_role") or "ambient") != "ambient" else None
+    if table == "conversation_messages":
+        source_id = str(row.get("source_id") or "")
+        return next((name for name, ids in CONVERSATION_SOURCE_IDS.items() if source_id in ids), None)
+    return None
+
+
+def load_record(conn: sqlite3.Connection, table: str, record_id: str,
+                names: Optional[Dict[str, Optional[str]]] = None) -> Optional[Dict[str, Any]]:
+    """A checked row as the lane and the cards need it, or None when it is gone or not a row the lane checks."""
+    spec = CHECKED_TABLES.get(table)
+    if spec is None:
+        return None
+    id_column, time_column, conversation_column = spec
+    row = _row(conn, table, id_column, record_id)
+    if row is None:
+        return None
+    source = truth_source(table, row)
+    if source is None:
+        return None
+    owner = _owner_row(table, row)
+    name = None
+    if not owner:
+        cache = names if names is not None else {}
+        name = (_contact_name(conn, str(row.get("sender_id") or ""), cache) if table == "conversation_messages"
+                else (str(row.get("speaker_label") or "").strip()[:60] or None))
+    return {
+        "table": table, "record_id": str(record_id), "source": source, "owner": owner, "name": name,
+        "text": str(row.get("content") or ""), "at": row.get(time_column),
+        "conversation_id": str(row.get(conversation_column) or "") or None if conversation_column else None,
+        "row": row,
+    }
+
+
+def speaker_for_reader(record: Dict[str, Any]) -> str:
+    return "owner" if record["owner"] else (record.get("name") or "a contact")
+
+
+def speaker_for_card(record: Dict[str, Any]) -> str:
+    return "you" if record["owner"] else (record.get("name") or "a contact")
+
+
+def previous_turns(conn: sqlite3.Connection, record: Dict[str, Any], limit: int = 6,
+                   names: Optional[Dict[str, Optional[str]]] = None) -> List[Dict[str, str]]:
+    """The ``limit`` rows of the same conversation before this one, oldest first, as ``{speaker, text}``. A journal
+    entry has no conversation, so it gets none."""
+    table = record["table"]
+    id_column, time_column, conversation_column = CHECKED_TABLES[table]
+    if not conversation_column or not record.get("conversation_id"):
+        return []
+    at = str(record.get("at") or "")
+    cursor = conn.execute(
+        f'SELECT * FROM "{table}" WHERE "{conversation_column}"=? AND "{id_column}"!=? '
+        f'AND ("{time_column}" < ? OR ("{time_column}" = ? AND "{id_column}" < ?)) '
+        f'ORDER BY "{time_column}" DESC, "{id_column}" DESC LIMIT ?',
+        (record["conversation_id"], record["record_id"], at, at, record["record_id"], int(limit)),
+    )
+    keys = [d[0] for d in cursor.description]
+    cache = names if names is not None else {}
+    turns = []
+    for found in reversed(cursor.fetchall()):
+        row = dict(zip(keys, found))
+        text = str(row.get("content") or "").strip()
+        if not text:
+            continue
+        if _owner_row(table, row):
+            speaker = "owner"
+        elif table == "conversation_messages":
+            speaker = _contact_name(conn, str(row.get("sender_id") or ""), cache) or "a contact"
+        else:
+            speaker = str(row.get("speaker_label") or "").strip()[:60] or "a contact"
+        turns.append({"speaker": speaker, "text": text[:STATEMENT_CHARS]})
+    return turns
+
+
+def _cited_text(conn: sqlite3.Connection, table: str, record_id: str) -> Optional[Dict[str, Any]]:
+    """A cited record's own text and source, read now; None when it no longer exists."""
+    if table == "signal_objects":
+        found = _row(conn, table, "object_id", record_id)
+        if found is None:
+            return None
+        try:
+            payload = json.loads(found.get("payload_json") or "{}")
+        except ValueError:
+            payload = {}
+        text = next((str(payload.get(k)) for k in ("object_value", "claim", "summary_text", "text")
+                     if isinstance(payload, dict) and payload.get(k)), "")
+        return {"text": text, "source": str(found.get("object_type") or "derived")}
+    from ..storage.adapters.sqlite.stores import _NATIVE_ID_COL
+
+    id_column = _NATIVE_ID_COL.get(table)
+    if id_column is None:
+        return {"text": "", "source": table}
+    found = _row(conn, table, id_column, record_id)
+    if found is None:
+        return None
+    column = next((c for c in _TEXT_COLUMNS if found.get(c)), None)
+    source = truth_source(table, found) or str(found.get("source_id") or "") or table
+    return {"text": str(found.get(column) or "") if column else "", "source": source}
+
+
+# --- writes ---------------------------------------------------------------------------------------------------------
+def already_checked(conn: sqlite3.Connection, table: str, record_id: str) -> bool:
+    if not _present(conn, CHECKS_TABLE):
+        return False
+    return conn.execute(f"SELECT 1 FROM {CHECKS_TABLE} WHERE record_table=? AND record_id=?",
+                        (table, record_id)).fetchone() is not None
+
+
+def record_check(conn: sqlite3.Connection, check: Dict[str, Any]) -> Optional[str]:
+    """Store one check; returns its id, or None when the record was already checked (one check per record)."""
+    ensure_tables(conn)
+    if check.get("verdict") not in VERDICTS or check.get("speaker_kind") not in ("owner", "contact"):
+        raise TruthRequestError("invalid_check")
+    check_id = uuid.uuid4().hex
+    created = now_utc()
+    with with_db_write():
+        cursor = conn.execute(
+            f"INSERT OR IGNORE INTO {CHECKS_TABLE} (check_id, record_table, record_id, conversation_id, source, "
+            "speaker_kind, week, category, claim_text, verdict, reason, cited_refs_json, effort, model, latency_ms, "
+            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (check_id, check["record_table"], check["record_id"], check.get("conversation_id"), check["source"],
+             check["speaker_kind"], iso_week(created), check.get("category"), check.get("claim_text"),
+             check["verdict"], check.get("reason"), json.dumps(check.get("cited_refs") or []), check.get("effort"),
+             check.get("model"), check.get("latency_ms"), created.isoformat()),
+        )
+        commit_connection(conn)
+    return check_id if cursor.rowcount else None
+
+
+def label_claim(conn: sqlite3.Connection, check_id: Any, label: Any, note: Any = None) -> Dict[str, Any]:
+    """The owner's label of one claim, and its ``verified_claim`` object, in one gated commit. A second submit
+    replaces both (the label keeps its id)."""
+    if not isinstance(check_id, str) or not check_id.strip() or len(check_id) > 64 or label not in LABELS:
+        raise TruthRequestError("invalid_truth_label")
+    if note is not None and not isinstance(note, str):
+        raise TruthRequestError("invalid_truth_label")
+    note = " ".join((note or "").split())[:MAX_NOTE_CHARS] or None
+    if not tables_present(conn):
+        raise TruthRequestError("unknown_check")
+    found = conn.execute(
+        f"SELECT check_id, record_table, record_id, source, speaker_kind, claim_text, verdict, created_at "
+        f"FROM {CHECKS_TABLE} WHERE check_id=?", (check_id.strip(),)).fetchone()
+    if found is None:
+        raise TruthRequestError("unknown_check")
+    check = dict(zip(("check_id", "record_table", "record_id", "source", "speaker_kind", "claim_text", "verdict",
+                      "created_at"), found))
+    if not check["claim_text"] or check["verdict"] == "not_checkable":
+        raise TruthRequestError("not_a_claim")
+    record = load_record(conn, check["record_table"], check["record_id"])
+    valid_from = (with_offset(record["at"]) if record else None) or check["created_at"]
+    now = now_utc().isoformat()
+    payload = {"claim": check["claim_text"], "label": label, "note": note, "speaker_kind": check["speaker_kind"],
+               "source": check["source"], "check_id": check["check_id"], "disclosure": "owner_only"}
+    refs = [{"table": check["record_table"], "record_id": check["record_id"]}]
+    key = f"truth_check:{check['check_id']}"
+    with with_db_write():
+        existing = conn.execute(f"SELECT label_id FROM {LABELS_TABLE} WHERE check_id=?", (check["check_id"],)).fetchone()
+        label_id = str(existing[0]) if existing else uuid.uuid4().hex
+        conn.execute(
+            f"INSERT INTO {LABELS_TABLE} (label_id, check_id, label, note, labelled_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(check_id) DO UPDATE SET label=excluded.label, note=excluded.note, labelled_at=excluded.labelled_at",
+            (label_id, check["check_id"], label, note, now),
+        )
+        _write_verified_claim(conn, key, payload, LABEL_CONFIDENCE[label], refs, valid_from, now)
+        commit_connection(conn)
+    return {"ok": True, "label_id": label_id}
+
+
+def _write_verified_claim(conn: sqlite3.Connection, key: str, payload: Dict[str, Any], confidence: float,
+                          refs: List[Dict[str, Any]], valid_from: str, now: str) -> None:
+    """Inside the caller's gate. Direct SQL, as FactStore writes facts: the memory dimension's definition lists the
+    types its derivation produces, and this one is the owner's own judgement, not a derived type."""
+    found = conn.execute(
+        "SELECT object_id FROM signal_objects WHERE signal_dimension=? AND object_type=? AND object_key=? "
+        "AND valid_to IS NULL", (OBJECT_DIMENSION, OBJECT_TYPE, key)).fetchone()
+    if found:
+        conn.execute("UPDATE signal_objects SET payload_json=?, confidence=?, source_refs_json=?, valid_from=?, "
+                     "updated_at=? WHERE object_id=?",
+                     (json.dumps(payload), confidence, json.dumps(refs), valid_from, now, found[0]))
+        return
+    conn.execute(
+        "INSERT INTO signal_objects (object_id, signal_dimension, object_type, object_key, payload_json, confidence, "
+        "source_refs_json, valid_from, valid_to, extractor_version, created_at, updated_at, created_by) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'owner')",
+        (str(uuid.uuid4()), OBJECT_DIMENSION, OBJECT_TYPE, key, json.dumps(payload), confidence, json.dumps(refs),
+         valid_from, EXTRACTOR_VERSION, now, now),
+    )
+
+
+def forget_records(conn: sqlite3.Connection, record_ids: Optional[Iterable[str]] = None) -> int:
+    """Delete the checks of removed records, with their labels and ``verified_claim`` objects: a claim read out of a
+    record does not outlive it. With ``record_ids`` (the owner's "remove this" flow) those records' checks; without
+    (a source scrub), every check whose record is no longer in its table. Returns the number of checks removed."""
+    if not tables_present(conn):
+        return 0
+    gone: List[str] = []
+    if record_ids is not None:
+        ids = sorted({str(r) for r in record_ids if str(r).strip()})
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            gone += [str(r[0]) for r in conn.execute(
+                f"SELECT check_id FROM {CHECKS_TABLE} WHERE record_id IN ({','.join('?' for _ in chunk)})", chunk)]
+    else:
+        for table, (id_column, _, _) in CHECKED_TABLES.items():
+            missing = "" if not _present(conn, table) else (
+                f" AND NOT EXISTS (SELECT 1 FROM {table} m WHERE m.{id_column} = c.record_id)")
+            gone += [str(r[0]) for r in conn.execute(
+                f"SELECT c.check_id FROM {CHECKS_TABLE} c WHERE c.record_table = ?{missing}", (table,))]
+    if not gone:
+        return 0
+    with with_db_write():
+        for start in range(0, len(gone), 500):
+            chunk = gone[start:start + 500]
+            marks = ",".join("?" for _ in chunk)
+            conn.execute(f"DELETE FROM {LABELS_TABLE} WHERE check_id IN ({marks})", chunk)
+            conn.execute(f"DELETE FROM {CHECKS_TABLE} WHERE check_id IN ({marks})", chunk)
+            conn.execute(f"DELETE FROM signal_objects WHERE object_type = ? AND object_key IN ({marks})",
+                         [OBJECT_TYPE, *(f"truth_check:{c}" for c in chunk)])
+        commit_connection(conn)
+    return len(gone)
+
+
+# --- the owner's reads ----------------------------------------------------------------------------------------------
+def recent_weeks(weeks: int, when: Optional[datetime] = None) -> List[str]:
+    """This ISO week and the ``weeks - 1`` before it, newest first."""
+    start = when or now_utc()
+    out: List[str] = []
+    for i in range(weeks):
+        week = iso_week(start - timedelta(days=7 * i))
+        if week not in out:
+            out.append(week)
+    return out
+
+
+def _empty_week(week: str) -> Dict[str, Any]:
+    from ..config.truth_inbound import SOURCES
+
+    return {"week": week, "checked": 0, "backed": 0, "nothing_found": 0, "unable": 0, "not_a_claim": 0,
+            "by_source": {s: 0 for s in SOURCES}, "by_category": {}, "labelled": 0, "to_confirm": 0,
+            "agreement": {"backed_true": 0, "backed_false": 0, "nothing_true": 0}, "latency_ms_p50": None}
+
+
+def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[datetime] = None) -> Dict[str, Any]:
+    """Counts per ISO week, newest first. Aggregates only: no claim text, no record id, no name."""
+    if type(weeks) is not int or not 1 <= weeks <= MAX_WEEKS:
+        raise TruthRequestError("invalid_truth_request")
+    names = recent_weeks(weeks, when)
+    out = {week: _empty_week(week) for week in names}
+    if tables_present(conn):
+        rows = conn.execute(
+            f"SELECT c.week, c.source, c.category, c.verdict, c.latency_ms, c.model IS NOT NULL, "
+            f"c.claim_text IS NOT NULL, l.label FROM {CHECKS_TABLE} c "
+            f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id "
+            f"WHERE c.week IN ({','.join('?' for _ in names)})", names).fetchall()
+        latencies: Dict[str, List[float]] = {week: [] for week in names}
+        for week, source, category, verdict, latency, modelled, has_claim, label in rows:
+            entry = out[week]
+            entry["checked"] += 1
+            key = {"supported": "backed", "no_evidence": "nothing_found", "unable": "unable",
+                   "not_checkable": "not_a_claim"}.get(verdict)
+            if key:
+                entry[key] += 1
+            if source in entry["by_source"]:
+                entry["by_source"][source] += 1
+            if category:
+                entry["by_category"][category] = entry["by_category"].get(category, 0) + 1
+            if label:
+                entry["labelled"] += 1
+                if verdict == "supported" and label in ("true", "false"):
+                    entry["agreement"]["backed_" + label] += 1
+                elif verdict == "no_evidence" and label == "true":
+                    entry["agreement"]["nothing_true"] += 1
+            elif has_claim and verdict != "not_checkable":
+                entry["to_confirm"] += 1
+            if modelled and latency is not None:
+                latencies[week].append(float(latency))
+        for week, values in latencies.items():
+            if values:
+                out[week]["latency_ms_p50"] = round(statistics.median(values), 1)
+    return {"weeks": [out[week] for week in names]}
+
+
+def claim_cards(conn: sqlite3.Connection, limit: int = 20, unlabelled_only: bool = True) -> Dict[str, Any]:
+    """The claims the lane found, newest check first, for the owner to label in the app. A card whose record is gone
+    is skipped; a cited record that is gone is left out of its card."""
+    if type(limit) is not int or not 1 <= limit <= MAX_CARDS or type(unlabelled_only) is not bool:
+        raise TruthRequestError("invalid_truth_request")
+    if not tables_present(conn):
+        return {"cards": []}
+    where = " AND l.check_id IS NULL" if unlabelled_only else ""
+    rows = conn.execute(
+        f"SELECT c.check_id, c.record_table, c.record_id, c.source, c.category, c.claim_text, c.verdict, "
+        f"c.cited_refs_json, c.latency_ms, l.label, l.note FROM {CHECKS_TABLE} c "
+        f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id "
+        f"WHERE c.claim_text IS NOT NULL AND c.verdict != 'not_checkable'{where} "
+        f"ORDER BY c.created_at DESC, c.check_id DESC LIMIT ?", (limit * 3,)).fetchall()
+    names: Dict[str, Optional[str]] = {}
+    cards = []
+    for check_id, table, record_id, source, category, claim_text, verdict, refs_json, latency, label, note in rows:
+        record = load_record(conn, table, record_id, names)
+        if record is None:
+            continue
+        cards.append({
+            "check_id": check_id, "speaker": speaker_for_card(record), "source": source,
+            "date": with_offset(record["at"]), "claim_text": claim_text, "category": category, "verdict": verdict,
+            "cited": list(_cited(conn, refs_json)), "latency_ms": latency, "label": label, "note": note,
+        })
+        if len(cards) >= limit:
+            break
+    return {"cards": cards}
+
+
+def _cited(conn: sqlite3.Connection, refs_json: Any) -> Iterable[Dict[str, Any]]:
+    try:
+        refs = json.loads(refs_json or "[]")
+    except ValueError:
+        return
+    for ref in refs if isinstance(refs, list) else []:
+        if not isinstance(ref, dict) or not ref.get("table") or not ref.get("record_id"):
+            continue
+        found = _cited_text(conn, str(ref["table"]), str(ref["record_id"]))
+        if found is None:
+            continue
+        yield {"source": found["source"], "date": ref.get("date"), "role": ref.get("role"),
+               "snippet": " ".join(found["text"].split())[:SNIPPET_CHARS]}

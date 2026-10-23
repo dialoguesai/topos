@@ -96,6 +96,63 @@ async def local_verify_claim_owner(
     return out.get("payload", {})
 
 
+async def _owner_truth_door(request: Request, response: Response, principal, msg_type: str) -> dict:
+    """The inbound truth lane's owner doors (VERIFY_CLAIM_WEEKLY_PROGRAM.md §2a): the body is read only after the
+    truth door admitted the caller (the route's dependency); an empty body is ``{}``; errors never echo it."""
+    raw = await request.body()
+    try:
+        body = json.loads(raw) if raw.strip() else {}
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise HTTPException(422, "invalid_truth_request", headers={"Cache-Control": "no-store"}) from None
+    response.headers["Cache-Control"] = "no-store"
+    msg = {"id": str(uuid.uuid4()), "type": msg_type, "payload": body if isinstance(body, dict) else None}
+    out = await handle_control_plane_request(msg, principal=principal)
+    if out.get("status") == "error":
+        return {"status": "error", "error": out.get("error", "unknown")}
+    return out.get("payload", {})
+
+
+@router.post("/truth_inbound_settings")
+async def local_truth_inbound_settings(
+    request: Request,
+    response: Response,
+    principal=Depends(_truth_door("truth_inbound_settings")),  # noqa: B008
+) -> dict:
+    """The owner's inbound truth lane settings. Body: {"get": true} or {"set": {"enabled": true, "sources":
+    ["imessage", "signal", "transcripts", "journal"], "model": "local", "rate_per_minute": 6}} (any subset)."""
+    return await _owner_truth_door(request, response, principal, "truth_inbound_settings")
+
+
+@router.post("/truth_weekly_stats")
+async def local_truth_weekly_stats(
+    request: Request,
+    response: Response,
+    principal=Depends(_truth_door("truth_weekly_stats")),  # noqa: B008
+) -> dict:
+    """Counts per ISO week from the inbound truth lane, newest first; no claim text. Body: {"weeks": 1}."""
+    return await _owner_truth_door(request, response, principal, "truth_weekly_stats")
+
+
+@router.post("/truth_claim_cards")
+async def local_truth_claim_cards(
+    request: Request,
+    response: Response,
+    principal=Depends(_truth_door("truth_claim_cards")),  # noqa: B008
+) -> dict:
+    """The claims the lane found, for the owner to label. Body: {"limit": 20, "unlabelled_only": true}."""
+    return await _owner_truth_door(request, response, principal, "truth_claim_cards")
+
+
+@router.post("/truth_claim_label")
+async def local_truth_claim_label(
+    request: Request,
+    response: Response,
+    principal=Depends(_truth_door("truth_claim_label")),  # noqa: B008
+) -> dict:
+    """The owner's label of one claim. Body: {"check_id": "...", "label": "true"|"partly"|"false", "note": "..."}."""
+    return await _owner_truth_door(request, response, principal, "truth_claim_label")
+
+
 @router.post("/truth_prompts")
 async def local_truth_prompts(
     body: dict = Body(default_factory=dict),

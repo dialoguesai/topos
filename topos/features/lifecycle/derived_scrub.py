@@ -957,8 +957,21 @@ def purge_derived_for_source(
         report["dossiers_refreshed"] = f"failed: {exc}"
 
     report["orphans"] = sweep_orphans(conn)
+    report["truth_checks_removed"] = _forget_truth_checks(conn, None)
     commit_connection(conn)
     return report
+
+
+def _forget_truth_checks(conn: sqlite3.Connection, record_ids: Optional[Set[str]]) -> Any:
+    """The inbound truth lane's checks of removed records, their labels and verified_claim objects
+    (query/truth_checks.forget_records). Never fails the scrub it rides on."""
+    try:
+        from ...query.truth_checks import forget_records
+
+        return forget_records(conn, record_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("truth check scrub skipped: %s", type(exc).__name__)
+        return "failed"
 
 
 def _purge_extraction_artifacts_for_records(
@@ -1116,6 +1129,7 @@ def purge_derived_for_records(
     report["facts_deleted"] = facts_deleted
     report["facts_trimmed"] = facts_trimmed
     report.update(_purge_extraction_artifacts_for_records(conn, id_set))
+    report["truth_checks_removed"] = _forget_truth_checks(conn, id_set)
 
     try:
         from ..entities.dossier import refresh_dossiers

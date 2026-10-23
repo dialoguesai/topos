@@ -256,6 +256,131 @@ async def handle_truth_seed_fact(message: Dict[str, Any]) -> Optional[Dict[str, 
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
+# --- the inbound truth lane's owner doors (VERIFY_CLAIM_WEEKLY_PROGRAM.md §2a) -----------------------------------------
+# Owner class only: each asks the truth door first, which admits a truth type it does not list as a read for OWNER_APP
+# alone, so the control-plane relay, an enrolled client and a third party are refused before the payload is read.
+# Errors are fixed codes, never the input. The two reads are open on the owner socket (OWNER_DOOR_OPEN_TYPES); the
+# settings change and the label are changes, so on the socket they need the app, the web app, the dev proxy or a
+# confirmation (they are dangerous by subtraction, like put_facts_llm_config).
+
+
+def _truth_error(req_id: Any, code: str) -> Dict[str, Any]:
+    return {"id": req_id, "status": "error", "error": code}
+
+
+@handles("truth_inbound_settings")
+async def handle_truth_inbound_settings(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"get": true}`` or ``{"set": {enabled?, sources?, model?, rate_per_minute?}}`` -> the settings (plus
+    ``paused_until``). Turning the lane on queues its first batch on the catch-up lane at once."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    refused = _truth_door_refusal(req_id, "truth_inbound_settings")
+    if refused:
+        return refused
+    payload = message.get("payload")
+    if not isinstance(payload, dict) or not set(payload) <= {"get", "set"}:
+        return _truth_error(req_id, "invalid_truth_settings")
+    from ...config.truth_inbound import InvalidTruthSettings, public_view, save
+    from .common import run_db_read, run_db_write
+
+    def apply(conn: Any, patch: Any) -> None:
+        stored = save(conn, patch)
+        if stored["enabled"]:
+            from ...ingestion.truth_inbound import enqueue_truth_checks
+
+            enqueue_truth_checks(conn)
+
+    try:
+        if "set" in payload:
+            await run_db_write(apply, payload["set"])
+        return {"id": req_id, "status": "ok", "payload": await run_db_read(public_view)}
+    except InvalidTruthSettings:
+        return _truth_error(req_id, "invalid_truth_settings")
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("truth_inbound_settings", req_id, exc)
+        return _truth_error(req_id, "truth_lane_unavailable")
+
+
+@handles("truth_weekly_stats")
+async def handle_truth_weekly_stats(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"weeks": 1..8}`` -> counts per ISO week, newest first, and whether the lane is on. Aggregates only."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    refused = _truth_door_refusal(req_id, "truth_weekly_stats")
+    if refused:
+        return refused
+    payload = message.get("payload")
+    weeks = payload.get("weeks", 1) if isinstance(payload, dict) else None
+    from ...config.truth_inbound import load
+    from ...query.truth_checks import TruthRequestError, weekly_stats
+    from .common import run_db_read
+
+    def read(conn: Any) -> Dict[str, Any]:
+        return {"enabled": load(conn)["enabled"], **weekly_stats(conn, weeks)}
+
+    try:
+        return {"id": req_id, "status": "ok", "payload": await run_db_read(read)}
+    except TruthRequestError as exc:
+        return _truth_error(req_id, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("truth_weekly_stats", req_id, exc)
+        return _truth_error(req_id, "truth_lane_unavailable")
+
+
+@handles("truth_claim_cards")
+async def handle_truth_claim_cards(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"limit": <=50, "unlabelled_only": true}`` -> the claims the lane found, newest first, with snippets cut from
+    the cited records' own text (400 characters)."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    refused = _truth_door_refusal(req_id, "truth_claim_cards")
+    if refused:
+        return refused
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
+    if payload is None:
+        return _truth_error(req_id, "invalid_truth_request")
+    from ...query.truth_checks import TruthRequestError, claim_cards
+    from .common import run_db_read
+
+    try:
+        result = await run_db_read(claim_cards, payload.get("limit", 20), payload.get("unlabelled_only", True))
+        return {"id": req_id, "status": "ok", "payload": result}
+    except TruthRequestError as exc:
+        return _truth_error(req_id, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("truth_claim_cards", req_id, exc)
+        return _truth_error(req_id, "truth_lane_unavailable")
+
+
+@handles("truth_claim_label")
+async def handle_truth_claim_label(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"check_id", "label": "true"|"partly"|"false", "note"?}`` -> ``{"ok": true, "label_id"}``. A second submit
+    for the same check replaces the label and its owner-only ``verified_claim`` object."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    refused = _truth_door_refusal(req_id, "truth_claim_label")
+    if refused:
+        return refused
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
+    if payload is None:
+        return _truth_error(req_id, "invalid_truth_label")
+    from ...query.truth_checks import TruthRequestError, label_claim
+    from .common import run_db_write
+
+    try:
+        result = await run_db_write(label_claim, payload.get("check_id"), payload.get("label"), payload.get("note"))
+        return {"id": req_id, "status": "ok", "payload": result}
+    except TruthRequestError as exc:
+        return _truth_error(req_id, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("truth_claim_label", req_id, exc)
+        return _truth_error(req_id, "truth_lane_unavailable")
+
+
 @handles("query", "query_live")
 async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

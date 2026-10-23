@@ -1092,6 +1092,9 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
         has_more = len(rows) > limit
         if has_more:
             rows = rows[:limit]
+        from ...data_explorer_tables import withhold_owner_only_rows
+
+        rows = withhold_owner_only_rows(table_name, rows)
         # The routine lane, while an Off-limits entry is carried and waiting (the fourth round): this tool has no
         # filter of its own, and the inspection floor no longer refuses a routine for such an entry alone. Each row
         # passes the share boundary's own row veto: the row's text and ids, the records linked to it and, for a
