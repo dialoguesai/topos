@@ -1411,4 +1411,15 @@ async def run_post_canonical_pipeline(
         mark_gc_due()
     except Exception as exc:  # noqa: BLE001 — maintenance must never break ingest
         logger.debug("gc mark skipped: %s", exc)
+
+    # The owner's inbound truth lane (ingestion/truth_inbound.py): when it is on for this source, queue record ids on
+    # the catch-up worker's lane. No model call here; off, this is one engine_config read on a worker thread.
+    try:
+        from .truth_inbound import after_rows_stored
+
+        queued = await asyncio.to_thread(after_rows_stored, source_def)
+        if queued:
+            outcome["truth_inbound"] = {"queued_job": queued}
+    except Exception as exc:  # noqa: BLE001 — the truth lane must never break ingest
+        logger.debug("truth lane enqueue skipped: %s", type(exc).__name__)
     return outcome

@@ -31,13 +31,32 @@ def is_permission_state_table(table_name: str) -> bool:
 #   was the way around them.
 #
 # Unlike the permission-state tables, the owner can still inspect these.
+#
+# - truth_checks, truth_labels: the inbound truth lane's claims and the owner's labels of them
+#   (query/truth_checks.py), never shared and never off the node (DISCLOSURE_RULES DR-49).
 OWNER_ONLY_TABLES: frozenset[str] = frozenset(
-    {"pipeline_jobs", "mcp_clients", "ai_chat_message_facets", "ai_coding_topos_touches"}
+    {"pipeline_jobs", "mcp_clients", "ai_chat_message_facets", "ai_coding_topos_touches", "truth_checks",
+     "truth_labels"}
 )
+
+#: ``signal_objects`` rows of these types are withheld from the legacy table tools for everyone but the owner's own
+#: surface, the way the tables above are: the owner's labels of claims (DR-49) ride in that shared table.
+OWNER_ONLY_SIGNAL_OBJECT_TYPES: frozenset[str] = frozenset({"verified_claim"})
 
 
 def is_owner_only_table(table_name: str) -> bool:
     return str(table_name or "").strip() in OWNER_ONLY_TABLES
+
+
+def withhold_owner_only_rows(table_name: str, rows: list) -> list:
+    """Drop owner-only ``signal_objects`` rows unless the owner's own surface is asking."""
+    if str(table_name or "").strip() != "signal_objects":
+        return rows
+    from .principal import OWNER_APP, current_principal
+
+    if getattr(current_principal(), "cls", None) == OWNER_APP:
+        return rows
+    return [r for r in rows if not (isinstance(r, dict) and r.get("object_type") in OWNER_ONLY_SIGNAL_OBJECT_TYPES)]
 
 
 def hidden_from_current_principal(table_name: str) -> bool:

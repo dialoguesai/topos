@@ -66,9 +66,12 @@ def test_the_embeddings_catchup_has_a_lane_of_its_own() -> None:
     """Behind the general lane's derive jobs its first batch waited hours and every next one queued at the back
     (22 Oct 2026); in the long lane it would wait out a first iMessage sync. tests/pipeline/test_embedding_catchup_lane.py
     runs the lanes."""
-    assert _catchup_kinds() == ["imported_ai_chat_embeddings_catchup", "local_sync_embeddings_catchup"]
-    assert sorted(CATCHUP_KINDS) == _catchup_kinds()
-    assert not set(CATCHUP_KINDS) & set(_executable_kinds() + _long_running_kinds())
+    # The owner's inbound truth lane shares the catch-up worker: a background check of stored rows, a bounded batch
+    # at a time, never on the request path (ingestion/truth_inbound.py).
+    assert _catchup_kinds() == ["imported_ai_chat_embeddings_catchup", "local_sync_embeddings_catchup",
+                                "truth_inbound_check"]
+    assert sorted((*CATCHUP_KINDS, "truth_inbound_check")) == _catchup_kinds()
+    assert not set(_catchup_kinds()) & set(_executable_kinds() + _long_running_kinds())
 
 
 def test_a_queued_sync_is_invisible_to_a_general_lane_claim(conn: sqlite3.Connection) -> None:

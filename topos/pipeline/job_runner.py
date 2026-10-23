@@ -20,6 +20,8 @@ from ..enrichment.derivation_recovery import SIGNAL_DERIVE_RETRY_KIND
 # Safe at import time too: stdlib only at module level.
 from ..ingestion.embeddings_catchup import CATCHUP_KINDS as EMBEDDINGS_CATCHUP_KINDS
 from ..ingestion.embeddings_catchup import CONTINUING_KINDS as EMBEDDINGS_CATCHUP_CONTINUING_KINDS
+# Stdlib only at module level as well.
+from ..ingestion.truth_inbound import KIND as TRUTH_INBOUND_KIND
 from .job_store import (
     DEFAULT_LEASE_SECONDS,
     claim_matching_queued_jobs,
@@ -414,9 +416,26 @@ def _enqueue_embeddings_catchup(conn: Any, source_id: Optional[str] = None) -> N
         logger.warning("Embeddings catch-up discovery failed", exc_info=True)
 
 
+async def _execute_truth_inbound(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from ..ingestion.truth_inbound import execute_truth_check
+
+    return await execute_truth_check(payload)
+
+
+def _enqueue_truth_inbound(conn: Any) -> None:
+    """The owner's inbound truth lane: queue its next batch when it is on and has nothing in flight."""
+    from ..ingestion.truth_inbound import enqueue_truth_checks
+
+    try:
+        enqueue_truth_checks(conn)
+    except Exception:
+        logger.warning("Truth lane discovery failed", exc_info=True)
+
+
 EXECUTORS: Dict[str, ExecutorFn] = {
     "ai_tool_enrichment_catchup": _execute_ai_tool_catchup,
     **{kind: _execute_embeddings_catchup for kind in EMBEDDINGS_CATCHUP_KINDS},
+    TRUTH_INBOUND_KIND: _execute_truth_inbound,
     "inbox_deferred_enrichment": _execute_inbox_deferred_enrichment,
     "file_ingestion": _execute_file_ingestion,
     "enrichment_process_source": _execute_enrichment_process_source,
@@ -468,7 +487,10 @@ _LONG_MAX_POLL_SECONDS = 10.0
 #: (``embeddings_catchup.enqueue_catchup`` queues the next only when none is in
 #: flight), and each batch takes the write gate only for its vectors and markers,
 #: as before.
-_CATCHUP_KINDS: frozenset[str] = frozenset(EMBEDDINGS_CATCHUP_KINDS)
+#:
+#: The owner's inbound truth lane (``truth_inbound``) runs here too: a background check of rows already stored, a
+#: bounded batch at a time (about a minute), paced by the owner's rate, and never on the request path.
+_CATCHUP_KINDS: frozenset[str] = frozenset((*EMBEDDINGS_CATCHUP_KINDS, TRUTH_INBOUND_KIND))
 
 
 def _executable_kinds() -> list[str]:
@@ -835,6 +857,10 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
         # what it left owed. Both only for a source whose catch-up the owner started.
         for sid in {entry.get("source_id") for entry in jobs if entry.get("source_id")}:
             await _run_db(conn_factory, _enqueue_embeddings_catchup, sid)
+    if kind in (TRUTH_INBOUND_KIND, LOCAL_SYNC_KIND):
+        # A finished truth batch queues the next; a finished iMessage or Signal sync (which does not pass through
+        # run_post_canonical_pipeline) queues what it stored. Both only when the owner has the lane on.
+        await _run_db(conn_factory, _enqueue_truth_inbound)
     _release_secrets(jobs)
 
 
@@ -905,6 +931,7 @@ async def _worker_loop(
     if sweep_debts and _enabled():
         await _run_db(conn_factory, _enqueue_ai_tool_catchup, None, True)
         await _run_db(conn_factory, _enqueue_embeddings_catchup, None)
+        await _run_db(conn_factory, _enqueue_truth_inbound)
     while True:
         try:
             if not _enabled():
@@ -923,6 +950,11 @@ async def _worker_loop(
             if sweep_debts and now >= next_debt_sweep:
                 next_debt_sweep = now + _DEBT_SWEEP_SECONDS
                 await _maybe_revive_blocked_debts(conn_factory)
+                # Rows from a door that queues nothing itself, and a truth lane whose pause has run out.
+                try:
+                    await _run_db(conn_factory, _enqueue_truth_inbound)
+                except Exception as exc:  # noqa: BLE001 — a sweep must never kill the worker
+                    logger.debug("truth lane sweep skipped: %s", exc)
 
             # claim_next_job takes the process-wide write gate — a BLOCKING
             # threading lock. Called directly it ran on the event loop, so every

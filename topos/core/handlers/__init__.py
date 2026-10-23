@@ -460,6 +460,11 @@ OWNER_DOOR_OPEN_TYPES = frozenset({
     # verify_claim v2: reads only; fixed node-written prompts (not an instruction sink); hosted model calls are
     # wallet-gated; owner class only at the truth door.
     "verify_claim_owner",
+    # The inbound truth lane's two reads (owner class only at the truth door): counts per week, and the claim cards.
+    # NOT here: truth_inbound_settings (it writes the lane's settings when its payload says set; a type that reads and
+    # writes by a field is a change) and truth_claim_label (it writes the owner's label, the week's truth set, which
+    # an agent must never edit). Both are dangerous on the socket by subtraction.
+    "truth_weekly_stats", "truth_claim_cards",
     # NOT here: tools_index rebuilds the tool index (INSERT OR REPLACE + DELETE with prune_missing,
     # features/signal/tool_index.py) — a write, and an instruction sink (security re-check N1).
 })
