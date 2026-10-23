@@ -16,9 +16,10 @@ Stages, each timed and each with its own outcome:
              are dropped.
 3. qualify   each record's actor role from the node's resolver (``features.provenance.roles.record_role``):
              authored, addressed, participated, observed, ambient; ``derived`` when a fact's source cannot be found.
-4. judge     two calls name the shown records that show the claim, in opposite order, run in parallel (the reply
-             is the numbers alone: output tokens are the judge's latency). A record counts only if both name it and
-             the role and period rules accept it; a record the two split on gets one call on its own.
+4. judge     two calls label every shown record shows / related / unrelated, in opposite order, run in parallel
+             (output tokens are the judge's latency, so the records may be split across parallel calls). A record
+             counts only if both say "shows" and the role and period rules accept it; a record the two split on
+             gets one call on its own.
 5. release   owner: verdict, the cited records with role, date and snippet.
 
 Contradictions are not produced (no labelled contradictions to measure against yet). Any model, retrieval or
@@ -54,6 +55,23 @@ READ_TIMEOUT_S = 8.0
 #: When the two list orders disagree on a record, one more call on that record alone decides it (2 of 3).
 TIEBREAK = True
 PREFIXED_SOURCES = ("canonical", "entity_thread", "commitment_evidence", "overheard")
+#: A fact whose source refs resolve is shown as its own item, ahead of the records it came from, with the role and date
+#: of its strongest source. Off: on the owner's development rows the fact lines were short, rarely carried the claim's
+#: words, took half the slots and were never cited (23 Oct 2026).
+GROUNDED_FACTS = False
+#: Owner, 23 Oct 2026: "let derived facts count when their source refs resolve". A "derived" item both judge orders
+#: marked "shows" counts under the role its source refs resolve to (a signal object's refs, or a vector hit's record),
+#: looked up only at counting time: the judge's view is unchanged, so the resolved raw records are never over-marked.
+#: Opinions still need the owner's own words.
+GROUNDED_DERIVED = True
+#: Whether a vector hit (an embedding chunk of a message) grounds through the record it was cut from. Off: on the
+#: owner's development rows it added true and false support at the same rate (yes 9 -> 12 of 28, no 5 -> 9 of 27),
+#: the judge agreeing on loosely matched chunks either way. Facts and goals with source refs ground regardless.
+GROUNDED_VECTOR = False
+ROLE_RANK = {"authored": 0, "addressed": 1, "participated": 2, "observed": 3, "ambient": 4, "derived": 5}
+#: Embedding record types that name a source table when the retrieval item itself carries none.
+EMBEDDED_TABLES = {"conversation_message": "conversation_messages", "ai_chat_message": "ai_chat_messages",
+                   "journal_entry": "journal_entries", "activity_event": "activity_events", "transcript_segment": "transcript_segments"}
 _QUESTION = re.compile(r"\?\s*$")
 _SENTENCE_BREAK = re.compile(r"(?<=[.!?])\s+(?=\S)")
 _STOP = frozenset("the a an and or of to in on at for with it this that thing stuff project app code work today yesterday "
@@ -158,10 +176,14 @@ Return the numbers of the excerpts that show the claim; an empty list when none 
 LIST_SCHEMA = OutputSchema({"type": "object", "properties": {"shows": {"type": "array", "items": {"type": "integer"}}}, "required": ["shows"]},
                            plain_json=True, max_tokens=64)
 
-#: How the judge answers. "list": only the numbers of the showing excerpts (~7 output tokens, ~0.6 s a call on Red Pill);
-#: "labels": a label for every excerpt (~160 tokens for ten, ~4 s). The model writes about 40 tokens a second, so the
-#: reply length is the judge stage's latency; the two shapes agreed on the owner's development rows.
-JUDGE_OUTPUT = "list"
+#: How the judge answers. "labels": a label for every excerpt (~160 output tokens for ten, ~4 s a call on Red Pill);
+#: "list": only the numbers of the showing excerpts (~7 tokens, ~0.6 s). The model writes about 40 tokens a second, so
+#: the reply length is the judge stage's latency. The list is the looser judge: on the owner's development rows it
+#: supported 3 more "no" rows of 27 (a "related" outlet in the reply did not help), so labels stay the default.
+JUDGE_OUTPUT = "labels"
+#: Excerpts per judge call. With a value, each call labels that many and all the calls (both orders) run in parallel,
+#: so the reply length per call, and the judge stage's latency, shrinks with it. None: all excerpts in one call.
+JUDGE_SHARD: Optional[int] = None
 
 #: Legacy table names in fact refs ("iMessage" -> conversation_messages, "Grow Journal" -> journal_entries).
 REF_TABLE_ALIASES = {"iMessage": "conversation_messages", "Grow Journal": "journal_entries"}
@@ -257,9 +279,18 @@ def window_of(claim: Claim) -> Optional[Tuple[date, date]]:
     return (lo - timedelta(days=1), hi + timedelta(days=1)) if lo and hi else None
 
 
-def accept(role: str, record_day: Optional[date], claim: Claim, window, authored_agreed: bool) -> Tuple[bool, str]:
-    """Actor-role and period rules for a record both judge calls labelled "shows"."""
-    if role == "derived" and claim.kind == "opinion":
+def effective_role(e: Dict[str, Any]) -> str:
+    """A derived item's counting role: the role its source refs resolve to, when the switch is on."""
+    if GROUNDED_DERIVED and e.get("role") == "derived" and e.get("grounded_role") in ROLE_RANK and e["grounded_role"] != "derived":
+        return e["grounded_role"]
+    return e.get("role") or "derived"
+
+
+def accept(role: str, record_day: Optional[date], claim: Claim, window, authored_agreed: bool, via: str = "") -> Tuple[bool, str]:
+    """Actor-role and period rules for a record both judge calls labelled "shows". ``role`` is the counting role
+    (``effective_role``); ``via`` = "fact" or "derived" marks an item that stands on resolved refs rather than being a
+    record itself, which never carries an opinion."""
+    if (role == "derived" or via in ("fact", "derived")) and claim.kind == "opinion":
         return False, "opinion_not_authored"
     if claim.subject == "someone_else":
         if role not in ("authored", "participated", "observed"):
@@ -364,11 +395,28 @@ class NodeEvidence:
                 "role": self.roles.record_role(row, table=table), "lanes": list(lanes), "lane": lane, "text": str(text or ""),
                 "context": context}
 
+    def _grounding(self, item) -> Optional[str]:
+        """The strongest role among the records an item's refs resolve to (a signal object's source refs, or the
+        record an embedding row points at), without showing those records. None when nothing resolves."""
+        rid = item.get("record_id")
+        if not rid:
+            return None
+        roles = [r["role"] for r in self._expand_fact(item)]
+        if not roles and GROUNDED_VECTOR:
+            try:
+                row = self.conn.execute("SELECT record_type FROM signal_embeddings WHERE record_id = ? LIMIT 1", (rid,)).fetchone()
+            except sqlite3.OperationalError:
+                row = None
+            table = EMBEDDED_TABLES.get(row[0] if row else "") or self._table_of.get(row[0] if row else "")
+            got = self._record(table, rid, [], "grounding") if table in SOURCE_ROWS else None
+            roles = [got["role"]] if got else []
+        return min(roles, key=lambda r: ROLE_RANK.get(r, 9)) if roles else None
+
     def _expand_fact(self, item):
-        row = self.conn.execute("SELECT source_refs_json FROM signal_objects WHERE object_id = ?", (item.get("record_id"),)).fetchone()
         try:
+            row = self.conn.execute("SELECT source_refs_json FROM signal_objects WHERE object_id = ?", (item.get("record_id"),)).fetchone()
             refs = json.loads(row[0]) if row and row[0] else []
-        except ValueError:
+        except (sqlite3.OperationalError, ValueError):
             refs = []
         out = []
         for ref in refs if isinstance(refs, list) else []:
@@ -396,7 +444,7 @@ class NodeEvidence:
         finally:
             MATERIALIZE_MISSING_DOSSIERS.reset(token)
         packet = packet if isinstance(packet, dict) else {}
-        stats = {"candidates": 0, "aggregates_skipped": 0, "facts_expanded": 0, "derived": 0}
+        stats = {"candidates": 0, "aggregates_skipped": 0, "facts_expanded": 0, "facts_grounded": 0, "derived": 0, "derived_grounded": 0}
         records: List[Dict[str, Any]] = []
         for lane in ("summaries", "semantic_hits"):
             for it in packet.get(lane) or []:
@@ -412,6 +460,14 @@ class NodeEvidence:
                     srcs = self._expand_fact(it)
                     if srcs:
                         stats["facts_expanded"] += 1
+                        text = str(it.get("summary_text") or it.get("topic") or "")
+                        if GROUNDED_FACTS and text:
+                            best = min(srcs, key=lambda s: ROLE_RANK.get(s["role"], 9))
+                            stats["facts_grounded"] += 1
+                            records.append({"table": "facts", "record_id": str(it.get("record_id") or ""), "via": "fact",
+                                            "event_at": str(it.get("event_at") or best["event_at"] or ""), "role": best["role"],
+                                            "lanes": lanes, "lane": lane, "text": text, "context": best["table"],
+                                            "origin": str(it.get("object_type") or "fact")[:40]})
                         records.extend(srcs)
                         continue
                 if table in SOURCE_ROWS:
@@ -424,9 +480,12 @@ class NodeEvidence:
                 text = str(it.get("summary_text") or it.get("topic") or "")
                 if text:
                     stats["derived"] += 1
+                    grounded = self._grounding(it) if GROUNDED_DERIVED else None
+                    if grounded:
+                        stats["derived_grounded"] += 1
                     records.append({"table": table or "derived", "record_id": str(it.get("record_id") or it.get("entity_id") or ""),
                                     "event_at": str(it.get("event_at") or ""), "role": "derived", "lanes": lanes, "lane": lane, "text": text,
-                                    "origin": str(it.get("object_type") or it.get("retrieval_source") or "")[:40]})
+                                    "origin": str(it.get("object_type") or it.get("retrieval_source") or "")[:40], "grounded_role": grounded or ""})
         return records, stats
 
 
@@ -457,7 +516,8 @@ def select_evidence(records, sentence: str, claim: Claim, now: datetime):
         start = max(0, min(hits) - SNIPPET // 4) if hits else 0
         shown.append({"n": i + 1, "ref": f"{r['table']}:{r['record_id']}", "source": r["table"], "date": r["event_at"][:10],
                       "role": r["role"] if r["role"] in ROLES else "derived", "lane": r["lane"], "snippet": text[start:start + SNIPPET],
-                      "context": r.get("context") or "", "origin": r.get("origin") or r["table"]})
+                      "context": r.get("context") or "", "origin": r.get("origin") or r["table"], "via": r.get("via") or "",
+                      "grounded_role": r.get("grounded_role") or ""})
     return shown, dropped
 
 
@@ -503,24 +563,37 @@ def shows_in(reply: Dict[str, Any]) -> set:
     return out
 
 
+def apply_rules(claim: Claim, by_n: Dict[int, Dict[str, Any]], agreed) -> Tuple[List[int], Dict[int, Tuple[bool, str]]]:
+    """The role and period rules over the records both orders agreed on: the cited numbers and each verdict."""
+    window = window_of(claim)
+    via = lambda n: by_n[n].get("via") or ("derived" if effective_role(by_n[n]) != by_n[n].get("role") else "")
+    authored_ok = any(accept("authored", _day(by_n[n]["date"]), claim, window, False)[0] for n in agreed if effective_role(by_n[n]) == "authored")
+    verdicts = {n: accept(effective_role(by_n[n]), _day(by_n[n]["date"]), claim, window, authored_ok, via(n)) for n in agreed}
+    return sorted(n for n, (ok, _) in verdicts.items() if ok), verdicts
+
+
 def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: float) -> Dict[str, Any]:
     system, schema = judge_prompt()
     when = f"{claim.date_from} to {claim.date_to}" if claim.date_from else "not stated"
     about = "someone other than the owner" if claim.subject == "someone_else" else "the owner"
     head = f"Claim ({claim.kind}, about {about}): {claim.text}\nTime: {when}\n\nExcerpts:\n"
-    line = lambda e: (f"[{e['n']}] {e['source']}" + (f" (session: {e['context']})" if e.get("context") else "")
-                      + f", {e['date'] or 'undated'}, {ROLE_TEXT[e['role']]}: {e['snippet']}")
-    forward = head + "\n".join(line(e) for e in evidence)
-    backward = head + "\n".join(line(e) for e in reversed(evidence))
+    def line(e):
+        if e.get("via") == "fact":  # the node's own fact, standing on the record it was derived from
+            return f"[{e['n']}] fact from {e.get('context') or 'a record'}, {e['date'] or 'undated'}, derived from a record {ROLE_TEXT[e['role']]}: {e['snippet']}"
+        return (f"[{e['n']}] {e['source']}" + (f" (session: {e['context']})" if e.get("context") else "")
+                + f", {e['date'] or 'undated'}, {ROLE_TEXT[e['role']]}: {e['snippet']}")
+    size = JUDGE_SHARD if JUDGE_SHARD and JUDGE_SHARD > 0 else len(evidence)
+    shards = [evidence[i:i + size] for i in range(0, len(evidence), size)]
     ends = time.perf_counter() + timeout
-    with ThreadPoolExecutor(max_workers=2) as pool:  # the two orders in parallel: half the judge latency
-        f1 = pool.submit(chat, system, forward, schema, timeout, usage)
-        f2 = pool.submit(chat, system, backward, schema, timeout, usage)
-        first, second = f1.result(), f2.result()
+    with ThreadPoolExecutor(max_workers=2 * len(shards)) as pool:  # every call in parallel: the judge takes one call's time
+        forward = [pool.submit(chat, system, head + "\n".join(line(e) for e in s), schema, timeout, usage) for s in shards]
+        backward = [pool.submit(chat, system, head + "\n".join(line(e) for e in reversed(s)), schema, timeout, usage) for s in shards]
+        first = set().union(*(shows_in(f.result()) for f in forward))
+        second = set().union(*(shows_in(f.result()) for f in backward))
     shows = shows_in
     valid = lambda ns: {n for n in ns if isinstance(n, int) and 1 <= n <= len(evidence)}
     by_n = {e["n"]: e for e in evidence}
-    agreed_set, split = valid(shows(first) & shows(second)), sorted(valid(shows(first) ^ shows(second)))
+    agreed_set, split = valid(first & second), sorted(valid(first ^ second))
     tiebroken = 0
     if TIEBREAK and split and ends - time.perf_counter() > 1.0:
         def alone(n):  # the record on its own, so its place in a list cannot decide it
@@ -534,10 +607,7 @@ def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: fl
                     agreed_set.add(n)
                     tiebroken += 1
     agreed = sorted(agreed_set)
-    window = window_of(claim)
-    authored_ok = any(accept("authored", _day(by_n[n]["date"]), claim, window, False)[0] for n in agreed if by_n[n]["role"] == "authored")
-    verdicts = {n: accept(by_n[n]["role"], _day(by_n[n]["date"]), claim, window, authored_ok) for n in agreed}
-    cites = sorted(n for n, (ok, _) in verdicts.items() if ok)
+    cites, verdicts = apply_rules(claim, by_n, agreed)
     if cites:
         reason = None
     elif agreed:

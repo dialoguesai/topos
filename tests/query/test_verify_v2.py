@@ -74,6 +74,7 @@ def test_names_drop_generic_kinds_of_thing():
     ("observed", "did_or_made", "owner", False, "role_not_allowed"),
     ("addressed", "did_or_made", "owner", False, "addressed_without_authored"),
     ("derived", "setup", "owner", False, "derived_without_authored"),
+    ("authored", "did_or_made", "owner", True, "accepted"),
     ("observed", "did_or_made", "someone_else", True, "accepted"),
     ("ambient", "did_or_made", "someone_else", False, "role_not_allowed"),
 ])
@@ -297,7 +298,7 @@ def test_gather_turns_dossier_writes_off_only_for_its_own_retrieval():
     ev = v2.NodeEvidence.__new__(v2.NodeEvidence)
     ev.adapter, ev.manifest, ev._Request, ev._Ledger = Adapter(), None, (lambda **kw: kw), (lambda: None)
     assert ev.gather("q", "", datetime(2026, 10, 8, tzinfo=timezone.utc)) == ([], {"candidates": 0, "aggregates_skipped": 0,
-                                                                                  "facts_expanded": 0, "derived": 0})
+                                                                                  "facts_expanded": 0, "facts_grounded": 0, "derived": 0, "derived_grounded": 0})
     assert seen == [False] and MATERIALIZE_MISSING_DOSSIERS.get() is True
 
 
@@ -391,7 +392,8 @@ class ListChat(FakeChat):
         return {"shows": [n for n, lab in self.labels.items() if lab == "shows"]}
 
 
-def test_the_list_judge_counts_only_the_numbers_both_calls_name():
+def test_the_list_judge_counts_only_the_numbers_both_calls_name(monkeypatch):
+    monkeypatch.setattr(v2, "JUDGE_OUTPUT", "list")
     out = run([rec(1, "authored"), rec(2, "authored")], ListChat(read_reply(), {1: "shows", 2: "related"}))
     assert out["verdict"] == "supported" and [e["n"] for e in out["evidence"] if e["cited"]] == [1]
     assert out["usage"]["model_calls"] == 3
@@ -439,3 +441,136 @@ def test_local_caps_the_reply_the_same_way(monkeypatch):
     assert sent[-1]["options"]["num_predict"] == 64 and sent[-1]["format"] == dict(v2.LIST_SCHEMA)
     chat("s", "u", v2.LABEL_SCHEMA, 5.0, m.Usage())
     assert "num_predict" not in sent[-1]["options"]
+
+
+def test_sharded_judge_labels_every_record_across_parallel_calls(monkeypatch):
+    monkeypatch.setattr(v2, "JUDGE_SHARD", 2)
+    seen = []
+
+    class Recording(FakeChat):
+        def __call__(self, system, user, schema, timeout, usage):
+            if system == v2.LABEL_SYSTEM:
+                seen.append([l.split("]")[0][1:] for l in user.splitlines() if l.startswith("[")])
+            return super().__call__(system, user, schema, timeout, usage)
+
+    records = [rec(n, "authored") for n in range(1, 6)]
+    out = run(records, Recording(read_reply(), {1: "shows", 5: "shows", 3: "related"}))
+    assert out["verdict"] == "supported" and [e["n"] for e in out["evidence"] if e["cited"]] == [1, 5]
+    assert sorted(seen) == [["1", "2"], ["2", "1"], ["3", "4"], ["4", "3"], ["5"], ["5"]]  # 3 shards, both orders each
+    assert out["usage"]["model_calls"] == 7
+
+
+def test_a_grounded_fact_counts_alone_but_not_for_an_opinion():
+    c = claim(kind="did_or_made", date_from="", date_to="")
+    assert v2.accept("authored", None, c, None, False, via="fact") == (True, "accepted")
+    assert v2.accept("authored", None, claim(kind="opinion", date_from="", date_to=""), None, False, via="fact") == (False, "opinion_not_authored")
+
+
+def _fact_db():
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""CREATE TABLE signal_objects (object_id TEXT PRIMARY KEY, source_refs_json TEXT);
+        CREATE TABLE journal_entries (entry_id TEXT PRIMARY KEY, entry_at TEXT, content TEXT);
+        CREATE TABLE conversation_messages (message_id TEXT PRIMARY KEY, event_at TEXT, content TEXT);
+        INSERT INTO signal_objects VALUES ('f1', '[{"table":"conversation_messages","record_id":"c1"},{"table":"journal_entries","record_id":"j1"}]');
+        INSERT INTO signal_objects VALUES ('f2', '[{"table":"journal_entries","record_id":"missing"}]');
+        INSERT INTO journal_entries VALUES ('j1', '2026-10-06T21:00:00', 'restyled the pinwheel sidebar');
+        INSERT INTO conversation_messages VALUES ('c1', '2026-10-06T20:00:00', 'looks great');""")
+    return conn
+
+
+@pytest.mark.parametrize("on", [True, False])
+def test_a_fact_whose_refs_resolve_is_shown_ahead_of_its_records(monkeypatch, on):
+    monkeypatch.setattr(v2, "GROUNDED_DERIVED", False)
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(v2, "GROUNDED_FACTS", on)
+
+    class Roles:
+        ROLES = ("authored", "addressed", "participated", "observed", "ambient")
+
+        @staticmethod
+        def record_role(row, table):
+            return "authored" if table == "journal_entries" else "observed"
+
+    items = [{"record_id": "f1", "fusion_sources": ["facts_store"], "summary_text": "Owner restyled the pinwheel sidebar", "event_at": "2026-10-05"},
+             {"record_id": "f2", "fusion_sources": ["facts_store"], "summary_text": "Owner likes pinwheels"}]
+
+    class Adapter:
+        def retrieve(self, req):
+            return SimpleNamespace(context_packet={"summaries": items})
+
+    ev = v2.NodeEvidence.__new__(v2.NodeEvidence)
+    ev.conn, ev.roles, ev.adapter, ev.manifest, ev._table_of = _fact_db(), Roles, Adapter(), None, {}
+    ev._Request, ev._Ledger = (lambda **kw: kw), (lambda: None)
+    records, stats = ev.gather("q", "", datetime(2026, 10, 8, tzinfo=timezone.utc))
+    got = [(r["table"], r["record_id"], r["role"], r.get("via") or "") for r in records]
+    expected = ([("facts", "f1", "authored", "fact")] if on else []) + [("conversation_messages", "c1", "observed", ""),
+                                                                      ("journal_entries", "j1", "authored", ""), ("derived", "f2", "derived", "")]
+    assert got == expected and stats["facts_grounded"] == (1 if on else 0) and stats["facts_expanded"] == 1
+    if on:
+        assert records[0]["event_at"] == "2026-10-05" and records[0]["context"] == "journal_entries"  # the fact's own date; its strongest source
+
+
+def test_the_judge_sees_a_grounded_fact_as_the_nodes_own():
+    seen = []
+
+    class Recording(FakeChat):
+        def __call__(self, system, user, schema, timeout, usage):
+            if system == v2.LABEL_SYSTEM:
+                seen.append(user)
+            return super().__call__(system, user, schema, timeout, usage)
+
+    fact = {**rec(1, "authored", table="facts", text="Owner restyled the pinwheel sidebar"), "via": "fact", "context": "journal_entries"}
+    out = run([fact], Recording(read_reply(), {1: "shows"}))
+    assert out["verdict"] == "supported" and out["evidence"][0]["via"] == "fact"
+    assert "[1] fact from journal_entries, 2026-10-06, derived from a record written by the owner: Owner restyled" in seen[0]
+
+
+def test_an_agreed_derived_item_counts_under_the_role_its_refs_resolve_to(monkeypatch):
+    grounded = {**rec(1, "derived", table="derived", text="Owner restyled the pinwheel sidebar"), "grounded_role": "authored"}
+    out = run([grounded], FakeChat(read_reply(), {1: "shows"}))
+    assert out["verdict"] == "supported" and out["evidence"][0]["grounded_role"] == "authored"
+    monkeypatch.setattr(v2, "GROUNDED_DERIVED", False)
+    out = run([grounded], FakeChat(read_reply(), {1: "shows"}))
+    assert out["verdict"] == "no_evidence" and out["reason"] == "shows_failed_rules"
+    monkeypatch.setattr(v2, "GROUNDED_DERIVED", True)
+    unresolved = {**rec(1, "derived", table="derived"), "grounded_role": ""}
+    assert run([unresolved], FakeChat(read_reply(), {1: "shows"}))["reason"] == "shows_failed_rules"
+    opinion = FakeChat(read_reply(type="opinion"), {1: "shows"})
+    out = run([grounded], opinion)
+    assert out["verdict"] == "no_evidence" and out["stages"]["judge"]["rejections"] == ["opinion_not_authored"]
+
+
+@pytest.mark.parametrize("vector", [False, True])
+def test_grounding_resolves_signal_object_refs_and_embedding_rows_only_when_asked(monkeypatch, vector):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(v2, "GROUNDED_VECTOR", vector)
+
+    class Roles:
+        ROLES = ("authored", "addressed", "participated", "observed", "ambient")
+
+        @staticmethod
+        def record_role(row, table):
+            return "authored" if table == "journal_entries" else "observed"
+
+    conn = _fact_db()
+    conn.executescript("""CREATE TABLE signal_embeddings (embedding_id TEXT, record_id TEXT, record_type TEXT);
+        INSERT INTO signal_embeddings VALUES ('e1', 'c1', 'conversation_message');""")
+    items = [{"record_id": "f1", "fusion_sources": ["derived_objects"], "summary_text": "a fact via the derived lane", "object_type": "fact"},
+             {"record_id": "c1", "fusion_sources": ["vector"], "summary_text": "a vector hit", "retrieval_source": "vector"},
+             {"record_id": "nothing", "fusion_sources": ["vector"], "summary_text": "unresolved", "retrieval_source": "vector"}]
+
+    class Adapter:
+        def retrieve(self, req):
+            return SimpleNamespace(context_packet={"summaries": items})
+
+    ev = v2.NodeEvidence.__new__(v2.NodeEvidence)
+    ev.conn, ev.roles, ev.adapter, ev.manifest, ev._table_of = conn, Roles, Adapter(), None, {}
+    ev._Request, ev._Ledger = (lambda **kw: kw), (lambda: None)
+    records, stats = ev.gather("q", "", datetime(2026, 10, 8, tzinfo=timezone.utc))
+    assert [(r["record_id"], r["role"], r["grounded_role"]) for r in records] == [("f1", "derived", "authored"), ("c1", "derived", "observed" if vector else ""),
+                                                                                  ("nothing", "derived", "")]
+    assert stats["derived"] == 3 and stats["derived_grounded"] == (2 if vector else 1)
