@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.17] — 2026-10-23
+
 - **A shared line that was edited no longer ranks by its old words.** `[P]` A share's search index took every
   vector stored for a line, whatever text it was built from. A line rewritten after it was embedded (an edit, a
   re-capture, a re-import, a merged reply) came back into the index with its old chunks, so a recipient's query
