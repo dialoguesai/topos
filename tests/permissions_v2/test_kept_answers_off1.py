@@ -450,7 +450,10 @@ def _job(number, *, keep_until, ended_at, deferred=False):
                None, "hash", 1, state="ended", ended_at=ended_at, keep_until=keep_until, deferred=deferred)
 
 
-def test_more_than_five_hundred_kept_answers_log_one_counts_only_line(caplog):
+def test_over_five_hundred_kept_answers_the_oldest_leave(caplog):
+    """R-OFF1 L3 (WS-OFF, 23 Oct): a real bound. Over KEPT_ENDED_BOUND kept answers, the oldest leave memory (the
+    control plane delivers them again, counted once by their id), with one counts-only line each time. Live answers
+    and deferred ones (they hold no body) are not counted and never dropped for it."""
     service = AnswerService(SimpleNamespace(), clock=lambda: 100)
     caplog.set_level(logging.WARNING, logger=LOGGER)
 
@@ -459,24 +462,45 @@ def test_more_than_five_hundred_kept_answers_log_one_counts_only_line(caplog):
                 if record.name == LOGGER and record.getMessage().startswith("permissions answer keep")]
     try:
         assert answer_release.KEPT_ENDED_BOUND == 500
-        for number in range(500):
-            service._jobs[f"ans-kept-{number}"] = _job(number, keep_until=DAY, ended_at=10)
-        for number in range(500, 520):          # unkept answers, still inside their window: not counted
+        for number in range(500):                # ended one second apart: number 0 is the oldest
+            service._jobs[f"ans-kept-{number}"] = _job(number, keep_until=DAY, ended_at=number)
+        for number in range(500, 520):           # live answers, still inside their window
             service._jobs[f"ans-kept-{number}"] = _job(number, keep_until=None, ended_at=99)
+        for number in range(520, 525):           # deferred kept ones
+            service._jobs[f"ans-kept-{number}"] = _job(number, keep_until=DAY, ended_at=0, deferred=True)
         service._clean(100)
-        assert keep_lines() == []
-        service._jobs["ans-kept-x"] = _job(999, keep_until=DAY, ended_at=10)
+        assert keep_lines() == [] and len(service._jobs) == 525
+        service._jobs["ans-kept-new"] = _job(999, keep_until=DAY, ended_at=99)
         service._clean(100)
-        service._clean(100)                      # still over: no second line
-        assert keep_lines() == ["permissions answer keep: kept_ended=501 bound=500"]
-        del service._jobs["ans-kept-x"], service._jobs["ans-kept-0"]
+        assert keep_lines() == ["permissions answer keep: kept_ended=501 bound=500 dropped_oldest=1"]
+        assert "ans-kept-0" not in service._jobs and "ans-kept-1" in service._jobs and "ans-kept-new" in service._jobs
+        service._clean(100)                      # at the bound: nothing more leaves, no second line
+        assert len(keep_lines()) == 1 and len(service._jobs) == 525
+        for number in range(3):
+            service._jobs[f"ans-kept-more-{number}"] = _job(1000 + number, keep_until=DAY, ended_at=99)
         service._clean(100)
-        service._jobs["ans-kept-0"] = _job(0, keep_until=DAY, ended_at=10)
-        service._jobs["ans-kept-x"] = _job(999, keep_until=DAY, ended_at=10)
-        service._clean(100)                      # over again: a second line
-        assert keep_lines() == ["permissions answer keep: kept_ended=501 bound=500"] * 2
+        assert keep_lines()[-1] == "permissions answer keep: kept_ended=503 bound=500 dropped_oldest=3"
+        assert not any(f"ans-kept-{number}" in service._jobs for number in range(1, 4))
+        assert all(f"ans-kept-{number}" in service._jobs for number in range(500, 525))
     finally:
         service.close()
+
+
+def test_a_kept_answer_dropped_over_the_bound_is_delivered_again_and_counted_once(answers_node, service, monkeypatch):
+    node = answers_node
+    monkeypatch.setattr(answer_release, "KEPT_ENDED_BOUND", 1)
+    first, second = secrets.token_hex(16), secrets.token_hex(16)
+    older = _ask(node, service, keep_until=node.now[0] + DAY, kq=first)
+    _ended(service, older)
+    newer = _ask(node, service, keep_until=node.now[0] + DAY, kq=second)
+    _ended(service, newer)
+    assert _fetch(node, service, newer)["outcome"] == "answered"        # this fetch's clean drops the older one
+    assert older not in service._jobs
+    with pytest.raises(PolicyError):
+        _fetch(node, service, older)                                     # gone: the control plane delivers it again
+    again = _ask(node, service, keep_until=node.now[0] + DAY, kq=first)
+    assert _fetch(node, service, _ended(service, again).answer_id)["outcome"] == "answered"
+    assert _questions(node) == 2                                         # two kept questions, each counted once
 
 
 # --- the sweep ----------------------------------------------------------------------------------------------------
@@ -545,6 +569,49 @@ def test_a_sweep_that_cannot_start_leaves_the_kept_ask_served(answers_node, serv
     assert _fetch(node, service, _ended(service, answer_id).answer_id)["outcome"] == "answered"
     assert service._sweeper is None
     assert "permissions answer keep: the sweep did not start" in [record.getMessage() for record in caplog.records]
+
+
+def test_the_sweep_drops_a_kept_answer_whose_share_moved(answers_node, service, monkeypatch):
+    """R-OFF1 L3: a kept answer whose share's authority moved (narrowed, re-granted) leaves memory at the next sweep,
+    not only when its window ends; its next fetch would have refused and dropped it, and that fetch may never come."""
+    monkeypatch.setattr(answer_release, "SWEEP_SECONDS", 0.02)
+    node = answers_node
+    answer_id = _ask(node, service, keep_until=node.now[0] + DAY)
+    job = _ended(service, answer_id)
+    assert not _gone(service, answer_id, seconds=0.3)            # the authority it was written under: kept
+    node.activate(node.search_raw, generation=2)
+    assert _gone(service, answer_id)
+    assert job.body is None and job.question is None
+
+
+def test_the_sweep_drops_a_kept_answer_whose_share_ended(answers_node, service, monkeypatch):
+    from tests.permissions_v2.message_search_harness import owner
+    monkeypatch.setattr(answer_release, "SWEEP_SECONDS", 0.02)
+    node = answers_node
+    answer_id = _ask(node, service, keep_until=node.now[0] + DAY)
+    _ended(service, answer_id)
+    with owner():
+        node.ledger.revoke("grant-search", expected_epoch=node.epoch(), command_id="revoke-grant-search")
+    assert _gone(service, answer_id)
+
+
+def test_a_sweep_that_cannot_read_the_ledger_keeps_the_answer_for_the_next(answers_node, service, monkeypatch):
+    monkeypatch.setattr(answer_release, "SWEEP_SECONDS", 0.02)
+    node = answers_node
+    answer_id = _ask(node, service, keep_until=node.now[0] + DAY)
+    _ended(service, answer_id)
+    read = service._grant_authority
+    reads = []
+
+    def unreadable(grant_id):
+        reads.append(grant_id)
+        raise RuntimeError("the ledger could not be read")
+
+    monkeypatch.setattr(service, "_grant_authority", unreadable)
+    assert not _gone(service, answer_id, seconds=0.3) and reads   # read and failed, many times: kept
+    monkeypatch.setattr(service, "_grant_authority", read)
+    assert _fetch(node, service, answer_id)["outcome"] == "answered"
+    assert service._sweeper is not None and service._sweeper.is_alive()
 
 
 def test_closing_the_service_ends_its_sweep(answers_node, service):

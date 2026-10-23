@@ -68,9 +68,10 @@ MAX_END_SECONDS = 110
 UNFETCHED_SECONDS = 600
 # Kept questions (lane OFF1N): the longest a kept job's ended body stays after its end, whatever its stamp says.
 KEPT_MAX_SECONDS = 14 * 86_400
-# More kept ended jobs than this in memory is logged as one counts-only line each time the count goes over it.
+# R-OFF1 L3: the most kept answers (ended, holding a body) this process holds. Over it the oldest leave (`_clean`),
+# with one counts-only line each time; the control plane delivers them again, counted once by their kept question id.
 KEPT_ENDED_BOUND = 500
-KEEP_LOG = "permissions answer keep: kept_ended=%d bound=%d"
+KEEP_LOG = "permissions answer keep: kept_ended=%d bound=%d dropped_oldest=%d"
 # While a kept job is in memory, a sweep runs `_clean` this often (`AnswerService._sweep`). A kept answer can stay for
 # days, and cleaned only at the next ask or fetch, it stayed in memory past its window on a node nobody asked again.
 SWEEP_SECONDS = 60
@@ -337,9 +338,6 @@ class AnswerService:
         self.judge = judge or _judge_local
         self._lock = threading.Lock()
         self._jobs: dict[str, Job] = {}
-        # Lane OFF1N: whether the kept ended jobs were over KEPT_ENDED_BOUND at the last `_clean`, so the line is
-        # written once each time the count goes over it, not on every ask and fetch.
-        self._kept_over = False
         # Lane OFF1N: the sweep that cleans while a kept job is in memory (`_sweep`; None while none runs), and the
         # stop it waits on.
         self._sweeper: threading.Thread | None = None
@@ -351,11 +349,14 @@ class AnswerService:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _sweep(self):
-        """Lane OFF1N: `_clean` every SWEEP_SECONDS while a kept job is in memory, so an answer past its window leaves
-        this process without waiting for the next ask or fetch. Ends with the service, or once no kept job is left
-        (decided under the lock, so the next kept ask starts another). Nothing is read or written but this queue."""
+        """Lane OFF1N: every SWEEP_SECONDS while a kept job is in memory, drop the kept answers whose share moved
+        (`_drop_moved`, R-OFF1 L3) and `_clean`, so an answer past its window, or no longer its share's, leaves this
+        process without waiting for the next ask or fetch. Ends with the service, or once no kept job is left (decided
+        under the lock, so the next kept ask starts another). It reads the ledger, outside the queue's lock, and writes
+        nothing but this queue."""
         try:
             while not self._closed.wait(SWEEP_SECONDS):
+                self._drop_moved()
                 with self._lock:
                     self._clean(self.clock())
                     if not any(job.keep_until is not None for job in self._jobs.values()):
@@ -388,12 +389,17 @@ class AnswerService:
             admission = ledger.verify(envelope, request=context, payload=payload, now=self.clock())
         return principal, signed, admission
 
-    def _current(self, signed):
+    def _grant_authority(self, grant_id):
+        """The grant's authority and policy as the ledger holds them now, after syncing the protection floor. Raises
+        the ledger's refusal for a grant that is not active."""
         ledger = self.runtime.protocol.ledger
         with with_db_write():
             with ledger._transaction() as db:
                 self.runtime.protocol._sync_protection(db)
-                authority, policy = ledger._authority(db, signed.grant_id, self.clock())
+                return ledger._authority(db, grant_id, self.clock())
+
+    def _current(self, signed):
+        authority, policy = self._grant_authority(signed.grant_id)
         requested = parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields})
         if authority != requested:
             raise PolicyError("permission_denied")
@@ -423,21 +429,52 @@ class AnswerService:
 
     def _clean(self, now):
         """Drop every ended job past its keep window (`keep_end`), delivered or not: the only exit for a delivered
-        body. Run under the lock by every ask and fetch, and by the sweep while a kept job is in memory. Then count the
-        kept ones left (lane OFF1N): memory only, so a count over KEPT_ENDED_BOUND is logged."""
-        kept = 0
-        for key, job in list(self._jobs.items()):
+        body, with a final refusal and a moved authority. Run under the lock by every ask and fetch, and by the sweep
+        while a kept job is in memory. Then (R-OFF1 L3) hold no more than KEPT_ENDED_BOUND kept answers: the oldest
+        leave first. A live answer, and a deferred kept job (it holds no body), is not counted."""
+        kept = []
+        for order, (key, job) in enumerate(list(self._jobs.items())):   # in the order asked: ties go to the first
             if job.state != "ended" or job.ended_at is None:
                 continue
             if now >= keep_end(job):
-                job.question = None
-                job.body = None
-                del self._jobs[key]
-            elif job.keep_until is not None:
-                kept += 1
-        if kept > KEPT_ENDED_BOUND and not self._kept_over:
-            _log.warning(KEEP_LOG, kept, KEPT_ENDED_BOUND)
-        self._kept_over = kept > KEPT_ENDED_BOUND
+                self._drop(key)
+            elif job.keep_until is not None and not job.deferred:
+                kept.append((job.ended_at, job.accepted_at, order, key))
+        over = len(kept) - KEPT_ENDED_BOUND
+        if over > 0:
+            for *_age, key in sorted(kept)[:over]:
+                self._drop(key)
+            _log.warning(KEEP_LOG, len(kept), KEPT_ENDED_BOUND, over)
+
+    def _drop(self, key):
+        job = self._jobs.pop(key)
+        job.question = None
+        job.body = None
+
+    def _drop_moved(self):
+        """R-OFF1 L3: drop the kept answers whose share's authority or answer mode is no longer the one they were
+        written under, as their next fetch would, since that fetch may never come. A grant the ledger refuses (ended,
+        revoked, out of its validity) has moved. A ledger that cannot be read now decides nothing: the next sweep, or
+        a fetch, does. The ledger is read outside the queue's lock, one read per grant."""
+        grants: dict = {}
+        with self._lock:
+            for key, job in self._jobs.items():
+                if job.state == "ended" and job.keep_until is not None and not job.deferred:
+                    grants.setdefault(job.grant_id, []).append(key)
+        for grant_id, keys in grants.items():
+            try:
+                authority, policy = self._grant_authority(grant_id)
+                mode = effective_mode(policy, frontend_client_id=self.runtime.protocol.frontend_client_id)
+            except PolicyError:
+                authority = mode = None
+            except Exception:  # noqa: BLE001 -- unreadable now; nothing is dropped on a guess
+                continue
+            with self._lock:
+                for key in keys:
+                    job = self._jobs.get(key)
+                    if job is not None and (authority is None or mode != job.mode
+                                            or not same_answer_authority(authority, job.admitted_authority)):
+                        self._drop(key)
 
     def submit(self, *, envelope, payload, request_id, owner_account_words=frozenset(),
                accepted_version=LEGACY_ACCEPTED_VERSION, keep_until=None, kept_question=None):
