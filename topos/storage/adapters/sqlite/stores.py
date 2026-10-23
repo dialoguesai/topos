@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from ..protocols import ListPage
 from ...canonical.canonical_store import SQLiteCanonicalStore as TypedSQLiteCanonicalStore
-from ...db.write_gate import commit_connection, with_db_write
+from ...db.write_gate import commit_connection, retry_stale_snapshot, with_db_write
 
 logger = logging.getLogger(__name__)
 
@@ -1298,8 +1298,9 @@ class SQLiteQuerySessionStore:
         envelope = session.get("envelope_json") or {}
         if not isinstance(envelope, dict):
             envelope = {}
-        with with_db_write():
-            self._conn.execute(
+
+        def _write(conn: sqlite3.Connection) -> None:
+            conn.execute(
                 """
                 INSERT INTO query_sessions (session_id, requester_id, intent_hash, envelope_json, ttl_expires_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, datetime('now'))
@@ -1318,7 +1319,12 @@ class SQLiteQuerySessionStore:
                     session.get("ttl_expires_at") or session.get("expires_at"),
                 ),
             )
-            commit_connection(self._conn)
+            commit_connection(conn)
+
+        # Every write in this store runs on the calling thread's own connection, where a
+        # half-read cursor can pin a stale snapshot (see retry_stale_snapshot).
+        with with_db_write():
+            retry_stale_snapshot(self._conn, _write)
         return session_id
 
     def append_artifact(self, session_id: str, artifact: Dict[str, Any]) -> str:
@@ -1338,8 +1344,9 @@ class SQLiteQuerySessionStore:
             duration_ms = max(0, int(raw_duration)) if raw_duration is not None else None
         except (TypeError, ValueError):
             duration_ms = None
-        with with_db_write():
-            self._conn.execute(
+
+        def _write(conn: sqlite3.Connection) -> None:
+            conn.execute(
                 """
                 INSERT INTO query_artifacts (
                     artifact_id, session_id, cache_key, public_result_json,
@@ -1356,20 +1363,26 @@ class SQLiteQuerySessionStore:
                     duration_ms,
                 ),
             )
-            commit_connection(self._conn)
+            commit_connection(conn)
+
+        with with_db_write():
+            retry_stale_snapshot(self._conn, _write)
         return artifact_id
 
     def invalidate(self, session_id: str, *, cache_key: Optional[str] = None) -> int:
-        with with_db_write():
+        def _write(conn: sqlite3.Connection) -> int:
             if cache_key is None:
-                cur = self._conn.execute("DELETE FROM query_artifacts WHERE session_id=?", (session_id,))
+                cur = conn.execute("DELETE FROM query_artifacts WHERE session_id=?", (session_id,))
             else:
-                cur = self._conn.execute(
+                cur = conn.execute(
                     "DELETE FROM query_artifacts WHERE session_id=? AND cache_key=?",
                     (session_id, cache_key),
                 )
-            commit_connection(self._conn)
-        return cur.rowcount
+            commit_connection(conn)
+            return cur.rowcount
+
+        with with_db_write():
+            return retry_stale_snapshot(self._conn, _write)
 
     def purge_expired(self) -> int:
         """Drop expired sessions and the artifacts belonging to them.
@@ -1391,26 +1404,34 @@ class SQLiteQuerySessionStore:
         repeatedly.
         """
         cutoff = self._conn.execute("SELECT datetime('now')").fetchone()[0]
-        with with_db_write():
+
+        def _write(conn: sqlite3.Connection) -> tuple:
             # Artifacts first, bounded by the SAME cutoff the session delete uses.
-            artifacts = self._conn.execute(
+            artifacts = conn.execute(
                 "DELETE FROM query_artifacts WHERE session_id IN "
                 "(SELECT session_id FROM query_sessions "
                 " WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < ?)",
                 (cutoff,),
             ).rowcount
-            cur = self._conn.execute(
+            cur = conn.execute(
                 "DELETE FROM query_sessions WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < ?",
                 (cutoff,),
             )
             # Reap anything already orphaned — by the old race, an interrupted
             # purge, or a session removed by any other path. Unreachable rows are
             # not harmless when they hold the owner's derived content.
-            orphaned = self._conn.execute(
+            orphaned = conn.execute(
                 "DELETE FROM query_artifacts WHERE session_id NOT IN "
                 "(SELECT session_id FROM query_sessions)"
             ).rowcount
-            commit_connection(self._conn)
+            commit_connection(conn)
+            return artifacts, cur.rowcount, orphaned
+
+        # Runs first on every query turn and its caller swallows failures, so a stale
+        # snapshot here used to leave the connection in a transaction that still held
+        # that snapshot, and the turn's own session write then failed on it.
+        with with_db_write():
+            artifacts, sessions, orphaned = retry_stale_snapshot(self._conn, _write)
         if orphaned:
             logger.info("query_artifacts: reaped %d orphaned artifact(s)", orphaned)
-        return artifacts + cur.rowcount + orphaned
+        return artifacts + sessions + orphaned

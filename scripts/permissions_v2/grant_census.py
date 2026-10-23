@@ -2810,6 +2810,17 @@ def _what_if_main(args) -> int:
 # a few records sooner; the census does not model that cap, before or after. The later title (`latest_title`, migration
 # 83) is in evidence.REVIEW_SURFACE_EXCLUSIONS, which no pinned function changes: it moves no review, no context
 # revision and no member, so the census reads a chat named after its review exactly as before it was named.
+# Then lane 194 (stale member vectors; DR-34 default-on review of 22 Oct, residual (i)), which moves one:
+# - SearchIndexService._members: a member takes a stored signal_embeddings chunk only when its content_hash equals
+#   sha256(embeddable_content(row)) of the row's current text (`_embedded_content_hash`); a chunk built from text the
+#   row no longer holds, or with no hash, is not taken, and the member falls back to the passage embedder (when the
+#   node has one, within EMBEDDINGS_PER_BUILD) or to lexical terms alone. Membership, every withheld class and every
+#   refusal are unchanged; only which vectors a member carries moves.
+# Mirror checked: `run` calls the real _members with passage_embedder=None (stored vectors only), so `stored_vectors`
+# now reads False for a member whose only chunks are stale, which is what the live index holds; nothing in the census
+# mirrors the vector query, so no census logic changes. Measured 22 Oct on a store copy: 0 of ~143k stored vectors
+# lack a hash; for unedited rows the hash reproduces (iMessage 3,998/3,998); every mismatch is a row re-ingested or
+# rewritten after it was embedded.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2894,7 +2905,7 @@ PINNED: dict[str, str] = {
     "release.source_message_decision":
         "ab68247aea0325143ba7c57ae294a4966a728618d2b9cd57c7a78f3dbc45b302",
     "search_index.SearchIndexService._members":
-        "4312c5ee172341d8fa0df9853a48cac22fa64075f47e76abc40a24a585619159",
+        "b76da3464df3b6e6a883814a9276b414c7d040083f7b61d04ff642c93f025833",
     "search_index.SearchIndexService._rebuild_once":
         "fc4dfa7d405b72c3ef5de9f0f6e584331d6231b8578166e38eb8371b26ec9c13",
     "search_release.MessageSearchRelease._accept":
