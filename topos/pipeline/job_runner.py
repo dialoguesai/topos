@@ -20,6 +20,8 @@ from ..enrichment.derivation_recovery import SIGNAL_DERIVE_RETRY_KIND
 # Safe at import time too: stdlib only at module level.
 from ..ingestion.embeddings_catchup import CATCHUP_KINDS as EMBEDDINGS_CATCHUP_KINDS
 from ..ingestion.embeddings_catchup import CONTINUING_KINDS as EMBEDDINGS_CATCHUP_CONTINUING_KINDS
+from ..ingestion.stale_text_catchup import CONTINUING_KINDS as STALE_TEXT_CONTINUING_KINDS
+from ..ingestion.stale_text_catchup import KIND as STALE_TEXT_KIND
 from .job_store import (
     DEFAULT_LEASE_SECONDS,
     claim_matching_queued_jobs,
@@ -405,18 +407,31 @@ async def _execute_embeddings_catchup(payload: Dict[str, Any]) -> Dict[str, Any]
     return await execute_catchup(payload)
 
 
+async def _execute_stale_text_catchup(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from ..ingestion.stale_text_catchup import execute_catchup
+
+    return await execute_catchup(payload)
+
+
 def _enqueue_embeddings_catchup(conn: Any, source_id: Optional[str] = None) -> None:
+    """Discovery for every embeddings catch-up: the owner-started lanes and the stale-text pass."""
+    from ..ingestion import stale_text_catchup
     from ..ingestion.embeddings_catchup import enqueue_catchup
 
     try:
         enqueue_catchup(conn, source_id)
     except Exception:
         logger.warning("Embeddings catch-up discovery failed", exc_info=True)
+    try:
+        stale_text_catchup.enqueue_catchup(conn, source_id)
+    except Exception:
+        logger.warning("Stale-text embeddings discovery failed", exc_info=True)
 
 
 EXECUTORS: Dict[str, ExecutorFn] = {
     "ai_tool_enrichment_catchup": _execute_ai_tool_catchup,
     **{kind: _execute_embeddings_catchup for kind in EMBEDDINGS_CATCHUP_KINDS},
+    STALE_TEXT_KIND: _execute_stale_text_catchup,
     "inbox_deferred_enrichment": _execute_inbox_deferred_enrichment,
     "file_ingestion": _execute_file_ingestion,
     "enrichment_process_source": _execute_enrichment_process_source,
@@ -467,8 +482,10 @@ _LONG_MAX_POLL_SECONDS = 10.0
 #: One source's batches still run one at a time, after its own ingest
 #: (``embeddings_catchup.enqueue_catchup`` queues the next only when none is in
 #: flight), and each batch takes the write gate only for its vectors and markers,
-#: as before.
-_CATCHUP_KINDS: frozenset[str] = frozenset(EMBEDDINGS_CATCHUP_KINDS)
+#: as before. The stale-text pass (``stale_text_catchup``) runs here too: a page is reads
+#: and hashing plus the model for the rows whose text changed, and it must not wait behind
+#: derive jobs or syncs any more than the other two.
+_CATCHUP_KINDS: frozenset[str] = frozenset(EMBEDDINGS_CATCHUP_KINDS) | {STALE_TEXT_KIND}
 
 
 def _executable_kinds() -> list[str]:
@@ -715,7 +732,8 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
         return
     if kind == "inbox_deferred_enrichment":
         jobs, payload = await _run_db(conn_factory, _coalesce_inbox_jobs, job, payload)
-    if kind in ("enrichment_process_source", "ai_tool_enrichment_catchup", LOCAL_SYNC_KIND, *EMBEDDINGS_CATCHUP_KINDS):
+    if kind in ("enrichment_process_source", "ai_tool_enrichment_catchup", LOCAL_SYNC_KIND, *EMBEDDINGS_CATCHUP_KINDS,
+                STALE_TEXT_KIND):
         payload["_progress_updater"] = _progress_updater
     if kind == LOCAL_SYNC_KIND:
         payload["_job_id"] = job_id
@@ -830,9 +848,10 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
     if kind in ("ai_tool_enrichment_catchup", "inbox_deferred_enrichment", LOCAL_SYNC_KIND):
         for sid in {entry.get("source_id") for entry in jobs if entry.get("source_id")}:
             await _run_db(conn_factory, _enqueue_ai_tool_catchup, sid, kind == LOCAL_SYNC_KIND)
-    if kind in EMBEDDINGS_CATCHUP_CONTINUING_KINDS:
+    if kind in EMBEDDINGS_CATCHUP_CONTINUING_KINDS or kind in STALE_TEXT_CONTINUING_KINDS:
         # A finished batch queues the next; a finished sync or import picks up
         # what it left owed. Both only for a source whose catch-up the owner started.
+        # A finished stale-text page queues the next page; a finished ingest resumes a pass or starts one that is due.
         for sid in {entry.get("source_id") for entry in jobs if entry.get("source_id")}:
             await _run_db(conn_factory, _enqueue_embeddings_catchup, sid)
     _release_secrets(jobs)

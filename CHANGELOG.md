@@ -9,6 +9,37 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+- **Rows whose text changed after they were embedded are re-embedded by the node itself.** `[P]` The 1.5.17 share-index rule
+  made every stored vector of a rewritten line useless outside the owner's own lanes: a share index embeds the
+  line's current text again on every rebuild (within its per-build budget, 8-18 ms a member) and keeps that vector
+  only inside the index, and below the owner's tier the vector and recent lanes drop the line. Nothing re-embedded
+  the stored rows. A new catch-up lane does (`topos/ingestion/stale_text_catchup.py`, kind
+  `stale_text_embeddings_catchup`), on the catch-up worker beside the iMessage/Signal and imported-chat lanes. A row
+  is stale when its stored `content_hash` matches the hash of neither rendering of its current text, the rule the
+  query gate and the index apply (`retrieval._index_current_texts`); a chunk with no hash at all (none is stored
+  today) counts as stale too. The comparison needs the rows, so a job is one page of a pass: it walks a source's
+  embedded canonical records in record-id order from a cursor the payload carries, 2,000 record ids a page,
+  re-embeds the stale ones through the ordinary embeddings job (which writes the new hash and drops the model's
+  superseded chunks), prunes any chunk of those records whose hash still matches no current rendering, and queues
+  the next page; a finished ingest of the source resumes a pass a stopped node left. A pass is repeated 24 hours
+  after it ends. Left alone: every current row, a row with no renderable text, a row the owner keeps from every
+  share (`share_excluded`), a record whose row is gone or is not a canonical row (a derived object), and every row
+  of a source without `embeddings` attached; a record with one current chunk and a stale leftover loses the
+  leftover and sees no model. The source's own ingest goes first, one page is in flight per source, a failed page is
+  queued again as it was and prunes nothing, and payloads and results hold record ids and counts only.
+  `TOPOS_STALE_TEXT_CATCHUP=off` stops discovery and makes a queued page end without work. No upgrade step and no
+  prompt: the rows already carry a vector the owner asked for when the source was attached with `embeddings`, the
+  model is the same local one (MiniLM on CPU, no network, no LLM), and the work is bounded by the rows that changed;
+  the release note in `manifests.json` says so. Measured on a synthetic store of 49,600 embedded records (40,000
+  AI-chat rows of 100-8,000 characters, 600 journal, 5,000 browser visits, 4,000 iMessage; 3,468 made stale) on a
+  loaded Apple-silicon Mac (load average 7-8): the scan alone reads and hashes 11,600-21,000 records a second with
+  under 7 MB of Python heap; a page with no stale row costs 4-80 ms; with the real MiniLM, 504 stale rows across
+  three sources took 25.6 s including the model load (45-60 rows/s once loaded, on rows averaging 1,000
+  characters), the process growing by the embedder's usual ~500 MB; the page query walks the record-id index (6 ms
+  a page against 63 ms for a sort of the whole source). Replaced vectors add no rows. On the live-store copy of 22
+  Oct this lane would re-embed roughly 1,100 AI-chat and 170 journal rows once, then only what is rewritten
+  afterwards. Tests: `tests/ingestion/test_embeddings_catchup_stale_text.py`. No migration.
+
 ## [1.5.17] — 2026-10-23
 
 - **A shared line that was edited no longer ranks by its old words.** `[P]` A share's search index took every
@@ -28,7 +59,8 @@ The machine-readable twin of each release is
   share index carries the new rule in its basis (`search_index.MEMBER_VECTORS`): after the upgrade each share's index
   is stale once and rebuilt, and the share answers nothing for those minutes. Still open: a vector also encodes the
   record's header (people, place, date), which the hash does not cover; re-embedding rows whose text changed after
-  they were embedded is a separate change.
+  they were embedded is a separate change (the next entry).
+
 
 - **Retrieval: source-blind evidence shaping, behind a switch that is off by default** (`TOPOS_EVIDENCE_SHAPING`). `[O]` Four rules that read relevance, text, conversation identity and time, never which connector a row came from, and set no per-source quota. (1) The vector lane fetches 60 hits (`TOPOS_EVIDENCE_POOL`) and groups them by conversation, or by a 30-minute session when a row has none; it keeps the ranker's order and at most two passages of each conversation, and fills the freed slots from deeper in the pool. `TOPOS_EVIDENCE_GROUP_ORDER=groups` instead puts every conversation's best passage first, ordered by best hit plus a small lift per supporting hit; measured with the vector-head pin on, that moved the ranker's second hit out of the pin when it shared the first hit's conversation, and AI-chat known-item answers were lost, so it is not the default. (2) Near-duplicate hits (word-shingle Jaccard ≥ 0.8) keep the better-ranked copy. (3) A hit the wider pool adds beyond the lane's own 20 is dropped when its cosine is more than 0.15 below the best (calibrated split-half for all-MiniLM-L6-v2); the ranker's own 20 are never cut. (4) In the fused summary list, items only derived lanes contributed (stats, facts, dossiers, edges, derived objects, goals, briefs, clusters) hold at most half of every prefix while record evidence remains; derived items keep their order, with no records left they fill the list, and an entity mention counts as a reference to its record. Conversation ids are looked up inside the module and never put on a hit. Measured on the owner's snapshot (112 questions, 548 turns, k = 20, on top of the vector-head pin): no family lost a known-item hit or conversation on any scope, at k = 20 or the answer step's 12; cross-source known-item hit@20 rose from 0.36 to 0.39–0.40 (AI coding on facts and topics 0.50 to 0.60), browser on `activity:read` from 0.45 to 0.50, iMessage conversations found on `messages:read` from 0.20 to 0.30; week-window conversations found rose or held in every cell; every top-5 derived item stayed in the top 20; record items went from 19% to 41% of the top 20. The vector lane's own list, which no answer reads, drops a third passage of a kept conversation in 4 of 548 turns. Off, the code path is unchanged (a scored run before the vector-head pin landed matched main on all 548 ranked lists). iMessage known-item answers cannot move until its rows are embedded. No migration or reprocess.
 
