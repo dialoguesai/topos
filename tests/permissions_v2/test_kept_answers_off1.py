@@ -29,7 +29,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from tests.permissions_v2.message_search_harness import recipient
 from tests.permissions_v2.test_bl159_answer_delivery import (  # noqa: F401 -- fixtures
-    ANSWER, QUESTION, answers_node, first_day, journal_database, service,
+    ANSWER, QUESTION, answers_node, first_day, journal_database, rebuild, service,
 )
 from topos.permissions_v2 import answer_release, answer_transport, kept_stamp as ks, owner_account_words as oaw
 from topos.permissions_v2.answer_protocol import ASK, FETCH, AskIntent, verify_node_answer
@@ -456,7 +456,60 @@ def test_a_kept_ask_that_meets_an_index_not_served_now_ends_deferred(answers_nod
             _fetch(node, service, answer_id)
         assert answer_id in service._jobs
     assert _fetch_lines(caplog) == [("deferred", "search_index_stale")] * 2
-    assert _questions(node) == 1                   # the ask's own question, as any accepted ask (see the report)
+    assert _questions(node) == 0                   # the deferral gave its ask's question back (WS-OFF, Q1)
+
+
+def test_deferred_asks_give_their_questions_back_and_an_answered_kept_ask_counts_once(answers_node, service):
+    """WS-OFF, 23 Oct (Q1): a kept question counts toward the share's daily limit on the day it is answered, not once
+    per delivery. Each deferral gives its ask's question back with its receipt; an answered kept ask counts once; a
+    live ask counts as before, answered or not."""
+    node = answers_node
+    _unserve(node)
+    assert _ended(service, _ask(node, service)).body.outcome == "no_answer"     # a live ask counts, as before
+    assert _questions(node) == 1
+    for _ in range(3):
+        assert _ended(service, _ask(node, service, keep_until=node.now[0] + DAY)).deferred
+        assert _questions(node) == 1                                           # the day did not move
+    rebuild(node)
+    assert _ended(service, _ask(node, service, keep_until=node.now[0] + DAY)).body.outcome == "answered"
+    assert _questions(node) == 2
+    assert _ended(service, _ask(node, service)).body.outcome == "answered"
+    assert _questions(node) == 3
+
+
+def test_a_refund_never_takes_the_day_below_zero(answers_node, service, monkeypatch):
+    """A day's row holds at least one question (its CHECK). A refund whose row is already gone changes nothing."""
+    node = answers_node
+    ledger = node.protocol.ledger
+    original = ledger.checkpoint_answer_receipt
+
+    def emptied_first(request_id, receipt, **kwargs):     # the day's row is gone when the receipt is filed
+        with ledger._transaction() as db:
+            db.execute("DELETE FROM p2a_question_days")
+        return original(request_id, receipt, **kwargs)
+
+    monkeypatch.setattr(ledger, "checkpoint_answer_receipt", emptied_first)
+    _unserve(node)
+    job = _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))
+    assert job.deferred and _receipt(node, job)[0]["outcome"] == "deferred"
+    with node.ledger._transaction() as db:
+        assert db.execute("SELECT COUNT(*) FROM p2a_question_days").fetchone()[0] == 0
+
+
+def test_a_deferred_receipt_gives_its_question_back_once(answers_node, service):
+    """The refund is the receipt's own transaction: filing the same receipt again is refused whole and gives back
+    nothing more."""
+    from topos.permissions_v2.ledger import utc_day
+    node = answers_node
+    _unserve(node)
+    job = _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))
+    receipt, _decision = _receipt(node, job)
+    with node.ledger._transaction() as db:      # two other questions asked that day
+        db.execute("INSERT INTO p2a_question_days VALUES (?, ?, 2) ON CONFLICT(grant_id, utc_day) "
+                   "DO UPDATE SET questions=questions+2", ("grant-search", utc_day(job.accepted_at)))
+    with pytest.raises(PolicyError) as replayed:
+        node.protocol.ledger.checkpoint_answer_receipt(job.request_id, receipt, now=node.now[0])
+    assert replayed.value.code == "request_replay" and _questions(node) == 2
 
 
 def test_an_unkept_ask_that_meets_an_index_not_served_now_ends_no_answer_as_before(answers_node, service):

@@ -423,11 +423,22 @@ class PolicyLedger:
         return lease
 
     def checkpoint_answer_receipt(self, request_id: str, receipt: dict, *, decision: dict | None = None, now: int) -> None:
-        """Persist counts, hashes and codes for an accepted ask, never its text."""
+        """Persist counts, hashes and codes for an accepted ask, never its text.
+
+        Kept questions (lane OFF1N; WS-OFF, 23 Oct): a `deferred` receipt is a kept ask that wrote nothing because its
+        share's index was not served, and the control plane asks it again. A kept question counts toward the daily
+        limit on the day it is answered, so this same transaction gives back the question its ask counted: one off
+        the grant's row for the ask's own UTC day (`accepted_at`), deleting a row that held one (a row never holds
+        zero) and leaving a missing row missing."""
         from .canonical import canonical_bytes
         if (not isinstance(receipt, dict) or receipt.get("version") != "topos-local-receipt/answer-v1"
                 or receipt.get("request_id") != request_id):
             raise PolicyError("answer_receipt_invalid")
+        deferred = receipt.get("outcome") == "deferred"
+        if deferred:
+            self._integer(receipt.get("accepted_at"))
+            if type(receipt.get("grant_id")) is not str:
+                raise PolicyError("answer_receipt_invalid")
         encoded = canonical_bytes(receipt).decode("ascii")
         with self._transaction() as conn:
             row = conn.execute("SELECT status FROM p2a_requests WHERE request_id=?", (request_id,)).fetchone()
@@ -438,6 +449,11 @@ class PolicyLedger:
                              "version": "answer-decision/v1", "outcome": receipt.get("outcome"),
                              "reason": receipt.get("reason")}).decode("ascii")))
             conn.execute("UPDATE p2a_requests SET status='answer_complete' WHERE request_id=?", (request_id,))
+            if deferred:
+                day = (receipt["grant_id"], utc_day(receipt["accepted_at"]))
+                if conn.execute("UPDATE p2a_question_days SET questions=questions-1 WHERE grant_id=? AND utc_day=? "
+                                "AND questions>1", day).rowcount == 0:
+                    conn.execute("DELETE FROM p2a_question_days WHERE grant_id=? AND utc_day=? AND questions=1", day)
 
     def _count_question(self, conn, envelopes, *, now: int) -> None:
         """One question per grant against its signed daily limit, inside the transaction that claims the request id.

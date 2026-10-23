@@ -598,8 +598,9 @@ class AnswerService:
             if ended >= job.accepted_at + MAX_END_SECONDS:
                 checked, reason = None, "deadline"
             # Lane OFF1N: a kept job whose retrieval met a share index not served now (`_compute` keeps the code)
-            # wrote no answer at all. It ends `deferred`, with no body and a receipt that says so, and its fetch is
-            # busy, so the control plane asks the kept question again later. A live job ends `no_answer`, as before.
+            # wrote no answer at all. It ends `deferred`, with no body and a receipt that says so (filing it gives the
+            # ask's question back, `checkpoint_answer_receipt`), and its fetch is busy, so the control plane asks the
+            # kept question again later. A live job ends `no_answer`, as before.
             deferred = checked is None and reason != "deadline" and job.not_served is not None
             body = (None if deferred else checked.body if checked is not None
                     else NoAnswer(version=VERSION, outcome="no_answer"))
