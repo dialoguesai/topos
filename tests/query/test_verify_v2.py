@@ -639,3 +639,46 @@ def test_the_judge_reports_each_orders_marks():
                               "snippet": "x", "context": "", "origin": "journal_entries", "via": "", "grounded_role": ""}],
                    LabelChat({1: "shows"}), Usage(), 5.0)
     assert out["first_ns"] == [1] and out["second_ns"] == [1] and out["tiebroken_ns"] == [] and out["cites"] == [1]
+
+
+@pytest.fixture()
+def owner_socket_client(monkeypatch):
+    """The owner-socket route mounted alone, with the handler replaced by an echo: the route's own wiring is under test."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from topos.api import local_mcp
+    from topos.auth import resolve_request_principal
+
+    async def echo(msg, principal=None):
+        return {"status": "ok", "payload": {"verdict": "unable", "reason": "effort_low", "type": msg["type"], "got": msg["payload"]}}
+
+    monkeypatch.setattr(local_mcp, "handle_control_plane_request", echo)
+    monkeypatch.setenv("TOPOS_TRUTH_CLIENT_ALLOWLIST", "truth-mirror")
+    app = FastAPI()
+    app.include_router(local_mcp.router)
+
+    def _as(principal):
+        app.dependency_overrides[resolve_request_principal] = lambda: principal
+        return TestClient(app)
+
+    return _as
+
+
+def test_the_owner_socket_route_reads_the_body_and_answers(owner_socket_client):
+    """Regression: the route's Request and Response annotations were unimported, so FastAPI read them as required
+    query parameters and answered 422 to the owner (found 23 Oct 2026 by the truth-lane session)."""
+    client = owner_socket_client(Principal(OWNER_APP, "uds"))
+    body = {"statement": SENTENCE, "effort": "low", "deadline_s": 5}
+    r = client.post("/api/local/verify_claim_owner", json=body)
+    assert r.status_code == 200, r.text
+    assert r.json()["type"] == "verify_claim_owner" and r.json()["got"] == body
+    assert r.headers["Cache-Control"] == "no-store" and r.headers["X-Request-ID"]
+    bad = client.post("/api/local/verify_claim_owner", content=b"{not json", headers={"Content-Type": "application/json"})
+    assert bad.status_code == 422 and bad.json()["detail"] == "invalid_truth_request"
+
+
+def test_the_owner_socket_route_refuses_a_relay_before_reading_the_body(owner_socket_client):
+    client = owner_socket_client(Principal(CP_RELAY, "cp_relay"))
+    r = client.post("/api/local/verify_claim_owner", json={"statement": SENTENCE})
+    assert r.status_code == 403 and SENTENCE not in r.text

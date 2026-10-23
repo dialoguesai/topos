@@ -617,11 +617,16 @@ def _bind_once(app, path: "Path"):
         threading.Thread(target=_run, name="topos-uds-serve", daemon=True).start()
 
         def _tighten() -> None:
-            # uvicorn creates the socket with the process umask; clamp to 0600
-            # the moment it appears. ~/.topos itself typically shields the
-            # window, but the clamp is the contract.
-            for _ in range(100):
-                if path.exists():
+            # uvicorn creates the socket with the process umask, then chmods it
+            # 0666 itself (Config.bind_socket), and only then listens. A clamp
+            # that lands between its bind and its chmod is undone by that chmod,
+            # and the owner socket stays world-writable (seen on CI runners under
+            # load, where the serve thread is preempted right after bind). So the
+            # clamp waits for the socket to be LIVE: a connect succeeds only once
+            # something listens, which is after uvicorn's chmod. ~/.topos itself
+            # typically shields the window, but the clamp is the contract.
+            for _ in range(200):
+                if path.exists() and socket_is_live(path):
                     try:
                         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
                         logger.info("owner socket listening at %s (mode 0600)", path)
@@ -629,7 +634,7 @@ def _bind_once(app, path: "Path"):
                         logger.warning("could not chmod owner socket", exc_info=True)
                     return
                 time.sleep(0.05)
-            logger.warning("owner socket did not appear at %s", path)
+            logger.warning("owner socket did not come up at %s", path)
 
         threading.Thread(target=_tighten, name="topos-uds-chmod", daemon=True).start()
         return server
