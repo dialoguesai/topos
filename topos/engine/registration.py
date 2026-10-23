@@ -158,10 +158,10 @@ def _knowledge_max_k() -> int:
 
 def _kept_answers() -> int:
     """`permissions_v2_kept_answers` (kept questions, lane OFF1N): 1, this node keeps a kept question's answer for the
-    window its `kept_stamp` signs and answers a kept ask it cannot serve now as busy, to be asked again. The control
-    plane delivers a kept question only to a node that says so; to any other it is a live ask, kept ten minutes. It
-    says what the code does, so it does not follow the answers switch (`permissions_v2_answer_version` says whether
-    this node answers at all). 0 when the module cannot be read."""
+    window its `kept_stamp` signs, and the fetch of a kept ask it could not serve then answers 429 `answer_deferred`,
+    to be asked again. The control plane delivers a kept question only to a node that says so; to any other it is a
+    live ask, kept ten minutes. It says what the code does, so it does not follow the answers switch
+    (`permissions_v2_answer_version` says whether this node answers at all). 0 when the module cannot be read."""
     try:
         from ..permissions_v2.kept_stamp import CAPABILITY_VERSION
 

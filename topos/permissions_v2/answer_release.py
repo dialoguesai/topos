@@ -11,7 +11,8 @@ the window its asker may come back in. Such a kept job's ended body stays until
 then (`keep_end`: at most KEPT_MAX_SECONDS, never less than an unkept job's
 window), still only in this process, with every fetch-time re-check as before.
 A kept job whose retrieval meets a share index not served now ends `deferred`:
-no body, and its fetch is busy, so the control plane asks again later.
+no body, its question given back, and its fetch answers `answer_deferred`, so
+the control plane asks again later.
 
 Fix A (`ANSWER_PROTECTED_ITEM_FILTER`, off by default), security note. With the
 switch on, a released record whose own text as the prompt shows it carries an
@@ -147,7 +148,7 @@ def _unresolved_refuses(method):
 # code is a bounded machine reason, never data; anything else is logged as `refused` or `error`) and the seconds the
 # node took. Never a question, an answer, an id or a record. Outcomes: `answered` / `no_answer` (the body handed out),
 # `pending` (still being written), `held` (written, kept while the share's index is not served; the code says why),
-# `deferred` (lane OFF1N: a kept ask that met an index not served now, answered busy; the code says why), `refused`
+# `deferred` (lane OFF1N: a kept ask that met an index not served now, `answer_deferred`; the code says why), `refused`
 # (the uniform refusal went back; the code says why). A `pending` that took under SLOW_FETCH_SECONDS is logged at
 # debug level, so the steady polls of one ask do not fill the log.
 FETCH_LOG = "permissions answer fetch: outcome=%s reason=%s seconds=%.1f"
@@ -231,7 +232,7 @@ class Job:
     keep_until: int | None = None
     # The not-served-now code a kept job's retrieval was refused with (`NOT_SERVED_NOW`); never set for a live ask.
     not_served: str | None = None
-    # The kept job ended `deferred`: no body, and every fetch of it is busy (`AnswerDeferred`) until `keep_end`.
+    # The kept job ended `deferred`: no body, and every fetch of it is `AnswerDeferred` until `keep_end`.
     deferred: bool = False
 
 
@@ -310,9 +311,11 @@ class AnswerBusy(Exception):
     """The only answer failure the control plane reports as busy, after issuance."""
 
 
-class AnswerDeferred(AnswerBusy):
-    """Lane OFF1N: the fetch of a kept job that ended `deferred`. On the wire it is busy, as AnswerBusy is (lane 190's
-    429 `answer_busy`): retryable, never a refusal. `reason` is the not-served code, for the node's own log only."""
+class AnswerDeferred(Exception):
+    """Lane OFF1N: the fetch of a kept job that ended `deferred`: 429 `answer_deferred`, never a refusal, and never
+    AnswerBusy. A busy fetch's job is still being written and the control plane keeps polling it; a deferred one wrote
+    nothing, so the control plane ends that kept delivery and asks again later (WS-OFF, 23 Oct). `reason` is the
+    not-served code, for the node's own log only."""
 
     def __init__(self, reason: str):
         super().__init__(reason)
@@ -500,8 +503,8 @@ class AnswerService:
                     raise PolicyError("authority_stale")
                 if job.state == "ended" and job.deferred:
                     # Lane OFF1N: no answer was written; the share's index was not served. Nothing is released and
-                    # the fetch's id is spent as refused, but the fetch is busy, so the control plane asks the kept
-                    # question again later instead of ending it.
+                    # the fetch's id is spent as refused, but the fetch answers `answer_deferred`, so the control
+                    # plane asks the kept question again later instead of ending it.
                     ledger.refuse(admission, now=self.clock())
                     raise AnswerDeferred(job.not_served)
                 body = job.body if job.state == "ended" else AnswerPending(version=VERSION, state="pending",
@@ -533,7 +536,7 @@ class AnswerService:
                 # after the same re-checks, until `_clean` drops the job UNFETCHED_SECONDS past its end. The only
                 # pops are a final refusal, a moved authority, and that window.
                 return result, outcome, reason
-        except AnswerBusy:
+        except (AnswerBusy, AnswerDeferred):
             raise
         except Exception:
             ledger.refuse(admission, now=self.clock())
@@ -599,8 +602,8 @@ class AnswerService:
                 checked, reason = None, "deadline"
             # Lane OFF1N: a kept job whose retrieval met a share index not served now (`_compute` keeps the code)
             # wrote no answer at all. It ends `deferred`, with no body and a receipt that says so (filing it gives the
-            # ask's question back, `checkpoint_answer_receipt`), and its fetch is busy, so the control plane asks the
-            # kept question again later. A live job ends `no_answer`, as before.
+            # ask's question back, `checkpoint_answer_receipt`), and its fetch answers `answer_deferred`, so the
+            # control plane asks the kept question again later. A live job ends `no_answer`, as before.
             deferred = checked is None and reason != "deadline" and job.not_served is not None
             body = (None if deferred else checked.body if checked is not None
                     else NoAnswer(version=VERSION, outcome="no_answer"))

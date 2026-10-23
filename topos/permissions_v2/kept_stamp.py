@@ -41,8 +41,8 @@ DOMAIN = b"topos-kept-stamp/v1\n"
 MESSAGE_TYPE = "permissions_v2_answer_submit"
 #: How far the node's clock may be from the control plane's, either way (the relay stamp's SKEW_S, pinned by test).
 SKEW_SECONDS = 300
-#: `permissions_v2_kept_answers`: the node keeps a kept answer for its window and answers a kept ask it cannot serve
-#: now as busy, to be asked again.
+#: `permissions_v2_kept_answers`: the node keeps a kept answer for its window, and the fetch of a kept ask it could
+#: not serve then answers 429 `answer_deferred`, to be asked again.
 CAPABILITY_VERSION = 1
 INVALID = "kept_stamp_invalid"
 EXPIRED = "kept_stamp_expired"

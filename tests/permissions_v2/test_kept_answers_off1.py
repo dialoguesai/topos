@@ -8,7 +8,8 @@ ask, with a signed side field, `kept_stamp`, that says until when its asker may 
 - the keep window: a kept job's ended body stays for its window (at most fourteen days, never less than an unkept
   job's ten minutes), in memory only, with every fetch-time re-check as before;
 - deferred: a kept ask whose retrieval meets a share index not served now ends `deferred` (no body, a counts-only
-  receipt the owner's week does not count, a busy fetch the control plane retries); an unkept one ends `no_answer`;
+  receipt the owner's week does not count, its question given back, a fetch that answers `answer_deferred`, so the
+  control plane asks again later); an unkept one ends `no_answer`;
 - the capability the control plane reads before it delivers a kept question.
 
 Invented data only; no model, network or personal data.
@@ -33,7 +34,7 @@ from tests.permissions_v2.test_bl159_answer_delivery import (  # noqa: F401 -- f
 )
 from topos.permissions_v2 import answer_release, answer_transport, kept_stamp as ks, owner_account_words as oaw
 from topos.permissions_v2.answer_protocol import ASK, FETCH, AskIntent, verify_node_answer
-from topos.permissions_v2.answer_release import AnswerBusy, AnswerService, Job
+from topos.permissions_v2.answer_release import AnswerBusy, AnswerDeferred, AnswerService, Job
 from topos.permissions_v2.canonical import PolicyError, canonical_bytes
 from topos.permissions_v2.search_index import index_path
 
@@ -451,9 +452,10 @@ def test_a_kept_ask_that_meets_an_index_not_served_now_ends_deferred(answers_nod
     assert (receipt["outcome"], receipt["reason"], receipt["records_used"]) == ("deferred", "search_index_stale", 0)
     assert decision == {"version": "answer-decision/v1", "outcome": "deferred", "reason": "search_index_stale"}
     caplog.set_level(logging.INFO, logger=LOGGER)
-    for _ in range(2):                             # every poll of the control plane: busy, and the id is kept
-        with pytest.raises(AnswerBusy):
+    for _ in range(2):                             # every fetch: deferred, never busy, and the id is kept
+        with pytest.raises(AnswerDeferred) as deferred:
             _fetch(node, service, answer_id)
+        assert not isinstance(deferred.value, AnswerBusy)
         assert answer_id in service._jobs
     assert _fetch_lines(caplog) == [("deferred", "search_index_stale")] * 2
     assert _questions(node) == 0                   # the deferral gave its ask's question back (WS-OFF, Q1)
@@ -589,7 +591,7 @@ def test_a_deferred_ask_is_remembered_for_an_unkept_answers_window(answers_node,
     job = _ended(service, answer_id)
     assert answer_release.keep_end(job) == job.ended_at + answer_release.UNFETCHED_SECONDS
     node.now[0] = job.ended_at + answer_release.UNFETCHED_SECONDS - 1
-    with pytest.raises(AnswerBusy):
+    with pytest.raises(AnswerDeferred):
         _fetch(node, service, answer_id)
     node.now[0] = job.ended_at + answer_release.UNFETCHED_SECONDS
     with pytest.raises(PolicyError):
@@ -598,7 +600,7 @@ def test_a_deferred_ask_is_remembered_for_an_unkept_answers_window(answers_node,
 
 
 def test_a_deferred_ask_whose_share_moved_is_refused_and_dropped(answers_node, service):
-    """Every fetch-time check runs before the busy: a moved authority is the uniform refusal, as for any job."""
+    """Every fetch-time check runs before the deferral: a moved authority is the uniform refusal, as for any job."""
     node = answers_node
     _unserve(node)
     answer_id = _ask(node, service, keep_until=node.now[0] + DAY)
@@ -610,8 +612,8 @@ def test_a_deferred_ask_whose_share_moved_is_refused_and_dropped(answers_node, s
 
 
 def test_a_kept_ask_and_its_deferred_fetch_on_the_wire(answers_node, service, monkeypatch):
-    """Through the relay dispatch: the stamped ask is accepted (pending), and the fetch of the deferred job is lane
-    190's retryable busy, byte for byte."""
+    """Through the relay dispatch: the stamped ask is accepted (pending), and the fetch of the deferred job is 429
+    `answer_deferred`, in the frame lane 190's busy has (WS-OFF, Q5)."""
     node = answers_node
     monkeypatch.setattr(answer_transport, "verify_relay_stamp", lambda _message: SimpleNamespace(
         cls="third_party", channel="cp_relay", acting_user="actor-1", client_id="client-2"))
@@ -635,7 +637,29 @@ def test_a_kept_ask_and_its_deferred_fetch_on_the_wire(answers_node, service, mo
         "id": signed.request_id, "type": answer_transport.FETCH_TYPE,
         "payload": {"envelope": signed.model_dump(), "intent": fetch}}))
     assert socket.frames[1] == {"id": signed.request_id, "type": answer_transport.FETCH_TYPE, "status": "error",
-                                "code": 429, "error": "answer_busy"}
+                                "code": 429, "error": "answer_deferred"}
+
+
+@pytest.mark.parametrize("raised, word", [(AnswerDeferred("search_index_stale"), "answer_deferred"),
+                                          (AnswerBusy(), "answer_busy")], ids=["deferred", "busy"])
+def test_a_deferred_fetch_has_its_own_word_and_a_busy_one_keeps_lane_190s(monkeypatch, raised, word):
+    """WS-OFF, 23 Oct (Q5): `answer_busy` on a fetch means the job is still being written, so the control plane keeps
+    polling; `answer_deferred` means this kept delivery is over, so it ends the attempt and asks again later. The same
+    status and frame shape; askers see neither."""
+    class Service:
+        def fetch(self, **_kwargs):
+            raise raised
+
+    monkeypatch.setattr(answer_transport, "verify_relay_stamp", lambda _message: SimpleNamespace(
+        cls="third_party", channel="cp_relay", acting_user="person", client_id="topos-app"))
+    monkeypatch.setattr(answer_transport, "get_runtime", lambda: SimpleNamespace(answers=lambda: Service()))
+    socket = Socket()
+    payload = {"envelope": {}, "intent": {"answer_id": "ans_a"}}
+    asyncio.run(answer_transport.dispatch_answer(socket, {"id": "req-1", "type": answer_transport.FETCH_TYPE,
+                                                          "payload": payload}))
+    assert socket.frames == [{"id": "req-1", "type": answer_transport.FETCH_TYPE, "status": "error", "code": 429,
+                              "error": word}]
+    assert not answer_transport._FETCHES_WAITING
 
 
 # --- the capability -----------------------------------------------------------------------------------------------

@@ -10,7 +10,7 @@ from topos.relay_stamp import verify_relay_stamp
 
 from . import kept_stamp, owner_account_words
 from .answer_protocol import ACCEPTS_FIELD, LEGACY_ACCEPTED_VERSION, parse_accepted_version
-from .answer_release import AnswerBusy
+from .answer_release import AnswerBusy, AnswerDeferred
 from .canonical import PolicyError, canonical_bytes
 from .runtime import get_runtime
 
@@ -154,6 +154,14 @@ async def dispatch_answer(ws, message):
         require_active_output(output, enabled=switches.on(switches.SELECTIVE_FACTS), selective_answer=selective_answer)
         await ws.send(canonical_bytes({"id": request_id, "type": kind, "status": "ok",
                                        "payload": {"result": result, "output": output}}).decode("ascii"))
+    except AnswerDeferred:
+        # Lane OFF1N (WS-OFF, 23 Oct): a kept ask that wrote nothing, its share's index not served. The frame of a
+        # busy fetch with its own word: `answer_busy` means still being written (keep polling), `answer_deferred`
+        # means this delivery is over (the control plane asks the kept question again later).
+        from . import search_timing
+        search_timing.refusal("answers", PolicyError("answer_deferred"))
+        await ws.send(canonical_bytes({"id": request_id, "type": message.get("type"), "status": "error",
+                                       "code": 429, "error": "answer_deferred"}).decode("ascii"))
     except AnswerBusy:
         from . import search_timing
         search_timing.refusal("answers", PolicyError("answer_busy"))   # the node's own log, with attribution on
