@@ -1163,8 +1163,8 @@
       ]
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.5.16",
+      "summary": "Release 1.5.16.",
       "steps": [
         {
           "id": "embed-imported-ai-chats",
@@ -1181,7 +1181,14 @@
           "consent": "prompt",
           "cost": "local embedding model only (MiniLM on CPU, 2 threads), no network, no LLM. Measured through this code path on 2,621 synthetic rows with the lengths of one node's backlog (7.06M characters, ~4,030 chunks) on a loaded Apple-silicon Mac (load average 8-10): 105-110 s including the model load, about 24 rows/s (37 chunks/s), 18-24 s per 500-row batch, and about 38 MB of database growth (~14 KB a row). Nodes with no ChatGPT rows queue nothing.",
           "order": 1
-        },
+        }
+      ],
+      "notes": []
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [
         {
           "id": "repair-derived-source-refs",
           "kind": "engine_endpoint",
@@ -1196,10 +1203,12 @@
           "progress": "GET /v1/upgrade/status; the CLI door is `python -m topos.features.lifecycle.source_ref_repair --db PATH [--dry-run]` (counts only; --dry-run opens the database read-only)",
           "idempotent": "a moved ref resolves in its new table, so a second run finds nothing to do (tests/features/test_source_ref_repair.py); each UPDATE is compare-and-set on the stored refs",
           "estimated_duration": "measured read-only on one live node (41,748 objects, 46,260 refs): the plan reads in ~0.3 s and would rewrite 951 refs in 702 objects (696 scope-mirror refs, 255 refs in 6 facts); seconds in all",
-          "order": 2
+          "order": 1
         }
       ],
-      "notes": []
+      "notes": [
+        "Share index members carry only vectors built from their row's current text (lane 194; search_index.MEMBER_VECTORS in every index basis): no step. Only a node with the permissions beta is affected. At the first index check after the upgrade every share's search index reads as stale once and is rebuilt by the restore loop (one build at a time), so each share answers nothing until its index is ready again, minutes per share; a member whose stored chunks were embedded from text its row no longer holds is rebuilt with a fresh vector (within the per-build embedding budget) or with its words alone. Below the owner's tier the vector and recent lanes also drop a hit whose stored text no longer matches its row."
+      ]
     }
   ]
 }

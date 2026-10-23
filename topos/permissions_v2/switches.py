@@ -216,6 +216,13 @@ INDEX_NARROW_MEMBERS = _switch(
     "and unbound (owner ruling of 16 Oct 2026, after the independent review: \"On, accept the hint\"); the hint is "
     "that a recipient who keeps asking can tell which shared conversation got new activity, and roughly when, from "
     "its records leaving and coming back. Off: the whole index goes, as before 1.5.10.")
+INDEX_NARROW_OWN_ROW_EDITS = _switch(
+    "INDEX_NARROW_OWN_ROW_EDITS", "bool", True, True,
+    "Fix a (DR-34, widens DR-31; read only while INDEX_NARROW_MEMBERS is on). An AI-chat line whose own stored row was "
+    "rewritten, already withheld because its own-row dependency moved, stays withheld instead of its whole share "
+    "index going. On by default, bound and unbound, since 1.5.16 (owner ruling of 22 Oct 2026: \"Yes, on for "
+    "everyone\"). Off: an own-row edit removes the whole index, as 1.5.15. The zeroing of the file a narrowed publish "
+    "replaces applies to every narrowed publish, whatever this switch says.")
 SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
@@ -465,7 +472,7 @@ SWITCHES = (
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
     DECIDE_OUTSIDE_GATE, OWNER_LANE, OWNER_LANE_SLOTS, OWNER_LANE_SHARED_MAX, OWNER_LANE_TYPES, REVIEW_PASS_BOUNDARY,
     REVIEW_PASS_BOUNDARY_MAX_AGE, SWEEP_INTEREST_VERDICT, SWEEP_INTEREST_VERDICT_FULL_EVERY,
-    INDEX_NARROW_MEMBERS,
+    INDEX_NARROW_MEMBERS, INDEX_NARROW_OWN_ROW_EDITS,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,
