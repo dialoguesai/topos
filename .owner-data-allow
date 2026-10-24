@@ -1,3 +1,4 @@
 44a3662213aea547  engineering prose about running a database migration, identical on main and untouched by this branch; a goal phrase extracted on the owner's node on 23 Oct 2026 happens to use the same ordinary words
 775b01f76a925481  engineering prose about running a database migration, identical on main and untouched by this branch; a goal phrase extracted on the owner's node on 23 Oct 2026 happens to use the same ordinary words
 6cbfcced42f825d9  engineering prose about running a database migration, identical on main and untouched by this branch; a goal phrase extracted on the owner's node on 23 Oct 2026 happens to use the same ordinary words
+0f034a6c148a1784  a 2 Oct 2026 release-note sentence about the control-plane deploy step in CHANGELOG.md, on main and untouched by this branch; a goal phrase extracted on the owner's node on 24 Oct 2026 happens to use the same ordinary words (owner's instruction of 24 Oct: "Add the allow entries and push the picker PRs")
