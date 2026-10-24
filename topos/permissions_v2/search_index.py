@@ -144,6 +144,9 @@ def _shred(path: Path) -> None:
                 candidate.unlink()
             except FileNotFoundError:
                 pass
+    if path.name.startswith("grant-") and path.name.endswith(".db"):
+        from . import sharing_readiness
+        sharing_readiness.note_unserved(path.parent, name=path.name)   # OFF2N: no index, no service
 
 
 #: DR-34: the chunk `_zero_open` writes at a time, so zeroing a large index file never holds its size in memory.
@@ -1168,11 +1171,14 @@ class SearchIndexService:
                 authority, policy = self.ledger._authority(db, grant_id, now)
             except PolicyError:
                 authority = policy = None
+        from . import sharing_readiness
         if policy is None:
             self.forget(grant_id)            # revoked or expired: index gone, id key rotated
+            sharing_readiness.note_ended(self.root, grant_id)   # OFF2N: no longer a share that should have one
             return {"state": "removed", "member_count": 0}
         if policy.versions.capability not in RELEASABLE_SEARCH_CAPABILITIES:
             purge(self.root, grant_id)       # never rotate another capability's record-id key
+            sharing_readiness.note_ended(self.root, grant_id)
             return {"state": "removed", "member_count": 0}
         key = self.keys.get(grant_id, create=True)
         from . import search_timing
@@ -1185,6 +1191,7 @@ class SearchIndexService:
         # The owner kept changing reviews or protection while the index was being built. BL-157: an index the full
         # current check still proves keeps serving (a failed refresh is not a restriction); any other is purged.
         self._discard_unsafe(grant_id, now=now)
+        sharing_readiness.note_owed(self.root, grant_id)   # OFF2N: still a share that should have an index
         return {"state": "stale", "member_count": 0}
 
     def restamp(self, grant_id: str, *, now: int | None = None) -> dict | None:
@@ -1272,6 +1279,8 @@ class SearchIndexService:
             self._published.add(path.name)
             if narrowed:
                 self._narrowed_owed[path.name] = _file_state(path)
+        from . import sharing_readiness
+        sharing_readiness.note_served(self.root, grant_id)   # OFF2N: re-stamped and re-checked under the gate
         return {"state": index["state"], "member_count": index["count"]}
 
     def _stamp_current(self, path: Path, grant_id: str, authority) -> bool:
@@ -1666,6 +1675,8 @@ class SearchIndexService:
             _built(temporary)
         with self._published_lock:
             self._published.add(final.name)
+        from . import sharing_readiness
+        sharing_readiness.note_served(self.root, grant_id)   # OFF2N: just built and re-checked under the gate
 
     # -- sweep: the index is a scrub surface --------------------------------
 
@@ -1727,6 +1738,11 @@ class SearchIndexService:
         try:
             with _gated(holds):
                 authorities = self._authorities(now)
+            from . import sharing_readiness
+            # OFF2N: the grants that should have an index, from the ledger read the sweep makes anyway.
+            sharing_readiness.note_grants(self.root, sorted(
+                grant_id for grant_id, authority in authorities.values()
+                if authority is not None and authority.capability_version in RELEASABLE_SEARCH_CAPABILITIES))
             stale = []
             narrow = []   # NR188: (path, grant id, the authority checked, the file checked, the members withheld)
             # NR187: the canonical token, read BEFORE the snapshot below is established (`_interests_current_kept`).
@@ -1754,6 +1770,11 @@ class SearchIndexService:
                         stale.append((path, grant_id, checked))
                     elif checked is not None and withheld:
                         narrow.append((path, grant_id, authority, checked, frozenset(withheld)))
+                    if grant_id is not None and checked is not None:
+                        # OFF2N: current and whole serves; stale or withholding does not (the request path refuses it)
+                        # until a removal, a build or the narrowed copy says more. About this file only.
+                        (sharing_readiness.note_served if verdict and not withheld else sharing_readiness.note_unserved)(
+                            self.root, grant_id, still=lambda path=path, checked=checked: _file_state(path) == checked)
             finally:
                 conn.close()
             for path, grant_id, checked in stale:
@@ -1788,6 +1809,8 @@ class SearchIndexService:
                 raise PolicyError("search_index_sweep_unavailable") from None
             with _gated(holds):
                 removed += purge_all(self.root)
+            from . import sharing_readiness
+            sharing_readiness.note_none_served(self.root)
         return removed
 
     def _narrow(self, path, grant_id, authority, checked, withheld: frozenset, *, now: int, started: float | None = None,
@@ -1896,6 +1919,8 @@ class SearchIndexService:
         # is part of the kept state, so it could never match the new file; it is dropped here all the same, so nothing
         # is kept about a file that is gone.
         self._forget_interest_verdict(path.name)
+        from . import sharing_readiness
+        sharing_readiness.note_served(self.root, grant_id, still=lambda: _file_state(path) == successor)   # OFF2N
         _log.warning("message search index narrowed (%d withheld)", len(withheld))
         search_timing.index_event("index_rebuild", path, state="narrowed", members=remaining)
         return True
@@ -2599,6 +2624,7 @@ class SearchIndexService:
         except IndexReplaced:
             raise PolicyError("search_index_stale") from None   # DR-34 (review): replaced under the read, never shredded
         except (sqlite3.Error, PolicyError):
+            self._readiness(grant_id, path, checked_state, False)
             raise PolicyError("search_index_unavailable") from None
         if not current:
             if path.exists():
@@ -2607,9 +2633,17 @@ class SearchIndexService:
                         _shred(path)
             raise PolicyError("search_index_stale")
         if withheld:
+            self._readiness(grant_id, path, checked_state, False)
             raise PolicyError("search_index_stale")   # NR188: kept for the sweep to narrow, never shredded here
+        self._readiness(grant_id, path, checked_state, True)
         if released is not None and _narrow_members() and not self._holds(path, checked_state, released):
             raise PolicyError("search_index_stale")   # NR188: a released record withheld since the checkpoint
+
+    def _readiness(self, grant_id: str, path: Path, checked_state, served: bool) -> None:
+        """OFF2N: the request path's own verdict about the file it checked, while that file is still the one there."""
+        from . import sharing_readiness
+        (sharing_readiness.note_served if served else sharing_readiness.note_unserved)(
+            self.root, grant_id, still=lambda: checked_state is not None and _file_state(path) == checked_state)
 
     def _holds(self, path: Path, checked_state, released) -> bool:
         """NR188: whether the file `check_own` checked (the same stat identity) still holds every released record."""

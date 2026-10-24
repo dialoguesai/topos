@@ -1229,6 +1229,8 @@ class RefreshLoop:
                    "started_at": now, "progress_at": now, "counts": dict.fromkeys(_COUNTS, 0)}
             self._start_slice(worker, run, now)
             self._pass = run
+            from . import sharing_readiness
+            sharing_readiness.backlog_pass(run["origin"] == "startup_backlog")   # OFF2N: counted while it runs
         return None
 
     def _start_slice(self, worker, run: dict, now: int) -> None:
@@ -1288,6 +1290,8 @@ class RefreshLoop:
                 "high_water": run["started_at"] if run["high_water"] is None else run["high_water"]}
 
     def _finish_pass(self, run: dict, state: str, exhausted: bool, now: int) -> CatchUpReceipt:
+        from . import sharing_readiness
+        sharing_readiness.backlog_pass(False)
         counts = run["counts"]
         if state == "complete":
             stored = self._load_state()
@@ -1684,15 +1688,19 @@ def restore_at_start(runtime, *, state: dict) -> list[str]:
     full = token != state.get("token")
     now = int(time.time())
     owed = rebuilds.owed()
-    shares = []
+    shares, active = [], []
     with ledger._transaction() as db:
         for row in db.execute("SELECT grant_id FROM p2a_grants ORDER BY grant_id").fetchall():
             try:
                 authority, policy = ledger._authority(db, row["grant_id"], now)
             except PolicyError:
                 continue
-            if policy.versions.capability in RELEASABLE_SEARCH_CAPABILITIES and row["grant_id"] not in owed:
-                shares.append((row["grant_id"], authority))
+            if policy.versions.capability in RELEASABLE_SEARCH_CAPABILITIES:
+                active.append(row["grant_id"])
+                if row["grant_id"] not in owed:
+                    shares.append((row["grant_id"], authority))
+    from . import sharing_readiness
+    sharing_readiness.note_grants(index.root, active)   # OFF2N: what should serve; served only once proven
     wanted = []
     with SearchVerification(index.resolver, index.reviews) as verified:   # one closure and digest for the round
         for grant_id, authority in shares:

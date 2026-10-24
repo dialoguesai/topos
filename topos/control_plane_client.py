@@ -120,6 +120,9 @@ _FAST_INBOUND_MESSAGE_TYPES = frozenset(
         # Settings → General owner display name (must not sit behind ingest saturation)
         "get_user_identity",
         "put_user_identity",
+        # Kept questions Wave 2 (OFF2N): whether this node has caught up, from memory, for the control plane's
+        # pacing, which reads it while a share index rebuilds and the inbound slots are full.
+        "get_sharing_readiness",
     }
 )
 
