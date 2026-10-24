@@ -157,6 +157,13 @@ class LocalChat:
     available = True
 
     def __call__(self, system: str, user: str, schema: Dict[str, Any], timeout: float, usage: Usage) -> Dict[str, Any]:
+        # Kept questions Wave 2 (OFF2N): on a background path (the owner's inbound truth lane runs as a pipeline job,
+        # marked background) the local model host goes to a share's answer job and, under the yield rule, the owner's
+        # own frames first, as the node's other background model calls do. The owner's own check (the Fun Camera's
+        # mirror) and a share's verify_claim door are not background, and never wait here.
+        from ..permissions_v2 import answer_gate
+
+        answer_gate.yield_if_background()
         body = {"model": self.model, "stream": False, "format": dict(schema), "think": False,
                 "options": {"temperature": 0, "seed": SEED},
                 "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
