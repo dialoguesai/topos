@@ -78,6 +78,10 @@ INBOUND_AGE_BOUND_SECONDS = {
     "permissions_v2_message_search_batch": 25.0,
     "permissions_v2_answer_submit": 20.0,
     "permissions_v2_answer_fetch": 20.0,
+    # Kept questions Wave 2 (R-OFF2 R2.3): the owner's away settings hold for one connection, so a push still waiting
+    # when its connection closes is dropped ("gone"), never applied on the next one. The bound is generous: the
+    # control plane pushes again on every change and after every register.
+    "put_away_config": 300.0,
 }
 #: At most one line in this long about requests that were not handled.
 INBOUND_SHED_LOG_SECONDS = 60.0

@@ -98,7 +98,8 @@ def bounds(monkeypatch, seconds: float) -> None:
 def test_the_table_is_the_four_share_doors_at_the_control_planes_budgets():
     # The control plane's relay budgets as production runs them: search 25 s (its default), answers 20 s (its
     # default is 10). A bound below the control plane's sheds requests it is still waiting for.
-    assert INBOUND_AGE_BOUND_SECONDS == {SEARCH: 25.0, BATCH: 25.0, SUBMIT: 20.0, FETCH: 20.0}
+    # Kept questions Wave 2 (R-OFF2 R2.3): the owner's away settings, a generous bound, dropped with their connection.
+    assert INBOUND_AGE_BOUND_SECONDS == {SEARCH: 25.0, BATCH: 25.0, SUBMIT: 20.0, FETCH: 20.0, "put_away_config": 300.0}
     assert not set(NEVER_AGED) & set(INBOUND_AGE_BOUND_SECONDS)
     assert not set(INBOUND_AGE_BOUND_SECONDS) & control_plane_client._FAST_INBOUND_MESSAGE_TYPES
     assert "ping" not in INBOUND_AGE_BOUND_SECONDS

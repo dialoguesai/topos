@@ -178,3 +178,63 @@ def test_it_is_owner_only_off_the_loop_and_the_capability_says_one():
     assert registration.build_engine_capabilities()["permissions_v2_away_config"] == 1 == away_config.CAPABILITY_VERSION
     snapshot = json.loads(open("topos/protocol/handled_message_types.json", encoding="utf-8").read())
     assert PUT in snapshot["handled_message_types"] and PUT in snapshot["owner_only_message_types"]
+
+
+def test_two_concurrent_pushes_end_on_the_higher_seq_whatever_the_interleaving(monkeypatch):
+    """R-OFF2 R2.1: the seq check and the hold are one step. The probe parks the older push's thread right after its
+    first pass through the lock, lets the newer push run to the end, then lets the older one finish."""
+    import threading
+
+    parked, newer_done = threading.Event(), threading.Event()
+    older_thread = []
+
+    class ParkingLock:
+        def __init__(self):
+            self._lock, self._parked_once = threading.Lock(), False
+
+        def __enter__(self):
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self._lock.release()
+            if threading.current_thread() in older_thread and not self._parked_once:
+                self._parked_once = True
+                parked.set()
+                newer_done.wait(5)
+            return False
+
+    monkeypatch.setattr(away_config, "_lock", ParkingLock())
+    older = threading.Thread(target=lambda: away_config.put(push(FIRST, 1)))
+    older_thread.append(older)
+    older.start()
+    assert parked.wait(5)
+    away_config.put(push(EVEN, 2))
+    newer_done.set()
+    older.join(5)
+    assert away_config.current() == EVEN
+
+
+@pytest.mark.asyncio
+async def test_a_push_queued_on_a_connection_that_closes_is_never_applied_on_the_next(monkeypatch):
+    """R-OFF2 R2.3: a push waiting for an inbound slot when its connection closes is dropped at dequeue ("gone"), as
+    the share doors' frames are; it never lands on the next connection."""
+    from tests.topos.test_nr183_owner_lane import BATCH, Node, Socket
+
+    node = Node(monkeypatch, limit=2, reserved=1)
+    real = node.client.handler
+
+    async def relay(message):
+        if message["type"] == PUT:
+            return await dispatch_relay_message(message)
+        return await real(message)
+    node.client.handler = relay
+    await node.receive(stamped(frame("hold-r1", BATCH), cls="third_party", acting=SOMEONE_ELSE))   # the shared slot
+    await node.receive(stamped({"id": "away-q", "type": PUT, "payload": push(EVEN, 9)}))         # waits for it
+    assert node.pool.waiting()["general"] == 1
+    node.client._ws = node.socket = Socket()                          # the connection closed; a new one is up
+    away_config.reset()
+    await node.settle()
+    assert away_config.current() == FIRST                              # the queued push was not applied
+    assert "away-q" not in node.replies()
+    assert node.client.inbound_shed_counts().get(("gone", PUT)) == 1
