@@ -420,7 +420,9 @@ ANSWER_HOLDS_BACKGROUND = _switch(
     "ends (at most 110 s, the job's own deadline, and never past the node's stop) before they start. Starts only: a "
     "build already running is not stopped or shortened. An ended share's removal never waits, and the owner's own "
     "rebuilds never wait. Fresh data reaches the index later. On bound and unbound alike since 1.5.10 (owner, 15 Oct: 'Yes on "
-    "the first 4 of those', D2). Off: they start at once, as in 1.5.9.")
+    "the first 4 of those', D2). Since kept questions Wave 2 it also holds each catch-up batch (the embeddings and AI-tool "
+    "catch-ups, the refresh loop's slices) for a share's answer job, so catch-up waits between kept answers. Off: they "
+    "start at once, as in 1.5.9.")
 ANSWER_JUDGE_RESERVE_SECONDS = _switch(
     "ANSWER_JUDGE_RESERVE_SECONDS", "int", 8, 8,
     "NR179 G2 (decision D1). Seconds before an answer job's deadline (110 s from acceptance) under which no further "
