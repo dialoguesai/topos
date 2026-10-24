@@ -146,7 +146,8 @@ async def shell_apply_update(request: Request) -> dict:
         raise HTTPException(
             status_code=403, detail="Shell update can only be triggered from localhost."
         )
-    if get_update_info() is None:
+    info = get_update_info()
+    if info is None:
         return {"started": False, "reason": "no_update_available"}
     with _apply_lock:
         if _apply_state["applying"]:
@@ -157,7 +158,7 @@ async def shell_apply_update(request: Request) -> dict:
     def worker() -> None:
         ok = False
         try:
-            ok = apply_package_update(DEFAULT_PACKAGE_NAME)
+            ok = apply_package_update(DEFAULT_PACKAGE_NAME, requires_python=info.requires_python)
         finally:
             with _apply_lock:
                 _apply_state["applying"] = False

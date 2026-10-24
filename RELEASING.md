@@ -171,7 +171,7 @@ repository's signed/notarized app release workflow is unaffected.
   4. Upgrade runner executes `steps_between(baseline, shipped)`
 - Rollback is **not** package downgrade. Recovery =
   restore `~/.topos/backups/database-pre-v{X}-*.db` +
-  `uv tool install topos-node==<old>`.
+  `uv tool install --force --python 3.12 topos-node==<old>`.
 - Forward path for bad derived changes: a hotfix release whose manifest
   step re-derives correctly.
 

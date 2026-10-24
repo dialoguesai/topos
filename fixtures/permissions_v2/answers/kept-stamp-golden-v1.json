@@ -1,0 +1,297 @@
+{
+  "capability": {
+    "permissions_v2_kept_answers": 1
+  },
+  "cases": {
+    "bad_signature_other_key": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "other",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"kq\":\"c82cd877d82c54bc5dd62bcd84656796\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "kq": "c82cd877d82c54bc5dd62bcd84656796",
+        "sig": "P727jeVGOflEVdc3MKPfLrF_JhrGJNOwtHhRY_2_kwDp0UG-03GLHH3YlODyEB8vnyK1xtgXpasnben1dEpDBw",
+        "v": 1
+      }
+    },
+    "bad_signature_window_changed": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"kq\":\"c82cd877d82c54bc5dd62bcd84656796\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468860,
+        "kq": "c82cd877d82c54bc5dd62bcd84656796",
+        "sig": "OqrjzMpyh-81Hgpv8XOiL1HLWpulxIBqlGEaj6VBoudSEFitjdr5oXJqSqLBwhjZ8kzwqTQS8IgKTHMmxssHCg",
+        "v": 1
+      }
+    },
+    "boolean": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":true,\"kq\":\"c82cd877d82c54bc5dd62bcd84656796\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": true,
+        "kq": "c82cd877d82c54bc5dd62bcd84656796",
+        "sig": "99AWIoU6KJTx_AbvW1yVwvbYn8giTDGrHZaaLECAyzMwqs16_lkcRvSinwV32pGXg2tKawN0gQjgy4LLzo2GAw",
+        "v": 1
+      }
+    },
+    "ended_within_the_skew": {
+      "expect": {
+        "kept": {
+          "keep_until": 863700,
+          "kq": "412aa1ee24992a1b6a38e90ff1b533ae"
+        }
+      },
+      "message": {
+        "id": "kept-ask-two",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":863700,\"kq\":\"412aa1ee24992a1b6a38e90ff1b533ae\",\"msg_id\":\"kept-ask-two\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 863700,
+        "kq": "412aa1ee24992a1b6a38e90ff1b533ae",
+        "sig": "iEUGWF83mTz073sV1c20YClQiOFSJP42J6CqsjHeHYj6HZA1-Nm2gBxuYjf737-Npv74BzpE3omq96Wgc9YhDQ",
+        "v": 1
+      }
+    },
+    "expired": {
+      "expect": {
+        "refused": "kept_stamp_expired"
+      },
+      "message": {
+        "id": "kept-ask-three",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":863699,\"kq\":\"c82cd877d82c54bc5dd62bcd84656796\",\"msg_id\":\"kept-ask-three\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 863699,
+        "kq": "c82cd877d82c54bc5dd62bcd84656796",
+        "sig": "8SCj5VRAkWpqQSqliQ0BvA4YrZ3ET-nrAX6SqzfuUjo0ZEE6ECEh5gRU8E5K-_6CmFsuZgRQInKyKNXPscudAQ",
+        "v": 1
+      }
+    },
+    "kq_changed_after_signing": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"kq\":\"c82cd877d82c54bc5dd62bcd84656796\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "kq": "412aa1ee24992a1b6a38e90ff1b533ae",
+        "sig": "OqrjzMpyh-81Hgpv8XOiL1HLWpulxIBqlGEaj6VBoudSEFitjdr5oXJqSqLBwhjZ8kzwqTQS8IgKTHMmxssHCg",
+        "v": 1
+      }
+    },
+    "kq_short": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"kq\":\"c82cd877d82c54bc5dd62bcd8465679\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "kq": "c82cd877d82c54bc5dd62bcd8465679",
+        "sig": "zM4fBTrYPHBxZwO5bh0aWJLr_FQ2TAHQoIrsigJZ2SN3NpJSXFJOuAXJYa_D_AjiGfBVZt7zrvU_xhma1eZaAg",
+        "v": 1
+      }
+    },
+    "kq_upper_case": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"kq\":\"C82CD877D82C54BC5DD62BCD84656796\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "kq": "C82CD877D82C54BC5DD62BCD84656796",
+        "sig": "BiqMN9AHwfwM6kTHctrda-bLzw9G0zFCUlUnbwjk_ZZrz2cKh6Jn5_-s6u-ETGoHWEgf36pchL_DbRUajLp4Bw",
+        "v": 1
+      }
+    },
+    "negative": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":-1468800,\"kq\":\"c82cd877d82c54bc5dd62bcd84656796\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": -1468800,
+        "kq": "c82cd877d82c54bc5dd62bcd84656796",
+        "sig": "zGZZu9QukCqND5un47QyUSeIJWDpXiZhZSsadNVlETpmx9AketSLIxX_XbVzpTTVab6dpn5hLudWSsAzfLNkDw",
+        "v": 1
+      }
+    },
+    "on_a_fetch": {
+      "expect": {
+        "refused": "permission_denied"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_fetch"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"kq\":\"c82cd877d82c54bc5dd62bcd84656796\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "kq": "c82cd877d82c54bc5dd62bcd84656796",
+        "sig": "OqrjzMpyh-81Hgpv8XOiL1HLWpulxIBqlGEaj6VBoudSEFitjdr5oXJqSqLBwhjZ8kzwqTQS8IgKTHMmxssHCg",
+        "v": 1
+      }
+    },
+    "valid": {
+      "expect": {
+        "kept": {
+          "keep_until": 1468800,
+          "kq": "c82cd877d82c54bc5dd62bcd84656796"
+        }
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"kq\":\"c82cd877d82c54bc5dd62bcd84656796\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "kq": "c82cd877d82c54bc5dd62bcd84656796",
+        "sig": "OqrjzMpyh-81Hgpv8XOiL1HLWpulxIBqlGEaj6VBoudSEFitjdr5oXJqSqLBwhjZ8kzwqTQS8IgKTHMmxssHCg",
+        "v": 1
+      }
+    },
+    "wrong_message_id": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-other",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"kq\":\"c82cd877d82c54bc5dd62bcd84656796\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "kq": "c82cd877d82c54bc5dd62bcd84656796",
+        "sig": "OqrjzMpyh-81Hgpv8XOiL1HLWpulxIBqlGEaj6VBoudSEFitjdr5oXJqSqLBwhjZ8kzwqTQS8IgKTHMmxssHCg",
+        "v": 1
+      }
+    },
+    "wrong_type": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":1468800,\"kq\":\"c82cd877d82c54bc5dd62bcd84656796\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_fetch\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 1468800,
+        "kq": "c82cd877d82c54bc5dd62bcd84656796",
+        "sig": "IaHS70JyRU7vBYHoLbXj07XHrHNyi9tN4qbue7AXpWgLl_bEehspqktx3z6zo8-yfIEyeW8Pqr1Z4frN2hRKAQ",
+        "v": 1
+      }
+    },
+    "zero": {
+      "expect": {
+        "refused": "kept_stamp_invalid"
+      },
+      "message": {
+        "id": "kept-ask-one",
+        "type": "permissions_v2_answer_submit"
+      },
+      "signed": {
+        "by": "cp",
+        "text": "topos-kept-stamp/v1\n{\"keep_until\":0,\"kq\":\"c82cd877d82c54bc5dd62bcd84656796\",\"msg_id\":\"kept-ask-one\",\"msg_type\":\"permissions_v2_answer_submit\",\"v\":1}"
+      },
+      "stamp": {
+        "keep_until": 0,
+        "kq": "c82cd877d82c54bc5dd62bcd84656796",
+        "sig": "yngRw1NNtm1UM02zM_aGAwj9u-5rBdEGN7qKE4wwEvXAwzI2KVJ_4mW-fKzZ7JrGuir-zIuxi4wAElJe4NchDw",
+        "v": 1
+      }
+    }
+  },
+  "domain": "topos-kept-stamp/v1\n",
+  "field": "kept_stamp",
+  "key_derivation": "Ed25519 private key: the 32 bytes of SHA-256 over the ASCII label (invented keys)",
+  "key_labels": {
+    "cp": "topos-kept-stamp-golden/cp/v1",
+    "other": "topos-kept-stamp-golden/other/v1"
+  },
+  "kq_derivation": "the first 32 hex characters of SHA-256 over the ASCII label (invented ids; the control plane derives its own as a keyed hash of its kept question's id)",
+  "kq_labels": {
+    "one": "topos-kept-stamp-golden/kq/one/v1",
+    "two": "topos-kept-stamp-golden/kq/two/v1"
+  },
+  "message_type": "permissions_v2_answer_submit",
+  "now": 864000,
+  "public_key_b64": "vjdaJSAdPo5qklnXwBPwyE7A5bh04YmT8Ge2GWntGhQ=",
+  "signature_encoding": "Ed25519 over the ASCII bytes of signed.text; base64url without padding, 86 chars",
+  "skew_seconds": 300,
+  "version": "kept-stamp-golden-v1"
+}

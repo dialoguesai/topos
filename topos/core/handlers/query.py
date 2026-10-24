@@ -191,14 +191,17 @@ async def handle_verify_claim_owner(message: Dict[str, Any]) -> Optional[Dict[st
     request = _owner_claim_request(message.get("payload"))
     if request is None:
         return {"id": req_id, "status": "error", "error": "invalid_truth_request"}
+    from ...config.verify_claim_model import device_pick
     from ...query.verify_v2 import VERSION, verify_owner_claim
     from ...query.verify_v2_models import chat_for_setting, judges_for_setting
     from .common import run_db_read
 
     try:
+        # The owner's model pick is a row in engine_config: read it on the worker, not the loop.
+        pick = await run_db_read(device_pick)
         result = await asyncio.wait_for(
-            verify_owner_claim(request, chat=chat_for_setting(), judges=judges_for_setting(), gather_in_worker=run_db_read,
-                               to_thread=asyncio.to_thread),
+            verify_owner_claim(request, chat=chat_for_setting(pick), judges=judges_for_setting(pick),
+                               gather_in_worker=run_db_read, to_thread=asyncio.to_thread),
             timeout=request.deadline_s + 2.0,
         )
     except asyncio.TimeoutError:
@@ -394,6 +397,91 @@ async def handle_truth_claim_label(message: Dict[str, Any]) -> Optional[Dict[str
     except Exception as exc:  # noqa: BLE001
         _log_query_failure("truth_claim_label", req_id, exc)
         return _truth_error(req_id, "truth_lane_unavailable")
+
+
+# --- the reflection doors (product-iterations/reflection/REFLECTION_PROGRAM.md §2a) ------------------------------------
+# Owner class only at the truth door (a reflection type is not in its read set, so the relay, an enrolled client and a
+# third party are refused before the payload is read). ``reflection_invitations`` and ``reflection_conversation`` are
+# reads and write nothing (OWNER_DOOR_OPEN_TYPES); ``reflection_label`` is the one write: dangerous by subtraction.
+# Errors are fixed codes, never the input.
+
+
+@handles("reflection_invitations")
+async def handle_reflection_invitations(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"starter"?: discover|wonderful|relationship|difficult|myself|connect, "limit": 1..6, "exclude": [ids]}`` ->
+    balanced cards from the candidates the sweep built out of the enabled packs' facts, plus which reflection packs
+    are on and which are missing. No starter: the home list across every section."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    refused = _truth_door_refusal(req_id, "reflection_invitations")
+    if refused:
+        return refused
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
+    if payload is None or not set(payload) <= {"starter", "limit", "exclude"}:
+        return _truth_error(req_id, "invalid_reflection_request")
+    from ...query.reflection import ReflectionRequestError, invitations
+    from .common import run_db_read
+
+    try:
+        result = await run_db_read(invitations, payload.get("starter"), payload.get("limit", 5), payload.get("exclude"))
+        return {"id": req_id, "status": "ok", "payload": result}
+    except ReflectionRequestError as exc:
+        return _truth_error(req_id, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("reflection_invitations", req_id, exc)
+        return _truth_error(req_id, "reflection_unavailable")
+
+
+@handles("reflection_conversation")
+async def handle_reflection_conversation(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"candidate_id"}`` -> the prepared conversation: character, system prompt, opening, three questions, the
+    evidence with the owner's own words (a row the owner did not write is its date and source only)."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    refused = _truth_door_refusal(req_id, "reflection_conversation")
+    if refused:
+        return refused
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
+    if payload is None:
+        return _truth_error(req_id, "invalid_reflection_request")
+    from ...query.reflection import ReflectionRequestError, conversation
+    from .common import run_db_read
+
+    try:
+        return {"id": req_id, "status": "ok", "payload": await run_db_read(conversation, payload.get("candidate_id"))}
+    except ReflectionRequestError as exc:
+        return _truth_error(req_id, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("reflection_conversation", req_id, exc)
+        return _truth_error(req_id, "reflection_unavailable")
+
+
+@handles("reflection_label")
+async def handle_reflection_label(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"candidate_id", "label": worth_it|opened|not_now|not_true|too_personal, "note"?}`` -> ``{"ok", "label_id"}``.
+    A second submit replaces the label and its owner-only ``reflection_label`` object; ``opened`` only counts."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    refused = _truth_door_refusal(req_id, "reflection_label")
+    if refused:
+        return refused
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
+    if payload is None:
+        return _truth_error(req_id, "invalid_reflection_label")
+    from ...query.reflection import ReflectionRequestError, label
+    from .common import run_db_write
+
+    try:
+        result = await run_db_write(label, payload.get("candidate_id"), payload.get("label"), payload.get("note"))
+        return {"id": req_id, "status": "ok", "payload": result}
+    except ReflectionRequestError as exc:
+        return _truth_error(req_id, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("reflection_label", req_id, exc)
+        return _truth_error(req_id, "reflection_unavailable")
 
 
 @handles("query", "query_live")

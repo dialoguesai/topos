@@ -18,7 +18,10 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from urllib.error import URLError
 from urllib.request import urlopen
 
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
+
+from .runtime_platform import INSTALL_PYTHON
 
 DEFAULT_PACKAGE_NAME = "topos-node"
 DEFAULT_CHECK_INTERVAL_SECONDS = 6 * 60 * 60
@@ -32,6 +35,9 @@ _announcement_logged = False
 _local_install_logged = False
 _monitor_task: asyncio.Task[None] | None = None
 _hotkey_thread: threading.Thread | None = None
+#: Requires-Python of each release PyPI has named as latest, keyed by
+#: (package, version), so check_for_update can carry it without a second fetch.
+_requires_python_seen: dict[tuple[str, str], str] = {}
 
 
 @dataclass(frozen=True)
@@ -39,6 +45,9 @@ class UpdateInfo:
     package_name: str
     installed: str
     latest: str
+    #: The latest release's Requires-Python as PyPI publishes it; None when it
+    #: names none or the check did not read it.
+    requires_python: str | None = None
 
 
 def should_skip_update_check(*, cli_skip: bool = False) -> bool:
@@ -77,7 +86,13 @@ def get_latest_pypi_version(
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, URLError, ValueError):
         return None
-    return str(payload.get("info", {}).get("version") or "").strip() or None
+    info = payload.get("info") or {}
+    latest = str(info.get("version") or "").strip() or None
+    requires_python = str(info.get("requires_python") or "").strip()
+    if latest and requires_python:
+        with _lock:
+            _requires_python_seen[(package_name, latest)] = requires_python
+    return latest
 
 
 def is_update_available() -> bool:
@@ -146,7 +161,42 @@ def check_for_update(package_name: str = DEFAULT_PACKAGE_NAME, *, strict: bool =
             )
         return None
 
-    return UpdateInfo(package_name=package_name, installed=installed, latest=latest)
+    with _lock:
+        requires_python = _requires_python_seen.get((package_name, latest))
+    return UpdateInfo(
+        package_name=package_name, installed=installed, latest=latest, requires_python=requires_python
+    )
+
+
+def _running_python() -> str:
+    return f"{sys.version_info.major}.{sys.version_info.minor}"
+
+
+def python_for_update(requires_python: str | None) -> str | None:
+    """The `X.Y` the next release must be installed on, or None when this interpreter will do.
+
+    `uv tool upgrade` keeps a tool on the interpreter its environment was built
+    with. When the newest release's Requires-Python excludes that interpreter,
+    uv resolves the newest release that still allows it, finds the one already
+    installed, prints "Nothing to upgrade" and exits 0 (measured with uv 0.5.11
+    and 0.12.23, 24 Oct 2026). A node on Python 3.10 would have stayed on its
+    last 3.10 release for good, offered the same update every six hours, and
+    failed it every time. Moving it takes `--python`, and this is the version
+    to name: the lowest one the release accepts.
+    """
+    if not requires_python:
+        return None
+    try:
+        allowed = SpecifierSet(requires_python)
+    except InvalidSpecifier:
+        return None
+    major, minor = sys.version_info.major, sys.version_info.minor
+    if allowed.contains(f"{major}.{minor}.{sys.version_info.micro}"):
+        return None
+    for candidate in range(minor + 1, minor + 20):
+        if allowed.contains(f"{major}.{candidate}.0"):
+            return f"{major}.{candidate}"
+    return None
 
 
 # uv records what a tool was installed FROM in its receipt. A plain
@@ -223,9 +273,10 @@ def _log_local_install_once(package_name: str, source: str) -> None:
     _logger.info(
         "%s was installed from %s, not from PyPI, so published releases do not "
         "apply to it and no update is offered. To follow PyPI again: "
-        "`uv tool install --force %s`.",
+        "`uv tool install --force --python %s %s`.",
         package_name,
         source,
+        INSTALL_PYTHON,
         package_name,
     )
 
@@ -261,8 +312,13 @@ def resolve_uv_binary() -> Optional[str]:
     return None
 
 
-def apply_package_update(package_name: str = DEFAULT_PACKAGE_NAME) -> bool:
-    """Install the latest PyPI release with uv, removing index version pins when needed."""
+def apply_package_update(package_name: str = DEFAULT_PACKAGE_NAME, *, requires_python: str | None = None) -> bool:
+    """Install the latest PyPI release with uv, removing index version pins when needed.
+
+    ``requires_python`` is the latest release's Requires-Python (``UpdateInfo``).
+    When it excludes the running interpreter the update also moves the tool
+    environment to the lowest Python it accepts (``python_for_update``).
+    """
     source = local_install_source(package_name)
     if source is not None:
         # `uv tool upgrade` would exit 0 here and change nothing, which is the
@@ -270,9 +326,10 @@ def apply_package_update(package_name: str = DEFAULT_PACKAGE_NAME) -> bool:
         _logger.error(
             "Update refused: %s is installed from %s, not from PyPI, so a published "
             "release cannot replace it. Reinstall from the index with "
-            "`uv tool install --force %s`, or update that working copy and reinstall it.",
+            "`uv tool install --force --python %s %s`, or update that working copy and reinstall it.",
             package_name,
             source,
+            INSTALL_PYTHON,
             package_name,
         )
         return False
@@ -286,15 +343,32 @@ def apply_package_update(package_name: str = DEFAULT_PACKAGE_NAME) -> bool:
             package_name,
         )
         return False
+    target_python = python_for_update(requires_python)
     command = [uv, "tool", "upgrade", package_name]
+    if target_python:
+        command = [uv, "tool", "upgrade", "--python", target_python, package_name]
     try:
         receipt = _uv_tool_receipt(package_name).read_text(encoding="utf-8")
     except OSError:
         receipt = ""
     # uv respects the original version constraint on upgrade. An index
     # install pinned to ==1.5.3 needs an unpinned reinstall to move to 1.5.4.
+    # A reinstall rebuilds the environment, and without --python uv builds it
+    # on whichever interpreter it prefers (3.14 on 24 Oct 2026), so name one.
     if re.search(r'(?<![\w-])specifier\s*=\s*"[^"]+"', receipt):
-        command = [uv, "tool", "install", "--force", "--upgrade", package_name]
+        command = [
+            uv, "tool", "install", "--force", "--upgrade",
+            "--python", target_python or _running_python(), package_name,
+        ]
+    if target_python:
+        _logger.warning(
+            "%s's latest release requires Python %s; this node runs %s, so the update "
+            "also moves it to Python %s.",
+            package_name,
+            requires_python,
+            _running_python(),
+            target_python,
+        )
     try:
         result = subprocess.run(
             command,
@@ -415,7 +489,7 @@ def _handle_hotkey_line(line: str, package_name: str = DEFAULT_PACKAGE_NAME) -> 
         return
 
     _logger.info("Updating %s (%s -> %s)...", package_name, info.installed, info.latest)
-    if apply_package_update(package_name):
+    if apply_package_update(package_name, requires_python=info.requires_python):
         _logger.warning(
             "Update installed. Stop Topos (Ctrl+C) and re-run `topos-node` to use %s.",
             info.latest,

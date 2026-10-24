@@ -37,6 +37,7 @@ import click
 
 from topos.cli.binary import resolve_node_binary
 from topos.defaults import DEFAULT_NODE_PORT
+from topos.runtime_platform import INSTALL_PYTHON
 
 LAUNCHD_LABEL = "com.dialogues.topos-node"
 SYSTEMD_UNIT = "topos-node.service"
@@ -293,7 +294,7 @@ def service_install(ctx, port: int) -> None:
         raise Declined(
             "topos-node isn't installed where the service can find it (~/.local/bin, "
             "~/.topos/runtime/bin, /opt/homebrew/bin, /usr/local/bin). Install it with "
-            "`uv tool install topos-node`, or set TOPOS_NODE_BIN to its path."
+            f"`uv tool install --python {INSTALL_PYTHON} topos-node`, or set TOPOS_NODE_BIN to its path."
         )
     path = unit_path(platform_name)
     if platform_name == "macos":

@@ -278,7 +278,7 @@ def _maybe_offer_self_update(
         return False
 
     click.echo(f"Updating {package_name}...")
-    if not apply_package_update(package_name):
+    if not apply_package_update(package_name, requires_python=info.requires_python):
         click.echo("Update failed. Continuing with current version.")
         return False
 

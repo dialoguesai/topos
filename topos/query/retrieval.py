@@ -5248,7 +5248,7 @@ _OWNER_ONLY_GRANTS = {
 #: Object types that never leave the owner tier, whatever a scope grants and whatever their payload says: there is
 #: no grant that unlocks them (an unlisted owner-only type would otherwise fall to `stat_insights`). `verified_claim`
 #: is the owner's label of a claim the inbound truth lane found, often about a contact (DISCLOSURE_RULES DR-49).
-_NEVER_BELOW_OWNER = frozenset({"verified_claim"})
+_NEVER_BELOW_OWNER = frozenset({"verified_claim", "reflection_label"})
 
 
 def _fact_disclosure_allowed(

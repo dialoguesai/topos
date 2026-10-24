@@ -9,6 +9,36 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.23] — 2026-10-24
+
+### Added
+- **Reflection: moments worth bringing up again, from the fact ontologies the owner switched on.** `[P]` `[O]` Two new
+  bundled packs ship disabled like every non-Wave-A pack: `moments.joy` (`moment.peak`, `moment.gratitude`) and
+  `moments.tension` (`moment.tension`, `moment.tension_resolved`), owner-subject and `authored_only`, so a contact's
+  reading of the owner is never an input. A sweep on the catch-up lane (`reflection_sweep`, `topos/query/reflection.py`)
+  reads the active facts of the seven reflection packs that are enabled in `pack_registry` and applies deterministic
+  rules (dated repeats, open threads with no closing row, people who recur in peak moments, an earlier window against
+  a recent one) into the owner-only `reflection_candidates` table; no model call, never on the request path, and a
+  node with no reflection pack on builds nothing. Three owner doors at the truth door (owner class only):
+  `reflection_invitations` and `reflection_conversation` are pure reads (balanced cards per starter; a conversation
+  composed on the node from per-section stance templates with the owner's own words, a row the owner did not write
+  shown as its date and source only), `reflection_label` the one write (`worth_it | opened | not_now | not_true |
+  too_personal`), carrying an owner-only `reflection_label` signal object (DISCLOSURE_RULES DR-60: never shared, never
+  indexed, never off the node). Pack-authoring lessons from the packs' own battery, kept in the packs: RULE notes stay
+  under the prompt builder's 600-character cap; no value field a verifier cannot find stated (no dates, no guessed
+  setting, no strength word); person slots are lists.
+
+## [1.5.22] — 2026-10-24
+
+### Added
+- **The updater moves the interpreter when a release needs a newer Python, every install instruction names one, and a Mac that cannot load scipy says so at startup.** `[O]` `uv tool upgrade` keeps a tool on the interpreter its environment was built with. When the newest release's Requires-Python excludes it, uv resolves the last release that still allows it, prints "Nothing to upgrade" and exits 0 (uv 0.5.11 and 0.12.23, 24 Oct 2026). `UpdateInfo` now carries the latest release's Requires-Python from the same PyPI read. When that excludes the running interpreter, `apply_package_update` passes `--python` with the lowest version it accepts: `uv tool upgrade --python X.Y` rebuilds the environment on X.Y, and on an environment already on X.Y it changes nothing. The pinned-specifier reinstall always names an interpreter, either the running one or the one the release needs, because a forced reinstall without `--python` rebuilt the owner's node on 3.14. Install instructions say `uv tool install --python 3.12 topos-node`: the README, the manual install test, `topos-node doctor`, the service installer's refusal and the release rollback note. A test fails when one does not, because without `--python` uv picks whichever interpreter it prefers, which is how the owner's node got 3.10. At startup on macOS 27 or later with scipy older than 1.16, the node logs one ERROR naming the fix (`<uv> tool upgrade --python 3.12 topos-node`, using the uv this node can reach). Before, each job failed with its own dlopen traceback. `topos.runtime_platform.INSTALL_PYTHON` is the one place the version is named in code.
+
+## [1.5.21] — 2026-10-24
+
+### Added
+- **Kept questions: a question asked while the owner's Topos was offline is answered when it is back.** `[P]` A signed `kept_stamp` side field on `permissions_v2_answer_submit` (the relay-stamp key, bound to the message id and type; body `{v, keep_until, kq}` with an opaque kept-question id) marks an ask the control plane kept and is now delivering; it is refused on a fetch, and the mirrored `AskIntent` grammar and the v1–v4 golden vectors are unchanged (new vectors `fixtures/permissions_v2/answers/kept-stamp-golden-v1.json`, mirrored by the control plane). A kept answer stays in memory for `min(keep_until, ended + 14 d)`, never shorter than the 600 s every answer gets, and is never written to disk; kept bodies are capped at 500, evicting first from the share holding the most, and a sweep drops one whose share's authority moved. For a kept ask only, a share index that is not served yet, an unreachable model or a full queue ends `deferred` (429 `answer_deferred`, distinct from `answer_busy`) and gives the day's question back; a writer failure (`deadline`, `judge_unavailable`, `model_error`) may defer once per kept question per UTC day, then ends final and counted. A kept question counts once per share and UTC day (`p2a_kept_question_counts`, keyed by `kq` plus a keyed question hash). Capability `permissions_v2_kept_answers: 1`. Live, unstamped asks behave exactly as before. Ships with the control plane's kept-questions switch, which stays off until this release is installed. Tests: `tests/permissions_v2/test_kept_answers_off1.py`.
+- **The model verify_claim runs on is the owner's pick in Settings → General.** `[P]` `[O]` Two new `engine_config` keys, `verify_claim_provider` (`redpill` for Topos Secure, `""` for local Ollama, the shape the facts picker stores) and `verify_claim_model` (a concrete model id), read per call like the node's other per-function model settings, so a change takes effect on the next check with no restart. `verify_v2_models.chat_for_setting()` and `judges_for_setting()` read the pick first; without one the environment decides exactly as before (`TOPOS_VERIFY_V2_MODEL` = `hosted` | `local`, then hosted when a Red Pill key is configured, else local), so a node without the setting changes nothing. The Fun Camera's truth mirror, `verify_claim_owner` and the inbound truth lane all run on it. The lane's own `truth_inbound.model` is a choice of side, not of model: `hosted` now means the picked hosted model (else the default, llama 3.3 70B) and `local` the picked local model (else `TOPOS_VERIFY_V2_LOCAL_MODEL` or the default), through `verify_v2_models.chat_for_lane()`; one model list for the feature, never two. A hosted pick must be a model this node runs (the two verify names directly plus the Topos Secure set the enrichment adapter routes); any other is refused at the write with a reason, never replaced by another model. Three new message types, `get_verify_claim_model_config`, `put_verify_claim_model_config` and `delete_verify_claim_model_config`, with `GET`/`PUT`/`DELETE /v1/verify-claim-model-config` as their HTTP twins (the shape of `/v1/facts-llm-config`: the resolved provider, model and source, the override, the local Ollama catalog as `available_models`, the hosted set this node accepts as `hosted_models`, and what each of the lane's sides resolves to). The read is open on the owner socket; the write and the clear are owner-confirmed changes, by subtraction in the dispatcher and by name in the HTTP census. No migration, no reprocessing.
+
 ## [1.5.20] — 2026-10-24
 
 ### Added

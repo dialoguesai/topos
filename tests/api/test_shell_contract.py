@@ -67,12 +67,14 @@ class TestShellUpdate:
 
     def test_applies_in_background_and_records_result(self, client, monkeypatch):
         monkeypatch.setattr(
-            shell_module, "get_update_info", lambda: UpdateInfo(package_name="topos-node", installed="1.0.0", latest="1.1.0")
+            shell_module,
+            "get_update_info",
+            lambda: UpdateInfo(package_name="topos-node", installed="1.0.0", latest="1.1.0", requires_python=">=3.12"),
         )
         applied = []
 
-        def fake_apply(package_name):
-            applied.append(package_name)
+        def fake_apply(package_name, *, requires_python=None):
+            applied.append((package_name, requires_python))
             return True
 
         monkeypatch.setattr(shell_module, "apply_package_update", fake_apply)
@@ -86,7 +88,8 @@ class TestShellUpdate:
             if deadline_status["last_result"] is not None:
                 break
             time.sleep(0.01)
-        assert applied == [shell_module.DEFAULT_PACKAGE_NAME]
+        # The release's Requires-Python reaches the updater, which may have to move the interpreter.
+        assert applied == [(shell_module.DEFAULT_PACKAGE_NAME, ">=3.12")]
         assert deadline_status["last_result"] == "success"
         assert deadline_status["applying"] is False
 

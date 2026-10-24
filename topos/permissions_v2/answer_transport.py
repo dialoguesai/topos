@@ -8,9 +8,9 @@ import logging
 from topos.principal import THIRD_PARTY, reset_principal, set_principal
 from topos.relay_stamp import verify_relay_stamp
 
-from . import owner_account_words
+from . import kept_stamp, owner_account_words
 from .answer_protocol import ACCEPTS_FIELD, LEGACY_ACCEPTED_VERSION, parse_accepted_version
-from .answer_release import AnswerBusy
+from .answer_release import AnswerBusy, AnswerDeferred
 from .canonical import PolicyError, canonical_bytes
 from .runtime import get_runtime
 
@@ -50,6 +50,23 @@ def _owner_account_words(message, kind, request_id) -> frozenset:
                                             key=relay_stamp._load_public_key_bytes())
 
 
+def _kept(message, kind, request_id):
+    """`(keep_until, kq)` the control plane signed for a kept question (lane OFF1N, `kept_stamp`): the end of its keep
+    window and its opaque id. None for a live ask.
+
+    The field rides beside the principal stamp, outside the closed payload, as the owner's account words do. Absent (a
+    live ask, or a control plane from before the field): None, and the ask is served exactly as before. Present on a
+    fetch, not exactly the grammar, or not verified under the pinned relay stamp key for this very message: the
+    request is refused."""
+    if kept_stamp.FIELD not in message:
+        return None
+    if kind != SUBMIT_TYPE:
+        raise PolicyError("permission_denied")
+    from topos import relay_stamp
+    return kept_stamp.verify_stamp(message[kept_stamp.FIELD], msg_id=request_id, msg_type=kind,
+                                   key=relay_stamp._load_public_key_bytes())
+
+
 def _accepted_version(message, kind) -> int:
     """The answer protocol version the asker's control plane says it accepts (A2A-4 amendment 13), from the ask frame.
 
@@ -80,6 +97,7 @@ async def dispatch_answer(ws, message):
             raise PolicyError("permission_denied")
         account_words = _owner_account_words(message, kind, request_id)
         accepted_version = _accepted_version(message, kind)
+        kept_ask = _kept(message, kind, request_id)
         waiting_key = None
         if kind == FETCH_TYPE:
             waiting_key = _fetch_waiting_key(principal, payload)
@@ -100,9 +118,11 @@ async def dispatch_answer(ws, message):
             def _work():
                 service = get_runtime().answers()
                 if kind == SUBMIT_TYPE:
+                    # A live ask reaches the service exactly as before; only a kept one carries its window and id.
+                    kept = {} if kept_ask is None else {"keep_until": kept_ask[0], "kept_question": kept_ask[1]}
                     result, output = service.submit(envelope=payload["envelope"], payload=payload["intent"],
                                                     request_id=request_id, owner_account_words=account_words,
-                                                    accepted_version=accepted_version)
+                                                    accepted_version=accepted_version, **kept)
                 else:
                     result, output = service.fetch(envelope=payload["envelope"], payload=payload["intent"],
                                                    request_id=request_id)
@@ -135,6 +155,14 @@ async def dispatch_answer(ws, message):
         require_active_output(output, enabled=switches.on(switches.SELECTIVE_FACTS), selective_answer=selective_answer)
         await ws.send(canonical_bytes({"id": request_id, "type": kind, "status": "ok",
                                        "payload": {"result": result, "output": output}}).decode("ascii"))
+    except AnswerDeferred:
+        # Lane OFF1N (WS-OFF, 23 Oct): a kept ask that wrote nothing, its share's index not served. The frame of a
+        # busy fetch with its own word: `answer_busy` means still being written (keep polling), `answer_deferred`
+        # means this delivery is over (the control plane asks the kept question again later).
+        from . import search_timing
+        search_timing.refusal("answers", PolicyError("answer_deferred"))
+        await ws.send(canonical_bytes({"id": request_id, "type": message.get("type"), "status": "error",
+                                       "code": 429, "error": "answer_deferred"}).decode("ascii"))
     except AnswerBusy:
         from . import search_timing
         search_timing.refusal("answers", PolicyError("answer_busy"))   # the node's own log, with attribution on

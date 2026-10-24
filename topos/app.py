@@ -53,6 +53,7 @@ from .api import (
     sanitization_ollama_config as sanitization_ollama_config_routes,
     disk_space_config as disk_space_config_routes,
     facts_llm_config as facts_llm_config_routes,
+    verify_claim_model_config as verify_claim_model_config_routes,
     community_naming_config as community_naming_config_routes,
     signal_extraction_config as signal_extraction_config_routes,
     filter_lab as filter_lab_routes,
@@ -176,6 +177,7 @@ app.include_router(user_identity_routes.router)
 app.include_router(sanitization_ollama_config_routes.router)
 app.include_router(disk_space_config_routes.router)
 app.include_router(facts_llm_config_routes.router)
+app.include_router(verify_claim_model_config_routes.router)
 app.include_router(community_naming_config_routes.router)
 app.include_router(signal_extraction_config_routes.router)
 app.include_router(filter_lab_routes.router)
@@ -331,6 +333,9 @@ async def startup_event() -> None:
         bool(importlib.util.find_spec("transformers")),
         bool(importlib.util.find_spec("torch")),
     )
+    from .runtime_platform import log_platform_problems
+
+    log_platform_problems(logger)
     # Bound torch's thread pools BEFORE the first model loads. Torch's intra-op pool is
     # one thread per core (twenty-six here); each can need the GIL to refcount a
     # Python-owned tensor, and on 2026-08-15 that deadlocked the event loop twelve
