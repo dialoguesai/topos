@@ -33,8 +33,12 @@ _TIMES = re.compile(r"(elapsed_s|wall_s|_ms|seconds?)=?[ =]?[0-9.]+")
 
 
 @pytest.fixture(autouse=True)
-def owner_first():
+def owner_first(monkeypatch):
     away_config.apply(away_config.DEFAULT)
+    # The suite's settings patch (`_patch_settings`) marks the model host as set; undoing a monkeypatch restores the
+    # value but not pydantic's record of what was set, which later tests read (a leak 916cd4bc has too). The record is
+    # put back, after the patches are undone (monkeypatch undoes in reverse order).
+    monkeypatch.setattr(llm_openai.settings, "__pydantic_fields_set__", set(llm_openai.settings.model_fields_set))
     yield
     while answer_gate.owner_frames():
         answer_gate.owner_frame_ended()
