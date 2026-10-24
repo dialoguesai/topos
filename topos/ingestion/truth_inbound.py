@@ -16,12 +16,22 @@ the next.
 
 What is owed. A row of a chosen source from the last :data:`WINDOW_DAYS` days (by its own time), with text, and no
 ``truth_checks`` row yet: newest first, so turning the lane on checks the past week, and a first sync of years of
-history does not queue years of checks. A row is checked once.
+history does not queue years of checks. A row is checked once, unless its check came back ``unable``: then the lane
+checks it again (:func:`recheck_due`, ``truth_checks.recheck_reason``) at once when the lane's model, effort or reader
+timeout is not the one that check ran with, else after :data:`RECHECK_COOLDOWN_S`; at most
+``truth_checks.MAX_ATTEMPTS`` checks in all, never once the owner labelled it, and only while the row is still a
+chosen source's row with text (the filters new rows get, with no time window). New rows go first; re-checks fill the
+rest of a batch. A re-check replaces the row's result in place (``truth_checks.recheck``): one row per record, its
+week unchanged, ``attempts`` counting the checks.
 
 Each check. ``statement`` = the row's text (first 1000 characters); ``context`` = the six rows before it in the same
 conversation; ``said_at`` = the row's time with the node's offset; ``speaker`` = ``"owner"`` for the owner's own row,
 else the contact's display name (never a raw identifier: "a contact" when the contacts do not name them);
-``about_others`` = the speaker is not the owner; ``effort`` = ``low``; ``deadline_s`` = 30. A row the engine's gate
+``about_others`` = the speaker is not the owner; ``effort`` = ``low``; ``deadline_s`` = 30; ``read_timeout_s`` =
+:func:`read_timeout_for` the lane's model (20 s on the local model, whose reader cannot finish in the engine's 8 s on
+a busy machine; the engine's 8 s on the hosted one); ``source_kind`` = :data:`SOURCE_KINDS` of the row's source
+(``message``, ``transcript`` or ``journal``), so the reader refuses a turn as talk about the conversation itself only
+by what that means for a chat line, a recording or a journal entry. A row the engine's gate
 refuses (a fragment, a question, empty) costs no model call and is stored as ``not_checkable``. Model checks start at
 most ``rate_per_minute`` times a minute (:data:`PACER`), and a job stops after :data:`JOB_BUDGET_S` seconds so the
 embeddings catch-up never waits long behind it; what it did not reach is still owed and goes in the next batch.
@@ -53,6 +63,14 @@ MAX_BATCH_SIZE = 200
 JOB_BUDGET_S = 60.0
 DEADLINE_S = 30.0
 EFFORT = "low"
+#: The reader's cap on the local model, inside DEADLINE_S. The first evening on the owner's node (23 Oct 2026) timed
+#: out 116 of 119 gate-passed rows at the engine's 8 s, which was sized for the hosted 70B; a deadline of 30 s leaves
+#: 10 s for retrieval and the one judge call at effort low.
+LOCAL_READ_TIMEOUT_S = 20.0
+#: The reader's source kind for each truth source (``verify_v2.SOURCE_KINDS``).
+SOURCE_KINDS = {"imessage": "message", "signal": "message", "transcripts": "transcript", "journal": "journal"}
+#: How long an ``unable`` row waits before the same model, effort and reader timeout check it again.
+RECHECK_COOLDOWN_S = 6 * 3600
 CONTEXT_TURNS = 6
 PAUSE_S = 600
 #: ``model_unavailable:<cause>`` causes that pause the lane instead of storing an ``unable`` row.
@@ -81,17 +99,33 @@ def _cutoff(now: datetime) -> str:
     return (now - timedelta(days=WINDOW_DAYS)).date().isoformat()
 
 
+def _chosen(sources: List[str]) -> List[Tuple[str, str, str, str, tuple]]:
+    """For each checked table the chosen sources reach: (table, id column, time column, extra filter on ``m``, its
+    parameters). The one place that says which rows of a table belong to the chosen sources."""
+    from ..query.truth_checks import CONVERSATION_SOURCE_IDS
+
+    out: List[Tuple[str, str, str, str, tuple]] = []
+    source_ids = [sid for name in sources for sid in CONVERSATION_SOURCE_IDS.get(name, ())]
+    if source_ids:
+        out.append(("conversation_messages", "message_id", "event_at",
+                    f" AND m.source_id IN ({','.join('?' for _ in source_ids)})", tuple(source_ids)))
+    if "journal" in sources:
+        out.append(("journal_entries", "entry_id", "entry_at", "", ()))
+    if "transcripts" in sources:
+        out.append(("transcript_segments", "segment_id", "event_at", " AND COALESCE(m.actor_role, 'ambient') != 'ambient'", ()))
+    return out
+
+
 def owed(conn: Any, sources: List[str], limit: int, *, now: Optional[datetime] = None) -> List[List[str]]:
     """``[table, record_id]`` pairs still to check for the chosen sources, newest first."""
-    from ..query.truth_checks import CHECKS_TABLE, CONVERSATION_SOURCE_IDS, _present
+    from ..query.truth_checks import CHECKS_TABLE, _present
 
     cutoff = _cutoff(now or datetime.now(timezone.utc))
     checked = _present(conn, CHECKS_TABLE)
     found: List[Tuple[str, str, str]] = []
-
-    def collect(table: str, id_column: str, time_column: str, extra: str, params: tuple) -> None:
+    for table, id_column, time_column, extra, params in _chosen(sources):
         if not _present(conn, table):
-            return
+            continue
         unchecked = (f" AND NOT EXISTS (SELECT 1 FROM {CHECKS_TABLE} t WHERE t.record_table='{table}' "
                      f"AND t.record_id=m.{id_column})") if checked else ""
         rows = conn.execute(
@@ -99,17 +133,46 @@ def owed(conn: Any, sources: List[str], limit: int, *, now: Optional[datetime] =
             f"AND m.content IS NOT NULL AND TRIM(m.content) != ''{extra}{unchecked} "
             f"ORDER BY m.{time_column} DESC LIMIT ?", (cutoff, *params, int(limit))).fetchall()
         found.extend((str(r[1] or ""), table, str(r[0])) for r in rows if r[0] is not None)
-
-    source_ids = [sid for name in sources for sid in CONVERSATION_SOURCE_IDS.get(name, ())]
-    if source_ids:
-        collect("conversation_messages", "message_id", "event_at",
-                f" AND m.source_id IN ({','.join('?' for _ in source_ids)})", tuple(source_ids))
-    if "journal" in sources:
-        collect("journal_entries", "entry_id", "entry_at", "", ())
-    if "transcripts" in sources:
-        collect("transcript_segments", "segment_id", "event_at", " AND COALESCE(m.actor_role, 'ambient') != 'ambient'", ())
     found.sort(key=lambda item: item[0], reverse=True)
     return [[table, record_id] for _, table, record_id in found[:limit]]
+
+
+def recheck_due(conn: Any, sources: List[str], signature: Any, limit: int, *,
+                now: Optional[datetime] = None) -> List[List[str]]:
+    """``[table, record_id]`` pairs of stored ``unable`` checks to run again (``truth_checks.recheck_reason`` against
+    the lane's ``signature``), newest check first. Only rows the job will not skip: still a chosen source's row, with
+    text, in its table (else a batch of skipped rows would queue itself again and again)."""
+    from ..query.truth_checks import CHECKS_TABLE, _present, recheck_reason, state_columns, state_of
+
+    if limit <= 0 or not _present(conn, CHECKS_TABLE):
+        return []
+    moment = now or datetime.now(timezone.utc)
+    columns = state_columns(conn)
+    found: List[Tuple[str, str, str]] = []
+    for table, id_column, _, extra, params in _chosen(sources):
+        if not _present(conn, table):
+            continue
+        rows = conn.execute(
+            f"SELECT c.created_at, c.record_id, {columns} FROM {CHECKS_TABLE} c JOIN {table} m "
+            f"ON m.{id_column} = c.record_id WHERE c.record_table = ? AND c.verdict = 'unable' "
+            f"AND m.content IS NOT NULL AND TRIM(m.content) != ''{extra}", (table, *params)).fetchall()
+        for created, record_id, *state in rows:
+            if recheck_reason(state_of(state), signature, now=moment, cooldown_s=RECHECK_COOLDOWN_S):
+                found.append((str(created or ""), table, str(record_id)))
+    found.sort(key=lambda item: item[0], reverse=True)
+    return [[table, record_id] for _, table, record_id in found[:limit]]
+
+
+def read_timeout_for(model: str) -> float:
+    """The reader's cap for the lane's model setting: the engine's default on the hosted model, longer on the local one."""
+    from ..query.verify_v2 import READ_TIMEOUT_S
+
+    return READ_TIMEOUT_S if model == "hosted" else LOCAL_READ_TIMEOUT_S
+
+
+def signature_for(chat: Any, model: str) -> Tuple[str, str, float]:
+    """What a check by this lane runs with, as ``truth_checks`` records it: (model label, effort, reader timeout)."""
+    return _model_label(chat), EFFORT, read_timeout_for(model)
 
 
 def enqueue_truth_checks(conn: Any, *, now: Optional[datetime] = None) -> Optional[str]:
@@ -129,6 +192,7 @@ def enqueue_truth_checks(conn: Any, *, now: Optional[datetime] = None) -> Option
     if settings["model"] == "hosted" and until is not None and until > moment:
         return None
     ensure_pipeline_jobs_schema(conn)
+    signature = signature_for(_chat_for(settings["model"]), settings["model"])
     # The in-flight check and the enqueue under one hold of the (reentrant) gate: two triggers at once queue one job.
     with with_db_write():
         if conn.execute("SELECT 1 FROM pipeline_jobs WHERE kind=? AND status IN ('queued','running') LIMIT 1",
@@ -136,6 +200,7 @@ def enqueue_truth_checks(conn: Any, *, now: Optional[datetime] = None) -> Option
             return None
         ensure_tables(conn)
         records = owed(conn, settings["sources"], BATCH_SIZE, now=moment)
+        records += recheck_due(conn, settings["sources"], signature, BATCH_SIZE - len(records), now=moment)
         if not records:
             return None
         return enqueue_job(conn, kind=KIND, payload={"records": records})
@@ -194,13 +259,15 @@ def _valid_records(value: Any) -> Optional[List[Tuple[str, str]]]:
     return out
 
 
-def _prepare(conn: Any, table: str, record_id: str, sources: List[str]):
-    """The record and its ClaimRequest, or None when it is gone, already checked, or no longer a chosen source."""
-    from ..query.truth_checks import (STATEMENT_CHARS, already_checked, load_record, previous_turns,
+def _prepare(conn: Any, table: str, record_id: str, sources: List[str], signature: Any):
+    """The record, its ClaimRequest and which check of the record this is (1 for a new row), or None when it is
+    gone, no longer a chosen source, or already checked and not due a re-check under ``signature``."""
+    from ..query.truth_checks import (STATEMENT_CHARS, check_state, load_record, previous_turns, recheck_reason,
                                       speaker_for_reader, with_offset)
     from ..query.verify_v2 import ClaimRequest
 
-    if already_checked(conn, table, record_id):
+    state = check_state(conn, table, record_id)
+    if state is not None and not recheck_reason(state, signature, cooldown_s=RECHECK_COOLDOWN_S):
         return None
     names: Dict[str, Optional[str]] = {}
     record = load_record(conn, table, record_id, names)
@@ -214,9 +281,11 @@ def _prepare(conn: Any, table: str, record_id: str, sources: List[str]):
         about_others=not record["owner"],
         effort=EFFORT,
         deadline_s=DEADLINE_S,
+        read_timeout_s=signature[2],
+        source_kind=SOURCE_KINDS.get(record["source"], "message"),
     )
     record.pop("row", None)
-    return record, request
+    return record, request, (state["attempts"] + 1 if state else 1)
 
 
 def _chat_for(model: str):
@@ -240,9 +309,13 @@ def pause_cause(result: Dict[str, Any], hosted: bool) -> Optional[str]:
     return cause if cause in (HOSTED_PAUSE_CAUSES if hosted else LOCAL_PAUSE_CAUSES) else None
 
 
-def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional[str]) -> Dict[str, Any]:
-    """The ``truth_checks`` row for one verify_claim v2 answer: verdict, the reader's main claim, cited refs only."""
+def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional[str],
+              read_timeout_s: Optional[float] = None) -> Dict[str, Any]:
+    """The ``truth_checks`` row for one verify_claim v2 answer: verdict, the reader's main claim, cited refs only,
+    stamped with the engine build (the answer's ``version``, else ``VERSION``: a row the engine's gate refused got no
+    answer, but the gate is the engine's own; and the sha16 of ``verify_v2.py``)."""
     from ..query.truth_checks import VERDICTS
+    from ..query.verify_v2 import VERSION, engine_sha16
 
     verdict, reason = result.get("verdict"), result.get("reason")
     if verdict == "unable" and str(reason or "").startswith("not_checkable:"):
@@ -263,8 +336,16 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
         "source": record["source"], "speaker_kind": "owner" if record["owner"] else "contact",
         "category": result.get("category"), "claim_text": (str(claim.get("text") or "") or None) if claim else None,
         "verdict": verdict, "reason": str(reason)[:120] if reason else None, "cited_refs": cited, "effort": EFFORT,
-        "model": model, "latency_ms": latency,
+        "model": model, "latency_ms": latency, "read_timeout_s": read_timeout_s,
+        "engine_version": str(result.get("version") or VERSION)[:80], "engine_sha16": engine_sha16() or None,
     }
+
+
+def _store(conn: Any, row: Dict[str, Any], attempt: int) -> Optional[str]:
+    """A first check is a new row; a later one replaces the ``unable`` row's result in place."""
+    from ..query.truth_checks import record_check, recheck
+
+    return record_check(conn, row) if attempt <= 1 else recheck(conn, row, attempt)
 
 
 async def _verify(request: Any, chat: Any) -> Dict[str, Any]:
@@ -309,7 +390,6 @@ def _probe_hosted() -> bool:
 async def execute_truth_check(payload: Dict[str, Any], *, pacer: Optional[Pacer] = None) -> Dict[str, Any]:
     """One batch. The result is counts only (it is stored as the job's detail)."""
     from ..config.truth_inbound import load, paused_until, set_paused_until
-    from ..query.truth_checks import record_check
     from ..query.verify_v2 import gate
 
     records = _valid_records(payload.get("records"))
@@ -330,24 +410,26 @@ async def execute_truth_check(payload: Dict[str, Any], *, pacer: Optional[Pacer]
             await asyncio.to_thread(_db, set_paused_until, None)
     chat = await asyncio.to_thread(_chat_for, settings["model"])
     pace = pacer or PACER
+    signature = signature_for(chat, settings["model"])
     started = time.monotonic()
-    counts = {"checked": 0, "not_checkable_by_gate": 0, "skipped": 0, "deferred": 0, "paused": False}
+    counts = {"checked": 0, "not_checkable_by_gate": 0, "skipped": 0, "deferred": 0, "paused": False, "rechecked": 0}
     for index, (table, record_id) in enumerate(records):
         if time.monotonic() - started >= JOB_BUDGET_S:
             counts["deferred"] = len(records) - index
             break
-        prepared = await asyncio.to_thread(_db, _prepare, table, record_id, settings["sources"])
+        prepared = await asyncio.to_thread(_db, _prepare, table, record_id, settings["sources"], signature)
         if prepared is None:
             counts["skipped"] += 1
             continue
-        record, request = prepared
+        record, request, attempt = prepared
         refused = gate(request.statement)
         if refused:
             # The engine's own gate, asked first: a refused row is stored without a model call or a pacing slot.
             row = check_row(record, {"verdict": "unable", "reason": f"not_checkable:{refused}",
                                      "timings_ms": {"total": 0.0}}, model=None)
-            await asyncio.to_thread(_db, record_check, row)
+            await asyncio.to_thread(_db, _store, row, attempt)
             counts["not_checkable_by_gate"] += 1
+            counts["rechecked"] += int(attempt > 1)
             continue
         await pace.wait(settings["rate_per_minute"])
         result = await _verify(request, chat)
@@ -357,6 +439,8 @@ async def execute_truth_check(payload: Dict[str, Any], *, pacer: Optional[Pacer]
             counts["paused"] = True
             counts["deferred"] = len(records) - index
             break
-        await asyncio.to_thread(_db, record_check, check_row(record, result, model=_model_label(chat)))
+        row = check_row(record, result, model=_model_label(chat), read_timeout_s=request.read_timeout_s)
+        await asyncio.to_thread(_db, _store, row, attempt)
         counts["checked"] += 1
+        counts["rechecked"] += int(attempt > 1)
     return {"status": "ok", **counts}

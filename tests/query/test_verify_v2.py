@@ -193,6 +193,19 @@ def test_truth_door_admits_owner_only(cls, channel, admitted, monkeypatch):
     ({"statement": SENTENCE, "context": "turns"}, False),
     ({"statement": SENTENCE, "context": [{"speaker": 1, "text": "x"}]}, False),
     ("not a dict", False),
+    ({"statement": SENTENCE, "deadline_s": 30, "read_timeout_s": 20}, True),
+    ({"statement": SENTENCE, "deadline_s": 30, "read_timeout_s": 30}, True),     # up to the deadline itself
+    ({"statement": SENTENCE, "read_timeout_s": 0.5}, True),
+    ({"statement": SENTENCE, "read_timeout_s": 20}, False),                      # past the default 10 s deadline
+    ({"statement": SENTENCE, "deadline_s": 5, "read_timeout_s": 8}, False),
+    ({"statement": SENTENCE, "read_timeout_s": 0.4}, False),
+    ({"statement": SENTENCE, "read_timeout_s": True}, False),
+    ({"statement": SENTENCE, "read_timeout_s": "8"}, False),
+    ({"statement": SENTENCE, "read_timeout_s": None}, False),
+    ({"statement": SENTENCE, "source_kind": "message"}, True),
+    ({"statement": SENTENCE, "source_kind": "journal"}, True),
+    ({"statement": SENTENCE, "source_kind": "email"}, False),
+    ({"statement": SENTENCE, "source_kind": ["message"]}, False),
 ])
 def test_payload_validation(payload, ok):
     from topos.core.handlers.query import _owner_claim_request
@@ -682,3 +695,119 @@ def test_the_owner_socket_route_refuses_a_relay_before_reading_the_body(owner_so
     client = owner_socket_client(Principal(CP_RELAY, "cp_relay"))
     r = client.post("/api/local/verify_claim_owner", json={"statement": SENTENCE})
     assert r.status_code == 403 and SENTENCE not in r.text
+
+
+# --- the reader's own timeout (per request) -----------------------------------------------------------------------------
+class TimedChat(FakeChat):
+    """Records the timeout and system prompt each reader call gets."""
+
+    def __init__(self, read):
+        super().__init__(read)
+        self.reads = []
+
+    def __call__(self, system, user, schema, timeout, usage):
+        if "not_checkable_because" in schema.get("properties", {}):
+            self.reads.append({"timeout": timeout, "system": system})
+            usage.add(10, 2)
+            return self.read
+        return super().__call__(system, user, schema, timeout, usage)
+
+
+def test_the_default_read_timeout_and_source_kind_are_unchanged_for_interactive_callers():
+    from topos.core.handlers.query import _owner_claim_request
+
+    assert v2.READ_TIMEOUT_S == 8.0
+    request = v2.ClaimRequest(statement=SENTENCE)
+    assert request.read_timeout_s == v2.READ_TIMEOUT_S and request.source_kind == "spoken"
+    door = _owner_claim_request({"statement": SENTENCE, "effort": "low", "deadline_s": 30})
+    assert door.read_timeout_s == v2.READ_TIMEOUT_S and door.source_kind == "spoken"
+    chat = TimedChat(read_reply(type="not_checkable", not_checkable_because="too_vague"))
+    run([], chat, deadline_s=30)
+    [read] = chat.reads
+    assert 7.5 < read["timeout"] <= 8.0 and read["system"] is v2.READ_SYSTEM
+
+
+@pytest.mark.parametrize("read_timeout, deadline, low, high", [(20.0, 30.0, 19.5, 20.0), (20.0, 5.0, 4.5, 5.0),
+                                                                (0.2, 30.0, 0.45, 0.5)])
+def test_a_requests_read_timeout_reaches_the_reader_inside_its_deadline(read_timeout, deadline, low, high):
+    chat = TimedChat(read_reply(type="not_checkable", not_checkable_because="too_vague"))
+    run([], chat, deadline_s=deadline, read_timeout_s=read_timeout)
+    [read] = chat.reads
+    assert low < read["timeout"] <= high
+
+
+def test_an_out_of_range_read_timeout_is_refused_before_any_model_call(monkeypatch):
+    from topos.core.handlers import query as handlers
+    from topos.query import verify_v2_models
+
+    monkeypatch.setenv("TOPOS_TRUTH_CLIENT_ALLOWLIST", "truth-mirror")
+    monkeypatch.setattr(verify_v2_models, "chat_for_setting", lambda *a, **k: pytest.fail("no model may be built"))
+    token = set_principal(Principal(OWNER_APP, "uds"))
+    try:
+        for payload in ({"statement": SENTENCE, "deadline_s": 10, "read_timeout_s": 11},
+                        {"statement": SENTENCE, "read_timeout_s": 0.1},
+                        {"statement": SENTENCE, "source_kind": "email"}):
+            out = asyncio.run(handlers.handle_verify_claim_owner({"id": "r1", "type": "verify_claim_owner", "payload": payload}))
+            assert out == {"id": "r1", "status": "error", "error": "invalid_truth_request"}
+    finally:
+        reset_principal(token)
+
+
+# --- source-aware refusals ----------------------------------------------------------------------------------------------
+def test_the_spoken_reader_prompt_is_the_one_fun_camera_had():
+    """The source kinds rephrase "meta" for other kinds only: the spoken prompts are byte for byte 1.5.18's."""
+    import hashlib
+
+    digest = lambda text: hashlib.sha256(text.encode()).hexdigest()[:16]  # noqa: E731
+    assert digest(v2.read_system(False, "spoken")) == "bf8e9feae13079cc"
+    assert digest(v2.read_system(True, "spoken")) == "809dc67ec673933c"
+    assert v2.read_system() is v2.READ_SYSTEM and v2.read_system(True) is v2.READ_SYSTEM_WITH_OTHERS
+    assert v2.read_system(False, "unknown") is v2.READ_SYSTEM  # an unknown kind reads as spoken
+
+
+@pytest.mark.parametrize("kind, says, never", [
+    ("spoken", ["only about the call, the screen or this conversation itself",
+                "only a remark about the call itself happening right now"], []),
+    ("message", ["a message someone sent in a chat thread", "a reaction, a greeting", "the logistics of the chat",
+                 'the message is "meta"'], ["the call", "the screen"]),
+    ("transcript", ["a recorded conversation", "only about the recording, the room or this conversation itself"],
+     ["the call", "the screen"]),
+    ("journal", ["wrote in their journal", "only about the act of writing this entry"],
+     ["the call", "the screen", "this conversation"]),
+])
+def test_the_reader_is_told_what_meta_means_for_the_source_kind(kind, says, never):
+    for about_others in (False, True):
+        chat = TimedChat(read_reply(category="meta"))
+        out = run([], chat, source_kind=kind, about_others=about_others)
+        [read] = chat.reads
+        assert read["system"] == v2.read_system(about_others, kind)
+        meta_line = next(line for line in read["system"].splitlines() if line.startswith('- "meta"'))
+        for phrase in says:
+            assert phrase in read["system"], phrase
+        for phrase in never:
+            assert phrase not in meta_line, phrase
+        # The enum values do not move: the reply contract and the control plane need nothing.
+        assert out["category"] == "meta" and out["reason"] == "not_checkable:about_the_call_itself"
+
+
+def test_the_reader_schema_is_the_same_for_every_source_kind():
+    seen = []
+
+    class Schemas(TimedChat):
+        def __call__(self, system, user, schema, timeout, usage):
+            seen.append(schema)
+            return super().__call__(system, user, schema, timeout, usage)
+
+    for kind in v2.SOURCE_KINDS:
+        run([], Schemas(read_reply(type="not_checkable", not_checkable_because="too_vague")), source_kind=kind)
+    assert all(schema is v2.READ_SCHEMA for schema in seen) and len(seen) == len(v2.SOURCE_KINDS)
+    assert "about_the_call_itself" in v2.WHY_NOT and "meta" in v2.CATEGORIES
+
+
+def test_the_engine_sha16_is_the_digest_the_weekly_lock_captures():
+    """The lock (eval/weekly_lock.py) takes sha256(verify_v2.py)[:16] of the installed file; rows carry the same."""
+    import hashlib
+
+    with open(v2.__file__, "rb") as source:
+        assert v2.engine_sha16() == hashlib.sha256(source.read()).hexdigest()[:16]
+    assert len(v2.engine_sha16()) == 16 and v2.engine_sha16() is v2.engine_sha16()

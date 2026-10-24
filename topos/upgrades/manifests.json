@@ -1227,6 +1227,14 @@
       ]
     },
     {
+      "version": "1.5.20",
+      "summary": "Release 1.5.20: the inbound truth lane gets its own reader timeout, re-checks of rows it could not answer, refusals phrased per source, and an engine-build stamp on every row.",
+      "steps": [],
+      "notes": [
+        "The inbound truth lane: no step and no prompt. truth_checks gains attempts, read_timeout_s, checked_at, engine_version and engine_sha16 on first use, with no migration (the table itself is created lazily). The lane re-checks unable rows (at most three checks a record) only while the owner has it on."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

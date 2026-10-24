@@ -133,8 +133,12 @@ _V2_MAX_DEADLINE_S = 30.0
 
 
 def _owner_claim_request(payload: Any):
-    """Validate a verify_claim_owner payload into a ClaimRequest, or None. Never echoes the input back."""
-    from ...query.verify_v2 import DEFAULT_DEADLINE_S, ClaimRequest
+    """Validate a verify_claim_owner payload into a ClaimRequest, or None. Never echoes the input back.
+
+    ``read_timeout_s`` (optional; the engine's READ_TIMEOUT_S when absent, which the engine bounds to the deadline) is
+    the reader's own cap, from 0.5 s up to the request's ``deadline_s``. ``source_kind`` (optional, default
+    ``spoken``) names what the statement is: a spoken turn, a chat message, a transcript segment or a journal entry."""
+    from ...query.verify_v2 import DEFAULT_DEADLINE_S, SOURCE_KINDS, ClaimRequest
 
     if not isinstance(payload, dict) or not isinstance(payload.get("statement"), str):
         return None
@@ -152,9 +156,20 @@ def _owner_claim_request(payload: Any):
     about_others = payload.get("about_others", False)
     if not isinstance(about_others, bool):
         return None
+    extra: Dict[str, Any] = {}
+    if "read_timeout_s" in payload:
+        read_timeout = payload["read_timeout_s"]
+        if (isinstance(read_timeout, bool) or not isinstance(read_timeout, (int, float))
+                or not 0.5 <= float(read_timeout) <= float(deadline)):
+            return None
+        extra["read_timeout_s"] = float(read_timeout)
+    if "source_kind" in payload:
+        if payload["source_kind"] not in SOURCE_KINDS:
+            return None
+        extra["source_kind"] = payload["source_kind"]
     turns = [{"speaker": str(t.get("speaker") or "")[:60], "text": str(t.get("text") or "")[:1000]} for t in context]
     return ClaimRequest(statement=payload["statement"], context=turns, said_at=said_at, speaker=speaker[:60] or "owner",
-                        effort=effort, deadline_s=float(deadline), about_others=about_others)
+                        effort=effort, deadline_s=float(deadline), about_others=about_others, **extra)
 
 
 @handles("verify_claim_owner")

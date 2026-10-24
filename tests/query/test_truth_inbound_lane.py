@@ -243,6 +243,7 @@ def test_a_check_builds_the_claim_request_the_design_names(node, monkeypatch):
     assert [t["speaker"] for t in request.context] == ["owner", "Robin Example"] * 3
     assert request.speaker == "Robin Example" and request.about_others is True
     assert request.effort == "low" and request.deadline_s == 30.0
+    assert request.read_timeout_s == 20.0 and request.source_kind == "message"
     said = datetime.fromisoformat(request.said_at)
     assert said.utcoffset() is not None and abs((datetime.now(timezone.utc) - said) - timedelta(hours=1)) < timedelta(minutes=2)
 
@@ -275,7 +276,10 @@ def test_the_stored_row_has_the_designs_columns_and_cited_refs_without_text(node
     [row] = checks(node.conn)
     assert set(row) == {"check_id", "record_table", "record_id", "conversation_id", "source", "speaker_kind", "week",
                         "category", "claim_text", "verdict", "reason", "cited_refs_json", "effort", "model",
-                        "latency_ms", "created_at"}
+                        "latency_ms", "created_at", "attempts", "read_timeout_s", "checked_at", "engine_version",
+                        "engine_sha16"}
+    assert row["attempts"] == 1 and row["read_timeout_s"] == lane.LOCAL_READ_TIMEOUT_S and row["checked_at"] == row["created_at"]
+    assert (row["engine_version"], row["engine_sha16"]) == ENGINE  # the stub answered without a version: VERSION
     assert row["verdict"] == "supported" and row["claim_text"] == "The owner finished the garden shed."
     assert row["source"] == "journal" and row["category"] == "did" and row["effort"] == "low"
     assert row["model"].startswith("local:") and row["latency_ms"] == 1234.5
@@ -301,6 +305,7 @@ def test_a_row_the_gate_refuses_costs_no_model_call_and_no_pacing_slot(node, mon
     assert rows["m-short"]["verdict"] == "not_checkable" and rows["m-short"]["reason"] == "not_checkable:fragment"
     assert rows["m-question"]["reason"] == "not_checkable:question" and rows["m-question"]["model"] is None
     assert rows["m-short"]["claim_text"] is None
+    assert (rows["m-short"]["engine_version"], rows["m-short"]["engine_sha16"]) == ENGINE  # the engine's own gate
 
 
 def test_a_reader_refusal_is_not_checkable_and_counts_its_model_call(node, monkeypatch):
@@ -452,3 +457,282 @@ def test_the_real_verify_call_uses_the_owner_engine_with_a_deadline(monkeypatch)
     request.deadline_s = -1.9  # wait_for gets 0.1 s
     out = asyncio.run(lane._verify(request, chat=None))
     assert out["verdict"] == "unable" and out["reason"] == "deadline"
+
+
+# --- the reader's timeout and the source kind -------------------------------------------------------------------------
+class ReaderChat:
+    """A local-model stand-in for the real engine: records what the reader gets and refuses the row as "meta", so no
+    retrieval runs."""
+
+    name, model = "local", "stand-in"
+
+    def __init__(self):
+        self.reads = []
+
+    def __call__(self, system, user, schema, timeout, usage):
+        self.reads.append({"system": system, "timeout": timeout})
+        usage.add(1, 1)
+        return {"category": "meta", "claims": [], "not_checkable_because": ""}
+
+
+@pytest.mark.parametrize("model, expected", [("local", 20.0), ("hosted", 8.0)])
+def test_the_lanes_read_timeout_follows_its_model_setting(node, monkeypatch, model, expected):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    turn_on(node.conn, model=model)
+    recorder = Recorder()
+    monkeypatch.setattr(lane, "_verify", recorder)
+    monkeypatch.setattr(lane, "_chat_for", lambda m: SimpleNamespace(name=m, model="test"))
+    run_job({"records": [["journal_entries", "j1"]]})
+    [request] = recorder.requests
+    assert request.read_timeout_s == expected and request.deadline_s == lane.DEADLINE_S
+    assert lane.read_timeout_for(model) == expected
+
+
+def test_the_lanes_read_timeout_and_source_kind_reach_the_reader(node, monkeypatch):
+    """Through the real verify_owner_claim: the reader call gets the lane's 20 s (not the engine's 8 s) and the
+    prompt for a chat message."""
+    from topos.query import verify_v2
+
+    add_message(node.conn, "m1", "Robin says the shed roof was finished on Sunday.")
+    node.conn.commit()
+    turn_on(node.conn)
+    chat = ReaderChat()
+    monkeypatch.setattr(lane, "_chat_for", lambda m: chat)
+    out = run_job({"records": [["conversation_messages", "m1"]]})
+    assert out["checked"] == 1
+    [read] = chat.reads
+    assert 19.0 < read["timeout"] <= 20.0
+    assert read["system"] == verify_v2.read_system(True, "message") and read["system"] != verify_v2.READ_SYSTEM_WITH_OTHERS
+    [row] = checks(node.conn)
+    assert row["verdict"] == "not_checkable" and row["reason"] == "not_checkable:about_the_call_itself"
+    assert row["read_timeout_s"] == 20.0
+
+
+def test_each_source_tells_the_reader_its_kind(node, monkeypatch):
+    add_message(node.conn, "m-imessage", "I painted the shed doors blue yesterday afternoon.", from_self=True)
+    add_message(node.conn, "m-signal", "I bought new hinges for the shed doors today.", source_id="signal", from_self=True)
+    add_message(node.conn, "m-vox", "I told everyone the shed would be done by Friday.", source_id="voxterm_transcripts",
+                from_self=True, conversation_id="vox-1")
+    add_segment(node.conn, "seg-1", "I said the shed roof is finished and painted.")
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    turn_on(node.conn)
+    recorder = Recorder()
+    monkeypatch.setattr(lane, "_verify", recorder)
+    run_job({"records": [["conversation_messages", "m-imessage"], ["conversation_messages", "m-signal"],
+                         ["conversation_messages", "m-vox"], ["transcript_segments", "seg-1"], ["journal_entries", "j1"]]})
+    kinds = {r.statement.split()[1]: r.source_kind for r in recorder.requests}
+    assert kinds == {"painted": "message", "bought": "message", "told": "transcript", "said": "transcript",
+                     "finished": "journal"}
+
+
+# --- re-checks of unable rows -----------------------------------------------------------------------------------------
+def _engine():
+    import hashlib
+
+    from topos.query import verify_v2
+
+    with open(verify_v2.__file__, "rb") as source:
+        return verify_v2.VERSION, hashlib.sha256(source.read()).hexdigest()[:16]
+
+
+#: The stamp every row this build stores carries: the engine's VERSION and the sha16 of verify_v2.py.
+ENGINE = _engine()
+
+
+def test_a_row_carries_the_answers_engine_version_when_it_names_one(node, monkeypatch):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    turn_on(node.conn)
+    monkeypatch.setattr(lane, "_verify", Recorder({"I finished building the garden shed this morning.":
+                                                   {**supported(), "version": "verify-claim/v2.0-test"}}))
+    run_job({"records": [["journal_entries", "j1"]]})
+    [row] = checks(node.conn)
+    assert (row["engine_version"], row["engine_sha16"]) == ("verify-claim/v2.0-test", ENGINE[1])
+
+
+#: What the lane's checks on the local model run with (the label the lane records: the environment may name the model).
+LOCAL = ("local:" + __import__("topos.query.verify_v2_models", fromlist=["x"]).LocalChat().model, "low", 20.0)
+
+#: The table as 1.5.19 created it, before attempts / read_timeout_s / checked_at.
+DDL_1519 = """CREATE TABLE truth_checks (check_id TEXT PRIMARY KEY, record_table TEXT NOT NULL, record_id TEXT NOT NULL,
+    conversation_id TEXT, source TEXT NOT NULL, speaker_kind TEXT NOT NULL CHECK (speaker_kind IN ('owner', 'contact')),
+    week TEXT NOT NULL, category TEXT, claim_text TEXT,
+    verdict TEXT NOT NULL CHECK (verdict IN ('supported', 'no_evidence', 'unable', 'not_checkable')), reason TEXT,
+    cited_refs_json TEXT NOT NULL DEFAULT '[]', effort TEXT, model TEXT, latency_ms REAL, created_at TEXT NOT NULL)"""
+
+
+def _unable(conn, record_id="j1", *, model=LOCAL[0], effort="low", read_timeout=20.0, attempts=1, checked_at=None,
+            table="journal_entries", source="journal"):
+    """Store an unable row as a check that ran with the given model, effort and reader timeout."""
+    store.record_check(conn, lane.check_row({"table": table, "record_id": record_id, "source": source, "owner": True},
+                                            {"verdict": "unable", "reason": "model_unavailable:TimeoutError",
+                                             "category": "did", "claim": None, "timings_ms": {"total": 8500.0}},
+                                            model=model, read_timeout_s=read_timeout))
+    conn.execute("UPDATE truth_checks SET effort=?, attempts=?, checked_at=COALESCE(?, checked_at) WHERE record_id=?",
+                 (effort, attempts, checked_at, record_id))
+    conn.commit()
+
+
+def _hours_ago(hours):
+    return (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+
+
+@pytest.mark.parametrize("over, trigger", [
+    ({"model": "local:some-other-model"}, "model"),
+    ({"model": "hosted:" + "meta-llama/llama-3.3-70b-instruct"}, "model"),
+    ({"effort": "high"}, "effort"),
+    ({"read_timeout": 8.0}, "read_timeout"),
+    ({"read_timeout": None}, "read_timeout"),        # a row stored before the timeout was recorded
+    ({"checked_at": _hours_ago(7)}, "cooldown"),
+    ({"checked_at": _hours_ago(1)}, None),           # same model, effort and timeout, inside the cooldown
+    ({"attempts": 3, "model": "local:some-other-model"}, None),  # the cap holds whatever changed
+    ({"attempts": 3, "checked_at": _hours_ago(48)}, None),
+])
+def test_an_unable_row_is_due_again_on_each_trigger_and_never_past_the_cap(node, over, trigger):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    _unable(node.conn, **over)
+    state = store.check_state(node.conn, "journal_entries", "j1")
+    assert store.recheck_reason(state, LOCAL, cooldown_s=lane.RECHECK_COOLDOWN_S) == trigger
+    due = lane.recheck_due(node.conn, ["journal"], LOCAL, 10)
+    assert due == ([["journal_entries", "j1"]] if trigger else [])
+
+
+def test_only_unable_and_unlabelled_rows_are_checked_again(node):
+    for i, verdict in enumerate(("supported", "no_evidence", "not_checkable")):
+        add_journal(node.conn, f"j{i}", f"I finished building garden shed number {i} this morning.")
+        node.conn.commit()
+        result = {"verdict": "unable" if verdict == "not_checkable" else verdict,
+                  "reason": "not_checkable:fragment" if verdict == "not_checkable" else None,
+                  "claim": {"text": "The owner built a shed."}, "timings_ms": {"total": 1.0}}
+        store.record_check(node.conn, lane.check_row({"table": "journal_entries", "record_id": f"j{i}", "source": "journal",
+                                                      "owner": True}, result, model="local:old", read_timeout_s=None))
+    add_journal(node.conn, "j-labelled", "I painted both shed doors a deep blue today.")
+    node.conn.commit()
+    store.record_check(node.conn, lane.check_row(
+        {"table": "journal_entries", "record_id": "j-labelled", "source": "journal", "owner": True},
+        {"verdict": "unable", "reason": "deadline", "claim": {"text": "The owner painted the shed doors."},
+         "timings_ms": {"total": 31000.0}}, model="local:old"))
+    check_id = store.check_state(node.conn, "journal_entries", "j-labelled")["check_id"]
+    store.label_claim(node.conn, check_id, "true")
+    assert lane.recheck_due(node.conn, ["journal"], LOCAL, 10) == []
+
+
+def test_a_recheck_replaces_the_result_in_place_and_counts_the_attempt(node, monkeypatch):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    _unable(node.conn, read_timeout=8.0, checked_at=_hours_ago(1))
+    [before] = checks(node.conn)
+    turn_on(node.conn)
+    recorder = Recorder()
+    monkeypatch.setattr(lane, "_verify", recorder)
+    job_id = lane.enqueue_truth_checks(node.conn)
+    payload = json.loads(node.conn.execute("SELECT payload_json FROM pipeline_jobs WHERE job_id=?", (job_id,)).fetchone()[0])
+    assert payload == {"records": [["journal_entries", "j1"]]}
+    out = run_job(payload)
+    assert out["checked"] == 1 and out["rechecked"] == 1
+    [after] = checks(node.conn)
+    assert after["check_id"] == before["check_id"] and after["week"] == before["week"]
+    assert after["created_at"] == before["created_at"] and after["checked_at"] > before["checked_at"]
+    assert after["verdict"] == "supported" and after["claim_text"] == "The owner finished the garden shed."
+    assert after["attempts"] == 2 and after["read_timeout_s"] == 20.0 and after["model"] == LOCAL[0]
+    assert (after["engine_version"], after["engine_sha16"]) == ENGINE
+    assert recorder.requests[0].read_timeout_s == 20.0
+    assert node.conn.execute("SELECT COUNT(*) FROM truth_checks").fetchone()[0] == 1  # still one row per record
+
+
+def test_a_row_still_unable_after_its_third_check_is_left_alone(node, monkeypatch):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    _unable(node.conn, attempts=2, checked_at=_hours_ago(7))
+    turn_on(node.conn)
+    late = {"verdict": "unable", "reason": "deadline", "claim": None, "evidence": [], "timings_ms": {"total": 31000.0}}
+    monkeypatch.setattr(lane, "_verify", Recorder({"I finished building the garden shed this morning.": late}))
+    assert run_job({"records": [["journal_entries", "j1"]]})["rechecked"] == 1
+    [row] = checks(node.conn)
+    assert row["verdict"] == "unable" and row["attempts"] == store.MAX_ATTEMPTS == 3
+    later = datetime.now(timezone.utc) + timedelta(days=2)
+    assert lane.recheck_due(node.conn, ["journal"], ("hosted:another", "high", 8.0), 10, now=later) == []
+    assert lane.enqueue_truth_checks(node.conn, now=later) is None
+    week = store.weekly_stats(node.conn, 1)["weeks"][0]
+    assert week["rechecked"] == 1 and week["attempts_exhausted"] == 1 and week["unable"] == 1
+
+
+def test_a_due_row_the_job_would_skip_is_never_queued(node, monkeypatch):
+    """A re-check of a gone record or a deselected source would be skipped by the job, and each finished batch queues
+    the next: queuing it would loop."""
+    add_journal(node.conn, "j-kept", "I finished building the garden shed this morning.")
+    add_message(node.conn, "m-signal", "I bought new hinges for the shed doors today.", source_id="signal", from_self=True)
+    node.conn.commit()
+    _unable(node.conn, "j-gone", read_timeout=None)
+    _unable(node.conn, "m-signal", read_timeout=None, table="conversation_messages", source="signal")
+    _unable(node.conn, "j-kept", read_timeout=None)
+    turn_on(node.conn, sources=["journal", "imessage"])
+    assert lane.recheck_due(node.conn, ["journal", "imessage"], LOCAL, 10) == [["journal_entries", "j-kept"]]
+    node.conn.execute("UPDATE journal_entries SET content='  ' WHERE entry_id='j-kept'")
+    node.conn.commit()
+    assert lane.recheck_due(node.conn, ["journal", "imessage"], LOCAL, 10) == []
+    assert lane.enqueue_truth_checks(node.conn) is None
+
+
+def test_new_rows_go_first_and_re_checks_fill_the_batch(node, monkeypatch):
+    add_journal(node.conn, "j-old", "I finished building the garden shed this morning.", at=ago(days=3))
+    for i in range(3):
+        add_journal(node.conn, f"j-new{i}", f"I painted shed door number {i} a deep blue today.", at=ago(hours=i + 1))
+    node.conn.commit()
+    _unable(node.conn, "j-old", read_timeout=None)
+    turn_on(node.conn)
+    monkeypatch.setattr(lane, "BATCH_SIZE", 3)
+    job_id = lane.enqueue_truth_checks(node.conn)
+    payload = json.loads(node.conn.execute("SELECT payload_json FROM pipeline_jobs WHERE job_id=?", (job_id,)).fetchone()[0])
+    assert payload["records"] == [["journal_entries", "j-new0"], ["journal_entries", "j-new1"], ["journal_entries", "j-new2"]]
+    node.conn.execute("DELETE FROM pipeline_jobs")
+    monkeypatch.setattr(lane, "BATCH_SIZE", 5)
+    job_id = lane.enqueue_truth_checks(node.conn)
+    payload = json.loads(node.conn.execute("SELECT payload_json FROM pipeline_jobs WHERE job_id=?", (job_id,)).fetchone()[0])
+    assert payload["records"][-1] == ["journal_entries", "j-old"] and len(payload["records"]) == 4
+
+
+def test_a_table_the_1519_lane_created_gains_the_columns_and_its_timed_out_rows_are_due(node, monkeypatch):
+    """The owner's node holds the table without the new columns, and its timed-out rows recorded no reader timeout:
+    the first enqueue adds the columns and queues those rows (attempts 1, a timeout that differs from the lane's)."""
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.execute(DDL_1519)
+    node.conn.execute("CREATE UNIQUE INDEX idx_truth_checks_record ON truth_checks(record_table, record_id)")
+    node.conn.execute("CREATE TABLE truth_labels (label_id TEXT PRIMARY KEY, check_id TEXT NOT NULL UNIQUE, label TEXT NOT NULL, "
+                      "note TEXT, labelled_at TEXT NOT NULL)")
+    node.conn.execute("INSERT INTO truth_checks (check_id, record_table, record_id, source, speaker_kind, week, verdict, reason, "
+                      "effort, model, latency_ms, created_at) VALUES ('c1', 'journal_entries', 'j1', 'journal', 'owner', "
+                      "'2026-W43', 'unable', 'model_unavailable:TimeoutError', 'low', ?, 8500.0, ?)",
+                      (LOCAL[0], _hours_ago(1)))
+    node.conn.commit()
+    assert store.weekly_stats(node.conn, 1)["weeks"][0]["rechecked"] == 0  # reads the old table as it is
+    turn_on(node.conn)
+    job_id = lane.enqueue_truth_checks(node.conn)
+    assert job_id
+    columns = [r[1] for r in node.conn.execute("PRAGMA table_info(truth_checks)").fetchall()]
+    assert columns[-5:] == ["attempts", "read_timeout_s", "checked_at", "engine_version", "engine_sha16"]
+    [row] = checks(node.conn)
+    assert row["attempts"] == 1 and row["read_timeout_s"] is None and row["checked_at"] is None
+    assert row["engine_version"] is None and row["engine_sha16"] is None  # 1.5.19's rows: unstamped
+    monkeypatch.setattr(lane, "_verify", Recorder())
+    out = run_job({"records": [["journal_entries", "j1"]]})
+    assert out["rechecked"] == 1
+    [row] = checks(node.conn)
+    assert row["check_id"] == "c1" and row["attempts"] == 2 and row["verdict"] == "supported" and row["week"] == "2026-W43"
+    assert (row["engine_version"], row["engine_sha16"]) == ENGINE  # the re-check carries this build's stamp
+
+
+def test_a_recheck_that_lost_a_race_stores_nothing(node):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    _unable(node.conn, attempts=2)
+    row = lane.check_row({"table": "journal_entries", "record_id": "j1", "source": "journal", "owner": True}, supported(),
+                         model=LOCAL[0], read_timeout_s=20.0)
+    assert store.recheck(node.conn, row, 2) is None  # the row has two checks already: attempt 2 was someone else's
+    assert store.recheck(node.conn, row, 3)
+    assert store.recheck(node.conn, row, 3) is None  # no longer unable
+    with pytest.raises(store.TruthRequestError):
+        store.recheck(node.conn, row, 4)

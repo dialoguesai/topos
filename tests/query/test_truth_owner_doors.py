@@ -140,6 +140,30 @@ def test_weekly_stats_take_one_to_eight_weeks(node, weeks):
 def test_weekly_stats_on_a_node_without_the_tables_are_zeros(node):
     [entry] = store.weekly_stats(node.conn, 1)["weeks"]
     assert entry["checked"] == 0 and not store.tables_present(node.conn)
+    assert entry["rechecked"] == 0 and entry["attempts_exhausted"] == 0
+
+
+def _set_attempts(conn, check_id, attempts, verdict=None):
+    conn.execute("UPDATE truth_checks SET attempts=?, verdict=COALESCE(?, verdict) WHERE check_id=?",
+                 (attempts, verdict, check_id))
+    conn.commit()
+
+
+def test_weekly_stats_count_rows_checked_again_and_rows_out_of_attempts(node, week):
+    add_message(node.conn, "m-late", "I fixed the shed door hinges after lunch.", from_self=True, at=ago(hours=3))
+    add_message(node.conn, "m-later", "I swept out the whole shed before dinner.", from_self=True, at=ago(hours=2))
+    node.conn.commit()
+    late = _check(node.conn, "conversation_messages", "m-late", "imessage", True, verdict="unable", claim=None)
+    later = _check(node.conn, "conversation_messages", "m-later", "imessage", True, verdict="unable", claim=None)
+    _set_attempts(node.conn, week.them, 2)                      # answered on its second check
+    _set_attempts(node.conn, late, store.MAX_ATTEMPTS)          # still unable after the third
+    _set_attempts(node.conn, later, 2)                          # unable, one check left
+    [entry] = store.weekly_stats(node.conn, 1)["weeks"]
+    assert entry["checked"] == 5 and entry["unable"] == 2
+    assert entry["rechecked"] == 3 and entry["attempts_exhausted"] == 1
+    text = json.dumps(entry)
+    for secret in ("m-late", late, "hinges"):
+        assert secret not in text
 
 
 # --- the cards --------------------------------------------------------------------------------------------------------
@@ -329,6 +353,42 @@ def test_the_cli_prints_the_weekly_numbers_without_claim_text_and_never_writes(n
     assert node.path.read_bytes() == before
     assert "truth" in commands.main.commands
     assert CliRunner().invoke(truth_group, ["weekly", "--weeks", "9"]).exit_code != 0
+
+
+def test_the_cli_reads_a_table_an_earlier_build_created_without_changing_it(node, monkeypatch):
+    """The CLI's connection is read-only, so it cannot add the re-check columns: it reads the 1.5.19 table as it is."""
+    from click.testing import CliRunner
+
+    from topos.cli.truth_cmd import truth_group
+
+    node.conn.execute("CREATE TABLE truth_checks (check_id TEXT PRIMARY KEY, record_table TEXT NOT NULL, record_id TEXT "
+                      "NOT NULL, conversation_id TEXT, source TEXT NOT NULL, speaker_kind TEXT NOT NULL, week TEXT NOT NULL, "
+                      "category TEXT, claim_text TEXT, verdict TEXT NOT NULL, reason TEXT, cited_refs_json TEXT NOT NULL "
+                      "DEFAULT '[]', effort TEXT, model TEXT, latency_ms REAL, created_at TEXT NOT NULL)")
+    node.conn.execute("CREATE TABLE truth_labels (label_id TEXT PRIMARY KEY, check_id TEXT NOT NULL UNIQUE, label TEXT "
+                      "NOT NULL, note TEXT, labelled_at TEXT NOT NULL)")
+    node.conn.execute("INSERT INTO truth_checks (check_id, record_table, record_id, source, speaker_kind, week, verdict, "
+                      "created_at) VALUES ('c1', 'journal_entries', 'j1', 'journal', 'owner', ?, 'unable', ?)",
+                      (store.iso_week(), datetime.now(timezone.utc).isoformat()))
+    node.conn.commit()
+    monkeypatch.setattr("topos.storage.db.paths.resolve_active_database", lambda *a, **k: SimpleNamespace(path=node.path))
+    before = node.path.read_bytes()
+    result = CliRunner().invoke(truth_group, ["weekly", "--json"])
+    assert result.exit_code == 0, result.output
+    entry = json.loads(result.output)["weeks"][0]
+    assert entry["unable"] == 1 and entry["rechecked"] == 0 and entry["attempts_exhausted"] == 0
+    assert node.path.read_bytes() == before
+
+
+def test_the_cli_says_how_many_rows_were_checked_again(node, week, monkeypatch):
+    from click.testing import CliRunner
+
+    from topos.cli.truth_cmd import truth_group
+
+    _set_attempts(node.conn, week.them, 2)
+    monkeypatch.setattr("topos.storage.db.paths.resolve_active_database", lambda *a, **k: SimpleNamespace(path=node.path))
+    result = CliRunner().invoke(truth_group, ["weekly"])
+    assert result.exit_code == 0 and "checked again: 1; still unable after the last check allowed: 0" in result.output
 
 
 def test_the_cli_on_a_database_without_the_lane_prints_zeros_and_creates_nothing(node, monkeypatch):
