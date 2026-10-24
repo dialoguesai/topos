@@ -79,6 +79,9 @@ KEEP_LOG = "permissions answer keep: kept_ended=%d bound=%d dropped_oldest=%d"
 # While a kept job is in memory, a sweep runs `_clean` this often (`AnswerService._sweep`). A kept answer can stay for
 # days, and cleaned only at the next ask or fetch, it stayed in memory past its window on a node nobody asked again.
 SWEEP_SECONDS = 60
+# R-OFF1 R5: how often the sweep re-reads the kept grants' authority (`_drop_moved`): one write-gate hold of about
+# 53 ms for 100 grants on a test node (about 0.5 ms a grant), so every fifth minute rather than every sweep.
+DROP_MOVED_SECONDS = 300
 # NR179 G2 (`ANSWER_JUDGE_RESERVE_SECONDS`): with a reserve set, every support-judge call is cut off this many seconds
 # before the job's deadline, which leaves the body's close, its re-check and its receipt that much time.
 JUDGE_RELEASE_MARGIN_SECONDS = 5
@@ -367,14 +370,16 @@ class AnswerService:
         self._executor.shutdown(wait=False, cancel_futures=True)
 
     def _sweep(self):
-        """Lane OFF1N: every SWEEP_SECONDS while a kept job is in memory, drop the kept answers whose share moved
-        (`_drop_moved`, R-OFF1 L3) and `_clean`, so an answer past its window, or no longer its share's, leaves this
-        process without waiting for the next ask or fetch. Ends with the service, or once no kept job is left (decided
-        under the lock, so the next kept ask starts another). It reads the ledger, outside the queue's lock, and writes
-        nothing but this queue."""
+        """Lane OFF1N: every SWEEP_SECONDS while a kept job is in memory, `_clean`; and the first time there are kept
+        answers to check, then every DROP_MOVED_SECONDS, drop those whose share moved (`_drop_moved`, R-OFF1 L3, R5).
+        So an answer past its window, or no longer its share's, leaves this process without waiting for the next ask
+        or fetch. Ends with the service, or once no kept job is left (decided under the lock, so the next kept ask
+        starts another). It reads the ledger, outside the queue's lock, and writes nothing but this queue."""
+        moved_at = None
         try:
             while not self._closed.wait(SWEEP_SECONDS):
-                self._drop_moved()
+                if (moved_at is None or time.monotonic() - moved_at >= DROP_MOVED_SECONDS) and self._drop_moved():
+                    moved_at = time.monotonic()
                 with self._lock:
                     self._clean(self.clock())
                     if not any(job.keep_until is not None for job in self._jobs.values()):
@@ -456,51 +461,84 @@ class AnswerService:
     def _clean(self, now):
         """Drop every ended job past its keep window (`keep_end`), delivered or not: the only exit for a delivered
         body, with a final refusal and a moved authority. Run under the lock by every ask and fetch, and by the sweep
-        while a kept job is in memory. Then (R-OFF1 L3) hold no more than KEPT_ENDED_BOUND kept answers: the oldest
-        leave first. A live answer, and a deferred kept job (it holds no body), is not counted."""
-        kept = []
+        while a kept job is in memory. Then (R-OFF1 L3, R4) hold no more than KEPT_ENDED_BOUND kept answers: the grant
+        holding the most gives way first (a tie: the grant whose oldest is older), its oldest first, so one share's
+        volume never pushes out another share's. A live answer, and a deferred kept job (it holds no body), is not
+        counted."""
+        kept: dict = {}
+        total = 0
         for order, (key, job) in enumerate(list(self._jobs.items())):   # in the order asked: ties go to the first
             if job.state != "ended" or job.ended_at is None:
                 continue
             if now >= keep_end(job):
                 self._drop(key)
             elif job.keep_until is not None and not job.deferred:
-                kept.append((job.ended_at, job.accepted_at, order, key))
-        over = len(kept) - KEPT_ENDED_BOUND
+                kept.setdefault(job.grant_id, []).append(((job.ended_at, job.accepted_at, order), key))
+                total += 1
+        over = total - KEPT_ENDED_BOUND
         if over > 0:
-            for *_age, key in sorted(kept)[:over]:
+            for held in kept.values():
+                held.sort()
+            for _ in range(over):
+                grant_id = min(kept, key=lambda grant: (-len(kept[grant]), kept[grant][0][0]))
+                _age, key = kept[grant_id].pop(0)
                 self._drop(key)
-            _log.warning(KEEP_LOG, len(kept), KEPT_ENDED_BOUND, over)
+                if not kept[grant_id]:
+                    del kept[grant_id]
+            _log.warning(KEEP_LOG, total, KEPT_ENDED_BOUND, over)
 
     def _drop(self, key):
         job = self._jobs.pop(key)
         job.question = None
         job.body = None
 
-    def _drop_moved(self):
+    def _grant_authorities(self, grant_ids) -> dict:
+        """R-OFF1 R5: each grant's current authority and answer mode, read in one hold of the write gate and one ledger
+        transaction (the protection floor synced once), so a sweep holds the gate once however many shares keep
+        answers. None for a grant the ledger refuses (ended, revoked, out of its validity). Raises when the ledger
+        cannot be read at all."""
+        ledger, protocol = self.runtime.protocol.ledger, self.runtime.protocol
+        found: dict = {}
+        with with_db_write():
+            with ledger._transaction() as db:
+                protocol._sync_protection(db)
+                now = self.clock()
+                for grant_id in grant_ids:
+                    try:
+                        authority, policy = ledger._authority(db, grant_id, now)
+                    except PolicyError:
+                        found[grant_id] = None
+                        continue
+                    found[grant_id] = (authority, effective_mode(policy,
+                                                                 frontend_client_id=protocol.frontend_client_id))
+        return found
+
+    def _drop_moved(self) -> bool:
         """R-OFF1 L3: drop the kept answers whose share's authority or answer mode is no longer the one they were
         written under, as their next fetch would, since that fetch may never come. A grant the ledger refuses (ended,
         revoked, out of its validity) has moved. A ledger that cannot be read now decides nothing: the next sweep, or
-        a fetch, does. The ledger is read outside the queue's lock, one read per grant."""
+        a fetch, does. The ledger is read outside the queue's lock, every grant in one gate hold (R5). True when it
+        read the ledger (there were kept answers to check)."""
         grants: dict = {}
         with self._lock:
             for key, job in self._jobs.items():
                 if job.state == "ended" and job.keep_until is not None and not job.deferred:
                     grants.setdefault(job.grant_id, []).append(key)
-        for grant_id, keys in grants.items():
-            try:
-                authority, policy = self._grant_authority(grant_id)
-                mode = effective_mode(policy, frontend_client_id=self.runtime.protocol.frontend_client_id)
-            except PolicyError:
-                authority = mode = None
-            except Exception:  # noqa: BLE001 -- unreadable now; nothing is dropped on a guess
-                continue
-            with self._lock:
+        if not grants:
+            return False
+        try:
+            current = self._grant_authorities(sorted(grants))
+        except Exception:  # noqa: BLE001 -- unreadable now; nothing is dropped on a guess
+            return True
+        with self._lock:
+            for grant_id, keys in grants.items():
+                read = current.get(grant_id)
                 for key in keys:
                     job = self._jobs.get(key)
-                    if job is not None and (authority is None or mode != job.mode
-                                            or not same_answer_authority(authority, job.admitted_authority)):
+                    if job is not None and (read is None or read[1] != job.mode
+                                            or not same_answer_authority(read[0], job.admitted_authority)):
                         self._drop(key)
+        return True
 
     def submit(self, *, envelope, payload, request_id, owner_account_words=frozenset(),
                accepted_version=LEGACY_ACCEPTED_VERSION, keep_until=None, kept_question=None):

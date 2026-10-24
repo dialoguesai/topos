@@ -445,8 +445,8 @@ def test_a_kept_ask_carries_its_window_and_its_question_id_together(answers_node
     assert service._jobs == {} and _questions(node) == 0
 
 
-def _job(number, *, keep_until, ended_at, deferred=False):
-    return Job(f"ans-kept-{number}", f"req-{number}", "grant-a", "assignment-a", "actor-1", "client-2", None, "only",
+def _job(number, *, keep_until, ended_at, deferred=False, grant="grant-a"):
+    return Job(f"ans-kept-{number}", f"req-{number}", grant, "assignment-a", "actor-1", "client-2", None, "only",
                None, "hash", 1, state="ended", ended_at=ended_at, keep_until=keep_until, deferred=deferred)
 
 
@@ -482,6 +482,28 @@ def test_over_five_hundred_kept_answers_the_oldest_leave(caplog):
         assert keep_lines()[-1] == "permissions answer keep: kept_ended=503 bound=500 dropped_oldest=3"
         assert not any(f"ans-kept-{number}" in service._jobs for number in range(1, 4))
         assert all(f"ans-kept-{number}" in service._jobs for number in range(500, 525))
+    finally:
+        service.close()
+
+
+def test_over_the_bound_the_share_holding_the_most_gives_way_first(caplog):
+    """R-OFF1 R4 (WS-OFF, 24 Oct): one share's volume never pushes out another share's kept answers. Over the bound,
+    the grant holding the most kept answers loses its oldest first; a tie goes to the grant whose oldest is older."""
+    service = AnswerService(SimpleNamespace(), clock=lambda: 100)
+    try:
+        service._jobs["ans-kept-b"] = _job(-1, keep_until=DAY, ended_at=0, grant="grant-b")    # the oldest of all
+        for number in range(500):
+            service._jobs[f"ans-kept-{number}"] = _job(number, keep_until=DAY, ended_at=1 + number % 90)
+        service._clean(100)
+        assert "ans-kept-b" in service._jobs and len(service._jobs) == 500
+        assert "ans-kept-0" not in service._jobs                      # grant-a's oldest (ended at 1, asked first)
+        service._jobs.clear()
+        for number in range(250):
+            service._jobs[f"ans-a-{number}"] = _job(number, keep_until=DAY, ended_at=50, grant="grant-a")
+            service._jobs[f"ans-b-{number}"] = _job(1000 + number, keep_until=DAY, ended_at=40, grant="grant-b")
+        service._jobs["ans-c"] = _job(5000, keep_until=DAY, ended_at=10, grant="grant-c")
+        service._clean(100)                                           # a tie at 250: grant-b's oldest is older
+        assert "ans-b-0" not in service._jobs and "ans-a-0" in service._jobs and "ans-c" in service._jobs
     finally:
         service.close()
 
@@ -575,6 +597,7 @@ def test_the_sweep_drops_a_kept_answer_whose_share_moved(answers_node, service, 
     """R-OFF1 L3: a kept answer whose share's authority moved (narrowed, re-granted) leaves memory at the next sweep,
     not only when its window ends; its next fetch would have refused and dropped it, and that fetch may never come."""
     monkeypatch.setattr(answer_release, "SWEEP_SECONDS", 0.02)
+    monkeypatch.setattr(answer_release, "DROP_MOVED_SECONDS", 0.02)
     node = answers_node
     answer_id = _ask(node, service, keep_until=node.now[0] + DAY)
     job = _ended(service, answer_id)
@@ -587,6 +610,7 @@ def test_the_sweep_drops_a_kept_answer_whose_share_moved(answers_node, service, 
 def test_the_sweep_drops_a_kept_answer_whose_share_ended(answers_node, service, monkeypatch):
     from tests.permissions_v2.message_search_harness import owner
     monkeypatch.setattr(answer_release, "SWEEP_SECONDS", 0.02)
+    monkeypatch.setattr(answer_release, "DROP_MOVED_SECONDS", 0.02)
     node = answers_node
     answer_id = _ask(node, service, keep_until=node.now[0] + DAY)
     _ended(service, answer_id)
@@ -597,21 +621,43 @@ def test_the_sweep_drops_a_kept_answer_whose_share_ended(answers_node, service, 
 
 def test_a_sweep_that_cannot_read_the_ledger_keeps_the_answer_for_the_next(answers_node, service, monkeypatch):
     monkeypatch.setattr(answer_release, "SWEEP_SECONDS", 0.02)
+    monkeypatch.setattr(answer_release, "DROP_MOVED_SECONDS", 0.02)
     node = answers_node
     answer_id = _ask(node, service, keep_until=node.now[0] + DAY)
     _ended(service, answer_id)
-    read = service._grant_authority
+    read = service._grant_authorities
     reads = []
 
-    def unreadable(grant_id):
-        reads.append(grant_id)
+    def unreadable(grant_ids):
+        reads.append(list(grant_ids))
         raise RuntimeError("the ledger could not be read")
 
-    monkeypatch.setattr(service, "_grant_authority", unreadable)
+    monkeypatch.setattr(service, "_grant_authorities", unreadable)
     assert not _gone(service, answer_id, seconds=0.3) and reads   # read and failed, many times: kept
-    monkeypatch.setattr(service, "_grant_authority", read)
+    monkeypatch.setattr(service, "_grant_authorities", read)
     assert _fetch(node, service, answer_id)["outcome"] == "answered"
     assert service._sweeper is not None and service._sweeper.is_alive()
+
+
+def test_the_sweep_reads_the_ledger_once_per_sweep_and_rereads_it_only_every_five_minutes(answers_node, service,
+                                                                                         monkeypatch):
+    """R-OFF1 R5: every kept grant's authority comes from one read (one write-gate hold), at the first sweep and then
+    every DROP_MOVED_SECONDS (300), while `_clean` keeps its own SWEEP_SECONDS."""
+    assert answer_release.DROP_MOVED_SECONDS == 300
+    monkeypatch.setattr(answer_release, "SWEEP_SECONDS", 0.02)
+    node = answers_node
+    reads = []
+    read = service._grant_authorities
+
+    def counted(grant_ids):
+        reads.append(list(grant_ids))
+        return read(grant_ids)
+
+    monkeypatch.setattr(service, "_grant_authorities", counted)
+    _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))
+    _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))
+    time.sleep(0.4)                                               # many sweeps
+    assert reads == [["grant-search"]]                            # one read, of both answers' one grant
 
 
 def test_closing_the_service_ends_its_sweep(answers_node, service):
