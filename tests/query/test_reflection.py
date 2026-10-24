@@ -399,3 +399,66 @@ def test_the_two_packs_ship_disabled_and_load(node):
     assert packs["moments.joy"].role_policy == "authored_only" and packs["moments.tension"].net_subject == "deny"
     rows = dict(node.conn.execute("SELECT pack_id, enabled FROM pack_registry WHERE pack_id LIKE 'moments.%'").fetchall())
     assert rows == {"moments.joy": 0, "moments.tension": 0}
+
+
+# --- people: runner labels, entity ids and handles never reach a card ------------------------------------------------
+def add_entity(conn, entity_id, name, *, is_self=False):
+    now = "2026-10-01T00:00:00Z"
+    conn.execute(
+        "INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, is_self, created_at, updated_at) "
+        "VALUES (?, 'person', ?, ?, ?, ?, ?)", (entity_id, name, name.lower(), 1 if is_self else 0, now, now))
+    conn.commit()
+
+
+LEAKY = ("id:", "key:", "ent_", "+1555", "@example")
+
+
+def _texts(conn):
+    return [" ".join(str(x or "") for x in r) for r in conn.execute(
+        "SELECT text, observation, interpretation, person FROM reflection_candidates")]
+
+
+def test_runner_labels_resolve_to_names_or_are_left_out(node):
+    """Measured on 1.5.23 (24 Oct): commitments bound to the message's recipient read "you promised id:ent_<hex>"."""
+    conn = node.conn
+    enable(conn, "obligations.commitments", "relationships.social")
+    add_entity(conn, "ent_0a1b2c3d4e5f6071", "Wren Example")
+    add_entity(conn, "ent_ffff0000aaaa1111", "The Owner", is_self=True)
+    add_contact(conn, "+15550000002", "Sol Example", contact_id="c2")
+    add_journal(conn, "j-p", "Told them I'd send it.", at=day(30))
+    conn.commit()
+    r = [{"table": "journal_entries", "record_id": "j-p", "role": "authored", "date": "2026-09-24"}]
+    promise = lambda who, k: add_fact(conn, "obligations.commitments", "commit.made", {
+        "counterparty": who, "direction": "owed_by_owner", "description": f"send the thing {k}", "status": "open"},
+        at=day(30), refs=r, key=f"commit.made:{k}")
+    promise("id:ent_0a1b2c3d4e5f6071", "known")       # resolves through the spine
+    promise("id:ent_9999999999999999", "unknown")     # an entity the spine does not have
+    promise("key:+15550000002", "contact")            # resolves through the owner's contacts
+    promise("key:imessage:+15550000003", "handle")    # a key nobody named
+    promise("id:ent_ffff0000aaaa1111", "self")        # the owner's own entity
+    promise("+15550000004", "bare-handle")            # a raw handle the model copied
+    promise("ent_0a1b2c3d4e5f6071", "bare-id")        # a bare entity id
+    store.sweep(conn, now=NOW)
+    rows = {k: (person, text) for k, person, text in conn.execute(
+        "SELECT candidate_key, person, text FROM reflection_candidates WHERE rule='open_promise'")}
+    by = {k.rsplit(":", 1)[-1]: v for k, v in rows.items()}
+    assert by["known"][0] == "Wren Example" and "you promised Wren Example" in by["known"][1]
+    assert by["bare-id"][0] == "Wren Example"
+    assert by["contact"][0] == "Sol Example"
+    for k in ("unknown", "handle", "self", "bare-handle"):
+        assert by[k][0] is None and "you promised someone" in by[k][1], k
+    for text in _texts(conn):
+        assert not any(s in text for s in LEAKY), text
+
+
+def test_a_label_in_free_text_is_scrubbed_anyway(node):
+    conn = node.conn
+    enable(conn, "moments.joy")
+    add_journal(conn, "j-x", "Great dinner.", at=day(3))
+    conn.commit()
+    add_fact(conn, "moments.joy", "moment.peak", {"kind": "connected", "description": "dinner with id:ent_0a1b2c3d4e5f6071 and key:+15550000009",
+             "with": ["id:ent_0a1b2c3d4e5f6071"]}, at=day(3),
+             refs=[{"table": "journal_entries", "record_id": "j-x", "role": "authored", "date": "2026-10-21"}])
+    store.sweep(conn, now=NOW)
+    texts = _texts(conn)
+    assert texts and all(not any(s in t for s in LEAKY) for t in texts), texts
