@@ -4,7 +4,7 @@
 # the other person felt or did beyond the owner's words (operating principle 4, relational
 # privacy). Ships DISABLED; enabling it is the owner's call.
 pack: moments.tension
-version: 0.1.0
+version: 0.1.1
 status: draft
 title: "Tensions, misunderstandings and unresolved experiences"
 author: topos
@@ -35,13 +35,15 @@ predicates:
       with: person_ref                # the other party as the owner named them; empty for a tension with no one
       context: {enum: [relationship, work, family, health, money, self, other]}
       description: string
-      date: date_or_approx
       status: {enum: [open, processed, resolved, let_go, unknown]}
     note: >
       The OWNER's account only. `description` is what the owner said happened and how it
       sat with them; it never contains a claim about the other person's feelings or motives
-      beyond the owner's quoted words. `status` comes from the record ("we talked it out"
-      resolved, "I've made my peace" let_go); silence is open, never resolved.
+      beyond the owner's quoted words. "I keep going back and forth", "can't decide", "can't land
+      it" -> undecided_decision; "still haven't told", "keep meaning to bring up" -> avoided_conversation;
+      "again", "third time" -> recurring_frustration. `status` comes from the record ("we talked it
+      out" resolved, "I've made my peace" let_go); silence is open, never resolved. Dates go in
+      occurrence_date, never in the value.
   - name: moment.tension_resolved
     value_type: structured
     cardinality: multi
@@ -53,8 +55,7 @@ predicates:
       with: person_ref
       description: string
       outcome: {enum: [talked_through, reconciled, decided, let_go, accepted]}
-      date: date_or_approx
-    note: "the closing half, so the open ledger can retire what was worked through without losing its history (RF-053, RF-078)"
+    note: "the closing half: 'talked it all out', 'we're good', 'made up', 'finally decided', 'let it go' ARE moment.tension_resolved with the matching outcome; extract them even when the original tension is not in this record. It retires what was worked through without losing its history (RF-053, RF-078)"
 
 cross_refs:
   - "relationships.social — owns rel.relationship_event(conflict|reconciled); this pack owns the owner's experience and its status"
@@ -70,6 +71,8 @@ guidance:
     a decision that will not settle, something hard to accept. The record must name the
     situation; a mood with no situation is not a tension.
   abstention:
+    - "A FIRST-PERSON UNRESOLVED SITUATION IS A TENSION: 'I keep going back and forth on the offer', 'still haven't told my dad', 'got into it again about the schedule' are moment.tension. Extract them; do not wait for the owner to call it a problem."
+    - "A FIRST-PERSON CLOSING IS A RESOLUTION: 'talked it all out, we're good' is moment.tension_resolved (talked_through). Extract it."
     - "No situation, no tension: 'rough week' alone abstains; 'rough week, the thing with Dana is still hanging' is a tension."
     - "Only the owner's words about their own experience; never derive a tension from what the other person wrote."
     - "Never assert the other person's feelings, intent or fault; `description` quotes or paraphrases the owner only."
