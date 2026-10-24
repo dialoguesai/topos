@@ -1,0 +1,124 @@
+# Reflection program (24 Oct 2026): the difficult half of "moments worth bringing up again".
+# OWNER-SUBJECT: a tension is the owner's experience of it. The other party rides inside the
+# value as a person_ref and the pack records ONLY the owner's account; it never asserts what
+# the other person felt or did beyond the owner's words (operating principle 4, relational
+# privacy). Ships DISABLED; enabling it is the owner's call.
+pack: moments.tension
+version: 0.1.0
+status: draft
+title: "Tensions, misunderstandings and unresolved experiences"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal          # health.mental stays its own special-class pack; this one records situations, not states of mind
+role_policy: authored_only           # only the owner's own account; a contact's "you were angry" is not an owner fact
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "the owner describing a conflict, misunderstanding, disappointment, avoided conversation or recurring frustration"
+    - "a decision the owner keeps revisiting; something the owner finds hard to accept; feeling misunderstood"
+    - "the closing half: made up, talked it through, let it go, decided"
+  exemplars: ["we got into it", "still bothers me", "I keep going back and forth", "I should talk to him about",
+              "haven't brought it up", "didn't go the way I hoped", "I don't think she gets it", "can't stop thinking about",
+              "same thing again", "hard to accept", "we talked it out", "I let it go", "finally decided", "made up"]
+
+predicates:
+  - name: moment.tension
+    value_type: structured
+    cardinality: multi
+    temporal: episodic
+    altitude: stated
+    key_fields: [kind, with, description]
+    event_identity: "windowed:30"     # the same disagreement retold inside a month is one tension; a new month is a recurrence worth counting
+    value_schema:
+      kind: {enum: [conflict, misunderstanding, disappointment, avoided_conversation, recurring_frustration, undecided_decision, hard_to_accept, felt_misunderstood, weighing_on_me, other]}
+      with: person_ref                # the other party as the owner named them; empty for a tension with no one
+      context: {enum: [relationship, work, family, health, money, self, other]}
+      description: string
+      date: date_or_approx
+      status: {enum: [open, processed, resolved, let_go, unknown]}
+    note: >
+      The OWNER's account only. `description` is what the owner said happened and how it
+      sat with them; it never contains a claim about the other person's feelings or motives
+      beyond the owner's quoted words. `status` comes from the record ("we talked it out"
+      resolved, "I've made my peace" let_go); silence is open, never resolved.
+  - name: moment.tension_resolved
+    value_type: structured
+    cardinality: multi
+    temporal: episodic
+    altitude: stated
+    key_fields: [with, description]
+    event_identity: "windowed:30"
+    value_schema:
+      with: person_ref
+      description: string
+      outcome: {enum: [talked_through, reconciled, decided, let_go, accepted]}
+      date: date_or_approx
+    note: "the closing half, so the open ledger can retire what was worked through without losing its history (RF-053, RF-078)"
+
+cross_refs:
+  - "relationships.social — owns rel.relationship_event(conflict|reconciled); this pack owns the owner's experience and its status"
+  - "obligations.commitments — an avoided conversation the owner PROMISED to have is also commit.made"
+  - "health.mental — states of mind (stress, low mood) stay there under the special class; this pack records situations"
+  - "aspirations.goals — an undecided decision about a goal cross-refs the goal"
+  - "moments.joy — the positive half"
+
+guidance:
+  definitions: >
+    A tension is a situation the owner described as unresolved or uncomfortable: a conflict,
+    a misunderstanding, a disappointment, a conversation not had, a frustration that recurs,
+    a decision that will not settle, something hard to accept. The record must name the
+    situation; a mood with no situation is not a tension.
+  abstention:
+    - "No situation, no tension: 'rough week' alone abstains; 'rough week, the thing with Dana is still hanging' is a tension."
+    - "Only the owner's words about their own experience; never derive a tension from what the other person wrote."
+    - "Never assert the other person's feelings, intent or fault; `description` quotes or paraphrases the owner only."
+    - "Never infer status=resolved from silence; resolution needs the record to say so."
+    - "Third-party conflicts the owner merely reports ('my sister and her boss are fighting') are not the owner's tensions."
+    - "Venting about public figures, products or weather is not a tension."
+
+revision:
+  supersedes_on: {moment.tension: [status, description]}
+  noop_when: "re-statement within 30d at equal status"
+
+synthesis:
+  - kind: reconciliation
+    description: >
+      moment.tension_resolved SHOULD close the matching moment.tension (same `with`,
+      overlapping description terms) via supersession to status resolved or let_go.
+  - kind: pattern
+    predicate: moment.tension
+    description: "the same kind of tension recurring across contexts or months (RF-034, RF-055, RF-063, RF-079)"
+    inputs: [moment.tension]
+    min_evidence: 3
+    subject: owner
+    disclosure: owner_only
+    calibration: {method: own_baseline}
+
+consumers: [assistant_context]
+
+eval:
+  gold:
+    - {text: "Mark and I got into it again about the schedule. Third time this month and it still bothers me.",
+       expect: {predicate: moment.tension, kind: recurring_frustration, status: open}}
+    - {text: "I keep going back and forth on whether to take the Lisbon offer. I can't land it.",
+       expect: {predicate: moment.tension, kind: undecided_decision, status: open}}
+    - {text: "I still haven't told my dad about the move. Every call I almost do.",
+       expect: {predicate: moment.tension, kind: avoided_conversation, status: open}}
+    - {text: "Talked it all out with Priya last night. We're good.",
+       expect: {predicate: moment.tension_resolved, outcome: talked_through}}
+  negative_controls:
+    - {text: "Rough week.",
+       expect_none: true, why: "a mood with no situation; health.mental territory at most"}
+    - {text: "You were really angry at dinner.",
+       expect_none: true, why: "the contact's reading of the owner, not the owner's own account"}
+    - {text: "My sister and her boss are at war again.",
+       expect_none: true, why: "a third party's conflict the owner reports, not the owner's tension"}
+    - {text: "This weather is unbearable.",
+       expect_none: true, why: "venting with no interpersonal or personal situation"}
+  calibration: {min_conf_for_assert: 0.6, ece_max: 0.15}
+
+decisions:
+  - "2026-10-24: owner-subject; the other party is a person_ref inside the value and the description is the owner's account only."
+  - "2026-10-24: personal, not special: situations, not states of mind; mood lives in health.mental under its own opt-in."
+  - "2026-10-24: ships DISABLED; the reflection catalog (RF01) names it, the owner enables it."

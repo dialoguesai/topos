@@ -1,0 +1,120 @@
+# Reflection program (24 Oct 2026): the positive half of "moments worth bringing up again".
+# OWNER-SUBJECT on purpose: a peak moment is the owner's experience; the people who were
+# there ride inside the value as person_refs (the obligations.commitments precedent), so
+# no net_subject and no outward gate. Ships DISABLED like every non-Wave-A pack; enabling
+# it is the owner's call on the Signal > derivation packs screen.
+pack: moments.joy
+version: 0.1.0
+status: draft
+title: "Moments of joy, love and fulfillment"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_only          # a feeling is the owner's to say; a contact's "you looked so happy" is not a fact about the owner
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "the owner describing a moment that felt good: alive, happy, loved, connected, proud, grateful, at peace, in awe"
+    - "a day, evening, trip, conversation or achievement the owner wants to remember; thanks to someone who made a difference"
+  exemplars: ["best day", "so happy", "felt so alive", "loved every minute", "I'm so grateful", "made my week",
+              "couldn't stop smiling", "felt at home", "we finally", "proud of", "one of those nights", "thank you for",
+              "meant a lot", "I needed that", "perfect evening"]
+
+predicates:
+  - name: moment.peak
+    value_type: structured
+    cardinality: multi
+    temporal: episodic
+    altitude: stated
+    key_fields: [kind, description]
+    event_identity: "windowed:7"      # one evening retold three times that week is one moment
+    value_schema:
+      kind: {enum: [alive, happy, loved, connected, fulfilled, accomplished, optimistic, small_pleasure, awe, at_peace, other]}
+      description: string
+      with: person_refs               # who was there, as the owner named them (may be empty)
+      where: entity_ref_or_string
+      activity: string
+      date: date_or_approx
+      intensity: {enum: [mild, strong, peak]}
+    note: >
+      STATED feeling only: the owner says, in their own words, that the moment felt good.
+      The record must carry both the feeling and what happened; a bare "great" with no
+      event is a mention, not a moment. `intensity` follows the owner's language
+      ("nice" mild, "so happy" strong, "best day of my year" peak), never the extractor's.
+  - name: moment.gratitude
+    value_type: structured
+    cardinality: multi
+    temporal: episodic
+    altitude: stated
+    key_fields: [person, what]
+    event_identity: "windowed:30"
+    value_schema:
+      person: person_ref
+      what: string
+      acknowledged: boolean           # true when the record IS the thanks, or says it was given
+      date: date_or_approx
+    note: >
+      Someone made a difference, in the owner's words. `acknowledged` is read from the
+      record only (a message of thanks to that person, or "I told her how much it meant");
+      silence is unknown, never false.
+
+cross_refs:
+  - "life.events — owns the milestone itself; this pack owns how it FELT when the owner said so"
+  - "aspirations.goals — owns the goal and its milestone; moment.peak(accomplished) is the owner's pride in it"
+  - "relationships.social — owns who people are; this pack carries them only as the company kept"
+  - "moments.tension — the difficult half; a moment can close a tension (reconciled) and both packs record their side"
+
+guidance:
+  definitions: >
+    A moment is an experience the owner described as good, with enough of what happened
+    to reopen it later (when, where, with whom, doing what). Gratitude is a person the
+    owner credited with making a difference.
+  abstention:
+    - "No feeling stated by the owner, no moment: 'went to the concert' is an event, 'the concert was the best night I've had all year' is a moment."
+    - "Someone else's description of the owner's happiness is not the owner's statement (role_policy authored_only)."
+    - "Never infer `with` from the conversation's participants; only people the record names as present."
+    - "Sarcasm and idiom ('great, another meeting') are not moments; when in doubt, abstain."
+    - "A hope ('this is going to be amazing') is not a moment; it belongs to aspirations.goals until it happened."
+
+revision:
+  supersedes_on: {moment.peak: [intensity, description]}
+  noop_when: "retelling within 7d at equal or lower intensity"
+
+synthesis:
+  - kind: pattern
+    predicate: moment.peak
+    description: "people, places and activities that recur across peak moments (RF-042, RF-019, RF-039)"
+    inputs: [moment.peak]
+    min_evidence: 3
+    subject: owner
+    disclosure: owner_only
+    calibration: {method: own_baseline}
+
+consumers: [assistant_context]
+
+eval:
+  gold:
+    - {text: "Honestly last night with the band was one of those nights. I haven't felt that alive in months.",
+       expect: {predicate: moment.peak, kind: alive, intensity: strong}}
+    - {text: "Dinner at Nadia's turned into four hours of talking. I left feeling completely at home.",
+       expect: {predicate: moment.peak, kind: connected, intensity: strong}}
+    - {text: "Thank you for driving out on Sunday. It meant more than you know.",
+       expect: {predicate: moment.gratitude, acknowledged: true}}
+    - {text: "Can't believe the paper finally got accepted. Proud of this one.",
+       expect: {predicate: moment.peak, kind: accomplished}}
+  negative_controls:
+    - {text: "Went to the concert on Friday, got home late.",
+       expect_none: true, why: "an event with no stated feeling — life.events or nothing, not a moment"}
+    - {text: "You looked so happy at the party!",
+       expect_none: true, why: "the contact's reading of the owner, not the owner's own statement"}
+    - {text: "Great, another all-hands at 8am.",
+       expect_none: true, why: "sarcasm; no good moment happened"}
+    - {text: "This trip is going to be amazing.",
+       expect_none: true, why: "anticipation, not an experience; aspirations.goals territory"}
+  calibration: {min_conf_for_assert: 0.6, ece_max: 0.15}
+
+decisions:
+  - "2026-10-24: owner-subject by design; company rides as person_refs inside the value; no outward gate."
+  - "2026-10-24: authored_only, because a feeling attributed by someone else is not the owner's fact."
+  - "2026-10-24: ships DISABLED; the reflection catalog (RF01) names it, the owner enables it."
