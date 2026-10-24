@@ -91,9 +91,18 @@ def apply(settings: Any) -> dict:
     """Hold ``settings`` (``parse`` decides) from now on, and tell the listeners. Returns what is held."""
     parsed = parse(settings)
     with _lock:
-        _current.clear()
-        _current.update(parsed)
-        listeners = list(_listeners)
+        listeners = _hold(parsed)
+    return _tell(listeners, parsed)
+
+
+def _hold(parsed: dict) -> list:
+    """Under ``_lock``: hold ``parsed``; the listeners to tell once the lock is released."""
+    _current.clear()
+    _current.update(parsed)
+    return list(_listeners)
+
+
+def _tell(listeners: list, parsed: dict) -> dict:
     for listener in listeners:
         try:
             listener()
@@ -113,11 +122,12 @@ def put(payload: Any) -> dict:
     if type(seq) is not int:
         raise ValueError("away_config_invalid")
     parsed = parse({key: payload[key] for key in DEFAULT})
-    with _lock:
+    with _lock:   # R-OFF2 R2.1: the seq check and the hold in one step, so crossing pushes end on the higher seq
         if _seq is not None and seq < _seq:
             return dict(_current)   # an older push that arrived late: the newer one stands
         _seq = seq
-    return apply(parsed)
+        listeners = _hold(parsed)
+    return _tell(listeners, parsed)
 
 
 def reset() -> dict:
@@ -125,4 +135,5 @@ def reset() -> dict:
     global _seq
     with _lock:
         _seq = None
-    return apply(DEFAULT)
+        listeners = _hold(dict(DEFAULT))
+    return _tell(listeners, dict(DEFAULT))

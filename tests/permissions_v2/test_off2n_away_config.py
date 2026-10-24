@@ -178,3 +178,38 @@ def test_it_is_owner_only_off_the_loop_and_the_capability_says_one():
     assert registration.build_engine_capabilities()["permissions_v2_away_config"] == 1 == away_config.CAPABILITY_VERSION
     snapshot = json.loads(open("topos/protocol/handled_message_types.json", encoding="utf-8").read())
     assert PUT in snapshot["handled_message_types"] and PUT in snapshot["owner_only_message_types"]
+
+
+def test_two_concurrent_pushes_end_on_the_higher_seq_whatever_the_interleaving(monkeypatch):
+    """R-OFF2 R2.1: the seq check and the hold are one step. The probe parks the older push's thread right after its
+    first pass through the lock, lets the newer push run to the end, then lets the older one finish."""
+    import threading
+
+    parked, newer_done = threading.Event(), threading.Event()
+    older_thread = []
+
+    class ParkingLock:
+        def __init__(self):
+            self._lock, self._parked_once = threading.Lock(), False
+
+        def __enter__(self):
+            self._lock.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self._lock.release()
+            if threading.current_thread() in older_thread and not self._parked_once:
+                self._parked_once = True
+                parked.set()
+                newer_done.wait(5)
+            return False
+
+    monkeypatch.setattr(away_config, "_lock", ParkingLock())
+    older = threading.Thread(target=lambda: away_config.put(push(FIRST, 1)))
+    older_thread.append(older)
+    older.start()
+    assert parked.wait(5)
+    away_config.put(push(EVEN, 2))
+    newer_done.set()
+    older.join(5)
+    assert away_config.current() == EVEN
