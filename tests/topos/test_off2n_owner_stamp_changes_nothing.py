@@ -7,7 +7,11 @@ owner as ``acting_user``) and once unstamped, through the client and the relay d
 - the reply, the provider and model the host was asked for, the request body it received, and the log lines (times
   and durations masked) are the same; so are the refusals (an unusable context size, a model host that fails);
 - what differs is the lane class (a kept slot for the stamped frame, a shared one for the unstamped) and the yield
-  (the stamped frame counts as the owner's in flight while it runs, so background work waits for it).
+  (the stamped frame counts as the owner's in flight while it runs, so background work waits for it);
+- and, documented (R-OFF2 F1, contract §E revised): where the node cannot verify the stamp as the owner's — no pinned
+  key, another key, a stamp issued outside its window, a bound node with a stamp naming another account — the stamped
+  frame is refused ``owner_mode_required`` where the unstamped one is answered. The control plane's one unstamped retry
+  on that refusal relies on exactly this.
 
 Keys are made at run time; every id and text here is invented. No model is called.
 """
@@ -24,7 +28,7 @@ from topos.permissions_v2 import answer_gate, away_config
 from topos.permissions_v2.owner_lane import GENERAL, RESERVED
 from topos.services.llm import openai as llm_openai
 from tests.services.test_ollama_generate_failure_logging import _FakeAdapter, _patch_post, _patch_stream, _Resp
-from tests.topos.test_nr183_owner_lane import Node, OWNER, stamped
+from tests.topos.test_nr183_owner_lane import ANOTHER_KEY, Node, OWNER, SOMEONE_ELSE, bound, stamped  # noqa: F401
 from tests.topos.test_nr183_owner_lane import pinned_key  # noqa: F401 -- autouse: the stamp key, no switch set
 
 PAYLOAD = {"provider": "ollama", "model": "an-invented-model", "prompt": "an invented question about an invented week",
@@ -168,3 +172,39 @@ async def test_with_the_lane_off_the_stamped_frame_is_not_even_told_apart(monkey
         await asyncio.sleep(0.01)
     await node.settle()
     assert node.replies()["gen-4"]["status"] == "ok" and seen == []
+
+
+# -- the documented differences (R-OFF2 F1): where the stamp cannot be verified as the owner's ---------------------------
+
+def _no_key(monkeypatch, tmp_path):
+    from topos import relay_stamp
+    monkeypatch.delenv("TOPOS_CP_STAMP_PUBKEY")
+    monkeypatch.setattr(relay_stamp, "_PINNED_KEY_PATH", str(tmp_path / "no-such-key.pub"))
+    return {}
+
+
+def _stale(monkeypatch, tmp_path):
+    import time
+    old = time.time() - 10_000
+    return {"iat": old, "exp": old + 100}
+
+
+@pytest.mark.parametrize("case", ["no pinned key", "another key", "outside its window", "bound, another account"])
+def test_where_the_stamp_cannot_be_verified_the_stamped_frame_is_refused_and_the_unstamped_answered(
+        case, monkeypatch, tmp_path, request):
+    host = Host(monkeypatch)
+    how = {"acting": OWNER}
+    if case == "no pinned key":
+        how.update(_no_key(monkeypatch, tmp_path))
+    elif case == "another key":
+        how["key"] = ANOTHER_KEY
+    elif case == "outside its window":
+        how.update(_stale(monkeypatch, tmp_path))
+    else:
+        request.getfixturevalue("bound")
+        how["acting"] = SOMEONE_ELSE
+    plain = asyncio.run(dispatch_relay_message(generation(f"gen-{case}")))
+    owner = asyncio.run(dispatch_relay_message(stamped(generation(f"gen-{case}"), cls="owner_app", **how)))
+    assert plain["status"] == "ok" and plain["payload"]["output"] == "an invented reply"
+    assert owner["status"] == "error" and owner["error"] == "owner_mode_required" and owner.get("code") == 403
+    assert len(host.asked) == 1                                        # the refused frame never reached the model
