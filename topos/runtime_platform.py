@@ -26,7 +26,8 @@ from packaging.version import InvalidVersion, Version
 #: The interpreter every install and reinstall names with `--python`. Without
 #: it uv picks its own preferred interpreter: on 24 Oct 2026 a plain
 #: `uv tool install --force` rebuilt the owner's node on 3.14, which nothing had
-#: tested.
+#: tested. It equals the floor in pyproject's requires-python, and
+#: tests/topos/test_runtime_platform.py fails when the two disagree.
 INSTALL_PYTHON = "3.12"
 
 #: The first scipy whose macOS wheels load on macOS 27 (1.15.3 fails, 1.16.3 loads).
