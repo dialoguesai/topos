@@ -60,9 +60,12 @@ _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 _ENTITY_ID = re.compile(r"^(?:ent_[0-9a-f]{6,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$", re.I)
 #: A raw handle: a phone number or an email address. Never a display name.
 _HANDLE = re.compile(r"^(?:\+?[0-9][0-9 ().-]{5,}|[^@\s]+@[^@\s]+)$")
-#: Anything id-, label- or handle-shaped that must never reach card text (the last line of defence).
+#: Anything id-, label- or handle-shaped that must never reach card text (the last line of defence). A phone number is
+#: a run of digits, spaces, dots, dashes and brackets that does not start inside another number and is not an ISO date:
+#: the first version matched every "2026-10-11" the cards print, so every card read "On someone you wrote".
 _LEAK = re.compile(r"(?:\b(?:id|key):\S+|\bent_[0-9a-f]{6,}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
-                   r"|\+?[0-9][0-9 ().-]{8,}[0-9]|[^@\s]+@[^@\s]+\.[a-z]{2,})", re.I)
+                   r"|(?<![0-9-])(?![0-9]{4}-[0-9]{2}-[0-9]{2}(?![0-9]))\+?[0-9][0-9 ().-]{8,}[0-9]"
+                   r"|[^@\s]+@[^@\s]+\.[a-z]{2,})", re.I)
 
 _DDL = (
     f"""CREATE TABLE IF NOT EXISTS {CANDIDATES_TABLE} (
