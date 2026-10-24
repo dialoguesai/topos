@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Reflection: moments worth bringing up again, from the fact ontologies the owner switched on.** `[P]` `[O]` Two new
+  bundled packs ship disabled like every non-Wave-A pack: `moments.joy` (`moment.peak`, `moment.gratitude`) and
+  `moments.tension` (`moment.tension`, `moment.tension_resolved`), owner-subject and `authored_only`, so a contact's
+  reading of the owner is never an input. A sweep on the catch-up lane (`reflection_sweep`, `topos/query/reflection.py`)
+  reads the active facts of the seven reflection packs that are enabled in `pack_registry` and applies deterministic
+  rules (dated repeats, open threads with no closing row, people who recur in peak moments, an earlier window against
+  a recent one) into the owner-only `reflection_candidates` table; no model call, never on the request path, and a
+  node with no reflection pack on builds nothing. Three owner doors at the truth door (owner class only):
+  `reflection_invitations` and `reflection_conversation` are pure reads (balanced cards per starter; a conversation
+  composed on the node from per-section stance templates with the owner's own words, a row the owner did not write
+  shown as its date and source only), `reflection_label` the one write (`worth_it | opened | not_now | not_true |
+  too_personal`), carrying an owner-only `reflection_label` signal object (DISCLOSURE_RULES DR-60: never shared, never
+  indexed, never off the node). Pack-authoring lessons from the packs' own battery, kept in the packs: RULE notes stay
+  under the prompt builder's 600-character cap; no value field a verifier cannot find stated (no dates, no guessed
+  setting, no strength word); person slots are lists.
+
 ## [1.5.20] — 2026-10-24
 
 ### Added
