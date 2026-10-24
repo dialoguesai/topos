@@ -331,6 +331,9 @@ async def startup_event() -> None:
         bool(importlib.util.find_spec("transformers")),
         bool(importlib.util.find_spec("torch")),
     )
+    from .runtime_platform import log_platform_problems
+
+    log_platform_problems(logger)
     # Bound torch's thread pools BEFORE the first model loads. Torch's intra-op pool is
     # one thread per core (twenty-six here); each can need the GIL to refcount a
     # Python-owned tensor, and on 2026-08-15 that deadlocked the event loop twelve
