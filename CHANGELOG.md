@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.22] — 2026-10-24
+
 ### Added
 - **Reflection: moments worth bringing up again, from the fact ontologies the owner switched on.** `[P]` `[O]` Two new
   bundled packs ship disabled like every non-Wave-A pack: `moments.joy` (`moment.peak`, `moment.gratitude`) and
