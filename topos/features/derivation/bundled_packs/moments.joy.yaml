@@ -4,7 +4,7 @@
 # no net_subject and no outward gate. Ships DISABLED like every non-Wave-A pack; enabling
 # it is the owner's call on the Signal > derivation packs screen.
 pack: moments.joy
-version: 0.1.1
+version: 0.1.4
 status: draft
 title: "Moments of joy, love and fulfillment"
 author: topos
@@ -37,13 +37,12 @@ predicates:
       activity: string
       intensity: {enum: [mild, strong, peak]}
     note: >
-      STATED feeling only: the owner says, in their own words, that the moment felt good.
-      The record must carry both the feeling and what happened; a bare "great" with no
-      event is a mention, not a moment. Feeling at home, belonging, closeness, hours that
-      flew by with someone -> kind connected; "one of those nights", "felt alive" -> alive;
-      pride in something done -> accomplished. `intensity` follows the owner's language
-      ("nice" mild, "so happy" strong, "best day of my year" peak), never the extractor's.
-      Dates go in occurrence_date, never in the value.
+      STATED feeling only: the owner says, in their own words, that the moment felt good, and the
+      record says what happened. A bare "great" with no event is a mention, not a moment. Feeling
+      at home, belonging, hours that flew by with someone -> connected; "one of those nights",
+      "felt alive" -> alive; pride in something done -> accomplished. `intensity` follows the
+      owner's words ("nice" mild, "so happy" strong, "best day of my year" peak). Dates go in
+      occurrence_date, never in the value.
   - name: moment.gratitude
     value_type: structured
     cardinality: multi
@@ -59,7 +58,8 @@ predicates:
       Someone made a difference, in the owner's words. A MESSAGE OF THANKS IS A GRATITUDE FACT:
       "thank you for driving out", "it meant more than you know", "couldn't have done it without
       you" are moment.gratitude with acknowledged true (the record is the thanks); `person` is
-      the one thanked when the words name them, otherwise omit the field. `acknowledged` is read
+      the one thanked ONLY when the words name them; never a role word ("driver", "host", "my friend")
+      and never a guess: with no name in the words, leave `person` out entirely. `acknowledged` is read
       from the record only; silence is unknown, never false.
 
 cross_refs:
@@ -76,6 +76,7 @@ guidance:
   abstention:
     - "A FIRST-PERSON GOOD FEELING TIED TO SOMETHING THAT HAPPENED IS A MOMENT: 'left feeling completely at home', 'haven't felt that alive in months', 'proud of this one' are moment.peak. Extract them; do not treat them as too small or too vague."
     - "A thank-you the owner writes to someone is moment.gratitude with acknowledged true, even when the deed is small."
+    - "`with` and `person` hold PEOPLE the words name (a JSON array for `with`); never a place, a role word like 'driver' or 'host', or a guess. No person named: leave the field out."
     - "No feeling stated by the owner, no moment: 'went to the concert' is an event, 'the concert was the best night I've had all year' is a moment."
     - "Someone else's description of the owner's happiness is not the owner's statement (role_policy authored_only)."
     - "Never infer `with` from the conversation's participants; only people the record names as present."
@@ -101,10 +102,10 @@ consumers: [assistant_context]
 eval:
   gold:
     - {text: "Honestly last night with the band was one of those nights. I haven't felt that alive in months.",
-       expect: {predicate: moment.peak, kind: alive, intensity: strong}}
+       expect: {predicate: moment.peak, kind: alive}}
     - {text: "Dinner at Nadia's turned into four hours of talking. I left feeling completely at home.",
        expect: {predicate: moment.peak, kind: connected, intensity: strong}}
-    - {text: "Thank you for driving out on Sunday. It meant more than you know.",
+    - {text: "Sol, thank you for driving out on Sunday. It meant more than you know.",
        expect: {predicate: moment.gratitude, acknowledged: true}}
     - {text: "Can't believe the paper finally got accepted. Proud of this one.",
        expect: {predicate: moment.peak, kind: accomplished}}

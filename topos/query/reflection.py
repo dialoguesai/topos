@@ -362,14 +362,14 @@ def rules(facts: List[Dict[str, Any]], now: datetime, names: Dict[str, str]) -> 
     for f in tensions:
         by_kind[str(f["value"].get("kind") or "other")].append(f)
     for kind, fs in by_kind.items():
-        contexts = {str(f["value"].get("context") or "") for f in fs}
+        # Recurrence is read from time (two instances a month or more apart); the pack carries no setting field,
+        # because a small model guessed one the record never stated (pack gate, 24 Oct 2026).
         span = max(_days_ago(f["at"], now) for f in fs) - min(_days_ago(f["at"], now) for f in fs)
-        if len(fs) >= 2 and (len(contexts) >= 2 or span >= 30):
+        if len(fs) >= 2 and span >= 30:
             out.append(_candidate("recurring_tension", kind, "S3", "recognition", "difficult",
                                   f"The same kind of tension ({kind.replace('_', ' ')}) appears {len(fs)} times, "
-                                  f"from {_day(min(f['at'] for f in fs))} to {_day(max(f['at'] for f in fs))}"
-                                  + (f", across {len(contexts)} contexts." if len(contexts) >= 2 else "."),
-                                  f"{len(fs)} dated instances of {kind}.", fs, now,
+                                  f"from {_day(min(f['at'] for f in fs))} to {_day(max(f['at'] for f in fs))}.",
+                                  f"{len(fs)} dated instances of {kind}, a month or more apart.", fs, now,
                                   interpretation="A frustration recurring across situations.", row_ids=["RF-034", "RF-063"]))
         if len(fs) >= 2:
             recent = [f for f in fs if _days_ago(f["at"], now) <= 90]

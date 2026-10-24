@@ -4,7 +4,7 @@
 # the other person felt or did beyond the owner's words (operating principle 4, relational
 # privacy). Ships DISABLED; enabling it is the owner's call.
 pack: moments.tension
-version: 0.1.1
+version: 0.1.4
 status: draft
 title: "Tensions, misunderstandings and unresolved experiences"
 author: topos
@@ -32,18 +32,16 @@ predicates:
     event_identity: "windowed:30"     # the same disagreement retold inside a month is one tension; a new month is a recurrence worth counting
     value_schema:
       kind: {enum: [conflict, misunderstanding, disappointment, avoided_conversation, recurring_frustration, undecided_decision, hard_to_accept, felt_misunderstood, weighing_on_me, other]}
-      with: person_ref                # the other party as the owner named them; empty for a tension with no one
-      context: {enum: [relationship, work, family, health, money, self, other]}
+      with: person_refs               # the other party or parties, as the owner named them; empty for a tension with no one
       description: string
       status: {enum: [open, processed, resolved, let_go, unknown]}
     note: >
-      The OWNER's account only. `description` is what the owner said happened and how it
-      sat with them; it never contains a claim about the other person's feelings or motives
-      beyond the owner's quoted words. "I keep going back and forth", "can't decide", "can't land
-      it" -> undecided_decision; "still haven't told", "keep meaning to bring up" -> avoided_conversation;
-      "again", "third time" -> recurring_frustration. `status` comes from the record ("we talked it
-      out" resolved, "I've made my peace" let_go); silence is open, never resolved. Dates go in
-      occurrence_date, never in the value.
+      The OWNER's account only: `description` is what the owner said happened and how it sat with
+      them, never a claim about the other person's feelings or motives. "I keep going back and
+      forth", "can't decide", "can't land it" -> undecided_decision; "still haven't told", "keep
+      meaning to bring up" -> avoided_conversation; "again", "third time" -> recurring_frustration.
+      `status` from the record only ("we talked it out" resolved, "made my peace" let_go); silence
+      is open. Dates go in occurrence_date, never in the value.
   - name: moment.tension_resolved
     value_type: structured
     cardinality: multi
@@ -52,7 +50,7 @@ predicates:
     key_fields: [with, description]
     event_identity: "windowed:30"
     value_schema:
-      with: person_ref
+      with: person_refs
       description: string
       outcome: {enum: [talked_through, reconciled, decided, let_go, accepted]}
     note: "the closing half: 'talked it all out', 'we're good', 'made up', 'finally decided', 'let it go' ARE moment.tension_resolved with the matching outcome; extract them even when the original tension is not in this record. It retires what was worked through without losing its history (RF-053, RF-078)"
@@ -73,6 +71,7 @@ guidance:
   abstention:
     - "A FIRST-PERSON UNRESOLVED SITUATION IS A TENSION: 'I keep going back and forth on the offer', 'still haven't told my dad', 'got into it again about the schedule' are moment.tension. Extract them; do not wait for the owner to call it a problem."
     - "A FIRST-PERSON CLOSING IS A RESOLUTION: 'talked it all out, we're good' is moment.tension_resolved (talked_through). Extract it."
+    - "`with` holds PEOPLE the words name, as a JSON array; never a place, a company, an offer or a topic. No person named: leave `with` out."
     - "No situation, no tension: 'rough week' alone abstains; 'rough week, the thing with Dana is still hanging' is a tension."
     - "Only the owner's words about their own experience; never derive a tension from what the other person wrote."
     - "Never assert the other person's feelings, intent or fault; `description` quotes or paraphrases the owner only."
@@ -91,7 +90,7 @@ synthesis:
       overlapping description terms) via supersession to status resolved or let_go.
   - kind: pattern
     predicate: moment.tension
-    description: "the same kind of tension recurring across contexts or months (RF-034, RF-055, RF-063, RF-079)"
+    description: "the same kind of tension recurring across months (RF-034, RF-055, RF-063, RF-079); the setting, when the owner names one, is in the description"
     inputs: [moment.tension]
     min_evidence: 3
     subject: owner

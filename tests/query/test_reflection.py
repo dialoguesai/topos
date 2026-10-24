@@ -87,16 +87,12 @@ def world(node):
              at=day(18), refs=r("journal_entries", "j-paper", 18), quote="Paper accepted. Proud of this one.")
     add_fact(conn, "moments.joy", "moment.gratitude", {"person": "Dana", "what": "getting me through the move", "acknowledged": False},
              at=day(60), refs=r("journal_entries", "j-dinner", 60))
-    add_fact(conn, "moments.tension", "moment.tension", {"kind": "recurring_frustration", "with": "Mark", "context": "work",
-             "description": "the schedule fight", "status": "open"}, at=day(5), refs=r("journal_entries", "j-mark", 5),
+    add_fact(conn, "moments.tension", "moment.tension", {"kind": "recurring_frustration", "with": "Mark",              "description": "the schedule fight", "status": "open"}, at=day(5), refs=r("journal_entries", "j-mark", 5),
              quote="Mark and I got into it again about the schedule")
-    add_fact(conn, "moments.tension", "moment.tension", {"kind": "recurring_frustration", "with": "Mark", "context": "family",
-             "description": "the weekend fight", "status": "open"}, at=day(40), refs=r("journal_entries", "j-mark2", 40))
-    add_fact(conn, "moments.tension", "moment.tension", {"kind": "avoided_conversation", "with": "dad", "context": "family",
-             "description": "telling dad about the move", "status": "open"}, at=day(9), refs=r("journal_entries", "j-dad", 9),
+    add_fact(conn, "moments.tension", "moment.tension", {"kind": "recurring_frustration", "with": "Mark",              "description": "the weekend fight", "status": "open"}, at=day(40), refs=r("journal_entries", "j-mark2", 40))
+    add_fact(conn, "moments.tension", "moment.tension", {"kind": "avoided_conversation", "with": "dad",              "description": "telling dad about the move", "status": "open"}, at=day(9), refs=r("journal_entries", "j-dad", 9),
              quote="Still haven't told dad about the move")
-    add_fact(conn, "moments.tension", "moment.tension", {"kind": "misunderstanding", "with": "Nadia", "context": "relationship",
-             "description": "the mix-up about the reading", "status": "processed"}, at=day(80), refs=r("journal_entries", "j-theme", 80))
+    add_fact(conn, "moments.tension", "moment.tension", {"kind": "misunderstanding", "with": "Nadia",              "description": "the mix-up about the reading", "status": "processed"}, at=day(80), refs=r("journal_entries", "j-theme", 80))
     add_fact(conn, "obligations.commitments", "commit.made", {"counterparty": "Wren", "direction": "owed_by_owner",
              "description": "send the lake photos", "due": "this week", "status": "open"}, at=day(22),
              refs=r("journal_entries", "j-promise", 22), quote="I'd send the lake photos this week")
@@ -130,7 +126,7 @@ def test_the_rules_find_the_catalog_shapes(world):
     assert rules["gratitude"][3] == "Dana" and rules["gratitude"][1] == "S2"
     assert rules["company"][3] == "Nadia" and "2 of the moments" in rules["company"][4]
     assert rules["avoided"][1:4] == ("S2", "difficult", "dad")
-    assert rules["recurring_tension"][1:3] == ("S3", "difficult") and "across 2 contexts" in rules["recurring_tension"][4]
+    assert rules["recurring_tension"][1:3] == ("S3", "difficult") and "appears 2 times" in rules["recurring_tension"][4]
     assert rules["open_promise"][3] == "Wren" and rules["open_promise"][1] == "S1"
     assert rules["theme"][1] == "S1" and rules["stated_change"][1] == "S5"
     assert rules["change"][1] == "S1" and rules["rel_open"][1:4] == ("S2", "neutral", "Priya")
