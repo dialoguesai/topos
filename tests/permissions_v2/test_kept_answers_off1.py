@@ -836,7 +836,7 @@ def test_a_kept_question_id_exempts_at_most_seven_deliveries_a_day(answers_node,
     assert _questions(node) == 2
 
 
-@pytest.mark.parametrize("code", ["deadline", "judge_unavailable"])
+@pytest.mark.parametrize("code", ["deadline", "judge_unavailable", "model_error"])
 def test_a_deferral_that_ran_the_writer_is_allowed_once_a_day_per_kept_question(answers_node, service, monkeypatch,
                                                                                code):
     """R-OFF1 R1 + R2 (WS-OFF, 24 Oct): these two ran the writer, so each kept question may defer on them once a UTC
@@ -983,9 +983,9 @@ def test_a_refusal_waiting_cannot_cure_ends_a_kept_ask_no_answer(answers_node, s
 
 def _host_cannot_serve(node, service, monkeypatch, code):
     """The four ways the owner's machine fails a job just after it comes back (R-OFF1 I3), without a model."""
-    if code == "model_unavailable":
+    if code in ("model_unavailable", "model_error"):
         async def unavailable(_prompt, *, deadline):
-            raise PolicyError("model_unavailable")
+            raise PolicyError(code)
         service.generate = unavailable
     elif code == "judge_unavailable":
         monkeypatch.setattr(service, "_compute", lambda job: (None, "judge_unavailable"))
@@ -995,7 +995,8 @@ def _host_cannot_serve(node, service, monkeypatch, code):
         monkeypatch.setattr(answer_release, "MAX_END_SECONDS", 0)           # every job ran out of time
 
 
-@pytest.mark.parametrize("code", ["model_unavailable", "judge_unavailable", "queue_deadline", "deadline"])
+@pytest.mark.parametrize("code", ["model_unavailable", "judge_unavailable", "queue_deadline", "deadline",
+                                  "model_error"])
 def test_a_kept_ask_the_machine_could_not_serve_then_ends_deferred(answers_node, service, monkeypatch, code):
     """R-OFF1 I3 (WS-OFF, 23 Oct): a kept question arrives just after the owner's Topos comes back, when the model
     host may not be up yet, others' live asks may fill the queue, or the job may run out of time. For a kept ask
@@ -1015,18 +1016,27 @@ def test_a_kept_ask_the_machine_could_not_serve_then_ends_deferred(answers_node,
     assert _questions(node) == 1
 
 
-def test_a_model_that_answers_badly_still_ends_a_kept_ask_no_answer(answers_node, service):
-    """Only the four "not now" failures defer: a model that answered, badly, is no answer for a kept ask too."""
+def test_a_model_error_counts_as_a_writer_failure_for_kept_asks_only(answers_node, service):
+    """WS-OFF, 24 Oct (Rig D): the local writer's call reports a cold model still loading, a missing model and an
+    incomplete reply all as `model_error`. A kept question delivered while the owner's Topos loads its model is the
+    restart case, so for a kept ask it is a writer failure: one deferral per kept question a UTC day, then no_answer,
+    counted. A live ask ends no_answer, as before."""
     node = answers_node
 
     async def broken(_prompt, *, deadline):
         raise PolicyError("model_error")
 
     service.generate = broken
-    kept = _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))
-    assert not kept.deferred and kept.body.outcome == "no_answer"
-    assert (_receipt(node, kept)[0]["outcome"], _receipt(node, kept)[0]["reason"]) == ("no_answer", "model_error")
-    assert _questions(node) == 1
+    assert "model_error" in answer_release.KEPT_LATER and "model_error" in answer_release.KEPT_COSTLY
+    kq = secrets.token_hex(16)
+    first = _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq))
+    assert first.deferred and first.deferred_by == "model_error" and _questions(node) == 0
+    second = _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq))
+    assert not second.deferred and second.body.outcome == "no_answer" and _questions(node) == 1
+    live = _ended(service, _ask(node, service))
+    assert not live.deferred and live.body.outcome == "no_answer"
+    assert (_receipt(node, live)[0]["outcome"], _receipt(node, live)[0]["reason"]) == ("no_answer", "model_error")
+    assert _questions(node) == 2
 
 
 def test_a_deferred_receipt_adds_nothing_to_the_owners_week(answers_node, service):
