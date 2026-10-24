@@ -9,6 +9,15 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Reflection cards name people, never a raw entity id or handle.** `[P]` `[O]` On 1.5.23 a commitment bound to a
+  message's recipient read "you promised id:ent_…": the derivation writer stores that counterparty as a runner label
+  (`id:<entity id>` or `key:<messenger key>`), and the sweep only resolved bare UUIDs. `reflection.resolve_people` now
+  resolves an `id:` label or a bare entity id through the entity spine and a `key:` label through the owner's contacts;
+  the owner's own entity, an unresolved label and a raw phone number or email are left out ("you promised someone").
+  Every card field also passes a last scrub that replaces any id-, label- or handle-shaped token. Cards built by 1.5.23
+  are rewritten in place at the next sweep (they are keyed by fact, not by text).
+
 ## [1.5.23] — 2026-10-24
 
 ### Added
