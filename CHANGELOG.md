@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.20] — 2026-10-24
+
 ### Added
 - **Truth lane rows carry the engine build that checked them.** `[O]` `truth_checks` gains `engine_version` (the answer's `version`, `verify_v2.VERSION` today) and `engine_sha16` (the first 16 hex digits of the SHA-256 of `verify_v2.py`, `verify_v2.engine_sha16()`), written at insert and replaced by a re-check, and added on first use to an existing table like the re-check columns (no migration). A row the engine's gate refused is stamped too: the gate is the engine's own. Rows stored before this read NULL. The weekly eval's lock captures the same digest of the installed file, so its export can tell builds apart by stamp rather than by time (`excluded.other_engine_version`), including re-checked rows. `VERSION` itself is unchanged.
 
