@@ -1238,7 +1238,9 @@
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "Python floor 3.12 (requires-python >=3.12, scipy >=1.16): no step and no prompt. An install on Python 3.10 or 3.11 cannot take this release by `uv tool upgrade` or the in-app update: uv keeps the tool on its interpreter, resolves the last release that still allows it, and answers \"Nothing to upgrade\" with exit 0. Reinstall it on the floor with `uv tool upgrade --python 3.12 topos-node` (or `uv tool install --force --python 3.12 topos-node`), then restart Topos. On macOS 27 a 3.10 install also cannot load scipy 1.15.3, so its embeddings and entities jobs fail until it moves. From this release the updater passes --python itself when a later release's Requires-Python excludes the running interpreter."
+      ]
     }
   ]
 }

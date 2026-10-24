@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,11 @@ from topos import runtime_platform, runtime_update
 from topos.runtime_platform import INSTALL_PYTHON, log_platform_problems, scipy_load_problem
 
 REPO = Path(__file__).resolve().parents[2]
+
+
+def test_install_python_is_the_floor_in_requires_python():
+    project = tomllib.loads((REPO / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    assert project["requires-python"] == f">={INSTALL_PYTHON}"
 
 
 def _the_mac(monkeypatch, *, macos: int | None, scipy: str | None) -> None:

@@ -178,10 +178,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The floor (3.12, pyproject requires-python and .python-version) is the
+      # default `python`; 3.13 is on PATH for the newer-Python install smoke below.
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: |
+            3.13
+            3.12
 
       - name: Set up uv
         uses: astral-sh/setup-uv@v4
@@ -239,6 +243,13 @@ jobs:
       - name: Fresh-install smoke test (wheel)
         if: ${{ needs.plan.outputs.package == 'true' }}
         run: python scripts/release_smoke_test.py
+
+      # One Python newer than the floor, at install depth: a fresh 3.13 venv
+      # installs the wheel, imports the engine stack and boots the app. The
+      # public lane itself runs on the floor only.
+      - name: Fresh-install smoke test (wheel, Python 3.13)
+        if: ${{ needs.plan.outputs.package == 'true' }}
+        run: python3.13 scripts/release_smoke_test.py
 
   # Always reports, including when selection or a required job failed. An
   # unexpected skip/cancel fails; only skips explicitly chosen by the plan pass.
