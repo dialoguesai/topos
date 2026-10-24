@@ -1244,6 +1244,14 @@
       ]
     },
     {
+      "version": "1.5.22",
+      "summary": "Release 1.5.22: the updater moves the interpreter when a release needs a newer Python.",
+      "steps": [],
+      "notes": [
+        "No step and no prompt. The in-app updater passes --python from the latest release's Requires-Python, so a node on an older interpreter can reach a release that raises the floor; still requires-python >=3.10, no dependency change."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

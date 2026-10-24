@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.22] — 2026-10-24
+
 ### Added
 - **The updater moves the interpreter when a release needs a newer Python, every install instruction names one, and a Mac that cannot load scipy says so at startup.** `[O]` `uv tool upgrade` keeps a tool on the interpreter its environment was built with. When the newest release's Requires-Python excludes it, uv resolves the last release that still allows it, prints "Nothing to upgrade" and exits 0 (uv 0.5.11 and 0.12.23, 24 Oct 2026). `UpdateInfo` now carries the latest release's Requires-Python from the same PyPI read. When that excludes the running interpreter, `apply_package_update` passes `--python` with the lowest version it accepts: `uv tool upgrade --python X.Y` rebuilds the environment on X.Y, and on an environment already on X.Y it changes nothing. The pinned-specifier reinstall always names an interpreter, either the running one or the one the release needs, because a forced reinstall without `--python` rebuilt the owner's node on 3.14. Install instructions say `uv tool install --python 3.12 topos-node`: the README, the manual install test, `topos-node doctor`, the service installer's refusal and the release rollback note. A test fails when one does not, because without `--python` uv picks whichever interpreter it prefers, which is how the owner's node got 3.10. At startup on macOS 27 or later with scipy older than 1.16, the node logs one ERROR naming the fix (`<uv> tool upgrade --python 3.12 topos-node`, using the uv this node can reach). Before, each job failed with its own dlopen traceback. `topos.runtime_platform.INSTALL_PYTHON` is the one place the version is named in code.
 
