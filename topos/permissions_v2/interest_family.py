@@ -133,7 +133,7 @@ LABEL_RULES = "interest-label-rules/v2"
 # visits the clustering placed in the cluster, and every visit with no vector of its own that repeats the page text
 # of one of them (``_repeat_visits``). v1 counted placed visits alone: a page's repeat visits counted nowhere, because
 # the embedding job keeps one vector per distinct page text.
-COUNTING = "interest-visit-count/v3-human-actor"
+COUNTING = "interest-visit-count/v3-agent-excluded"
 
 # The family whose Off-limits rule also matches a bare part of a protected name, as a whole word
 # (entity_boundary.NAME_PART_TABLES). A label is read under that rule too (_offlimits_name_part).
@@ -743,8 +743,9 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
                 counts[check], days[check] = len(counted), len({v.day for v in counted})
             members_in_month = browsing[cluster_id][month] + others[cluster_id][month] + unplaced[cluster_id]
             withheld = "browsing" if browsing[cluster_id][month] * 2 <= members_in_month else cluster_check
-            # A label made from agent/unknown visits can contaminate a mixed
-            # cluster even when its human-only count passes. Withhold that label.
+            # A label made from an agent's or automation's visits can contaminate a
+            # mixed cluster even when its personal count passes. Withhold that label.
+            # Visits with no attribution evidence are the owner's (ruling 24 Oct 2026).
             if any(not personal_browser_activity({**r, "source_id": SOURCE_ID}) for r in rows_all):
                 withheld = "human_actor"
             if withheld is None and _visits_protected(boundary, [visits_by_id[v.event_id] for v in month_visits]):

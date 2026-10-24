@@ -1263,7 +1263,9 @@
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "Browser controller attribution (topos#195): no step and no prompt. The browser raw tables gain actor_kind, actor_provider, parent_conversation_source, parent_conversation_id and actor_json on first use (ALTER TABLE ADD COLUMN, no migration). The interests family's COUNTING moves to interest-visit-count/v3-agent-excluded, so share indexes for the interests family rebuild once after the upgrade. Visits an agent or automation is shown to have driven leave personal enrichment and interests from the next pass; browsing with no attribution evidence, including all history stored before this release, counts as the owner's as before (owner ruling 24 Oct 2026). No derived fact is deleted by the upgrade itself."
+      ]
     }
   ]
 }

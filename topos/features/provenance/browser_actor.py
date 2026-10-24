@@ -2,7 +2,12 @@
 
 The extension's declaration is evidence, not a new principal or an access grant.
 Missing/legacy attribution remains unknown; absence of bot signals is not human
-evidence. Conversation IDs are opaque source-scoped references, never timestamps
+evidence. One rule differs, for personal enrichment and interests only: browsing
+with no attribution evidence either way (no envelope, or kind unknown with method
+unresolved, no signals and no identity) counts as the owner's own (owner ruling,
+24 Oct 2026). History stored before attribution, and ordinary browsing the plugin
+leaves unresolved, keep feeding interests as they always have; positive agent or
+automation evidence keeps a row out. The timeline still labels it "unknown". Conversation IDs are opaque source-scoped references, never timestamps
 or similarity matches. A missing parent may arrive on a later source sync.
 """
 from __future__ import annotations
@@ -69,9 +74,21 @@ def timeline_controller(event_id, source_id, activity_type, metadata_json):
     return "ai" if kind in {"agent", "automation"} else kind
 
 
+def has_attribution_evidence(row: dict) -> bool:
+    """Whether anything says who controlled the tab: a kind other than unknown, a resolved method, a signal or an
+    identity. A record stored before attribution, or one the plugin left unresolved, carries none."""
+    actor = browser_actor(row)
+    return (actor["kind"] != "unknown" or actor["method"] != "unresolved" or bool(actor["signals"])
+            or any(actor.get(key) for key in IDENTITY_FIELDS))
+
+
 def personal_browser_activity(row: dict) -> bool:
-    """Non-browser records are unaffected; browser evidence needs explicit human attribution."""
-    return not is_browser_record(row) or browser_actor(row)["kind"] == "human"
+    """Non-browser records are unaffected. Browser evidence counts as personal when it is explicitly human or when
+    nothing says who controlled the tab (owner ruling, 24 Oct 2026); agent, automation and unknown-with-evidence
+    stay out."""
+    if not is_browser_record(row):
+        return True
+    return browser_actor(row)["kind"] == "human" or not has_attribution_evidence(row)
 
 
 def actor_label(row: dict) -> str:
@@ -99,11 +116,13 @@ def conversation_activity(conn, *, source_id: str, conversation_id: str) -> list
 
 
 def exclude_nonhuman_browser_embeddings(conn, records: list[dict]) -> list[dict]:
-    """Keep recall vectors, but keep nonhuman browsing out of personal clusters."""
+    """Keep recall vectors, but keep nonhuman browsing out of personal clusters. A browser record whose activity row
+    is not found carries no attribution evidence and stays (owner ruling, 24 Oct 2026); a chunk the lookup fails on
+    is left out, because its actor cannot be established."""
     candidates = [r for r in records if is_browser_record(r)]
     if not candidates:
         return records
-    allowed = set()
+    allowed, unreadable = set(), set()
     ids = list({str(r.get("record_id") or "") for r in candidates})
     for start in range(0, len(ids), 400):
         chunk = ids[start:start + 400]
@@ -111,8 +130,13 @@ def exclude_nonhuman_browser_embeddings(conn, records: list[dict]) -> list[dict]
             rows = conn.execute("SELECT event_id, source_id, metadata_json FROM activity_events WHERE event_id IN ("
                                 + ",".join("?" for _ in chunk) + ")", chunk).fetchall()
         except Exception:
-            continue  # Cannot establish the actor: do not derive an interest.
+            unreadable.update(chunk)  # Cannot establish the actor: do not derive an interest.
+            continue
+        found = set()
         for rid, source, meta in rows:
+            found.add(rid)
             if personal_browser_activity({"event_id": rid, "source_id": source, "metadata_json": meta}):
                 allowed.add(rid)
-    return [r for r in records if not is_browser_record(r) or r.get("record_id") in allowed]
+        allowed.update(rid for rid in chunk if rid not in found)
+    return [r for r in records if not is_browser_record(r)
+            or (r.get("record_id") in allowed and r.get("record_id") not in unreadable)]

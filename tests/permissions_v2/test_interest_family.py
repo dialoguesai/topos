@@ -996,7 +996,7 @@ def test_one_cluster_built_alone_counts_its_repeats_as_the_build_of_all(db):
 
 
 def test_the_counting_rule_is_in_every_member_revision(db, monkeypatch):
-    assert fam.COUNTING == "interest-visit-count/v3-human-actor"
+    assert fam.COUNTING == "interest-visit-count/v3-agent-excluded"
     month_of_visits(db, 0, 5, [3, 9, 17])
     db.commit()
     before = only(db).content_revision
@@ -1250,13 +1250,22 @@ def _driven_as_the_owners_app(owner_app_on_the_socket):
     split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""
 
 
-@pytest.mark.parametrize("actor", [None, {"kind": "unknown"}, {"kind": "automation", "method": "webdriver"},
+@pytest.mark.parametrize("actor", [{"kind": "automation", "method": "webdriver"},
     {"kind": "agent", "method": "manual", "provider": "openai", "name": "Codex",
      "conversation_source": "codex_sessions", "conversation_id": "codex:synthetic-parent"}])
-def test_agent_and_legacy_visits_never_become_personal_interests(db, actor):
+def test_agent_and_automation_visits_never_become_personal_interests(db, actor):
     month_of_visits(db, 500, 15, [3, 9, 17], metadata={"browser_actor": actor})
     db.commit()
     assert build(db).objects == []
+
+
+@pytest.mark.parametrize("actor", [None, {"kind": "unknown"}, {"kind": "unknown", "method": "unresolved"}])
+def test_visits_with_no_attribution_evidence_count_as_the_owners(db, actor):
+    # Owner ruling, 24 Oct 2026: history from before attribution, and browsing the plugin leaves unresolved, keeps
+    # feeding interests as it did before attribution existed; only positive agent/automation evidence keeps it out.
+    month_of_visits(db, 500, 15, [3, 9, 17], metadata={"browser_actor": actor})
+    db.commit()
+    assert build(db).objects != []
 
 
 def test_a_mixed_old_cluster_cannot_release_a_label_learned_from_bot_browsing(db):

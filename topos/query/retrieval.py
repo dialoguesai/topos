@@ -1702,13 +1702,14 @@ def _canonical_row_to_item(
                     actor_row = {**row, "source_id": found[0], "metadata_json": found[1]}
             except Exception:
                 pass
-        if is_browser_record(actor_row):
+        # Who drove the tab is the owner's to see only: below owner_raw every browser row reads exactly as before
+        # attribution, so nothing tells a grantee which visits an agent drove (review of topos#195, finding 2).
+        if is_browser_record(actor_row) and not personal_browser_activity(actor_row):
             if belief_intent:
-                return None  # A browser action is never the owner's authored belief.
-            if not personal_browser_activity(actor_row):
+                return None  # An agent's or automation's browsing is never the owner's authored belief.
+            if disclosure_tier == "owner_raw":
                 owner = False
-                label = actor_label(actor_row) if disclosure_tier == "owner_raw" else "browser controller"
-                text = f"[{label}] {text}"
+                text = f"[{actor_label(actor_row)}] {text}"
 
         span = _activity_highlight_text(conn, event_id, clean, highlight_cache)
         if span:
@@ -1752,7 +1753,7 @@ def _canonical_row_to_item(
         "relevance_score": round(_canonical_relevance(text, query_text), 4),
         "retrieval_source": retrieval_source or f"canonical:{table}",
     }
-    if table == "activity_events" and is_browser_record(actor_row):
+    if table == "activity_events" and disclosure_tier == "owner_raw" and is_browser_record(actor_row):
         actor = browser_actor(actor_row)
         item["actor_kind"] = actor["kind"]
         item["personal_interest_eligible"] = personal_browser_activity(actor_row)
@@ -1814,7 +1815,7 @@ def _annotate_index_message_roles(
         rid = str(item.get("record_id") or "")
         if not rid:
             continue
-        if disclosure_tier == "owner_raw" or "activity_events" in (manifest.canonical_tables or []):
+        if disclosure_tier == "owner_raw":  # The controller is the owner's to see only (review of topos#195).
             try:
                 found = conn.execute("SELECT source_id, metadata_json FROM activity_events WHERE event_id=?", (rid,)).fetchone()
             except Exception:
@@ -1826,10 +1827,10 @@ def _annotate_index_message_roles(
                     actor = browser_actor(actor_row)
                     item["actor_kind"] = actor["kind"]
                     item["personal_interest_eligible"] = personal_browser_activity(actor_row)
-                    item["owner_authored"] = False
-                    item["speaker_label"] = actor_label(actor_row) if disclosure_tier == "owner_raw" else "browser controller"
-                    if disclosure_tier == "owner_raw":
-                        item["browser_actor"] = actor
+                    if not item["personal_interest_eligible"]:
+                        item["owner_authored"] = False
+                    item["speaker_label"] = actor_label(actor_row)
+                    item["browser_actor"] = actor
                     continue
         for table in tables:
             columns = "sender_type" if table == "ai_chat_messages" else "is_from_self, sender_id"

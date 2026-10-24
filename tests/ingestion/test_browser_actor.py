@@ -40,7 +40,7 @@ def test_highlighting_is_personal_only_with_explicit_human_actor(kind, method, e
     row = {"activity_type": "browser_highlight", "metadata_json": {"highlight": "A page author's words", "browser_actor": {**AGENT, "kind": kind, "method": method}}}
     assert is_engaged(row) is expected
     assert personal_browser_activity(row) is expected
-    assert not is_engaged({"activity_type": "browser_highlight"})  # legacy is unknown
+    assert is_engaged({"activity_type": "browser_highlight"})  # no attribution evidence: the owner's (ruling 24 Oct)
 
 
 def test_invalid_and_incomplete_attribution_never_becomes_human():
@@ -116,7 +116,9 @@ def test_every_personal_enrichment_job_excludes_ai_but_recall_and_timeline_keep_
     unrelated = {"source_id": "github", "activity_type": "star", "actor": "a-github-user"}
     records = [agent, human, legacy, unrelated]
     for job in ("entities", "topics", "facts", "goal_extraction", "stats", "sentiment"):
-        assert rows_for_job(job, records) == [human, unrelated]
+        # Owner ruling 24 Oct 2026: browsing with no attribution evidence (here, from before attribution) is the
+        # owner's; only positive agent/automation evidence keeps a row out of personal enrichment.
+        assert rows_for_job(job, records) == [human, legacy, unrelated]
     for job in ("embeddings", "timeline", "pii_redaction"):
         assert rows_for_job(job, records) == records
 
