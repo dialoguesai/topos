@@ -711,12 +711,7 @@ def _activity_highlight_text(
 
             engaged = is_engaged(probe)
         except Exception:
-            engaged = str(activity_type or "").strip().lower() in (
-                "browser_highlight",
-                "highlight",
-                "star",
-                "star_page",
-            )
+            engaged = False
         if engaged:
             meta = metadata_json
             if isinstance(meta, str):
@@ -1697,7 +1692,24 @@ def _canonical_row_to_item(
                     text = f"{text} — {parent_text}".strip(" —") if text else parent_text
 
     if table == "activity_events":
+        from ..features.provenance.browser_actor import browser_actor, actor_label, is_browser_record, personal_browser_activity
+        actor_row = row
         event_id = str(clean.get("record_id") or clean.get("event_id") or "")
+        if conn is not None and "metadata_json" not in actor_row:
+            try:
+                found = conn.execute("SELECT source_id, metadata_json FROM activity_events WHERE event_id=?", (event_id,)).fetchone()
+                if found is not None:
+                    actor_row = {**row, "source_id": found[0], "metadata_json": found[1]}
+            except Exception:
+                pass
+        if is_browser_record(actor_row):
+            if belief_intent:
+                return None  # A browser action is never the owner's authored belief.
+            if not personal_browser_activity(actor_row):
+                owner = False
+                label = actor_label(actor_row) if disclosure_tier == "owner_raw" else "browser controller"
+                text = f"[{label}] {text}"
+
         span = _activity_highlight_text(conn, event_id, clean, highlight_cache)
         if span:
             text = f"{span} — {text}".strip(" —") if text else span
@@ -1740,6 +1752,13 @@ def _canonical_row_to_item(
         "relevance_score": round(_canonical_relevance(text, query_text), 4),
         "retrieval_source": retrieval_source or f"canonical:{table}",
     }
+    if table == "activity_events" and is_browser_record(actor_row):
+        actor = browser_actor(actor_row)
+        item["actor_kind"] = actor["kind"]
+        item["personal_interest_eligible"] = personal_browser_activity(actor_row)
+        if disclosure_tier == "owner_raw":
+            item["browser_actor"] = actor
+            item["speaker_label"] = actor_label(actor_row)
     # The fan-out link, carried so result assembly can collapse a child against
     # its own parent. Written by ingest since the beginning and read by nothing
     # until now — the same join this workstream opened with.
@@ -1795,6 +1814,23 @@ def _annotate_index_message_roles(
         rid = str(item.get("record_id") or "")
         if not rid:
             continue
+        if disclosure_tier == "owner_raw" or "activity_events" in (manifest.canonical_tables or []):
+            try:
+                found = conn.execute("SELECT source_id, metadata_json FROM activity_events WHERE event_id=?", (rid,)).fetchone()
+            except Exception:
+                found = None
+            if found is not None:
+                from ..features.provenance.browser_actor import browser_actor, actor_label, is_browser_record, personal_browser_activity
+                actor_row = {"event_id": rid, "source_id": found[0], "metadata_json": found[1]}
+                if is_browser_record(actor_row):
+                    actor = browser_actor(actor_row)
+                    item["actor_kind"] = actor["kind"]
+                    item["personal_interest_eligible"] = personal_browser_activity(actor_row)
+                    item["owner_authored"] = False
+                    item["speaker_label"] = actor_label(actor_row) if disclosure_tier == "owner_raw" else "browser controller"
+                    if disclosure_tier == "owner_raw":
+                        item["browser_actor"] = actor
+                    continue
         for table in tables:
             columns = "sender_type" if table == "ai_chat_messages" else "is_from_self, sender_id"
             try:

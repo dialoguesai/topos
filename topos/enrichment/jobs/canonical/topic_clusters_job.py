@@ -159,7 +159,8 @@ def _load_batch_embeddings(conn, record_ids: List[str]) -> List[Dict[str, Any]]:
                     "record_type": record_type,
                 }
             )
-    return out
+    from ....features.provenance.browser_actor import exclude_nonhuman_browser_embeddings
+    return exclude_nonhuman_browser_embeddings(conn, out)
 
 
 class TopicClusterJob(BaseEnrichmentJob):

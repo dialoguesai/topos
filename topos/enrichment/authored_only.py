@@ -30,7 +30,12 @@ def rows_for_job(job_name: str, records: Sequence[Dict[str, Any]], *,
     canonical table: a reloaded row carries no stamp, and without one an owner row reads as someone else's) and
     no posture: the question is who typed the row, and goal_extraction applies the owner's posture itself.
     """
+    # Browsing by an agent (or an unresolved controller) is searchable evidence,
+    # never evidence of the owner's personal interests, entities, goals or beliefs.
+    from ..features.provenance.browser_actor import personal_browser_activity
     rows = list(records or [])
+    if job_name not in {"embeddings", "pii_redaction", "timeline"}:
+        rows = [r for r in rows if personal_browser_activity(r)]
     from ..sources.registry import REGISTRY
 
     gates: Dict[str, Any] = {}

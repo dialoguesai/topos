@@ -355,6 +355,7 @@ def _seed_activity(conn: sqlite3.Connection) -> None:
             activity_type = "visit"
             title = _ACTIVITY_TITLES[i % len(_ACTIVITY_TITLES)]
             metadata = {"page_excerpt": f"Notes on {title.lower()}."}
+        metadata["browser_actor"] = {"version": 1, "kind": "human", "method": "manual"}
         conn.execute(
             """INSERT INTO activity_events
                (event_id, activity_type, url, title, occurred_at, source_id, metadata_json)

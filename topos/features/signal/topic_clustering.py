@@ -303,7 +303,9 @@ def load_embedding_records(
                 collapsed[record_key] = item
         else:
             out.append(item)
-    return list(collapsed.values()) if cluster_collapse_chunks_enabled() else out
+    from ..provenance.browser_actor import exclude_nonhuman_browser_embeddings
+    records = list(collapsed.values()) if cluster_collapse_chunks_enabled() else out
+    return exclude_nonhuman_browser_embeddings(conn, records)
 
 
 def _init_centroids(vectors: List[List[float]], k: int) -> List[List[float]]:

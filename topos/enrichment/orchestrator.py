@@ -453,6 +453,8 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
         JobEnvelope: Any,
         PipelineStage: Any,
     ) -> Dict[str, Any]:
+        if not canonical_messages:
+            return {"jobs_run": 0, "records_created": {}, "errors": []}
         resolved = self._resolve_job_names(source_id, job_names)
         # Injected adapters (tests) are thread-agnostic fakes whose writes may
         # run inline; a runtime bundle binds the sqlite connection of whichever
