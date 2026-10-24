@@ -5,6 +5,19 @@ counts; a restart loses pending work. An ended body stays for its keep window
 (UNFETCHED_SECONDS from the job's end, fetched or not), so the same signed
 authority can fetch it again after a lost reply; `_clean` drops it then.
 
+Kept questions (lane OFF1N). An ask the control plane delivers for a question
+it kept while this node was offline carries a signed `kept_stamp`: the end of
+the window its asker may come back in. Such a kept job's ended body stays until
+then (`keep_end`: at most KEPT_MAX_SECONDS, never less than an unkept job's
+window), still only in this process, with every fetch-time re-check as before;
+while one is in memory a sweep drops expired jobs every SWEEP_SECONDS, without
+waiting for the next ask or fetch.
+A kept job that cannot be answered now ends `deferred`: its retrieval met a
+share index not served now, or (R-OFF1 I3) the model or judge host was not up,
+the job waited too long in the queue, or it ran out of time. No body, its
+question given back, and its fetch answers `answer_deferred`, so the control
+plane asks again later (and caps how often).
+
 Fix A (`ANSWER_PROTECTED_ITEM_FILTER`, off by default), security note. With the
 switch on, a released record whose own text as the prompt shows it carries an
 Off-limits term (`answer_generation.withhold_protected_items`) is withheld from
@@ -22,6 +35,8 @@ those, as before.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -34,7 +49,8 @@ from dataclasses import dataclass
 from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
-from . import answer_domain, answer_gate, answer_time, owner_account_words as account_words_grammar, switches
+from . import (answer_domain, answer_gate, answer_time, kept_stamp, owner_account_words as account_words_grammar,
+    switches)
 from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, JudgeOutOfTime, account_words_as_asked, build_prompt,
     close_answer, judge_sentences, node_name_words, owner_name_words, owner_party_words, people_words,
     question_lacks_permitted_anchor, sieve_answer, tense_guard_on, withhold_protected_items)
@@ -54,6 +70,18 @@ MAX_END_SECONDS = 110
 # the reply, so a delivered body is not popped: the same authority fetching the same answer id again inside this window
 # gets the same body after the same re-checks. `_clean` drops the job at the window's end.
 UNFETCHED_SECONDS = 600
+# Kept questions (lane OFF1N): the longest a kept job's ended body stays after its end, whatever its stamp says.
+KEPT_MAX_SECONDS = 14 * 86_400
+# R-OFF1 L3: the most kept answers (ended, holding a body) this process holds. Over it the oldest leave (`_clean`),
+# with one counts-only line each time; the control plane delivers them again, counted once by their kept question id.
+KEPT_ENDED_BOUND = 500
+KEEP_LOG = "permissions answer keep: kept_ended=%d bound=%d dropped_oldest=%d"
+# While a kept job is in memory, a sweep runs `_clean` this often (`AnswerService._sweep`). A kept answer can stay for
+# days, and cleaned only at the next ask or fetch, it stayed in memory past its window on a node nobody asked again.
+SWEEP_SECONDS = 60
+# R-OFF1 R5: how often the sweep re-reads the kept grants' authority (`_drop_moved`): one write-gate hold of about
+# 53 ms for 100 grants on a test node (about 0.5 ms a grant), so every fifth minute rather than every sweep.
+DROP_MOVED_SECONDS = 300
 # NR179 G2 (`ANSWER_JUDGE_RESERVE_SECONDS`): with a reserve set, every support-judge call is cut off this many seconds
 # before the job's deadline, which leaves the body's close, its re-check and its receipt that much time.
 JUDGE_RELEASE_MARGIN_SECONDS = 5
@@ -88,6 +116,17 @@ RECEIPT_REASONS = frozenset({
     "labeler_rubric_mismatch",
 })
 REASON_OTHER = "refused"
+# R-OFF1 I3 (WS-OFF, 23 Oct): for a kept question these receipt reasons mean "not now", not "never". A kept question is
+# delivered just after the owner's Topos comes back, when the model host may not be up yet (`model_unavailable`,
+# `judge_unavailable`), others' live asks may fill the queue (`queue_deadline`), or the job may run out of time
+# (`deadline`). A kept job that ends with one of them is deferred, as for an index not served now. A live ask ends
+# `no_answer` with them, as before. A model that answered badly (`model_error`) is no answer for a kept question too.
+KEPT_LATER = frozenset({"model_unavailable", "judge_unavailable", "queue_deadline", "deadline"})
+# R-OFF1 R1 + R2 (WS-OFF, 24 Oct): of those, the two that come after the writer ran. A kept question may defer on them
+# once a UTC day (`ledger.claim_costly_deferral`); the next ends `no_answer`, counted. The rest ran no writer and are
+# not capped: the control plane's window is their bound, as for an index not served now.
+KEPT_COSTLY = frozenset({"judge_unavailable", "deadline"})
+KEPT_QUESTION_TEXT_DOMAIN = b"topos-kept-question-text/v1\n"
 
 # BL-159: the refusals of a written answer's re-check that say only "the share's index is not served right now"
 # (dropped by a sweep, being rebuilt, a verification pass closed under it). They decide nothing about the items the
@@ -133,8 +172,9 @@ def _unresolved_refuses(method):
 # code is a bounded machine reason, never data; anything else is logged as `refused` or `error`) and the seconds the
 # node took. Never a question, an answer, an id or a record. Outcomes: `answered` / `no_answer` (the body handed out),
 # `pending` (still being written), `held` (written, kept while the share's index is not served; the code says why),
-# `refused` (the uniform refusal went back; the code says why). A `pending` that took under SLOW_FETCH_SECONDS is
-# logged at debug level, so the steady polls of one ask do not fill the log.
+# `deferred` (lane OFF1N: a kept ask that could not be answered now, `answer_deferred`; the code says why), `refused`
+# (the uniform refusal went back; the code says why). A `pending` that took under SLOW_FETCH_SECONDS is logged at
+# debug level, so the steady polls of one ask do not fill the log.
 FETCH_LOG = "permissions answer fetch: outcome=%s reason=%s seconds=%.1f"
 SLOW_FETCH_SECONDS = 5.0
 _CODE = re.compile(r"[a-z][a-z0-9_]{0,63}")
@@ -211,6 +251,26 @@ class Job:
     # G1: the job was refused before the model because its question asks about a domain the grant denies
     # (`answer_domain`). The private receipt carries it only while ANSWER_DENIED_DOMAIN_REFUSAL is on.
     refused_denied_domain: bool = False
+    # Kept questions (lane OFF1N): the end of the window the control plane signed for a kept question (`kept_stamp`),
+    # in epoch seconds; None for a live ask. In this process only, as the question is.
+    keep_until: int | None = None
+    # The kept question's opaque id (`kept_stamp`'s `kq`), for the ledger's per-day counts; None for a live ask.
+    kept_question: str | None = None
+    # Why a kept job was deferred: the not-served-now code its retrieval was refused with (`NOT_SERVED_NOW`), or the
+    # receipt reason of a "not now" failure (`KEPT_LATER`). Never set for a live ask.
+    deferred_by: str | None = None
+    # The kept job ended `deferred`: no body, and every fetch of it is `AnswerDeferred` until `keep_end`.
+    deferred: bool = False
+
+
+def keep_end(job) -> int:
+    """When `_clean` drops an ended job. A live job, and a deferred one (it holds no body): UNFETCHED_SECONDS after its
+    end. A kept job (lane OFF1N): the end of the window its stamp signed, at most KEPT_MAX_SECONDS after its end and
+    never before a live job's, so being kept only ever lengthens the stay."""
+    floor = job.ended_at + UNFETCHED_SECONDS
+    if job.keep_until is None or job.deferred:
+        return floor
+    return max(floor, min(job.keep_until, job.ended_at + KEPT_MAX_SECONDS))
 
 
 def answer_template() -> str:
@@ -278,6 +338,17 @@ class AnswerBusy(Exception):
     """The only answer failure the control plane reports as busy, after issuance."""
 
 
+class AnswerDeferred(Exception):
+    """Lane OFF1N: the fetch of a kept job that ended `deferred`: 429 `answer_deferred`, never a refusal, and never
+    AnswerBusy. A busy fetch's job is still being written and the control plane keeps polling it; a deferred one wrote
+    nothing, so the control plane ends that kept delivery and asks again later (WS-OFF, 23 Oct). `reason` is the
+    not-served code, for the node's own log only."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
+
+
 class AnswerService:
     def __init__(self, runtime, *, clock=None, generate=None, judge=None):
         self.runtime = runtime
@@ -288,10 +359,36 @@ class AnswerService:
         self.judge = judge or _judge_local
         self._lock = threading.Lock()
         self._jobs: dict[str, Job] = {}
+        # Lane OFF1N: the sweep that cleans while a kept job is in memory (`_sweep`; None while none runs), and the
+        # stop it waits on.
+        self._sweeper: threading.Thread | None = None
+        self._closed = threading.Event()
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="permissions-answer")
 
     def close(self):
+        self._closed.set()
         self._executor.shutdown(wait=False, cancel_futures=True)
+
+    def _sweep(self):
+        """Lane OFF1N: every SWEEP_SECONDS while a kept job is in memory, `_clean`; and the first time there are kept
+        answers to check, then every DROP_MOVED_SECONDS, drop those whose share moved (`_drop_moved`, R-OFF1 L3, R5).
+        So an answer past its window, or no longer its share's, leaves this process without waiting for the next ask
+        or fetch. Ends with the service, or once no kept job is left (decided under the lock, so the next kept ask
+        starts another). It reads the ledger, outside the queue's lock, and writes nothing but this queue."""
+        moved_at = None
+        try:
+            while not self._closed.wait(SWEEP_SECONDS):
+                if (moved_at is None or time.monotonic() - moved_at >= DROP_MOVED_SECONDS) and self._drop_moved():
+                    moved_at = time.monotonic()
+                with self._lock:
+                    self._clean(self.clock())
+                    if not any(job.keep_until is not None for job in self._jobs.values()):
+                        self._sweeper = None
+                        return
+        except Exception:  # noqa: BLE001 -- the next ask or fetch still cleans, as before the sweep
+            _log.warning("permissions answer keep: the sweep stopped")
+            with self._lock:
+                self._sweeper = None
 
     def _enabled(self):
         return switches.on(switches.ANSWERS) and switches.on(switches.MESSAGE_SEARCH)
@@ -315,12 +412,25 @@ class AnswerService:
             admission = ledger.verify(envelope, request=context, payload=payload, now=self.clock())
         return principal, signed, admission
 
-    def _current(self, signed):
+    def _question_key(self, question: str) -> str:
+        """R-OFF1 R3: the keyed hash of a kept ask's question that the ledger binds its kept question's exemption to.
+        HMAC-SHA256 under a key derived from this node's signing key, so the stored hash matches no plain hash of the
+        text (the receipt's request hash among them) and cannot be tried against guesses without the key."""
+        secret = self.runtime.protocol.node_signing_key.private_bytes_raw()
+        key = hashlib.sha256(KEPT_QUESTION_TEXT_DOMAIN + secret).digest()
+        return hmac.new(key, question.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def _grant_authority(self, grant_id):
+        """The grant's authority and policy as the ledger holds them now, after syncing the protection floor. Raises
+        the ledger's refusal for a grant that is not active."""
         ledger = self.runtime.protocol.ledger
         with with_db_write():
             with ledger._transaction() as db:
                 self.runtime.protocol._sync_protection(db)
-                authority, policy = ledger._authority(db, signed.grant_id, self.clock())
+                return ledger._authority(db, grant_id, self.clock())
+
+    def _current(self, signed):
+        authority, policy = self._grant_authority(signed.grant_id)
         requested = parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields})
         if authority != requested:
             raise PolicyError("permission_denied")
@@ -349,15 +459,89 @@ class AnswerService:
                 effective_disclosure(policy))
 
     def _clean(self, now):
-        """Drop every ended job past its keep window, delivered or not: the only exit for a delivered body."""
-        for key, job in list(self._jobs.items()):
-            if job.state == "ended" and job.ended_at is not None and now >= job.ended_at + UNFETCHED_SECONDS:
-                job.question = None
-                job.body = None
-                del self._jobs[key]
+        """Drop every ended job past its keep window (`keep_end`), delivered or not: the only exit for a delivered
+        body, with a final refusal and a moved authority. Run under the lock by every ask and fetch, and by the sweep
+        while a kept job is in memory. Then (R-OFF1 L3, R4) hold no more than KEPT_ENDED_BOUND kept answers: the grant
+        holding the most gives way first (a tie: the grant whose oldest is older), its oldest first, so one share's
+        volume never pushes out another share's. A live answer, and a deferred kept job (it holds no body), is not
+        counted."""
+        kept: dict = {}
+        total = 0
+        for order, (key, job) in enumerate(list(self._jobs.items())):   # in the order asked: ties go to the first
+            if job.state != "ended" or job.ended_at is None:
+                continue
+            if now >= keep_end(job):
+                self._drop(key)
+            elif job.keep_until is not None and not job.deferred:
+                kept.setdefault(job.grant_id, []).append(((job.ended_at, job.accepted_at, order), key))
+                total += 1
+        over = total - KEPT_ENDED_BOUND
+        if over > 0:
+            for held in kept.values():
+                held.sort()
+            for _ in range(over):
+                grant_id = min(kept, key=lambda grant: (-len(kept[grant]), kept[grant][0][0]))
+                _age, key = kept[grant_id].pop(0)
+                self._drop(key)
+                if not kept[grant_id]:
+                    del kept[grant_id]
+            _log.warning(KEEP_LOG, total, KEPT_ENDED_BOUND, over)
+
+    def _drop(self, key):
+        job = self._jobs.pop(key)
+        job.question = None
+        job.body = None
+
+    def _grant_authorities(self, grant_ids) -> dict:
+        """R-OFF1 R5: each grant's current authority and answer mode, read in one hold of the write gate and one ledger
+        transaction (the protection floor synced once), so a sweep holds the gate once however many shares keep
+        answers. None for a grant the ledger refuses (ended, revoked, out of its validity). Raises when the ledger
+        cannot be read at all."""
+        ledger, protocol = self.runtime.protocol.ledger, self.runtime.protocol
+        found: dict = {}
+        with with_db_write():
+            with ledger._transaction() as db:
+                protocol._sync_protection(db)
+                now = self.clock()
+                for grant_id in grant_ids:
+                    try:
+                        authority, policy = ledger._authority(db, grant_id, now)
+                    except PolicyError:
+                        found[grant_id] = None
+                        continue
+                    found[grant_id] = (authority, effective_mode(policy,
+                                                                 frontend_client_id=protocol.frontend_client_id))
+        return found
+
+    def _drop_moved(self) -> bool:
+        """R-OFF1 L3: drop the kept answers whose share's authority or answer mode is no longer the one they were
+        written under, as their next fetch would, since that fetch may never come. A grant the ledger refuses (ended,
+        revoked, out of its validity) has moved. A ledger that cannot be read now decides nothing: the next sweep, or
+        a fetch, does. The ledger is read outside the queue's lock, every grant in one gate hold (R5). True when it
+        read the ledger (there were kept answers to check)."""
+        grants: dict = {}
+        with self._lock:
+            for key, job in self._jobs.items():
+                if job.state == "ended" and job.keep_until is not None and not job.deferred:
+                    grants.setdefault(job.grant_id, []).append(key)
+        if not grants:
+            return False
+        try:
+            current = self._grant_authorities(sorted(grants))
+        except Exception:  # noqa: BLE001 -- unreadable now; nothing is dropped on a guess
+            return True
+        with self._lock:
+            for grant_id, keys in grants.items():
+                read = current.get(grant_id)
+                for key in keys:
+                    job = self._jobs.get(key)
+                    if job is not None and (read is None or read[1] != job.mode
+                                            or not same_answer_authority(read[0], job.admitted_authority)):
+                        self._drop(key)
+        return True
 
     def submit(self, *, envelope, payload, request_id, owner_account_words=frozenset(),
-               accepted_version=LEGACY_ACCEPTED_VERSION):
+               accepted_version=LEGACY_ACCEPTED_VERSION, keep_until=None, kept_question=None):
         intent = AskIntent.parse(payload)
         # The transport verified the control plane's signature over these words; the grammar is checked again here.
         if type(owner_account_words) is not frozenset:
@@ -366,6 +550,13 @@ class AnswerService:
         # value); a caller written before the keyword is served as a control plane from before the field.
         if type(accepted_version) is not int:
             raise PolicyError("permission_denied")
+        # Kept questions (lane OFF1N): the transport verified the control plane's signature over the window and the
+        # kept question's id, which come together; their grammar is checked again here. Neither: a live ask, served
+        # exactly as before.
+        if (keep_until is None) != (kept_question is None):
+            raise PolicyError("permission_denied")
+        if keep_until is not None:
+            keep_until, kept_question = kept_stamp.parse_keep_until(keep_until), kept_stamp.parse_kq(kept_question)
         account_words = (frozenset(account_words_grammar.parse_words(sorted(owner_account_words, key=str)))
                          if owner_account_words else frozenset())
         _principal, signed, admission = self._verified(envelope, intent.model_dump(), request_id, ASK)
@@ -376,19 +567,25 @@ class AnswerService:
             if mode not in ("only", "with_sources") or policy.versions.capability != "permissions-beta/p2c-v3":
                 raise PolicyError("answers_mode_mismatch")
             now = self.clock()
+            if keep_until is not None and kept_stamp.expired(keep_until, now=now):
+                # A kept question delivered past its window is no kept ask: the uniform refusal, and no question.
+                raise PolicyError(kept_stamp.EXPIRED)
             with self._lock:
                 self._clean(now)
                 active = [job for job in self._jobs.values() if job.state in ("queued", "running")]
                 if len(active) >= MAX_JOBS or any(job.grant_id == signed.grant_id for job in active):
                     ledger.refuse(admission, now=now)
                     raise AnswerBusy()
-                ledger.admit_answer(admission, now=now, charge=True)
+                ledger.admit_answer(admission, now=now, charge=True, kept_question=kept_question,
+                                    question_hash=None if kept_question is None else self._question_key(
+                                        intent.question))
                 answer_id = "ans_" + secrets.token_hex(16)
                 job = Job(answer_id, request_id, signed.grant_id, signed.assignment_id, signed.actor_id,
                           signed.client_id, parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields}), mode, intent.question,
                           signed.request_hash, now, disclosure=effective_disclosure(policy),
                           account_words=account_words, records_cap=records_cap(accepted_version),
-                          chars_cap=answer_chars_cap(accepted_version), accepted_version=accepted_version)
+                          chars_cap=answer_chars_cap(accepted_version), accepted_version=accepted_version,
+                          keep_until=keep_until, kept_question=kept_question)
                 self._jobs[answer_id] = job
                 _active_delta(1)
                 try:
@@ -398,6 +595,14 @@ class AnswerService:
                     _active_delta(-1)
                     self._jobs.pop(answer_id, None)
                     raise
+                if keep_until is not None and self._sweeper is None and not self._closed.is_set():
+                    sweeper = threading.Thread(target=self._sweep, name="permissions-answer-keep", daemon=True)
+                    try:
+                        sweeper.start()
+                    except RuntimeError:   # no thread to be had: the ask is served, the next ask or fetch cleans
+                        _log.warning("permissions answer keep: the sweep did not start")
+                    else:
+                        self._sweeper = sweeper
             return self._signed(signed, AnswerPending(version=VERSION, state="pending", answer_id=answer_id))
         except AnswerBusy:
             raise
@@ -409,6 +614,9 @@ class AnswerService:
         started = time.perf_counter()
         try:
             result, outcome, reason = self._fetch(envelope=envelope, payload=payload, request_id=request_id)
+        except AnswerDeferred as deferred:
+            _log_fetch("deferred", _fetch_reason(PolicyError(deferred.reason)), started)
+            raise
         except BaseException as exc:
             inner = exc.__context__ if isinstance(exc, PolicyError) and exc.__suppress_context__ else exc
             _log_fetch("refused", _fetch_reason(inner if inner is not None else exc), started)
@@ -434,6 +642,12 @@ class AnswerService:
                     job.body = None
                     self._jobs.pop(intent.answer_id, None)
                     raise PolicyError("authority_stale")
+                if job.state == "ended" and job.deferred:
+                    # Lane OFF1N: no answer was written; the share's index was not served. Nothing is released and
+                    # the fetch's id is spent as refused, but the fetch answers `answer_deferred`, so the control
+                    # plane asks the kept question again later instead of ending it.
+                    ledger.refuse(admission, now=self.clock())
+                    raise AnswerDeferred(job.deferred_by)
                 body = job.body if job.state == "ended" else AnswerPending(version=VERSION, state="pending",
                                                                              answer_id=job.answer_id)
                 if body is None:
@@ -463,6 +677,8 @@ class AnswerService:
                 # after the same re-checks, until `_clean` drops the job UNFETCHED_SECONDS past its end. The only
                 # pops are a final refusal, a moved authority, and that window.
                 return result, outcome, reason
+        except (AnswerBusy, AnswerDeferred):
+            raise
         except Exception:
             ledger.refuse(admission, now=self.clock())
             raise PolicyError("permission_denied") from None
@@ -525,17 +741,30 @@ class AnswerService:
             ended = self.clock()
             if ended >= job.accepted_at + MAX_END_SECONDS:
                 checked, reason = None, "deadline"
-            body = checked.body if checked is not None else NoAnswer(version=VERSION, outcome="no_answer")
+            # Lane OFF1N: a kept job that wrote no answer because its share's index was not served now (`_compute`
+            # keeps the code), or (R-OFF1 I3) for one of the "not now" reasons of KEPT_LATER, ends `deferred`, with no
+            # body and a receipt that says so (filing it gives the ask's question back, `checkpoint_answer_receipt`),
+            # and its fetch answers `answer_deferred`, so the control plane asks the kept question again later. A
+            # live job ends `no_answer`, as before.
+            if job.keep_until is not None and checked is None and reason in KEPT_LATER and (
+                    job.deferred_by is not None or reason not in KEPT_COSTLY
+                    or self.runtime.protocol.ledger.claim_costly_deferral(job.grant_id, job.kept_question,
+                                                                         accepted_at=job.accepted_at)):
+                job.deferred_by = reason
+            deferred = checked is None and job.deferred_by is not None
+            body = (None if deferred else checked.body if checked is not None
+                    else NoAnswer(version=VERSION, outcome="no_answer"))
             if checked is not None and body.outcome == "answered" and job.disclosure != "none":
                 # The writer rides on the body only at the policy's level; the receipt keeps its own full record.
                 body = type(body).parse({**body.model_dump(), "writer": writer_for(job.disclosure, job.template)})
-            try:
-                parse_answer_output(body, request_type=FETCH, mode=job.mode, disclosure=job.disclosure,
-                                    accepted_version=job.accepted_version)
-            except PolicyError:
-                checked, reason = None, "body_invalid"
-                body = NoAnswer(version=VERSION, outcome="no_answer")
-            receipt = self._receipt(job, checked, reason, started, ended)
+            if not deferred:
+                try:
+                    parse_answer_output(body, request_type=FETCH, mode=job.mode, disclosure=job.disclosure,
+                                        accepted_version=job.accepted_version)
+                except PolicyError:
+                    checked, reason = None, "body_invalid"
+                    body = NoAnswer(version=VERSION, outcome="no_answer")
+            receipt = self._receipt(job, checked, reason, started, ended, deferred=deferred)
             # A body is never available to fetch unless its counts-only receipt committed.
             self.runtime.protocol.ledger.checkpoint_answer_receipt(job.request_id, receipt,
                 decision=job.set_decision, now=ended)
@@ -544,6 +773,9 @@ class AnswerService:
                     job.body = body
                     job.state = "ended"
                     job.ended_at = ended
+                    if deferred:
+                        job.question = None       # nothing re-checks a deferred job: its question goes now
+                        job.deferred = True
             if split is not None:
                 split.end(reason if checked is None else getattr(checked, "reason", None), started - job.accepted_at)
         except Exception:
@@ -711,6 +943,9 @@ class AnswerService:
         except PolicyError as exc:
             # BL-156: the refusal's own code (the index missing, stale or not ready; the grant inactive; the
             # authority stale), never `authority_moved` for all of them. `receipt_reason` keeps it counts-only.
+            if job.keep_until is not None and exc.code in NOT_SERVED_NOW:
+                # Lane OFF1N: for a kept job this decided nothing; it ends deferred (`_run`), the question asked again.
+                job.deferred_by = exc.code
             return None, receipt_reason(exc.code)
         except Unresolved as exc:
             # NR185: the final PolicyError it is (its code is neither "not served now" nor `answer_evidence_moved`).
@@ -719,7 +954,9 @@ class AnswerService:
             return None, "model_error"
 
     @staticmethod
-    def _receipt(job, checked, reason, started, ended):
+    def _receipt(job, checked, reason, started, ended, *, deferred=False):
+        """The counts-only receipt. Its outcome is `answered` or `no_answer`, or (lane OFF1N) `deferred` for a kept job
+        that wrote nothing and is asked again (`Job.deferred_by`): no answer the owner's week counts."""
         from .shadow_labeler_local import MODEL, MODEL_REVISION
         return {"version": "topos-local-receipt/answer-v1", "request_id": job.request_id,
             "answer_id": job.answer_id, "grant_id": job.grant_id,
@@ -733,7 +970,8 @@ class AnswerService:
             **({"items_withheld_protected": job.items_withheld_protected}
                if switches.on(switches.ANSWER_PROTECTED_ITEM_FILTER) else {}),
             "model": {"tag": MODEL, "digest": MODEL_REVISION}, "template_version": job.template or answer_template(),
-            "outcome": "answered" if checked is not None and checked.body.outcome == "answered" else "no_answer",
+            "outcome": ("deferred" if deferred
+                        else "answered" if checked is not None and checked.body.outcome == "answered" else "no_answer"),
             "reason": reason, "sentences": {"generated": 0 if checked is None else checked.generated,
                 "kept": 0 if checked is None else checked.kept,
                 "dropped_citation": 0 if checked is None else checked.dropped_citation,
