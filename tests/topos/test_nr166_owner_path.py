@@ -124,5 +124,5 @@ def test_what_this_branch_sheds_and_what_it_moves_off_the_loop():
         "get_dashboard_measurements",
         # Calibrate SQLite reads/writes use the same off-loop handler dispatch.
         "calibration_catalog", "calibration_answer", "calibration_preview",
-        # Kept questions Wave 2 (OFF2N): the owner's away settings, one engine_config write; readiness, from memory.
+        # Kept questions Wave 2 (OFF2N): the owner's away settings and readiness, both from memory.
         "put_away_config", "get_sharing_readiness"}

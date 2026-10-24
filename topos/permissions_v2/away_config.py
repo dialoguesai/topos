@@ -11,21 +11,21 @@ can schedule its own work by it with no request in hand:
 - ``others_when_idle``: only whether readiness reports ``owner_idle_seconds`` (§C, DR-45). Off (the default), the
   node says nothing about the owner's activity.
 
-``put_away_config`` (owner class only) stores it in ``engine_config`` under ``ENGINE_CONFIG_KEY``, as JSON, as
-``put_facts_llm_config`` stores its pick, and applies it at once: the next acquire of an inbound slot and the next
-poll of every background wait read it. ``load`` reads it once when the app starts. Never set, it is ``DEFAULT``. A
-payload that is not exactly the contract's shape is refused and nothing is stored. The setting names no one and goes
-nowhere but this node's own scheduling.
+``put_away_config`` (owner class only) applies a push at once: the next acquire of an inbound slot and the next poll
+of every background wait read it. **Held in memory for the current control-plane connection only** (contract §D as
+revised after R-OFF2 F3): nothing is written to disk, and each new connection, and each one that ends, goes back to
+``DEFAULT`` (``reset``) until the control plane pushes again. So a control plane whose owner-order switch is off, or a
+push that failed, always means the defaults: no idleness reported, the reserve and the yield rule on. A push carries
+``seq``, the control-plane row's update counter: one lower than the ``seq`` held on this connection is ignored (the
+reply says what is held), so two pushes that cross end on the newer. A payload that is not exactly the contract's
+shape is refused and nothing changes. The setting names no one and goes nowhere but this node's own scheduling.
 """
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from typing import Any, Callable, Mapping
 
-#: The ``engine_config`` row the settings are kept in (one key, JSON).
-ENGINE_CONFIG_KEY = "permissions_v2_away_config"
 #: ``permissions_v2_away_config`` in the node's capabilities: >= 1, this node takes ``put_away_config``.
 CAPABILITY_VERSION = 1
 VERSION = 1
@@ -37,12 +37,15 @@ DEFAULT = {"v": VERSION, "while_using": OWNER_FIRST, "others_when_idle": False}
 _log = logging.getLogger(__name__)
 _lock = threading.Lock()
 _current: dict = dict(DEFAULT)
+_seq: int | None = None   # the newest push's seq on this connection; None: no push since the connection began
 _listeners: list = []
+#: A push: what the node holds, and the control plane's order for it.
+PUSH_FIELDS = frozenset((*DEFAULT, "seq"))
 
 
 def parse(payload: Any) -> dict:
-    """The settings ``payload`` states, or ValueError: exactly ``v`` 1, ``while_using`` one of ``WHILE_USING`` and
-    ``others_when_idle`` a boolean, and no other key."""
+    """The settings ``payload`` states (the held shape, no ``seq``), or ValueError: exactly ``v`` 1, ``while_using``
+    one of ``WHILE_USING`` and ``others_when_idle`` a boolean, and no other key."""
     if not isinstance(payload, Mapping) or set(payload) != set(DEFAULT):
         raise ValueError("away_config_invalid")
     version, while_using, idle = payload["v"], payload["while_using"], payload["others_when_idle"]
@@ -99,25 +102,27 @@ def apply(settings: Any) -> dict:
     return dict(parsed)
 
 
-def store(conn, payload: Any) -> dict:
-    """``put_away_config``: keep ``payload`` in ``engine_config`` and hold it. A payload ``parse`` refuses raises
-    ValueError before anything is written; a write that fails raises and changes nothing held."""
-    parsed = parse(payload)
-    from ..core.state import set_engine_config_value
-
-    set_engine_config_value(conn, ENGINE_CONFIG_KEY, json.dumps(parsed, sort_keys=True))
+def put(payload: Any) -> dict:
+    """``put_away_config``: exactly ``{"v": 1, "seq": <int>, "while_using", "others_when_idle"}`` (else ValueError,
+    nothing changes). Held at once, unless its ``seq`` is lower than the one held on this connection: then nothing
+    changes. Returns what the node holds either way (the held shape, no ``seq``)."""
+    global _seq
+    if not isinstance(payload, Mapping) or set(payload) != PUSH_FIELDS:
+        raise ValueError("away_config_invalid")
+    seq = payload["seq"]
+    if type(seq) is not int:
+        raise ValueError("away_config_invalid")
+    parsed = parse({key: payload[key] for key in DEFAULT})
+    with _lock:
+        if _seq is not None and seq < _seq:
+            return dict(_current)   # an older push that arrived late: the newer one stands
+        _seq = seq
     return apply(parsed)
 
 
-def load(conn) -> dict:
-    """At start: hold what the control plane last pushed, or ``DEFAULT`` when nothing (or nothing readable) is kept."""
-    from ..core.state import get_engine_config_value
-
-    raw = get_engine_config_value(conn, ENGINE_CONFIG_KEY)
-    if raw is None:
-        return apply(DEFAULT)
-    try:
-        return apply(json.loads(raw))
-    except (TypeError, ValueError):
-        _log.warning("away settings kept on this node are not readable; the defaults hold until the next push")
-        return apply(DEFAULT)
+def reset() -> dict:
+    """A control-plane connection began or ended: ``DEFAULT`` until the control plane pushes on the new one."""
+    global _seq
+    with _lock:
+        _seq = None
+    return apply(DEFAULT)

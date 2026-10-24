@@ -16,7 +16,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from .config.settings import settings
-from .permissions_v2 import answer_gate
+from .permissions_v2 import answer_gate, away_config
 from .core.connection_resilience import (
     ConnectionSnapshot,
     ConnectionState,
@@ -206,8 +206,6 @@ class ControlPlaneClient:
         if self._owner_lane is not None:
             # OFF2N: "Share evenly" or back, pushed by the control plane on another thread: the pool's waiting frames
             # are handed what the new mode frees, on the client's own loop. A client that is gone hears nothing.
-            from .permissions_v2 import away_config
-
             away_config.on_change(_wake_lane_of(weakref.ref(self)))
         self._inbound_tasks: set[asyncio.Task] = set()
         # UI reads get a separate bounded reserve, never an unbounded bypass.
@@ -455,6 +453,8 @@ class ControlPlaneClient:
                     ping_timeout=PING_TIMEOUT_SECONDS,
                 ) as ws:
                     self._ws = ws
+                    # OFF2N (R-OFF2 F3): the owner's away settings hold for one connection; the defaults until a push.
+                    away_config.reset()
                     self._set_state("connected")
                     self._ready.set()
                     self._backoff.reset()
@@ -481,6 +481,7 @@ class ControlPlaneClient:
                 self._record_failure(exc)
             finally:
                 self._ws = None
+                away_config.reset()
                 self._ready.clear()
                 if not self._stop.is_set() and self._state != "stopping":
                     self._last_disconnected_at = utc_now_iso()
