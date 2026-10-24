@@ -495,6 +495,11 @@ def canonicalize_normalized_batch(
                 if mapper:
                     for mapped in mapper.map_many(norm):
                         table = mapped.table or "activity_events"
+                        # Declared field maps must not strip capture provenance.
+                        from ..features.provenance.browser_actor import BROWSER_SOURCES, browser_actor, _object
+                        if table == "activity_events" and source_id in BROWSER_SOURCES:
+                            meta = _object(mapped.payload.get("metadata_json"))
+                            mapped.payload["metadata_json"] = {**meta, "browser_actor": browser_actor(payload)}
                         payloads_by_table.setdefault(table, []).append(mapped.payload)
             if result.withheld_incognito:
                 logger.info(
@@ -524,6 +529,9 @@ def canonicalize_normalized_batch(
                         if source_record_id:
                             result.refused.setdefault(source_record_id, result.refused[str(ref.record_id)])
                         continue
+                    stored_meta = db_conn.execute("SELECT metadata_json FROM activity_events WHERE event_id=?", (ref.record_id,)).fetchone()
+                    if stored_meta is not None:
+                        canonical_payload["metadata_json"] = stored_meta[0]
                     signal_record = _prepare_signal_record(
                         activity_payload_to_signal_record(canonical_payload, source_id=source_id)
                     )

@@ -123,7 +123,7 @@ class TestBrowserRoles:
             "event_id": "e2",
             "activity_type": "browser_highlight",
             "title": "Fermentation Methods Deep Dive",
-            "metadata_json": json.dumps({"highlight": "copper still method"}),
+            "metadata_json": json.dumps({"highlight": "copper still method", "browser_actor": {"kind": "human", "method": "manual"}}),
         }
         assert record_role(row, table="activity_events") == ROLE_AMBIENT
         assert is_engaged(row)
@@ -132,12 +132,12 @@ class TestBrowserRoles:
         row = {
             "event_id": "e3",
             "activity_type": "visit",
-            "metadata_json": json.dumps({"highlight": "a span"}),
+            "metadata_json": json.dumps({"highlight": "a span", "browser_actor": {"kind": "human", "method": "manual"}}),
         }
         assert is_engaged(row)
 
     def test_star_event_is_engaged(self):
-        row = {"event_id": "e4", "event_type": "star_page", "url": "https://x.test"}
+        row = {"event_id": "e4", "event_type": "star_page", "url": "https://x.test", "actor": {"kind": "human", "method": "manual"}}
         assert is_engaged(row)
 
     def test_visit_row_inferred_ambient_without_table(self):

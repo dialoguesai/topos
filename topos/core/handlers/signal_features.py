@@ -701,6 +701,7 @@ async def handle_signal_list_timeline(message: Dict[str, Any]) -> Optional[Dict[
             conn,
             canonical_table=payload.get("canonical_table"),
             source_id=payload.get("source_id"),
+            actor_kind=payload.get("actor_kind"),
             date_from=payload.get("date_from"),
             date_to=payload.get("date_to"),
             limit=min(int(payload.get("limit") or 100), 500),

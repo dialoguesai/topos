@@ -996,7 +996,7 @@ def test_one_cluster_built_alone_counts_its_repeats_as_the_build_of_all(db):
 
 
 def test_the_counting_rule_is_in_every_member_revision(db, monkeypatch):
-    assert fam.COUNTING == "interest-visit-count/v2"
+    assert fam.COUNTING == "interest-visit-count/v3-human-actor"
     month_of_visits(db, 0, 5, [3, 9, 17])
     db.commit()
     before = only(db).content_revision
@@ -1248,3 +1248,19 @@ def _module_holds(module, word: str) -> bool:
 def _driven_as_the_owners_app(owner_app_on_the_socket):
     """These doors are the owner's app's: every request here is an ATTESTED socket peer under the dangerous-door
     split (CONTRACTS §1.6), as Topos.app is — the split stays in its product configuration (tests/conftest.py)."""
+
+
+@pytest.mark.parametrize("actor", [None, {"kind": "unknown"}, {"kind": "automation", "method": "webdriver"},
+    {"kind": "agent", "method": "manual", "provider": "openai", "name": "Codex",
+     "conversation_source": "codex_sessions", "conversation_id": "codex:synthetic-parent"}])
+def test_agent_and_legacy_visits_never_become_personal_interests(db, actor):
+    month_of_visits(db, 500, 15, [3, 9, 17], metadata={"browser_actor": actor})
+    db.commit()
+    assert build(db).objects == []
+
+
+def test_a_mixed_old_cluster_cannot_release_a_label_learned_from_bot_browsing(db):
+    month_of_visits(db, 600, 6, [3, 9, 17])  # enough explicit human visits
+    visit(db, 700, at(8, 17), metadata={"browser_actor": {"kind": "automation", "method": "webdriver"}})
+    db.commit()
+    assert build(db).objects == []  # a fresh human-only label is required

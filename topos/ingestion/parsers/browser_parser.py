@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any, Dict
 from datetime import datetime, timezone
 
+from ...features.provenance.browser_actor import browser_actor
 from ..sources.base import RawRecord
 from ..validation.base import ValidationResult
 from .base import NormalizedRecord, Parser
@@ -38,8 +39,9 @@ class BrowserParser(Parser):
         
         # Create normalized record with all browser fields preserved
         normalized = {
-            "record_id": payload.get("url", raw.record_id) + "_" + ts,  # Unique ID
+            "record_id": str(payload.get("capture_id") or (payload.get("url", raw.record_id) + "_" + ts)),  # Unique ID
             "dataset_id": self.dataset_id,
+            "actor": browser_actor(payload),
             "url": payload.get("url", ""),
             "visited_at": ts,
             "title": payload.get("title", ""),
@@ -120,10 +122,11 @@ class BrowserEventsParser(Parser):
         else:
             ts = str(ts)
         url = payload.get("url") or ""
-        record_id = f"{event_type}_{(url or raw.record_id)[:80]}_{ts[:24]}"
+        record_id = str(payload.get("capture_id") or f"{event_type}_{(url or raw.record_id)[:80]}_{ts[:24]}")
         normalized = {
             "record_id": record_id,
             "dataset_id": self.dataset_id,
+            "actor": browser_actor(payload),
             "event_type": event_type,
             "url": url,
             "visited_at": ts,
