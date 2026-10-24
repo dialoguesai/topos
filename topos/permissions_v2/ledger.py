@@ -109,8 +109,8 @@ KEPT_QUESTION_DOMAIN = b"topos-kept-question-day/v1\n"
 # R-OFF1 R3: the most deliveries of one kept question a grant's UTC day exempts from its count; the next is a question.
 KEPT_EXEMPTIONS_PER_DAY = 7
 # R-OFF1 R1 + R2: the deferrals one kept question may take a UTC day after the writer ran (`deadline`,
-# `judge_unavailable`); the next such one ends `no_answer` and stays counted. Deferrals that ran no writer are not
-# capped.
+# `judge_unavailable`, `model_error`); the next such one ends `no_answer` and stays counted. Deferrals that ran no
+# writer are not capped.
 KEPT_COSTLY_DEFERRALS_PER_DAY = 1
 
 

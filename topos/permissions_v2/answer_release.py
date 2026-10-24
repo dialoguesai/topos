@@ -120,12 +120,14 @@ REASON_OTHER = "refused"
 # delivered just after the owner's Topos comes back, when the model host may not be up yet (`model_unavailable`,
 # `judge_unavailable`), others' live asks may fill the queue (`queue_deadline`), or the job may run out of time
 # (`deadline`). A kept job that ends with one of them is deferred, as for an index not served now. A live ask ends
-# `no_answer` with them, as before. A model that answered badly (`model_error`) is no answer for a kept question too.
-KEPT_LATER = frozenset({"model_unavailable", "judge_unavailable", "queue_deadline", "deadline"})
-# R-OFF1 R1 + R2 (WS-OFF, 24 Oct): of those, the two that come after the writer ran. A kept question may defer on them
-# once a UTC day (`ledger.claim_costly_deferral`); the next ends `no_answer`, counted. The rest ran no writer and are
-# not capped: the control plane's window is their bound, as for an index not served now.
-KEPT_COSTLY = frozenset({"judge_unavailable", "deadline"})
+# `no_answer` with them, as before. WS-OFF, 24 Oct (Rig D): `model_error` too, since the local writer's call reports a
+# cold model still loading (a timeout), a missing model and an incomplete reply all as `model_error`.
+KEPT_LATER = frozenset({"model_unavailable", "judge_unavailable", "queue_deadline", "deadline", "model_error"})
+# R-OFF1 R1 + R2 (WS-OFF, 24 Oct): of those, the ones that come after the writer ran, or may have (`model_error`). A
+# kept question may defer on them once a UTC day, all of them together (`ledger.claim_costly_deferral`); the next ends
+# `no_answer`, counted. The rest ran no writer and are not capped: the control plane's window is their bound, as for
+# an index not served now.
+KEPT_COSTLY = frozenset({"judge_unavailable", "deadline", "model_error"})
 KEPT_QUESTION_TEXT_DOMAIN = b"topos-kept-question-text/v1\n"
 
 # BL-159: the refusals of a written answer's re-check that say only "the share's index is not served right now"
