@@ -5,7 +5,7 @@ verdict, the cited records by table, id, role and date, never their text). An ``
 the lane (:func:`recheck_reason`: a changed model, effort or reader timeout, or a cooldown; at most
 :data:`MAX_ATTEMPTS` checks in all, never once the owner labelled it), in place: the row keeps its id, its week and
 its ``created_at``, and ``attempts`` / ``read_timeout_s`` / ``checked_at`` say how many checks it had and how the last
-one ran. ``truth_labels`` holds the owner's
+one ran. ``engine_version`` / ``engine_sha16`` stamp every row with the engine build of its last check. ``truth_labels`` holds the owner's
 judgement of a claim (true / partly / false and an optional note), one per check; a new submit replaces it. Both
 are created lazily on first write, as ``ai_chat_message_facets`` is, so a node that never turns the lane on keeps
 neither (no migration). Both are in ``data_explorer_tables.OWNER_ONLY_TABLES``: the legacy table tools serve them to
@@ -82,7 +82,9 @@ _DDL = (
         created_at TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 1,
         read_timeout_s REAL,
-        checked_at TEXT
+        checked_at TEXT,
+        engine_version TEXT,
+        engine_sha16 TEXT
     )""",
     f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{CHECKS_TABLE}_record ON {CHECKS_TABLE}(record_table, record_id)",
     f"CREATE INDEX IF NOT EXISTS idx_{CHECKS_TABLE}_week ON {CHECKS_TABLE}(week, created_at)",
@@ -98,8 +100,11 @@ _DDL = (
 #: (the table itself was created lazily, with no migration, so its columns are too). ``attempts`` counts the checks
 #: of the record (1 for every row stored before retries existed); ``read_timeout_s`` is the reader cap the last check
 #: ran with (NULL for a row stored before it was recorded, or for a row the gate refused without a model call);
-#: ``checked_at`` is when the last check ran (NULL: ``created_at``).
-_ADDED_COLUMNS = (("attempts", "INTEGER NOT NULL DEFAULT 1"), ("read_timeout_s", "REAL"), ("checked_at", "TEXT"))
+#: ``checked_at`` is when the last check ran (NULL: ``created_at``). ``engine_version`` / ``engine_sha16`` name the
+#: engine build of the last check: ``verify_v2.VERSION`` and the sha16 of ``verify_v2.py`` (NULL on rows stored
+#: before the stamp), so the weekly eval tells builds apart by stamp rather than by time.
+_ADDED_COLUMNS = (("attempts", "INTEGER NOT NULL DEFAULT 1"), ("read_timeout_s", "REAL"), ("checked_at", "TEXT"),
+                  ("engine_version", "TEXT"), ("engine_sha16", "TEXT"))
 #: An ``unable`` row is checked again at most until it has had this many checks in all.
 MAX_ATTEMPTS = 3
 
@@ -344,13 +349,13 @@ def record_check(conn: sqlite3.Connection, check: Dict[str, Any]) -> Optional[st
         cursor = conn.execute(
             f"INSERT OR IGNORE INTO {CHECKS_TABLE} (check_id, record_table, record_id, conversation_id, source, "
             "speaker_kind, week, category, claim_text, verdict, reason, cited_refs_json, effort, model, latency_ms, "
-            "created_at, attempts, read_timeout_s, checked_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            "created_at, attempts, read_timeout_s, checked_at, engine_version, engine_sha16) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
             (check_id, check["record_table"], check["record_id"], check.get("conversation_id"), check["source"],
              check["speaker_kind"], iso_week(created), check.get("category"), check.get("claim_text"),
              check["verdict"], check.get("reason"), json.dumps(check.get("cited_refs") or []), check.get("effort"),
              check.get("model"), check.get("latency_ms"), created.isoformat(), check.get("read_timeout_s"),
-             created.isoformat()),
+             created.isoformat(), check.get("engine_version"), check.get("engine_sha16")),
         )
         commit_connection(conn)
     return check_id if cursor.rowcount else None
@@ -437,11 +442,11 @@ def recheck(conn: sqlite3.Connection, check: Dict[str, Any], attempt: int) -> Op
         conn.execute(
             f"UPDATE {CHECKS_TABLE} SET conversation_id=?, source=?, speaker_kind=?, category=?, claim_text=?, "
             "verdict=?, reason=?, cited_refs_json=?, effort=?, model=?, latency_ms=?, attempts=?, read_timeout_s=?, "
-            "checked_at=? WHERE check_id=?",
+            "checked_at=?, engine_version=?, engine_sha16=? WHERE check_id=?",
             (check.get("conversation_id"), check["source"], check["speaker_kind"], check.get("category"),
              check.get("claim_text"), check["verdict"], check.get("reason"), json.dumps(check.get("cited_refs") or []),
              check.get("effort"), check.get("model"), check.get("latency_ms"), attempt, check.get("read_timeout_s"),
-             now_utc().isoformat(), found[0]),
+             now_utc().isoformat(), check.get("engine_version"), check.get("engine_sha16"), found[0]),
         )
         commit_connection(conn)
     return str(found[0])
