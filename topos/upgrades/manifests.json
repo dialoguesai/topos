@@ -1235,6 +1235,15 @@
       ]
     },
     {
+      "version": "1.5.21",
+      "summary": "Release 1.5.21: kept questions (node side) and the verify_claim model picker.",
+      "steps": [],
+      "notes": [
+        "Kept questions: no step and no prompt. p2a_kept_question_counts joins the ledger's own schema (CREATE TABLE IF NOT EXISTS, hashes and counts only); kept answers live in memory only. Nothing changes until the control plane's kept-questions switch is on.",
+        "verify_claim model picker: no step and no prompt. Two engine_config keys, read per call; with none stored the environment decides exactly as before."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

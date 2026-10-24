@@ -156,6 +156,20 @@ def _knowledge_max_k() -> int:
         return 0
 
 
+def _kept_answers() -> int:
+    """`permissions_v2_kept_answers` (kept questions, lane OFF1N): 1, this node keeps a kept question's answer for the
+    window its `kept_stamp` signs, and the fetch of a kept ask it could not serve then answers 429 `answer_deferred`,
+    to be asked again. The control plane delivers a kept question only to a node that says so; to any other it is a
+    live ask, kept ten minutes. It says what the code does, so it does not follow the answers switch
+    (`permissions_v2_answer_version` says whether this node answers at all). 0 when the module cannot be read."""
+    try:
+        from ..permissions_v2.kept_stamp import CAPABILITY_VERSION
+
+        return int(CAPABILITY_VERSION)
+    except Exception:  # noqa: BLE001 -- an unimportable module keeps nothing
+        return 0
+
+
 def _node_key_id() -> Any:
     """`permissions_v2_node_key_id` (A2A-1 §3.5): the key id of this node's sharing config, or None. A hint, read
     from disk on every beat; it takes no lock and loads no runtime."""
@@ -236,6 +250,8 @@ def build_engine_capabilities() -> Dict[str, Any]:
         # >= 1: a knowledge share here may opt into naming each AI-chat message's chat (`release_conversation_title`).
         # The control plane offers the choice only to a node that says so; a node before it refuses the key at parse.
         "permissions_v2_conversation_titles": 1,
+        # Kept questions: >= 1 keeps a kept answer for its signed window and defers a kept ask it cannot serve now.
+        "permissions_v2_kept_answers": _kept_answers(),
         "capability_tiers": capability_tiers,
         "signal_providers": [p for p in ("huggingface", "ollama") if p in providers],
         "signal_jobs_available": signal_jobs_available,
