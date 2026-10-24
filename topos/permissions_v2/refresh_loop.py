@@ -1193,6 +1193,7 @@ class RefreshLoop:
         ledger, the index service, the rules and the canonical database are read at most once per interval."""
         if not self.settings.catchup or self._worker is None:
             return None
+        self._hold_before_a_slice()
         now = int(self.clock())
         with self._lock:
             if self._pass is not None:
@@ -1232,6 +1233,21 @@ class RefreshLoop:
             from . import sharing_readiness
             sharing_readiness.backlog_pass(run["origin"] == "startup_backlog")   # OFF2N: counted while it runs
         return None
+
+    def _hold_before_a_slice(self) -> float:
+        """Kept questions Wave 2 (OFF2N, scope §6.2 item 4): before a tick that may start a slice of a pass (the
+        startup backlog's among them), ``answer_gate.hold_background_start``: it waits while a share answer is in hand
+        (``ANSWER_HOLDS_BACKGROUND``) or, under the yield rule, an owner frame is in flight, at most 110 s. Here, never
+        under the loop's lock, which the daemon sweep's ``observe`` takes after every sweep. Asked only when a wait
+        would follow: whether a running pass's slice has ended, or the next check is due."""
+        from . import answer_gate
+
+        def may_start() -> bool:
+            if self._pass is not None:
+                return not self._worker_object().running()
+            checked = self._last_catchup_check
+            return checked is None or int(self.clock()) >= checked + self.settings.catchup_interval
+        return answer_gate.hold_background_start(only_if=may_start)
 
     def _start_slice(self, worker, run: dict, now: int) -> None:
         """The pass's current slice as one worker run, with what the pass has left of its budget."""

@@ -269,6 +269,11 @@ async def execute_catchup(payload: dict) -> dict:
                     "messages_total": total_count, "current_job_name": job_name,
                     "current_job_progress_percent": current_job_progress})
 
+    from ..permissions_v2 import answer_gate
+
+    # Kept questions Wave 2 (OFF2N): a batch starts once no share answer is in hand and, under the yield rule, no
+    # owner frame is in flight (at most 110 s): with kept questions delivered back to back, catch-up waits between.
+    await answer_gate.hold_background_batch()
     result = await EnrichmentOrchestrator().run_canonical(records, job_names=[JOB], progress_callback=progress)
     errors = list(result.get("errors") or [])
     if not errors:

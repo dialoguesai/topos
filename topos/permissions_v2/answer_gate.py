@@ -377,3 +377,28 @@ def hold_background_start(*, only_if=None, limit: float | None = None, poll: flo
            and not run.is_stop_requested()):
         sleep(poll)
     return _note(clock() - started, limit, "background build", str(whom))
+
+
+async def hold_background_batch(*, limit: float | None = None, poll: float | None = None,
+                                clock=time.monotonic) -> float:
+    """OFF2N (scope §6.2 item 4): before each batch of a catch-up that runs in a coroutine (the embeddings catch-up,
+    the AI-tool catch-up), ``hold_background_start``'s rules, awaited instead of slept: it waits while an answer job is
+    in hand (with ``ANSWER_HOLDS_BACKGROUND``) or the yield rule holds it for an owner frame, at most ``limit`` seconds
+    (110), and ends when the node stops. No wait in the owner's own work, inside an answer job, or while this thread
+    holds the write gate. With the control plane delivering kept questions back to back ("Others first"), a catch-up
+    then waits between answers. Seconds waited; a wait of a second or more is logged with its seconds only."""
+    answers = holds_background()
+    whom = _Whom()
+    if not whom.saw(answers and active(), _owner_holds()):
+        return 0.0
+    if _background.get() is None or _answer_job.get() is True or _holds_the_write_gate():
+        return 0.0
+    limit = LIMIT_SECONDS if limit is None else limit
+    poll = POLL_SECONDS if poll is None else poll
+    from topos import runtime_shutdown
+    run = runtime_shutdown.current_generation()
+    started = clock()
+    while (whom.saw(answers and active(), _owner_holds()) and clock() - started < limit
+           and not run.is_stop_requested()):
+        await asyncio.sleep(poll)
+    return _note(clock() - started, limit, "catch-up batch", str(whom))
