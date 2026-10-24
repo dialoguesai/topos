@@ -157,7 +157,10 @@ VHIGH = {**V136, P + "TRUTH_INTERPRET_ENABLED": False, P + "TRUTH_INTERPRET_PER_
 #: Fix 192 (22 Oct 2026, DR-34, widens DR-31): an AI-chat line whose own stored row was rewritten stays withheld
 #: instead of its whole share index going; off bound and unbound alike until the owner rules the default. 63 + 1 = 64.
 VOWN = {**VHIGH, P + "INDEX_NARROW_OWN_ROW_EDITS": True}
-TABLE = {**V166, **VOWN}
+#: Kept questions Wave 2 (lane OFF2N; the owner's ruling D-10 of 23 Oct 2026, "on with its built settings"): the NR183
+#: owner lane on, bound and unbound alike, with its built slots, cap and types unchanged. No switch added (64).
+VOFF2 = {**VOWN, P + "OWNER_LANE": True}
+TABLE = {**V166, **VOFF2}
 
 
 @pytest.fixture(autouse=True)
@@ -342,18 +345,22 @@ def test_each_answer_quality_switch_takes_its_1_5_10_default_bound_or_not(name, 
 
 
 @pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
-def test_the_nr183_owner_lane_is_off_bound_or_not_and_keeps_four_slots_when_on(bound, state, monkeypatch):
-    """NR183: off with nothing set, read without an `is_bound()` stat; on is one environment line, and the count it
-    keeps is at least one (`tests/topos/test_nr183_owner_lane.py` pins what the lane does)."""
+def test_the_nr183_owner_lane_is_on_bound_or_not_and_keeps_four_slots(bound, state, monkeypatch):
+    """NR183, on since Wave 2 of kept questions (D-10): on with nothing set, read without an `is_bound()` stat; off
+    is one environment line, and the count it keeps is at least one (`tests/topos/test_nr183_owner_lane.py` pins what
+    the lane does). Its built settings are NR183's: 4 kept, at most 2 borrowed, the 15 types."""
     state(bound)
     lane, slots = P + "OWNER_LANE", P + "OWNER_LANE_SLOTS"
     shared, types = P + "OWNER_LANE_SHARED_MAX", P + "OWNER_LANE_TYPES"
-    assert switches.lookup(lane).unbound == switches.lookup(lane).bound == V183[lane] is False
+    assert V183[lane] is False and VOFF2[lane] is True
+    assert switches.lookup(lane).unbound == switches.lookup(lane).bound == VOFF2[lane] is True
     assert switches.lookup(slots).unbound == switches.lookup(slots).bound == V183[slots] == 4
     assert switches.lookup(shared).unbound == switches.lookup(shared).bound == V183[shared] == 2
     assert switches.lookup(types).unbound == switches.lookup(types).bound == V183[types]
-    assert switches.on(lane) is False and switches.number(slots) == 4 and switches.number(shared) == 2
+    assert switches.on(lane) is True and switches.number(slots) == 4 and switches.number(shared) == 2
     assert switches.entries(types) == NR183_TYPES
+    monkeypatch.setenv(lane, "false")
+    assert switches.on(lane) is False
     monkeypatch.setenv(lane, "true")
     monkeypatch.setenv(slots, "0")
     monkeypatch.setenv(shared, "0")

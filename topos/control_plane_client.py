@@ -8,6 +8,7 @@ import logging
 import ssl
 import threading
 import time
+import weakref
 from typing import Any, Awaitable, Callable, Dict
 
 import certifi
@@ -122,6 +123,19 @@ _FAST_INBOUND_MESSAGE_TYPES = frozenset(
 )
 
 
+def _wake_lane_of(client_ref) -> Callable[[], None]:
+    """OFF2N: what the owner's away settings call on a change, for the client ``client_ref`` names (weakly)."""
+    def wake() -> None:
+        client = client_ref()
+        lane = getattr(client, "_owner_lane", None)
+        loop = getattr(client, "_loop", None)
+        if lane is None or loop is None or loop.is_closed():
+            return
+        with contextlib.suppress(RuntimeError):
+            loop.call_soon_threadsafe(lane.wake)
+    return wake
+
+
 class ControlPlaneClient:
     """Maintains a WS connection to the control plane and dispatches incoming requests."""
 
@@ -183,6 +197,12 @@ class ControlPlaneClient:
         from .permissions_v2 import owner_lane
 
         self._owner_lane = owner_lane.slots_for(self._inbound_concurrency_limit)
+        if self._owner_lane is not None:
+            # OFF2N: "Share evenly" or back, pushed by the control plane on another thread: the pool's waiting frames
+            # are handed what the new mode frees, on the client's own loop. A client that is gone hears nothing.
+            from .permissions_v2 import away_config
+
+            away_config.on_change(_wake_lane_of(weakref.ref(self)))
         self._inbound_tasks: set[asyncio.Task] = set()
         # UI reads get a separate bounded reserve, never an unbounded bypass.
         self._fast_inbound_tasks: set[asyncio.Task] = set()

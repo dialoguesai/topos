@@ -228,17 +228,20 @@ SEARCH_ATTRIBUTION = _switch(
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
     "and caller, and each \"nothing changed\" fast path's hits and misses; no content. Needs search timings.")
 # Lane NR183 (15 Oct 2026, plan item O1, the owner's ruling D3: the owner's own requests go ahead of recipients' when
-# the node is busy). Off bound and unbound alike until WS0 flips it after the owner confirms; reading it costs no
+# the node is busy). On bound and unbound alike since kept questions Wave 2 (lane OFF2N; the owner's ruling D-10 of 23
+# Oct 2026, "on with its built settings": 4 kept slots, at most 2 borrowed, the built types); reading it costs no
 # `is_bound()` stat. Read once, when the control-plane client is made (`owner_lane.slots_for`): a change needs a restart.
+# The owner's "Share evenly" (`away_config`, pushed by the control plane) switches the reserve off live instead.
 OWNER_LANE = _switch(
-    "OWNER_LANE", "bool", False, False,
+    "OWNER_LANE", "bool", True, True,
     "NR183 O1. Of the node's inbound handler slots for control-plane requests (16), OWNER_LANE_SLOTS are kept for "
     "the owner's interactive requests (a type in OWNER_LANE_TYPES the control plane signed as the owner's own app, "
     "never a recipient door's), which take those first, borrow at most OWNER_LANE_SHARED_MAX of the others, and go "
     "first when a slot comes free; everything else, recipients' share requests, the owner's background work and "
     "every unstamped frame included, shares the rest in arrival order. Each class's waiting places count its own "
-    "frames only, so the owner's activity never makes a recipient's request busy (DR-04). Off (the default): one "
-    "pool in arrival order, as in 1.5.9.")
+    "frames only, so the owner's activity never makes a recipient's request busy (DR-04). On by default since Wave 2 "
+    "of kept questions (D-10); the owner's \"Share evenly\" shares every slot in arrival order, live. Off: one pool in "
+    "arrival order, as in 1.5.9, and no owner frame is classified (no yield to the owner, no owner idleness).")
 OWNER_LANE_SLOTS = _switch(
     "OWNER_LANE_SLOTS", "int", 4, 4,
     "NR183 O1. How many inbound slots the owner lane keeps, at least 1 and never all; the shared class's waiting "

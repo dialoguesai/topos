@@ -123,4 +123,6 @@ def test_what_this_branch_sheds_and_what_it_moves_off_the_loop():
         # Daily owner metrics read SQLite aggregates off the event loop.
         "get_dashboard_measurements",
         # Calibrate SQLite reads/writes use the same off-loop handler dispatch.
-        "calibration_catalog", "calibration_answer", "calibration_preview"}
+        "calibration_catalog", "calibration_answer", "calibration_preview",
+        # Kept questions Wave 2 (OFF2N): the owner's away settings, one engine_config write.
+        "put_away_config"}
