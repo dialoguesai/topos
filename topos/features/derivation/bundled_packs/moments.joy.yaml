@@ -4,7 +4,7 @@
 # no net_subject and no outward gate. Ships DISABLED like every non-Wave-A pack; enabling
 # it is the owner's call on the Signal > derivation packs screen.
 pack: moments.joy
-version: 0.1.4
+version: 0.1.5
 status: draft
 title: "Moments of joy, love and fulfillment"
 author: topos
@@ -35,14 +35,12 @@ predicates:
       with: person_refs               # who was there, as the owner named them (may be empty)
       where: entity_ref_or_string
       activity: string
-      intensity: {enum: [mild, strong, peak]}
     note: >
       STATED feeling only: the owner says, in their own words, that the moment felt good, and the
       record says what happened. A bare "great" with no event is a mention, not a moment. Feeling
       at home, belonging, hours that flew by with someone -> connected; "one of those nights",
-      "felt alive" -> alive; pride in something done -> accomplished. `intensity` follows the
-      owner's words ("nice" mild, "so happy" strong, "best day of my year" peak). Dates go in
-      occurrence_date, never in the value.
+      "felt alive" -> alive; pride in something done -> accomplished. How strong it felt stays in
+      the quote, never as a field. Dates go in occurrence_date, never in the value.
   - name: moment.gratitude
     value_type: structured
     cardinality: multi
@@ -84,8 +82,8 @@ guidance:
     - "A hope ('this is going to be amazing') is not a moment; it belongs to aspirations.goals until it happened."
 
 revision:
-  supersedes_on: {moment.peak: [intensity, description]}
-  noop_when: "retelling within 7d at equal or lower intensity"
+  supersedes_on: {moment.peak: [description]}
+  noop_when: "retelling within 7d"
 
 synthesis:
   - kind: pattern
@@ -104,7 +102,7 @@ eval:
     - {text: "Honestly last night with the band was one of those nights. I haven't felt that alive in months.",
        expect: {predicate: moment.peak, kind: alive}}
     - {text: "Dinner at Nadia's turned into four hours of talking. I left feeling completely at home.",
-       expect: {predicate: moment.peak, kind: connected, intensity: strong}}
+       expect: {predicate: moment.peak, kind: connected}}
     - {text: "Sol, thank you for driving out on Sunday. It meant more than you know.",
        expect: {predicate: moment.gratitude, acknowledged: true}}
     - {text: "Can't believe the paper finally got accepted. Proud of this one.",

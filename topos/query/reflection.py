@@ -275,8 +275,7 @@ def rules(facts: List[Dict[str, Any]], now: datetime, names: Dict[str, str]) -> 
         people = [name(p) for p in _people(f)]
         who = f" with {', '.join(people)}" if people else ""
         text = f"On {_day(f['at'])} you wrote {_said(f)}{who}."
-        intensity = str(f["value"].get("intensity") or "")
-        obs = f"A {intensity + ' ' if intensity else ''}moment of kind {kind}, dated {_day(f['at'])}."
+        obs = f"A moment of kind {kind}, dated {_day(f['at'])}."
         out.append(_candidate("peak", f["key"], "S4", "recall", "positive", text, obs, [f], now,
                               person=", ".join(people), row_ids=["RF-032", "RF-033"]))
         if kind == "accomplished" and len(f["refs"]) <= 1:
