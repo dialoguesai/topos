@@ -585,7 +585,13 @@ def _run_now(dataset_id: str) -> None:
         conn = get_db_connection()
         if conn is None:
             return
-        _LAST.update(refresh_person_readings(conn, dataset_id))
+        from ...permissions_v2 import answer_gate
+
+        # Kept questions Wave 2 (OFF2N): the debounced pass is the node's own background work, so its model calls
+        # (the Ollama adapter's `yield_if_background`) let a share's answer job and, under the yield rule, the owner's
+        # own frames go first, at most 110 s each. The owner's "refresh now" route is not marked and never waits.
+        with answer_gate.background_work():
+            _LAST.update(refresh_person_readings(conn, dataset_id))
     except Exception as exc:  # noqa: BLE001 — a deferred lane never breaks its caller
         logger.warning("person readings failed: %s", exc)
         _LAST["error"] = str(exc)[:200]
