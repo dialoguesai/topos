@@ -394,7 +394,9 @@ def test_the_release_notes_declare_the_lane_and_ask_for_no_step():
 
     import topos
 
+    # The release that declares the lane (it was "unreleased" until the 1.5.18 cut stamped it), not whichever entry is
+    # unreleased today: a release cut empties "unreleased", and the lane's note moves with it.
     data = json.loads((Path(topos.__file__).parent / "upgrades" / "manifests.json").read_text())
-    unreleased = next(r for r in data["releases"] if r["version"] == "unreleased")
-    assert any(KIND in note for note in unreleased.get("notes", []))
-    assert not [s for s in unreleased.get("steps", []) if KIND in json.dumps(s)]
+    declaring = [r for r in data["releases"] if any(KIND in note for note in r.get("notes", []))]
+    assert declaring, "no release note declares the stale-text catch-up lane"
+    assert not [s for r in data["releases"] for s in r.get("steps", []) if KIND in json.dumps(s)]
