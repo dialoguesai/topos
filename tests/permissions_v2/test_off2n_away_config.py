@@ -213,3 +213,28 @@ def test_two_concurrent_pushes_end_on_the_higher_seq_whatever_the_interleaving(m
     newer_done.set()
     older.join(5)
     assert away_config.current() == EVEN
+
+
+@pytest.mark.asyncio
+async def test_a_push_queued_on_a_connection_that_closes_is_never_applied_on_the_next(monkeypatch):
+    """R-OFF2 R2.3: a push waiting for an inbound slot when its connection closes is dropped at dequeue ("gone"), as
+    the share doors' frames are; it never lands on the next connection."""
+    from tests.topos.test_nr183_owner_lane import BATCH, Node, Socket
+
+    node = Node(monkeypatch, limit=2, reserved=1)
+    real = node.client.handler
+
+    async def relay(message):
+        if message["type"] == PUT:
+            return await dispatch_relay_message(message)
+        return await real(message)
+    node.client.handler = relay
+    await node.receive(stamped(frame("hold-r1", BATCH), cls="third_party", acting=SOMEONE_ELSE))   # the shared slot
+    await node.receive(stamped({"id": "away-q", "type": PUT, "payload": push(EVEN, 9)}))         # waits for it
+    assert node.pool.waiting()["general"] == 1
+    node.client._ws = node.socket = Socket()                          # the connection closed; a new one is up
+    away_config.reset()
+    await node.settle()
+    assert away_config.current() == FIRST                              # the queued push was not applied
+    assert "away-q" not in node.replies()
+    assert node.client.inbound_shed_counts().get(("gone", PUT)) == 1

@@ -109,7 +109,9 @@ async def test_the_owners_own_request_is_handled_when_its_socket_closed_while_it
 def test_what_this_branch_sheds_and_what_it_moves_off_the_loop():
     assert set(INBOUND_AGE_BOUND_SECONDS) == {
         "permissions_v2_message_search", "permissions_v2_message_search_batch", "permissions_v2_answer_submit",
-        "permissions_v2_answer_fetch"}
+        "permissions_v2_answer_fetch",
+        # Kept questions Wave 2 (R-OFF2 R2.3): the owner's away settings, dropped with their connection.
+        "put_away_config"}
     assert not set(OWNERS_OWN) & set(INBOUND_AGE_BOUND_SECONDS)
     assert not set(OWNERS_OWN) & OFF_LOOP_MESSAGE_TYPES
     assert OFF_LOOP_MESSAGE_TYPES == {
