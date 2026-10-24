@@ -337,6 +337,55 @@ async def handle_delete_facts_llm_config(message: Dict[str, Any]) -> Optional[Di
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
 
+@handles("get_verify_claim_model_config")
+async def handle_get_verify_claim_model_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The model verify_claim runs on (the Fun Camera's truth mirror, ``verify_claim_owner``, the inbound lane's
+    sides), as the owner picked it in Settings → General; same shape as ``get_facts_llm_config``."""
+    req_id = message.get("id")
+    from ...config.verify_claim_model import effective_config_for_api
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("put_verify_claim_model_config")
+async def handle_put_verify_claim_model_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.verify_claim_model import effective_config_for_api, normalize_put_config, save_pick
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    try:
+        save_pick(conn, normalize_put_config(payload))
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("delete_verify_claim_model_config")
+async def handle_delete_verify_claim_model_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.verify_claim_model import NO_PICK, effective_config_for_api, save_pick
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        save_pick(conn, NO_PICK)
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
 @handles("get_conversation_context")
 async def handle_get_conversation_context(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

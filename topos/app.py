@@ -53,6 +53,7 @@ from .api import (
     sanitization_ollama_config as sanitization_ollama_config_routes,
     disk_space_config as disk_space_config_routes,
     facts_llm_config as facts_llm_config_routes,
+    verify_claim_model_config as verify_claim_model_config_routes,
     community_naming_config as community_naming_config_routes,
     signal_extraction_config as signal_extraction_config_routes,
     filter_lab as filter_lab_routes,
@@ -176,6 +177,7 @@ app.include_router(user_identity_routes.router)
 app.include_router(sanitization_ollama_config_routes.router)
 app.include_router(disk_space_config_routes.router)
 app.include_router(facts_llm_config_routes.router)
+app.include_router(verify_claim_model_config_routes.router)
 app.include_router(community_naming_config_routes.router)
 app.include_router(signal_extraction_config_routes.router)
 app.include_router(filter_lab_routes.router)

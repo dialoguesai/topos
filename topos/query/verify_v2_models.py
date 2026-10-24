@@ -1,7 +1,9 @@
 """Structured model calls for verify_claim v2: the reader and the per-record judge.
 
-The node writes these prompts; the control plane writes none. Two backends, chosen by the owner's setting
-(``TOPOS_VERIFY_V2_MODEL`` = ``hosted`` | ``local``; default hosted when a Red Pill key is configured):
+The node writes these prompts; the control plane writes none. Two backends, chosen by the owner's pick in the web
+app's Settings → General (``engine_config`` ``verify_claim_provider`` / ``verify_claim_model``, see
+``config/verify_claim_model.py``), else by ``TOPOS_VERIFY_V2_MODEL`` = ``hosted`` | ``local``, else hosted when a Red
+Pill key is configured:
 
 - ``HostedChat``: Red Pill (Topos Secure) with the node's own ``red_pill_api_key`` / ``red_pill_api_base``,
   behind the same hosted-model wallet check as the enrichment adapter. Schema-constrained JSON output.
@@ -169,17 +171,39 @@ class LocalChat:
             raise ModelUnavailable("bad_reply") from None
 
 
-def judges_for_setting() -> list:
+def device_pick() -> tuple:
+    """The owner's pick as stored on this node, ``("", "")`` when none (or no database). A caller on the event loop
+    reads it off-loop (``config.verify_claim_model.device_pick`` with its own connection) and passes it in."""
+    try:
+        from ..config.verify_claim_model import device_pick as _pick
+        from ..core.state import get_db_connection
+
+        return _pick(get_db_connection())
+    except Exception:  # noqa: BLE001 — no database, no pick: the environment decides, as before the setting
+        return ("", "")
+
+
+def judges_for_setting(pick: Optional[tuple] = None) -> list:
     """The judges for the owner's setting: the reader's own model, plus a second hosted model when one is configured."""
-    reader = chat_for_setting()
+    reader = chat_for_setting(pick)
     if not isinstance(reader, HostedChat):
         return [reader]
     second = os.environ.get("TOPOS_VERIFY_V2_SECOND_JUDGE", "").strip()
     return [reader] + ([HostedChat(model=second)] if second and second != reader.model else [])
 
 
-def chat_for_setting() -> Any:
-    """The owner's choice: hosted (default when a key is configured) or local."""
+def chat_for_setting(pick: Optional[tuple] = None) -> Any:
+    """The owner's choice, first that applies: the model picked in Settings → General (``pick``, read from this node
+    when not given), ``TOPOS_VERIFY_V2_MODEL`` (``local`` | ``hosted``), hosted when a Red Pill key is configured,
+    else local."""
+    from ..config.verify_claim_model import picked_side
+
+    pick = device_pick() if pick is None else tuple(pick)
+    side = picked_side(pick)
+    if side == "hosted":
+        return HostedChat(model=pick[1])
+    if side == "local":
+        return LocalChat(model=pick[1])
     choice = (os.environ.get("TOPOS_VERIFY_V2_MODEL") or "").strip().lower()
     if choice == "local":
         return LocalChat()
@@ -187,3 +211,15 @@ def chat_for_setting() -> Any:
     if choice == "hosted" or hosted.available:
         return hosted
     return LocalChat()
+
+
+def chat_for_lane(side: str, pick: Optional[tuple] = None) -> Any:
+    """What the inbound lane's ``truth_inbound.model`` means: ``hosted`` is the picked hosted model (else the default
+    hosted model), ``local`` is the picked local model (else ``TOPOS_VERIFY_V2_LOCAL_MODEL`` or the default). One
+    pick for the feature; the lane only chooses the side."""
+    from ..config.verify_claim_model import hosted_model_for_lane, local_model_for_lane
+
+    pick = device_pick() if pick is None else tuple(pick)
+    if side == "hosted":
+        return HostedChat(model=hosted_model_for_lane(pick))
+    return LocalChat(model=local_model_for_lane(pick))
