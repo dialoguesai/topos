@@ -26,8 +26,10 @@ refuses (a fragment, a question, empty) costs no model call and is stored as ``n
 most ``rate_per_minute`` times a minute (:data:`PACER`), and a job stops after :data:`JOB_BUDGET_S` seconds so the
 embeddings catch-up never waits long behind it; what it did not reach is still owed and goes in the next batch.
 
-The model. ``local`` is ``LocalChat`` (the node's pinned local model). ``hosted`` is ``HostedChat`` (the Red Pill key,
-behind the hosted wallet check). A hosted 402, an exhausted wallet or a missing key pauses the lane for ten minutes
+The model. ``local`` and ``hosted`` are sides of the owner's verify_claim model pick (``config/verify_claim_model.py``,
+``verify_v2_models.chat_for_lane``): ``local`` is ``LocalChat`` on the picked local model (else the node's default
+local model), ``hosted`` is ``HostedChat`` on the picked hosted model (else the default; the Red Pill key, behind the
+hosted wallet check). A hosted 402, an exhausted wallet or a missing key pauses the lane for ten minutes
 (``truth_inbound_paused_until``) without storing the row; after the pause a probe (key present, wallet allows) must
 pass before the next check, else the pause is renewed. A local model that cannot be reached pauses it the same way, so
 a stopped Ollama never marks a week of rows ``unable``.
@@ -218,9 +220,12 @@ def _prepare(conn: Any, table: str, record_id: str, sources: List[str]):
 
 
 def _chat_for(model: str):
-    from ..query.verify_v2_models import HostedChat, LocalChat
+    """The chat for the lane's side, on the model the owner picked for verify_claim (read from this node: call it off
+    the event loop)."""
+    from ..config.verify_claim_model import device_pick
+    from ..query.verify_v2_models import chat_for_lane
 
-    return HostedChat() if model == "hosted" else LocalChat()
+    return chat_for_lane(model, _db(device_pick))
 
 
 def _model_label(chat: Any) -> str:
@@ -323,7 +328,7 @@ async def execute_truth_check(payload: Dict[str, Any], *, pacer: Optional[Pacer]
                 await asyncio.to_thread(_db, _pause, "probe_failed")
                 return {"status": "ok", "skipped": "paused"}
             await asyncio.to_thread(_db, set_paused_until, None)
-    chat = _chat_for(settings["model"])
+    chat = await asyncio.to_thread(_chat_for, settings["model"])
     pace = pacer or PACER
     started = time.monotonic()
     counts = {"checked": 0, "not_checkable_by_gate": 0, "skipped": 0, "deferred": 0, "paused": False}

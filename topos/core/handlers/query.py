@@ -176,14 +176,17 @@ async def handle_verify_claim_owner(message: Dict[str, Any]) -> Optional[Dict[st
     request = _owner_claim_request(message.get("payload"))
     if request is None:
         return {"id": req_id, "status": "error", "error": "invalid_truth_request"}
+    from ...config.verify_claim_model import device_pick
     from ...query.verify_v2 import VERSION, verify_owner_claim
     from ...query.verify_v2_models import chat_for_setting, judges_for_setting
     from .common import run_db_read
 
     try:
+        # The owner's model pick is a row in engine_config: read it on the worker, not the loop.
+        pick = await run_db_read(device_pick)
         result = await asyncio.wait_for(
-            verify_owner_claim(request, chat=chat_for_setting(), judges=judges_for_setting(), gather_in_worker=run_db_read,
-                               to_thread=asyncio.to_thread),
+            verify_owner_claim(request, chat=chat_for_setting(pick), judges=judges_for_setting(pick),
+                               gather_in_worker=run_db_read, to_thread=asyncio.to_thread),
             timeout=request.deadline_s + 2.0,
         )
     except asyncio.TimeoutError:
