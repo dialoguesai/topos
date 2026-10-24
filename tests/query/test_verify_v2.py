@@ -802,3 +802,12 @@ def test_the_reader_schema_is_the_same_for_every_source_kind():
         run([], Schemas(read_reply(type="not_checkable", not_checkable_because="too_vague")), source_kind=kind)
     assert all(schema is v2.READ_SCHEMA for schema in seen) and len(seen) == len(v2.SOURCE_KINDS)
     assert "about_the_call_itself" in v2.WHY_NOT and "meta" in v2.CATEGORIES
+
+
+def test_the_engine_sha16_is_the_digest_the_weekly_lock_captures():
+    """The lock (eval/weekly_lock.py) takes sha256(verify_v2.py)[:16] of the installed file; rows carry the same."""
+    import hashlib
+
+    with open(v2.__file__, "rb") as source:
+        assert v2.engine_sha16() == hashlib.sha256(source.read()).hexdigest()[:16]
+    assert len(v2.engine_sha16()) == 16 and v2.engine_sha16() is v2.engine_sha16()

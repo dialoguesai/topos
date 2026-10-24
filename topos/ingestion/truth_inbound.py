@@ -306,8 +306,11 @@ def pause_cause(result: Dict[str, Any], hosted: bool) -> Optional[str]:
 
 def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional[str],
               read_timeout_s: Optional[float] = None) -> Dict[str, Any]:
-    """The ``truth_checks`` row for one verify_claim v2 answer: verdict, the reader's main claim, cited refs only."""
+    """The ``truth_checks`` row for one verify_claim v2 answer: verdict, the reader's main claim, cited refs only,
+    stamped with the engine build (the answer's ``version``, else ``VERSION``: a row the engine's gate refused got no
+    answer, but the gate is the engine's own; and the sha16 of ``verify_v2.py``)."""
     from ..query.truth_checks import VERDICTS
+    from ..query.verify_v2 import VERSION, engine_sha16
 
     verdict, reason = result.get("verdict"), result.get("reason")
     if verdict == "unable" and str(reason or "").startswith("not_checkable:"):
@@ -329,6 +332,7 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
         "category": result.get("category"), "claim_text": (str(claim.get("text") or "") or None) if claim else None,
         "verdict": verdict, "reason": str(reason)[:120] if reason else None, "cited_refs": cited, "effort": EFFORT,
         "model": model, "latency_ms": latency, "read_timeout_s": read_timeout_s,
+        "engine_version": str(result.get("version") or VERSION)[:80], "engine_sha16": engine_sha16() or None,
     }
 
 

@@ -43,6 +43,20 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from .verify_v2_models import ModelUnavailable, OutputSchema, Usage
 
 VERSION = "verify-claim/v2.0-dev"
+
+
+@lru_cache(maxsize=1)
+def engine_sha16() -> str:
+    """The first 16 hex digits of this file's SHA-256: the build identity a stored result is stamped with beside
+    ``VERSION`` (which changes only when bumped by hand). The weekly eval's lock captures the same digest of the
+    installed ``verify_v2.py``, so a row and a lock name one build. Empty when the file cannot be read."""
+    import hashlib
+
+    try:
+        with open(__file__, "rb") as source:
+            return hashlib.sha256(source.read()).hexdigest()[:16]
+    except OSError:
+        return ""
 MAX_STATEMENT_CHARS = 1000  # the truth-mirror's own statement cap
 DEFAULT_DEADLINE_S = 10.0
 SHOWN = 10

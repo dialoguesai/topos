@@ -276,8 +276,10 @@ def test_the_stored_row_has_the_designs_columns_and_cited_refs_without_text(node
     [row] = checks(node.conn)
     assert set(row) == {"check_id", "record_table", "record_id", "conversation_id", "source", "speaker_kind", "week",
                         "category", "claim_text", "verdict", "reason", "cited_refs_json", "effort", "model",
-                        "latency_ms", "created_at", "attempts", "read_timeout_s", "checked_at"}
+                        "latency_ms", "created_at", "attempts", "read_timeout_s", "checked_at", "engine_version",
+                        "engine_sha16"}
     assert row["attempts"] == 1 and row["read_timeout_s"] == lane.LOCAL_READ_TIMEOUT_S and row["checked_at"] == row["created_at"]
+    assert (row["engine_version"], row["engine_sha16"]) == ENGINE  # the stub answered without a version: VERSION
     assert row["verdict"] == "supported" and row["claim_text"] == "The owner finished the garden shed."
     assert row["source"] == "journal" and row["category"] == "did" and row["effort"] == "low"
     assert row["model"].startswith("local:") and row["latency_ms"] == 1234.5
@@ -303,6 +305,7 @@ def test_a_row_the_gate_refuses_costs_no_model_call_and_no_pacing_slot(node, mon
     assert rows["m-short"]["verdict"] == "not_checkable" and rows["m-short"]["reason"] == "not_checkable:fragment"
     assert rows["m-question"]["reason"] == "not_checkable:question" and rows["m-question"]["model"] is None
     assert rows["m-short"]["claim_text"] is None
+    assert (rows["m-short"]["engine_version"], rows["m-short"]["engine_sha16"]) == ENGINE  # the engine's own gate
 
 
 def test_a_reader_refusal_is_not_checkable_and_counts_its_model_call(node, monkeypatch):
@@ -525,6 +528,30 @@ def test_each_source_tells_the_reader_its_kind(node, monkeypatch):
 
 
 # --- re-checks of unable rows -----------------------------------------------------------------------------------------
+def _engine():
+    import hashlib
+
+    from topos.query import verify_v2
+
+    with open(verify_v2.__file__, "rb") as source:
+        return verify_v2.VERSION, hashlib.sha256(source.read()).hexdigest()[:16]
+
+
+#: The stamp every row this build stores carries: the engine's VERSION and the sha16 of verify_v2.py.
+ENGINE = _engine()
+
+
+def test_a_row_carries_the_answers_engine_version_when_it_names_one(node, monkeypatch):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    turn_on(node.conn)
+    monkeypatch.setattr(lane, "_verify", Recorder({"I finished building the garden shed this morning.":
+                                                   {**supported(), "version": "verify-claim/v2.0-test"}}))
+    run_job({"records": [["journal_entries", "j1"]]})
+    [row] = checks(node.conn)
+    assert (row["engine_version"], row["engine_sha16"]) == ("verify-claim/v2.0-test", ENGINE[1])
+
+
 #: What the lane's checks on the local model run with (the label the lane records: the environment may name the model).
 LOCAL = ("local:" + __import__("topos.query.verify_v2_models", fromlist=["x"]).LocalChat().model, "low", 20.0)
 
@@ -611,6 +638,7 @@ def test_a_recheck_replaces_the_result_in_place_and_counts_the_attempt(node, mon
     assert after["created_at"] == before["created_at"] and after["checked_at"] > before["checked_at"]
     assert after["verdict"] == "supported" and after["claim_text"] == "The owner finished the garden shed."
     assert after["attempts"] == 2 and after["read_timeout_s"] == 20.0 and after["model"] == LOCAL[0]
+    assert (after["engine_version"], after["engine_sha16"]) == ENGINE
     assert recorder.requests[0].read_timeout_s == 20.0
     assert node.conn.execute("SELECT COUNT(*) FROM truth_checks").fetchone()[0] == 1  # still one row per record
 
@@ -685,14 +713,16 @@ def test_a_table_the_1519_lane_created_gains_the_columns_and_its_timed_out_rows_
     job_id = lane.enqueue_truth_checks(node.conn)
     assert job_id
     columns = [r[1] for r in node.conn.execute("PRAGMA table_info(truth_checks)").fetchall()]
-    assert columns[-3:] == ["attempts", "read_timeout_s", "checked_at"]
+    assert columns[-5:] == ["attempts", "read_timeout_s", "checked_at", "engine_version", "engine_sha16"]
     [row] = checks(node.conn)
     assert row["attempts"] == 1 and row["read_timeout_s"] is None and row["checked_at"] is None
+    assert row["engine_version"] is None and row["engine_sha16"] is None  # 1.5.19's rows: unstamped
     monkeypatch.setattr(lane, "_verify", Recorder())
     out = run_job({"records": [["journal_entries", "j1"]]})
     assert out["rechecked"] == 1
     [row] = checks(node.conn)
     assert row["check_id"] == "c1" and row["attempts"] == 2 and row["verdict"] == "supported" and row["week"] == "2026-W43"
+    assert (row["engine_version"], row["engine_sha16"]) == ENGINE  # the re-check carries this build's stamp
 
 
 def test_a_recheck_that_lost_a_race_stores_nothing(node):
