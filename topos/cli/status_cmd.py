@@ -25,6 +25,7 @@ import click
 
 from topos import mcp_server
 from topos.mcp_server import NodeDown, NodeRefused, NodeSocket
+from topos.runtime_platform import INSTALL_PYTHON
 
 EXIT_OK = 0
 EXIT_NEEDS_HUMAN = 2
@@ -417,7 +418,8 @@ def doctor_findings(snapshot: dict, *, secret_sightings: int = 0) -> list[dict]:
         add(
             "binary_not_found",
             "No topos-node binary in the places the app and the plugin look.",
-            "Install the node: `uv tool install topos-node` (or open Topos.app), then check `which topos-node`.",
+            f"Install the node: `uv tool install --python {INSTALL_PYTHON} topos-node` (or open Topos.app), "
+            "then check `which topos-node`.",
         )
     if not node["running"]:
         add("node_down", "Topos is not running.", "Start it: `topos-node start --headless` (or open Topos.app).")

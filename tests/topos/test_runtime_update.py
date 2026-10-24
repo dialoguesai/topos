@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 
 import pytest
 
@@ -149,7 +150,10 @@ class TestApplyReportsTheTruth:
         versions = iter(["1.5.3", "1.5.4"])
         monkeypatch.setattr(runtime_update, "_installed_version_on_disk", lambda *a: next(versions))
         assert apply_package_update() is True
-        assert calls == [["/usr/bin/uv", "tool", "install", "--force", "--upgrade", "topos-node"]]
+        # A reinstall rebuilds the environment; --python keeps it on this interpreter
+        # instead of whichever one uv prefers.
+        running = f"{sys.version_info.major}.{sys.version_info.minor}"
+        assert calls == [["/usr/bin/uv", "tool", "install", "--force", "--upgrade", "--python", running, "topos-node"]]
 
     def test_success_when_the_version_cannot_be_read(self, tmp_path, monkeypatch):
         # Unknown must never be reported as failure: an unreadable dist-info is
@@ -163,6 +167,83 @@ class TestApplyReportsTheTruth:
             "topos.runtime_update.get_installed_package_version", lambda *a, **k: None
         )
         assert apply_package_update() is True
+
+
+class TestUpdateMovesTheInterpreterWhenTheReleaseNeedsIt:
+    """`uv tool upgrade` keeps a tool on its interpreter and calls that success.
+
+    With the newest release on Requires-Python >=3.12, a node on 3.10 heard
+    "Nothing to upgrade" (exit 0) forever (uv 0.5.11 and 0.12.23, 24 Oct 2026).
+    """
+
+    @staticmethod
+    def _record_uv(monkeypatch):
+        monkeypatch.setattr("topos.runtime_update.resolve_uv_binary", lambda: "/usr/bin/uv")
+        calls = []
+
+        class Result:
+            returncode = 0
+            stdout = "Upgraded tool environment"
+            stderr = ""
+
+        def run(command, **kwargs):
+            calls.append(command)
+            return Result()
+
+        monkeypatch.setattr(runtime_update.subprocess, "run", run)
+        versions = iter(["1.5.20", "1.5.21"])
+        monkeypatch.setattr(runtime_update, "_installed_version_on_disk", lambda *a: next(versions))
+        return calls
+
+    @staticmethod
+    def _next_minor() -> str:
+        return f"{sys.version_info.major}.{sys.version_info.minor + 1}"
+
+    def test_this_interpreter_is_kept_when_the_release_accepts_it(self):
+        assert runtime_update.python_for_update(None) is None
+        assert runtime_update.python_for_update("") is None
+        assert runtime_update.python_for_update(f">={sys.version_info.major}.{sys.version_info.minor}") is None
+        assert runtime_update.python_for_update("not a specifier") is None
+
+    def test_the_lowest_python_the_release_accepts_is_named(self):
+        assert runtime_update.python_for_update(f">={self._next_minor()}") == self._next_minor()
+        later = f"{sys.version_info.major}.{sys.version_info.minor + 2}"
+        assert runtime_update.python_for_update(f">={later},<4") == later
+
+    def test_upgrade_names_the_python_the_release_needs(self, tmp_path, monkeypatch):
+        _write_receipt(tmp_path, '[tool]\nrequirements = [{ name = "topos-node" }]\n')
+        calls = self._record_uv(monkeypatch)
+        assert apply_package_update(requires_python=f">={self._next_minor()}") is True
+        assert calls == [["/usr/bin/uv", "tool", "upgrade", "--python", self._next_minor(), "topos-node"]]
+
+    def test_plain_upgrade_when_the_release_accepts_this_python(self, tmp_path, monkeypatch):
+        _write_receipt(tmp_path, '[tool]\nrequirements = [{ name = "topos-node" }]\n')
+        calls = self._record_uv(monkeypatch)
+        assert apply_package_update(requires_python=">=3.0") is True
+        assert calls == [["/usr/bin/uv", "tool", "upgrade", "topos-node"]]
+
+    def test_pinned_reinstall_names_the_python_the_release_needs(self, tmp_path, monkeypatch):
+        _write_receipt(tmp_path, '[tool]\nrequirements = [{ name = "topos-node", specifier = "==1.5.20" }]\n')
+        calls = self._record_uv(monkeypatch)
+        assert apply_package_update(requires_python=f">={self._next_minor()}") is True
+        assert calls == [
+            ["/usr/bin/uv", "tool", "install", "--force", "--upgrade", "--python", self._next_minor(), "topos-node"]
+        ]
+
+    def test_check_carries_the_requires_python_pypi_published(self, monkeypatch):
+        class Response:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+            def read(self):
+                return b'{"info": {"version": "1.5.21", "requires_python": ">=3.12"}}'
+
+        monkeypatch.setattr(runtime_update, "urlopen", lambda *a, **k: Response())
+        monkeypatch.setattr(runtime_update, "get_installed_package_version", lambda *a: "1.5.20")
+        assert check_for_update() == UpdateInfo("topos-node", "1.5.20", "1.5.21", requires_python=">=3.12")
 
 
 def test_check_for_update_returns_info_when_newer(monkeypatch):

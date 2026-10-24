@@ -88,7 +88,7 @@ fi
 VENV="${ROOT}/venv"
 if [[ ! -x "${VENV}/bin/topos-node" ]]; then
     echo "installing topos-node into ${VENV}"
-    uv venv "${VENV}" >/dev/null
+    uv venv --python 3.12 "${VENV}" >/dev/null
     if [[ "${INSTALL_LOCAL}" == "1" ]]; then
         REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
         VIRTUAL_ENV="${VENV}" uv pip install --python "${VENV}/bin/python" \
