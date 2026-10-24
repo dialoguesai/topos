@@ -4,7 +4,7 @@ Both paths end at the same proof: **the node connects, the react-app shows it as
 Connected, and a chat turn returns an answer grounded in that node.** What differs
 is how the node gets onto the machine.
 
-- **Path A — terminal**: `uv tool install topos-node` → `--set-topos-key` → run.
+- **Path A — terminal**: `uv tool install --python 3.12 topos-node` → `--set-topos-key` → run.
 - **Path B — macOS app**: download the DMG → drag to Applications → launch →
   Connect this Mac (`topos://` pairing).
 

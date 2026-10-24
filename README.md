@@ -79,7 +79,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 Then:
 
 ```bash
-uv tool install topos-node
+uv tool install --python 3.12 topos-node
 topos-node --set-topos-key "<YOUR_TOPOS_KEY>"
 topos-node
 ```
@@ -235,7 +235,7 @@ topos-node --port 9100 --host 127.0.0.1     # bind somewhere else
 topos-node --app                            # menu-bar mode; logs to ~/.topos/logs/node.log
 topos-node profile --help                   # run more than one Topos on this machine
 
-uv tool upgrade topos-node                  # update
+uv tool upgrade --python 3.12 topos-node    # update
 uv tool uninstall topos-node                # remove
 ```
 
