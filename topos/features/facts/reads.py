@@ -301,6 +301,7 @@ def list_timeline(
         except sqlite3.OperationalError:
             pass  # Legacy/minimal tables have no metadata column.
     return {
+        "actor_filter": actor_kind,
         "items": [
             {
                 "event_at": r[0],

@@ -97,6 +97,7 @@ async def test_timeline_filter_counts_and_paginates_actors_before_returning_page
     project_timeline_rows(conn, [{**r, "_table": "activity_events"} for r in _rows(conn)])
     first = list_timeline(conn, actor_kind="ai", limit=1)
     second = list_timeline(conn, actor_kind="ai", limit=1, offset=1)
+    assert first["actor_filter"] == second["actor_filter"] == "ai"
     assert first["total"] == second["total"] == 2
     assert first["items"][0]["record_id"] != second["items"][0]["record_id"]
     assert {first["items"][0]["browser_actor"]["kind"], second["items"][0]["browser_actor"]["kind"]} == {"agent", "automation"}
