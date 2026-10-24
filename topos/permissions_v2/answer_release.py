@@ -35,6 +35,8 @@ those, as before.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import re
@@ -114,10 +116,14 @@ REASON_OTHER = "refused"
 # R-OFF1 I3 (WS-OFF, 23 Oct): for a kept question these receipt reasons mean "not now", not "never". A kept question is
 # delivered just after the owner's Topos comes back, when the model host may not be up yet (`model_unavailable`,
 # `judge_unavailable`), others' live asks may fill the queue (`queue_deadline`), or the job may run out of time
-# (`deadline`). A kept job that ends with one of them is deferred, as for an index not served now; the control plane
-# caps how often one kept question defers. A live ask ends `no_answer` with them, as before. A model that answered
-# badly (`model_error`) is no answer for a kept question too.
+# (`deadline`). A kept job that ends with one of them is deferred, as for an index not served now. A live ask ends
+# `no_answer` with them, as before. A model that answered badly (`model_error`) is no answer for a kept question too.
 KEPT_LATER = frozenset({"model_unavailable", "judge_unavailable", "queue_deadline", "deadline"})
+# R-OFF1 R1 + R2 (WS-OFF, 24 Oct): of those, the two that come after the writer ran. A kept question may defer on them
+# once a UTC day (`ledger.claim_costly_deferral`); the next ends `no_answer`, counted. The rest ran no writer and are
+# not capped: the control plane's window is their bound, as for an index not served now.
+KEPT_COSTLY = frozenset({"judge_unavailable", "deadline"})
+KEPT_QUESTION_TEXT_DOMAIN = b"topos-kept-question-text/v1\n"
 
 # BL-159: the refusals of a written answer's re-check that say only "the share's index is not served right now"
 # (dropped by a sweep, being rebuilt, a verification pass closed under it). They decide nothing about the items the
@@ -245,6 +251,8 @@ class Job:
     # Kept questions (lane OFF1N): the end of the window the control plane signed for a kept question (`kept_stamp`),
     # in epoch seconds; None for a live ask. In this process only, as the question is.
     keep_until: int | None = None
+    # The kept question's opaque id (`kept_stamp`'s `kq`), for the ledger's per-day counts; None for a live ask.
+    kept_question: str | None = None
     # Why a kept job was deferred: the not-served-now code its retrieval was refused with (`NOT_SERVED_NOW`), or the
     # receipt reason of a "not now" failure (`KEPT_LATER`). Never set for a live ask.
     deferred_by: str | None = None
@@ -399,6 +407,14 @@ class AnswerService:
             admission = ledger.verify(envelope, request=context, payload=payload, now=self.clock())
         return principal, signed, admission
 
+    def _question_key(self, question: str) -> str:
+        """R-OFF1 R3: the keyed hash of a kept ask's question that the ledger binds its kept question's exemption to.
+        HMAC-SHA256 under a key derived from this node's signing key, so the stored hash matches no plain hash of the
+        text (the receipt's request hash among them) and cannot be tried against guesses without the key."""
+        secret = self.runtime.protocol.node_signing_key.private_bytes_raw()
+        key = hashlib.sha256(KEPT_QUESTION_TEXT_DOMAIN + secret).digest()
+        return hmac.new(key, question.encode("utf-8"), hashlib.sha256).hexdigest()
+
     def _grant_authority(self, grant_id):
         """The grant's authority and policy as the ledger holds them now, after syncing the protection floor. Raises
         the ledger's refusal for a grant that is not active."""
@@ -522,14 +538,16 @@ class AnswerService:
                 if len(active) >= MAX_JOBS or any(job.grant_id == signed.grant_id for job in active):
                     ledger.refuse(admission, now=now)
                     raise AnswerBusy()
-                ledger.admit_answer(admission, now=now, charge=True, kept_question=kept_question)
+                ledger.admit_answer(admission, now=now, charge=True, kept_question=kept_question,
+                                    question_hash=None if kept_question is None else self._question_key(
+                                        intent.question))
                 answer_id = "ans_" + secrets.token_hex(16)
                 job = Job(answer_id, request_id, signed.grant_id, signed.assignment_id, signed.actor_id,
                           signed.client_id, parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields}), mode, intent.question,
                           signed.request_hash, now, disclosure=effective_disclosure(policy),
                           account_words=account_words, records_cap=records_cap(accepted_version),
                           chars_cap=answer_chars_cap(accepted_version), accepted_version=accepted_version,
-                          keep_until=keep_until)
+                          keep_until=keep_until, kept_question=kept_question)
                 self._jobs[answer_id] = job
                 _active_delta(1)
                 try:
@@ -690,7 +708,10 @@ class AnswerService:
             # body and a receipt that says so (filing it gives the ask's question back, `checkpoint_answer_receipt`),
             # and its fetch answers `answer_deferred`, so the control plane asks the kept question again later. A
             # live job ends `no_answer`, as before.
-            if job.keep_until is not None and checked is None and reason in KEPT_LATER:
+            if job.keep_until is not None and checked is None and reason in KEPT_LATER and (
+                    job.deferred_by is not None or reason not in KEPT_COSTLY
+                    or self.runtime.protocol.ledger.claim_costly_deferral(job.grant_id, job.kept_question,
+                                                                         accepted_at=job.accepted_at)):
                 job.deferred_by = reason
             deferred = checked is None and job.deferred_by is not None
             body = (None if deferred else checked.body if checked is not None

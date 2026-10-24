@@ -89,12 +89,16 @@ _DDL = (
     # QUESTION_DAY_RETENTION_DAYS. See `_count_question`.
     "CREATE TABLE IF NOT EXISTS p2a_question_days (grant_id TEXT NOT NULL, utc_day TEXT NOT NULL, "
     "questions INTEGER NOT NULL CHECK(questions>0), PRIMARY KEY (grant_id, utc_day)) WITHOUT ROWID",
-    # Kept questions (lane OFF1N; R-OFF1 L1): the kept questions each grant's UTC day has counted, so that a delivery
-    # of one again the same day is not a second question. A hash of the control plane's opaque kept question id
-    # (`kept_stamp`'s `kq`), never the id or any text, and the request that counted it, so that a deferral gives back
-    # only a count its own ask made. Pruned with p2a_question_days. See `admit_answer`.
-    "CREATE TABLE IF NOT EXISTS p2a_kept_question_days (grant_id TEXT NOT NULL, utc_day TEXT NOT NULL, "
-    "kq_hash TEXT NOT NULL, request_id TEXT NOT NULL, PRIMARY KEY (grant_id, utc_day, kq_hash)) WITHOUT ROWID",
+    # Kept questions (lane OFF1N; R-OFF1 L1, R1-R3): per grant, UTC day and kept question, so that a delivery of one
+    # again the same day is not a second question. Hashes only, never the id or any text: of the control plane's
+    # opaque kept question id (`kept_stamp`'s `kq`), and, keyed, of the question it was counted for (only that
+    # question is exempt). `counted_by` is the request that counted it (NULL once a deferral gave it back), so that a
+    # deferral gives back only a count its own ask made; `exemptions` the deliveries it exempted (at most
+    # KEPT_EXEMPTIONS_PER_DAY); `costly_deferrals` the deferrals after the writer ran (at most
+    # KEPT_COSTLY_DEFERRALS_PER_DAY). Pruned with p2a_question_days. See `admit_answer`.
+    "CREATE TABLE IF NOT EXISTS p2a_kept_question_counts (grant_id TEXT NOT NULL, utc_day TEXT NOT NULL, "
+    "kq_hash TEXT NOT NULL, question_hash TEXT NOT NULL, counted_by TEXT, exemptions INTEGER NOT NULL, "
+    "costly_deferrals INTEGER NOT NULL, PRIMARY KEY (grant_id, utc_day, kq_hash)) WITHOUT ROWID",
 )
 
 # A day's count is kept for a week of owner status, then pruned in bounded batches on later claims (as the control
@@ -102,6 +106,12 @@ _DDL = (
 QUESTION_DAY_RETENTION_DAYS = 8
 QUESTION_DAY_PRUNE_BATCH = 32
 KEPT_QUESTION_DOMAIN = b"topos-kept-question-day/v1\n"
+# R-OFF1 R3: the most deliveries of one kept question a grant's UTC day exempts from its count; the next is a question.
+KEPT_EXEMPTIONS_PER_DAY = 7
+# R-OFF1 R1 + R2: the deferrals one kept question may take a UTC day after the writer ran (`deadline`,
+# `judge_unavailable`); the next such one ends `no_answer` and stays counted. Deferrals that ran no writer are not
+# capped.
+KEPT_COSTLY_DEFERRALS_PER_DAY = 1
 
 
 def kept_question_hash(kq: str) -> str:
@@ -413,7 +423,8 @@ class PolicyLedger:
         admission.status = "admitted"
         return lease
 
-    def admit_answer(self, admission: Admission, *, now: int, charge: bool, kept_question: str | None = None) -> Lease:
+    def admit_answer(self, admission: Admission, *, now: int, charge: bool, kept_question: str | None = None,
+                     question_hash: str | None = None) -> Lease:
         """Claim an answer ask or fetch; only an ask spends a daily question.
 
         The authority is checked again in this transaction because an answer
@@ -425,13 +436,20 @@ class PolicyLedger:
         the stamp's opaque `kq`). It spends a question only the first time its
         grant's UTC day sees that id: a delivery of it again the same day (an
         answer lost, a restart) spends none, and is not held to the day's
-        limit its question was counted against. Only a hash of the id is kept.
+        limit its question was counted against. Only hashes are kept. R-OFF1
+        R3: the exemption holds only for the question it was counted for
+        (`question_hash`, keyed by the caller), and for at most
+        KEPT_EXEMPTIONS_PER_DAY deliveries; any other is an ordinary question.
         """
         from .answer_protocol import ASK, FETCH
         expected = ASK if charge else FETCH
-        if admission.envelope.request_type != expected or (kept_question is not None and not charge):
+        if (admission.envelope.request_type != expected or (kept_question is None) != (question_hash is None)
+                or (kept_question is not None and not charge)):
             raise PolicyError("unsupported_query")
         kq_hash = kept_question_hash(kept_question) if kept_question is not None else None
+        if question_hash is not None and (type(question_hash) is not str or len(question_hash) != 64
+                                          or question_hash.strip("0123456789abcdef")):
+            raise PolicyError("unsupported_query")
         with self._transaction() as conn:
             verify_current_signature(admission.envelope, trusted_keys=self.trusted_keys, now=now)
             authority, _policy = self._authority(conn, admission.envelope.grant_id, now)
@@ -441,12 +459,24 @@ class PolicyLedger:
                                 now=now)
             if charge:
                 day = (admission.envelope.grant_id, utc_day(now))
-                if kq_hash is None or conn.execute("SELECT 1 FROM p2a_kept_question_days WHERE grant_id=? AND "
-                                                   "utc_day=? AND kq_hash=?", (*day, kq_hash)).fetchone() is None:
+                kept = None if kq_hash is None else conn.execute(
+                    "SELECT question_hash, counted_by, exemptions FROM p2a_kept_question_counts WHERE grant_id=? AND "
+                    "utc_day=? AND kq_hash=?", (*day, kq_hash)).fetchone()
+                if kept is not None and kept["counted_by"] is not None and kept["question_hash"] == question_hash \
+                        and kept["exemptions"] < KEPT_EXEMPTIONS_PER_DAY:
+                    conn.execute("UPDATE p2a_kept_question_counts SET exemptions=exemptions+1 WHERE grant_id=? AND "
+                                 "utc_day=? AND kq_hash=?", (*day, kq_hash))
+                else:
                     self._count_question(conn, [admission.envelope], now=now)
-                    if kq_hash is not None:
-                        conn.execute("INSERT INTO p2a_kept_question_days VALUES (?, ?, ?, ?)",
-                                     (*day, kq_hash, admission.envelope.request_id))
+                    if kq_hash is not None and kept is None:
+                        conn.execute("INSERT INTO p2a_kept_question_counts VALUES (?, ?, ?, ?, ?, 0, 0)",
+                                     (*day, kq_hash, question_hash, admission.envelope.request_id))
+                    elif kq_hash is not None and kept["counted_by"] is None:     # given back by a deferral
+                        conn.execute("UPDATE p2a_kept_question_counts SET counted_by=?, question_hash=? WHERE "
+                                     "grant_id=? AND utc_day=? AND kq_hash=?",
+                                     (admission.envelope.request_id, question_hash, *day, kq_hash))
+                    # Otherwise another question, or past the cap, under a counted id: an ordinary question, and the
+                    # row stays the counted question's.
         admission.status = "answer_queued" if charge else "answer_fetch"
         return lease
 
@@ -456,9 +486,10 @@ class PolicyLedger:
         Kept questions (lane OFF1N; WS-OFF, 23 Oct): a `deferred` receipt is a kept ask that wrote nothing, and the
         control plane asks it again. A kept question counts toward the daily limit on the day it is answered, so when
         this ask is the one that counted its kept question (`admit_answer`), this same transaction gives that
-        question back: the kept question's row for the ask's own UTC day (`accepted_at`) goes, and one comes off the
-        grant's row, deleting a row that held one (a row never holds zero) and leaving a missing row missing. A
-        deferred ask that counted nothing (its kept question was already counted that day) gives nothing back."""
+        question back: the kept question's row for the ask's own UTC day (`accepted_at`) no longer names it as
+        counted (the row keeps its other counts), and one comes off the grant's row, deleting a row that held one (a
+        row never holds zero) and leaving a missing row missing. A deferred ask that counted nothing (its kept
+        question was already counted that day) gives nothing back."""
         from .canonical import canonical_bytes
         if (not isinstance(receipt, dict) or receipt.get("version") != "topos-local-receipt/answer-v1"
                 or receipt.get("request_id") != request_id):
@@ -480,11 +511,22 @@ class PolicyLedger:
             conn.execute("UPDATE p2a_requests SET status='answer_complete' WHERE request_id=?", (request_id,))
             if deferred:
                 day = (receipt["grant_id"], utc_day(receipt["accepted_at"]))
-                counted = conn.execute("DELETE FROM p2a_kept_question_days WHERE grant_id=? AND utc_day=? AND "
-                                       "request_id=?", (*day, request_id)).rowcount
+                counted = conn.execute("UPDATE p2a_kept_question_counts SET counted_by=NULL WHERE grant_id=? AND "
+                                       "utc_day=? AND counted_by=?", (*day, request_id)).rowcount
                 if counted and conn.execute("UPDATE p2a_question_days SET questions=questions-1 WHERE grant_id=? "
                                             "AND utc_day=? AND questions>1", day).rowcount == 0:
                     conn.execute("DELETE FROM p2a_question_days WHERE grant_id=? AND utc_day=? AND questions=1", day)
+
+    def claim_costly_deferral(self, grant_id: str, kept_question: str, *, accepted_at: int) -> bool:
+        """R-OFF1 R1 + R2: whether a kept ask that ran the writer and then failed (`deadline`, `judge_unavailable`)
+        may still defer: True, and one is spent, while its kept question has taken fewer than
+        KEPT_COSTLY_DEFERRALS_PER_DAY such deferrals on the ask's UTC day. False: it ends `no_answer`, counted."""
+        self._integer(accepted_at)
+        with self._transaction() as conn:
+            return conn.execute("UPDATE p2a_kept_question_counts SET costly_deferrals=costly_deferrals+1 WHERE "
+                                "grant_id=? AND utc_day=? AND kq_hash=? AND costly_deferrals<?",
+                                (grant_id, utc_day(accepted_at), kept_question_hash(kept_question),
+                                 KEPT_COSTLY_DEFERRALS_PER_DAY)).rowcount == 1
 
     def _count_question(self, conn, envelopes, *, now: int) -> None:
         """One question per grant against its signed daily limit, inside the transaction that claims the request id.
@@ -521,8 +563,8 @@ class PolicyLedger:
         conn.execute("DELETE FROM p2a_question_days WHERE (grant_id, utc_day) IN (SELECT grant_id, utc_day "
                      "FROM p2a_question_days WHERE utc_day < ? LIMIT ?)", (oldest, QUESTION_DAY_PRUNE_BATCH))
         # Lane OFF1N: the kept questions those days counted go with them.
-        conn.execute("DELETE FROM p2a_kept_question_days WHERE (grant_id, utc_day, kq_hash) IN (SELECT grant_id, "
-                     "utc_day, kq_hash FROM p2a_kept_question_days WHERE utc_day < ? LIMIT ?)",
+        conn.execute("DELETE FROM p2a_kept_question_counts WHERE (grant_id, utc_day, kq_hash) IN (SELECT grant_id, "
+                     "utc_day, kq_hash FROM p2a_kept_question_counts WHERE utc_day < ? LIMIT ?)",
                      (oldest, QUESTION_DAY_PRUNE_BATCH))
 
     def questions_asked(self, grant_id: str, *, now: int) -> int:

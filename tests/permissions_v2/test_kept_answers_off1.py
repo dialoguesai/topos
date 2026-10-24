@@ -724,19 +724,28 @@ def test_the_same_kept_question_counts_again_on_another_utc_day(answers_node, se
     assert days == {utc_day(first.accepted_at): 1, utc_day(second.accepted_at): 1}
 
 
-def test_the_ledger_keeps_only_a_hash_of_the_kept_question_id(answers_node, service):
+def test_the_ledger_keeps_only_hashes_of_the_kept_question_id_and_its_question(answers_node, service):
+    """The id and the question are both kept as hashes; the question's is keyed (with a key derived from the node's
+    signing key), so it matches neither the receipt's request hash nor any plain hash of the text."""
     node = answers_node
     kq = secrets.token_hex(16)
-    job = _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq))
+    question = "What is the owner working on lately?"
+    job = _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq, question=question))
     with node.ledger._transaction() as db:
-        rows = [tuple(row) for row in db.execute("SELECT * FROM p2a_kept_question_days").fetchall()]
+        rows = [dict(row) for row in db.execute("SELECT * FROM p2a_kept_question_counts").fetchall()]
     assert len(rows) == 1
-    grant_id, _day, kq_hash, request_id = rows[0]
-    assert (grant_id, request_id) == ("grant-search", job.request_id)
-    assert re.fullmatch(r"[0-9a-f]{64}", kq_hash) and kq not in kq_hash
+    row = rows[0]
+    assert set(row) == {"grant_id", "utc_day", "kq_hash", "question_hash", "counted_by", "exemptions",
+                        "costly_deferrals"}
+    assert (row["grant_id"], row["counted_by"], row["exemptions"], row["costly_deferrals"]) == (
+        "grant-search", job.request_id, 0, 0)
+    assert re.fullmatch(r"[0-9a-f]{64}", row["kq_hash"]) and re.fullmatch(r"[0-9a-f]{64}", row["question_hash"])
+    plain = {hashlib.sha256(question.encode()).hexdigest(), job.question_hash}
+    assert row["question_hash"] not in plain and kq not in row["kq_hash"]
     for stored in (node.ledger.path, node.ledger.path.with_name(node.ledger.path.name + "-wal")):
         if stored.exists():
-            assert kq.encode("ascii") not in stored.read_bytes()
+            data = stored.read_bytes()
+            assert kq.encode("ascii") not in data and question.encode() not in data
 
 
 def test_kept_question_rows_are_pruned_with_their_day(answers_node, service):
@@ -745,13 +754,77 @@ def test_kept_question_rows_are_pruned_with_their_day(answers_node, service):
     old = utc_day(node.now[0] - (QUESTION_DAY_RETENTION_DAYS + 2) * DAY)
     with node.ledger._transaction() as db:
         db.execute("INSERT INTO p2a_question_days VALUES ('grant-search', ?, 1)", (old,))
-        db.execute("INSERT INTO p2a_kept_question_days VALUES ('grant-search', ?, ?, 'answer-old')",
-                   (old, hashlib.sha256(b"an invented old kept question").hexdigest()))
+        db.execute("INSERT INTO p2a_kept_question_counts VALUES ('grant-search', ?, ?, ?, 'answer-old', 0, 0)",
+                   (old, hashlib.sha256(b"an invented old kept question").hexdigest(),
+                    hashlib.sha256(b"an invented old question").hexdigest()))
     _ended(service, _ask(node, service, keep_until=node.now[0] + DAY))          # a counted ask prunes
     with node.ledger._transaction() as db:
         assert db.execute("SELECT COUNT(*) FROM p2a_question_days WHERE utc_day=?", (old,)).fetchone()[0] == 0
-        assert db.execute("SELECT COUNT(*) FROM p2a_kept_question_days WHERE utc_day=?", (old,)).fetchone()[0] == 0
-        assert db.execute("SELECT COUNT(*) FROM p2a_kept_question_days").fetchone()[0] == 1
+        assert db.execute("SELECT COUNT(*) FROM p2a_kept_question_counts WHERE utc_day=?", (old,)).fetchone()[0] == 0
+        assert db.execute("SELECT COUNT(*) FROM p2a_kept_question_counts").fetchone()[0] == 1
+
+
+def test_a_kept_question_id_exempts_only_its_own_question(answers_node, service):
+    """R-OFF1 R3 (WS-OFF, 24 Oct): the exemption is bound to the question. A stamp that reuses a counted id for
+    another question is an ordinary question: it counts."""
+    node = answers_node
+    kq = secrets.token_hex(16)
+    _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq))
+    _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq))
+    assert _questions(node) == 1
+    other_question = "What is the owner working on lately?"
+    _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq, question=other_question))
+    assert _questions(node) == 2
+
+
+def test_a_kept_question_id_exempts_at_most_seven_deliveries_a_day(answers_node, service):
+    """R3: past the cap, a delivery of the same kept question counts as an ordinary question."""
+    from topos.permissions_v2.ledger import KEPT_EXEMPTIONS_PER_DAY
+    node = answers_node
+    assert KEPT_EXEMPTIONS_PER_DAY == 7
+    kq = secrets.token_hex(16)
+    for _ in range(1 + KEPT_EXEMPTIONS_PER_DAY):
+        _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq))
+    assert _questions(node) == 1
+    _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq))
+    assert _questions(node) == 2
+
+
+@pytest.mark.parametrize("code", ["deadline", "judge_unavailable"])
+def test_a_deferral_that_ran_the_writer_is_allowed_once_a_day_per_kept_question(answers_node, service, monkeypatch,
+                                                                               code):
+    """R-OFF1 R1 + R2 (WS-OFF, 24 Oct): these two ran the writer, so each kept question may defer on them once a UTC
+    day; the next one ends no_answer and stays counted. Another kept question has its own allowance, and so does the
+    next day. The node owns this limit; the control plane's window bounds the rest."""
+    node = answers_node
+    _host_cannot_serve(node, service, monkeypatch, code)
+    kq, other = secrets.token_hex(16), secrets.token_hex(16)
+    first = _ended(service, _ask(node, service, keep_until=node.now[0] + 3 * DAY, kq=kq))
+    assert first.deferred and _questions(node) == 0
+    second = _ended(service, _ask(node, service, keep_until=node.now[0] + 3 * DAY, kq=kq))
+    assert not second.deferred and second.body.outcome == "no_answer" and _questions(node) == 1
+    assert _receipt(node, second)[0]["outcome"] == "no_answer"
+    assert _fetch(node, service, second.answer_id) == {"version": "topos-answer/v1", "outcome": "no_answer"}
+    assert _ended(service, _ask(node, service, keep_until=node.now[0] + 3 * DAY, kq=other)).deferred
+    node.now[0] += DAY
+    assert _ended(service, _ask(node, service, keep_until=node.now[0] + 2 * DAY, kq=kq)).deferred
+
+
+@pytest.mark.parametrize("code", ["not_served", "model_unavailable", "queue_deadline"])
+def test_a_deferral_that_ran_no_writer_is_never_capped(answers_node, service, monkeypatch, code):
+    """R1: an index not served, a model host not up, a full queue: nothing ran, so a kept question defers on them as
+    often as it is delivered, always given back. They leave the writer allowance untouched."""
+    node = answers_node
+    if code == "not_served":
+        _unserve(node)
+    else:
+        _host_cannot_serve(node, service, monkeypatch, code)
+    kq = secrets.token_hex(16)
+    for _ in range(5):
+        assert _ended(service, _ask(node, service, keep_until=node.now[0] + DAY, kq=kq)).deferred
+    assert _questions(node) == 0
+    with node.ledger._transaction() as db:
+        assert db.execute("SELECT costly_deferrals FROM p2a_kept_question_counts").fetchone()[0] == 0
 
 
 def test_a_redelivery_is_not_held_to_the_limit_its_question_was_counted_against(answers_node, service):
