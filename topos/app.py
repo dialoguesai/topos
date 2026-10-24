@@ -627,6 +627,18 @@ async def startup_event() -> None:
 
         start_first_pin()
 
+        # Kept questions Wave 2 (OFF2N, contract §D): the owner's "While you're using Topos" as the control plane last
+        # pushed it, read before the client builds its inbound lane; never pushed, the defaults hold.
+        try:
+            from .core.state import get_db_connection as _get_conn_for_away
+            from .permissions_v2 import away_config as _away_config
+
+            _away_conn = state.db_conn if state.db_conn is not None else _get_conn_for_away()
+            if _away_conn is not None:
+                _away_config.load(_away_conn)
+        except Exception as away_exc:  # noqa: BLE001 -- the defaults hold
+            logger.warning("away settings not read at start (%s); the defaults hold", type(away_exc).__name__)
+
         state.control_plane_client = ControlPlaneClient(
             control_plane_url=settings.topos_control_plane_url,
             api_key=str(settings.topos_key or ""),

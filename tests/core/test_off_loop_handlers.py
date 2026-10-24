@@ -53,6 +53,8 @@ PAYLOADS = {
     # HT lane: the owner's home-chat timing rows. The first write creates the table, so the slow connection is reached.
     "record_home_chat_turn_timings": {"user_id": "an-invented-account", "records": []},
     "get_home_chat_turn_timings_summary": {"user_id": "an-invented-account", "days": 7},
+    # OFF2N (kept questions Wave 2): the owner's away settings, written to engine_config.
+    "put_away_config": {"v": 1, "while_using": "owner_first", "others_when_idle": False},
 }
 
 

@@ -170,6 +170,18 @@ def _kept_answers() -> int:
         return 0
 
 
+def _away_config() -> int:
+    """`permissions_v2_away_config` (kept questions Wave 2, lane OFF2N): 1, this node takes `put_away_config`, the
+    owner's "While you're using Topos" and "Answer others only when …", and schedules by them live. The control plane
+    sends them only to a node that says so. 0 when the module cannot be read."""
+    try:
+        from ..permissions_v2.away_config import CAPABILITY_VERSION
+
+        return int(CAPABILITY_VERSION)
+    except Exception:  # noqa: BLE001 -- an unimportable module takes nothing
+        return 0
+
+
 def _node_key_id() -> Any:
     """`permissions_v2_node_key_id` (A2A-1 §3.5): the key id of this node's sharing config, or None. A hint, read
     from disk on every beat; it takes no lock and loads no runtime."""
@@ -252,6 +264,8 @@ def build_engine_capabilities() -> Dict[str, Any]:
         "permissions_v2_conversation_titles": 1,
         # Kept questions: >= 1 keeps a kept answer for its signed window and defers a kept ask it cannot serve now.
         "permissions_v2_kept_answers": _kept_answers(),
+        # Kept questions, Wave 2: >= 1 takes the owner's away settings (`put_away_config`) and applies them live.
+        "permissions_v2_away_config": _away_config(),
         "capability_tiers": capability_tiers,
         "signal_providers": [p for p in ("huggingface", "ollama") if p in providers],
         "signal_jobs_available": signal_jobs_available,

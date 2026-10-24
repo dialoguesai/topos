@@ -1,0 +1,36 @@
+"""Kept questions, Wave 2 (lane OFF2N; ``lanes/OFF2_CONTRACT.md`` §D): the owner's order, over the relay.
+
+- ``put_away_config``: the owner's "While you're using Topos" (``while_using``) and "Answer others only when …"
+  (``others_when_idle``), which the control plane sends on every change and after each register. Stored in
+  ``engine_config`` and applied live (``permissions_v2.away_config``); the reply is what the node now holds. A payload
+  that is not exactly ``{"v": 1, "while_using": "owner_first" | "even", "others_when_idle": bool}`` is the node's
+  usual error reply, and nothing is stored.
+
+Registered ``owner_only``, so the dispatcher answers every principal but ``owner_app`` (the owner's socket, or a
+relayed frame the control plane signed as the owner's own app) with its usual ``owner_mode_required``, and
+``off_loop``: the write runs in a worker thread, on that thread's own connection.
+"""
+from __future__ import annotations
+
+from typing import Any, Dict, Optional
+
+import topos.core.handlers as hub
+
+from .registry import handles
+
+
+@handles("put_away_config", owner_only=True, off_loop=True)
+async def handle_put_away_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...permissions_v2 import away_config
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        held = away_config.store(conn, message.get("payload"))
+    except ValueError:
+        return {"id": req_id, "status": "error", "error": "away_config_invalid"}
+    except Exception:  # noqa: BLE001 -- never a path or an exception's text on the wire
+        return {"id": req_id, "status": "error", "error": "away_config_unavailable"}
+    return {"id": req_id, "status": "ok", "payload": held}
