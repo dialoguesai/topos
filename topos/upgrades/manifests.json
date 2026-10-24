@@ -1252,6 +1252,14 @@
       ]
     },
     {
+      "version": "1.5.23",
+      "summary": "Release 1.5.23: reflection, moments worth bringing up again, from the fact ontologies the owner switched on.",
+      "steps": [],
+      "notes": [
+        "No step and no prompt. The two new packs (moments.joy, moments.tension) seed disabled; reflection_candidates and reflection_labels are created on first use; the reflection_sweep job queues nothing while no reflection pack is enabled; the three reflection doors answer the owner class only. No migration, no dependency change."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
