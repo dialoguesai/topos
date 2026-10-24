@@ -8,7 +8,9 @@ Stages, each timed and each with its own outcome:
 0. gate      no model: empty, too long, a question, a fragment.
 1. read      one model call: the sentence + ClaimContext (prior turns, conversation time, speaker) -> one core
              claim: kind (did_or_made | setup | opinion), subject (owner | someone_else | both), reported speech,
-             names, period. ClaimContext interprets; it is never evidence.
+             names, period. ClaimContext interprets; it is never evidence. The call's own cap is the request's
+             ``read_timeout_s`` (default READ_TIMEOUT_S) inside the deadline, and the prompt describes the refusable
+             "meta" turn per the request's ``source_kind`` (a spoken turn, a message, a transcript, a journal entry).
 2. retrieve  the node's own hybrid retrieval (``DefaultSignalRetrievalAdapter``, summary mode: RRF over vectors, FTS,
              graph, entity threads, facts, raw records) with ``now`` = the conversation time, on the worker's OWN
              connection. Derived facts are followed through their source refs to the records they came from.
@@ -35,6 +37,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
+from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .verify_v2_models import ModelUnavailable, OutputSchema, Usage
@@ -63,12 +66,19 @@ def efforts() -> Dict[str, Dict[str, Any]]:
 
 EFFORTS = efforts()
 WHY_NOT = ("question", "not_about_the_owner", "plan_or_intention", "about_the_call_itself", "fragment", "too_vague")
+#: Where the checked text comes from (``ClaimRequest.source_kind``): a spoken turn (Fun Camera, the default), a chat
+#: message, a transcript segment or a journal entry. The "meta" category and the ``about_the_call_itself`` reason keep
+#: their names for every kind, so the response contract and the control plane need nothing; what the reader is told
+#: they mean is phrased per kind (``_SOURCE_TEXT``). Written for spoken turns alone, it refused 144 of the 504 message
+#: and journal rows of the inbound lane's first evening (23 Oct 2026) as talk about the call.
+SOURCE_KINDS = ("spoken", "message", "transcript", "journal")
 SUBJECTS = ("owner", "someone_else", "both")
 ROLES = ("authored", "addressed", "participated", "observed", "ambient", "derived")
 AGGREGATE_LANES = frozenset({"stat_insights", "goals", "topic_clusters"})
 #: Search with the claim worded as the owner's own records would word it (first person), not "The owner ...".
 QUERY_AS_WRITTEN = True
-#: The reader's own cap inside the request deadline.
+#: The reader's own cap inside the request deadline: the default of ``ClaimRequest.read_timeout_s``. Sized for the hosted
+#: 70B (an interactive caller waits 10 s in all); a request names its own when its model or its patience differs.
 READ_TIMEOUT_S = 8.0
 #: When the two list orders disagree on a record, one more call on that record alone decides it (2 of 3).
 TIEBREAK = True
@@ -108,17 +118,17 @@ ROLE_TEXT = {"authored": "written by the owner", "addressed": "an assistant's re
              "participated": "someone else's message in the owner's thread", "observed": "someone else's message",
              "ambient": "observed activity, not anyone's statement", "derived": "a fact derived from the owner's records (source not found)"}
 
-_READ_TEMPLATE = """You prepare what someone just said in a conversation (a sentence or a short passage) for a fact check
+_READ_TEMPLATE = """You prepare {what} for a fact check
 against the records of the person who owns them (their coding sessions, GitHub pushes, browser history, journal and
 messages). You get the conversation's date, who said it, the turns just before it, and what was said. Call the records'
 owner "the owner".
 
-Speech is loose: one turn can hold fillers, asides, a question and several assertions. Take its checkable assertions
+{loose} Take its checkable assertions
 (a named thing, a change made, how something is set up, an opinion about a specific thing): up to three distinct ones,
 the most specific first, each as its own entry in "claims"; the first is the main one. Do not split one assertion into
 pieces. {scope}
 
-"category" - what kind of thing the turn mainly asserts:
+"category" - what kind of thing the {unit} mainly asserts:
 - "did": something the speaker did, made, built or sent, past or under way.
 - "state": how a thing of the speaker's is set up, what it is, where it came from.
 - "view": a position, belief or framing the speaker holds.
@@ -127,16 +137,16 @@ pieces. {scope}
 - "plan": an intention or upcoming action.
 - "have": a possession or resource.
 - "count": a quantity, frequency or comparison.
-- "meta": only about the call, the screen or this conversation itself; fillers; what the speaker is doing on the call.
+- "meta": {meta}
 - "world": about the world or other people, with nothing about the speaker or the speaker's things.
-"claims": empty when the turn is "meta", "world", or asserts nothing checkable; then "not_checkable_because" gives
+"claims": empty when the {unit} is "meta", "world", or asserts nothing checkable; then "not_checkable_because" gives
 the reason. Each entry has:
 "type" - what that assertion says:
 - "did_or_made": something someone did, made, changed, adopted, built or worked on (past or ongoing).
 - "setup": how the owner's tools, data or system are set up or work now.
 - "opinion": an opinion about a specific thing ("that would be cool", "its UI was terrible").
 - "not_checkable": nothing said asserts anything checkable: it is only a question, only a future plan or intention,
-  only a remark about the call itself happening right now (audio, loading, screen sharing), or a fragment that asserts
+  {meta_type}, or a fragment that asserts
   nothing even with context.
 "subject": who the claim is about: "owner" (the speaker, or their own projects, tools and things), "someone_else"
 (another person or group, or their things), or "both".
@@ -150,16 +160,63 @@ project" and similar with the thing meant, and to turn relative dates into absol
 the owner's own actions ("I ..."), the same facts and names, plain words, at most 25 words.
 "not_checkable_because" (top level): when "claims" is empty, one of the listed reasons; otherwise ""."""
 
+#: How the reader is told what it is reading, per ``source_kind``: what the text is, how loose it runs, the word for
+#: one of them, what "meta" means there and how the ``not_checkable`` type describes it. The spoken wording is the
+#: original Fun Camera prompt, unchanged.
+_SOURCE_TEXT = {
+    "spoken": {
+        "what": "what someone just said in a conversation (a sentence or a short passage)",
+        "loose": "Speech is loose: one turn can hold fillers, asides, a question and several assertions.",
+        "unit": "turn",
+        "meta": "only about the call, the screen or this conversation itself; fillers; what the speaker is doing on the call.",
+        "meta_type": "only a remark about the call itself happening right now (audio, loading, screen sharing)",
+    },
+    "message": {
+        "what": "a message someone sent in a chat thread (a line or a short passage)",
+        "loose": "Chat is loose: one message can hold a reaction, a greeting, a question and several assertions.",
+        "unit": "message",
+        "meta": ('only about this conversation itself: a reaction, a greeting, thanks, an acknowledgement, or the '
+                 'logistics of the chat (who is free when, "call me", "sent you the link"); fillers.'),
+        "meta_type": "only a reaction, a greeting or the logistics of the chat itself",
+    },
+    "transcript": {
+        "what": "what someone said in a recorded conversation (a transcript segment: a sentence or a short passage)",
+        "loose": "Speech is loose: one segment can hold fillers, asides, a question and several assertions.",
+        "unit": "segment",
+        "meta": "only about the recording, the room or this conversation itself; fillers; what the speaker is doing while talking.",
+        "meta_type": "only a remark about the recording or the conversation itself happening right now",
+    },
+    "journal": {
+        "what": "a passage someone wrote in their journal (a sentence or a short passage)",
+        "loose": "Writing is loose: one entry can hold asides, a question and several assertions.",
+        "unit": "entry",
+        "meta": "only about the act of writing this entry (sitting down to write, what to write about, stopping); fillers.",
+        "meta_type": "only a remark about the act of writing this entry",
+    },
+}
 #: The request's ``about_others`` option picks the reader's scope. Off (the default): only what the speaker says about
 #: themself (alone or with others) is checked. On: a claim about someone else may be checked against the owner's
 #: messages, under the same actor-role rules.
-READ_SYSTEM = _READ_TEMPLATE.format(scope=(
-    "Take an assertion about the speaker or the speaker's own things: what they did, made, set up, use or think, alone\n"
-    "or with others, including their projects, tools and data. Only when everything said is about another person or\n"
-    'group is the type "not_checkable" because "not_about_the_owner".'))
-READ_SYSTEM_WITH_OTHERS = _READ_TEMPLATE.format(scope=(
-    "Prefer an assertion about the speaker themself; take one about someone else only when nothing said is about the\n"
-    "speaker. A claim about someone else is still checkable: the owner's messages may show it."))
+_SCOPE_OWN = ("Take an assertion about the speaker or the speaker's own things: what they did, made, set up, use or think, alone\n"
+              "or with others, including their projects, tools and data. Only when everything said is about another person or\n"
+              'group is the type "not_checkable" because "not_about_the_owner".')
+_SCOPE_WITH_OTHERS = ("Prefer an assertion about the speaker themself; take one about someone else only when nothing said is about the\n"
+                      "speaker. A claim about someone else is still checkable: the owner's messages may show it.")
+
+
+def read_system(about_others: bool = False, source_kind: str = "spoken") -> str:
+    """The reader's system prompt for a scope and a source kind: one string object per pair, and an unknown kind
+    reads as spoken."""
+    return _read_system(bool(about_others), source_kind if source_kind in SOURCE_KINDS else "spoken")
+
+
+@lru_cache(maxsize=None)
+def _read_system(about_others: bool, source_kind: str) -> str:
+    return _READ_TEMPLATE.format(scope=_SCOPE_WITH_OTHERS if about_others else _SCOPE_OWN, **_SOURCE_TEXT[source_kind])
+
+
+READ_SYSTEM = read_system(False, "spoken")
+READ_SYSTEM_WITH_OTHERS = read_system(True, "spoken")
 
 def _read_schema(why_not) -> Dict[str, Any]:
     claim = {
@@ -240,6 +297,10 @@ class ClaimRequest:
     about_others: bool = False  # also check claims about someone else (see READ_SYSTEM_WITH_OTHERS)
     effort: str = "high"
     deadline_s: float = DEFAULT_DEADLINE_S
+    #: The reader's own cap inside the deadline (bounded to ``deadline_s`` when run). The default suits the hosted 70B;
+    #: a local 9B on a busy machine needs longer, and a caller that can wait (the inbound lane) says so here.
+    read_timeout_s: float = READ_TIMEOUT_S
+    source_kind: str = "spoken"  # one of SOURCE_KINDS: how the reader is told what it is reading
 
 
 @dataclass
@@ -379,7 +440,8 @@ def read_claims(req: ClaimRequest, chat: Callable, usage: Usage, timeout: float)
                       for t in req.context[-6:]) or "(none)"
     user = (f"Conversation date: {conversation_time(req.said_at).date().isoformat()}\nSaid by: {req.speaker}\n\n"
             f"Earlier turns:\n{turns}\n\nWhat was said: {req.statement.strip()}")
-    system, schema = (READ_SYSTEM_WITH_OTHERS, READ_SCHEMA_WITH_OTHERS) if req.about_others else (READ_SYSTEM, READ_SCHEMA)
+    system = read_system(bool(req.about_others), req.source_kind)
+    schema = READ_SCHEMA_WITH_OTHERS if req.about_others else READ_SCHEMA
     out = chat(system, user, schema, timeout, usage)
     category = out.get("category") if out.get("category") in CATEGORIES else "did"
     why = out.get("not_checkable_because") if out.get("not_checkable_because") in WHY_NOT else None
@@ -698,8 +760,10 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
     claims; ``judges`` (default: ``chat`` alone) labels the evidence. The reader's claims (main one first) are checked
     in parallel, as many as the effort allows; the turn is supported when any claim is."""
     started = time.perf_counter()
-    deadline = started + max(0.5, float(req.deadline_s or DEFAULT_DEADLINE_S))
+    deadline_s = max(0.5, float(req.deadline_s or DEFAULT_DEADLINE_S))
+    deadline = started + deadline_s
     left = lambda: deadline - time.perf_counter()
+    read_cap = min(max(0.5, float(req.read_timeout_s or READ_TIMEOUT_S)), deadline_s)  # the reader's cap, inside the deadline
     usage = Usage()
     levels = efforts()
     effort = levels.get(req.effort) or levels["high"]
@@ -715,7 +779,7 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
     out["stages"]["gate"] = "passed"
     try:
         t = time.perf_counter()
-        category, claims, why = await to_thread(read_claims, req, chat, usage, min(READ_TIMEOUT_S, left()))
+        category, claims, why = await to_thread(read_claims, req, chat, usage, min(read_cap, left()))
         out["timings_ms"]["read"] = round((time.perf_counter() - t) * 1000, 1)
         out["category"] = category
         if not claims:

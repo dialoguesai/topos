@@ -1,7 +1,11 @@
 """The inbound truth lane's owner-only tables, and the owner's three reads and one write over them.
 
 ``truth_checks`` holds one row per checked record: what verify_claim v2 made of it (the reader's main claim, the
-verdict, the cited records by table, id, role and date, never their text). ``truth_labels`` holds the owner's
+verdict, the cited records by table, id, role and date, never their text). An ``unable`` row may be checked again by
+the lane (:func:`recheck_reason`: a changed model, effort or reader timeout, or a cooldown; at most
+:data:`MAX_ATTEMPTS` checks in all, never once the owner labelled it), in place: the row keeps its id, its week and
+its ``created_at``, and ``attempts`` / ``read_timeout_s`` / ``checked_at`` say how many checks it had and how the last
+one ran. ``truth_labels`` holds the owner's
 judgement of a claim (true / partly / false and an optional note), one per check; a new submit replaces it. Both
 are created lazily on first write, as ``ai_chat_message_facets`` is, so a node that never turns the lane on keeps
 neither (no migration). Both are in ``data_explorer_tables.OWNER_ONLY_TABLES``: the legacy table tools serve them to
@@ -26,7 +30,7 @@ import sqlite3
 import statistics
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from ..storage.db.write_gate import commit_connection, with_db_write
 
@@ -75,7 +79,10 @@ _DDL = (
         effort TEXT,
         model TEXT,
         latency_ms REAL,
-        created_at TEXT NOT NULL
+        created_at TEXT NOT NULL,
+        attempts INTEGER NOT NULL DEFAULT 1,
+        read_timeout_s REAL,
+        checked_at TEXT
     )""",
     f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{CHECKS_TABLE}_record ON {CHECKS_TABLE}(record_table, record_id)",
     f"CREATE INDEX IF NOT EXISTS idx_{CHECKS_TABLE}_week ON {CHECKS_TABLE}(week, created_at)",
@@ -87,6 +94,14 @@ _DDL = (
         labelled_at TEXT NOT NULL
     )""",
 )
+#: Columns added after 1.5.19 shipped the table: added in place, on first use, to a table an earlier build created
+#: (the table itself was created lazily, with no migration, so its columns are too). ``attempts`` counts the checks
+#: of the record (1 for every row stored before retries existed); ``read_timeout_s`` is the reader cap the last check
+#: ran with (NULL for a row stored before it was recorded, or for a row the gate refused without a model call);
+#: ``checked_at`` is when the last check ran (NULL: ``created_at``).
+_ADDED_COLUMNS = (("attempts", "INTEGER NOT NULL DEFAULT 1"), ("read_timeout_s", "REAL"), ("checked_at", "TEXT"))
+#: An ``unable`` row is checked again at most until it has had this many checks in all.
+MAX_ATTEMPTS = 3
 
 
 class TruthRequestError(ValueError):
@@ -102,13 +117,21 @@ def tables_present(conn: sqlite3.Connection) -> bool:
     return all(_present(conn, t) for t in TABLES)
 
 
+def _missing_columns(conn: sqlite3.Connection) -> List[Tuple[str, str]]:
+    have = set(_columns(conn, CHECKS_TABLE))
+    return [(name, decl) for name, decl in _ADDED_COLUMNS if name not in have]
+
+
 def ensure_tables(conn: sqlite3.Connection) -> None:
-    """Create both tables on first use. The probe is a read, so a node that has them takes no write gate."""
-    if tables_present(conn):
+    """Create both tables on first use, and add the later columns to a table an earlier build created. The probes are
+    reads, so a node that has everything takes no write gate."""
+    if tables_present(conn) and not _missing_columns(conn):
         return
     with with_db_write():
         for statement in _DDL:
             conn.execute(statement)
+        for name, decl in _missing_columns(conn):
+            conn.execute(f"ALTER TABLE {CHECKS_TABLE} ADD COLUMN {name} {decl}")
         commit_connection(conn)
 
 
@@ -310,7 +333,8 @@ def already_checked(conn: sqlite3.Connection, table: str, record_id: str) -> boo
 
 
 def record_check(conn: sqlite3.Connection, check: Dict[str, Any]) -> Optional[str]:
-    """Store one check; returns its id, or None when the record was already checked (one check per record)."""
+    """Store one check; returns its id, or None when the record was already checked (one row per record: a later
+    check of an ``unable`` row goes through :func:`recheck`)."""
     ensure_tables(conn)
     if check.get("verdict") not in VERDICTS or check.get("speaker_kind") not in ("owner", "contact"):
         raise TruthRequestError("invalid_check")
@@ -320,14 +344,107 @@ def record_check(conn: sqlite3.Connection, check: Dict[str, Any]) -> Optional[st
         cursor = conn.execute(
             f"INSERT OR IGNORE INTO {CHECKS_TABLE} (check_id, record_table, record_id, conversation_id, source, "
             "speaker_kind, week, category, claim_text, verdict, reason, cited_refs_json, effort, model, latency_ms, "
-            "created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_at, attempts, read_timeout_s, checked_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
             (check_id, check["record_table"], check["record_id"], check.get("conversation_id"), check["source"],
              check["speaker_kind"], iso_week(created), check.get("category"), check.get("claim_text"),
              check["verdict"], check.get("reason"), json.dumps(check.get("cited_refs") or []), check.get("effort"),
-             check.get("model"), check.get("latency_ms"), created.isoformat()),
+             check.get("model"), check.get("latency_ms"), created.isoformat(), check.get("read_timeout_s"),
+             created.isoformat()),
         )
         commit_connection(conn)
     return check_id if cursor.rowcount else None
+
+
+# --- re-checks of unable rows -----------------------------------------------------------------------------------------
+#: What a check ran with, as the lane compares it: (model label, effort, reader timeout in seconds).
+Signature = Tuple[Optional[str], Optional[str], Optional[float]]
+
+
+def state_columns(conn: sqlite3.Connection) -> str:
+    """The re-check columns of ``truth_checks c`` as a select list, on a table an earlier build created too (a column
+    it lacks reads as its default), and with or without the labels table: check id, verdict, model, effort, reader
+    timeout, attempts, last check time, labelled."""
+    have = set(_columns(conn, CHECKS_TABLE))
+    col = lambda name, fallback: f"c.{name}" if name in have else fallback  # noqa: E731
+    labelled = (f"EXISTS (SELECT 1 FROM {LABELS_TABLE} l WHERE l.check_id = c.check_id)"
+                if _present(conn, LABELS_TABLE) else "0")
+    return (f"c.check_id, c.verdict, c.model, c.effort, {col('read_timeout_s', 'NULL')}, "
+            f"COALESCE({col('attempts', 'NULL')}, 1), COALESCE({col('checked_at', 'NULL')}, c.created_at), {labelled}")
+
+
+_STATE_KEYS = ("check_id", "verdict", "model", "effort", "read_timeout_s", "attempts", "checked_at", "labelled")
+
+
+def state_of(found: Iterable[Any]) -> Dict[str, Any]:
+    """A :func:`state_columns` row as a dict."""
+    state = dict(zip(_STATE_KEYS, found))
+    state["attempts"] = int(state["attempts"] or 1)
+    state["labelled"] = bool(state["labelled"])
+    return state
+
+
+def check_state(conn: sqlite3.Connection, table: str, record_id: str) -> Optional[Dict[str, Any]]:
+    """What the store holds for one record, for the lane's re-check decision; None when it has no row."""
+    if not _present(conn, CHECKS_TABLE):
+        return None
+    found = conn.execute(f"SELECT {state_columns(conn)} FROM {CHECKS_TABLE} c WHERE c.record_table=? AND c.record_id=?",
+                         (table, record_id)).fetchone()
+    return state_of(found) if found is not None else None
+
+
+def recheck_reason(state: Optional[Dict[str, Any]], signature: Signature, *, now: Optional[datetime] = None,
+                   cooldown_s: float) -> Optional[str]:
+    """Why the lane should check a stored row again, or None. Only an ``unable`` row the owner has not labelled, with
+    fewer than :data:`MAX_ATTEMPTS` checks, is checked again: at once when the lane's model, effort or reader timeout
+    is not the one its last check ran with (a timeout the row does not record differs from every timeout), else once
+    ``cooldown_s`` has passed since that check."""
+    if not state or state.get("verdict") != "unable" or state.get("labelled"):
+        return None
+    if int(state.get("attempts") or 1) >= MAX_ATTEMPTS:
+        return None
+    model, effort, read_timeout = signature
+    if (state.get("model") or None) != (model or None):
+        return "model"
+    if (state.get("effort") or None) != (effort or None):
+        return "effort"
+    recorded = state.get("read_timeout_s")
+    if recorded is None or read_timeout is None or abs(float(recorded) - float(read_timeout)) > 1e-6:
+        return "read_timeout"
+    last = _aware(state.get("checked_at"))
+    if last is None or (now or now_utc()) - last >= timedelta(seconds=cooldown_s):
+        return "cooldown"
+    return None
+
+
+def recheck(conn: sqlite3.Connection, check: Dict[str, Any], attempt: int) -> Optional[str]:
+    """Replace an ``unable`` row's result with a later check of the same record, in place: the row keeps its id, its
+    week and its ``created_at`` (the week the record was first checked), and ``attempts`` becomes ``attempt``.
+    Returns the check id, or None when the row is no longer the ``unable`` row with ``attempt - 1`` checks (another
+    check got there first, or the owner labelled it)."""
+    ensure_tables(conn)
+    if check.get("verdict") not in VERDICTS or check.get("speaker_kind") not in ("owner", "contact"):
+        raise TruthRequestError("invalid_check")
+    if type(attempt) is not int or not 2 <= attempt <= MAX_ATTEMPTS:
+        raise TruthRequestError("invalid_check")
+    with with_db_write():
+        found = conn.execute(
+            f"SELECT c.check_id FROM {CHECKS_TABLE} c WHERE c.record_table=? AND c.record_id=? AND c.verdict='unable' "
+            f"AND c.attempts=? AND NOT EXISTS (SELECT 1 FROM {LABELS_TABLE} l WHERE l.check_id = c.check_id)",
+            (check["record_table"], check["record_id"], attempt - 1)).fetchone()
+        if found is None:
+            return None
+        conn.execute(
+            f"UPDATE {CHECKS_TABLE} SET conversation_id=?, source=?, speaker_kind=?, category=?, claim_text=?, "
+            "verdict=?, reason=?, cited_refs_json=?, effort=?, model=?, latency_ms=?, attempts=?, read_timeout_s=?, "
+            "checked_at=? WHERE check_id=?",
+            (check.get("conversation_id"), check["source"], check["speaker_kind"], check.get("category"),
+             check.get("claim_text"), check["verdict"], check.get("reason"), json.dumps(check.get("cited_refs") or []),
+             check.get("effort"), check.get("model"), check.get("latency_ms"), attempt, check.get("read_timeout_s"),
+             now_utc().isoformat(), found[0]),
+        )
+        commit_connection(conn)
+    return str(found[0])
 
 
 def label_claim(conn: sqlite3.Connection, check_id: Any, label: Any, note: Any = None) -> Dict[str, Any]:
@@ -439,26 +556,35 @@ def _empty_week(week: str) -> Dict[str, Any]:
     from ..config.truth_inbound import SOURCES
 
     return {"week": week, "checked": 0, "backed": 0, "nothing_found": 0, "unable": 0, "not_a_claim": 0,
+            "rechecked": 0, "attempts_exhausted": 0,
             "by_source": {s: 0 for s in SOURCES}, "by_category": {}, "labelled": 0, "to_confirm": 0,
             "agreement": {"backed_true": 0, "backed_false": 0, "nothing_true": 0}, "latency_ms_p50": None}
 
 
 def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[datetime] = None) -> Dict[str, Any]:
-    """Counts per ISO week, newest first. Aggregates only: no claim text, no record id, no name."""
+    """Counts per ISO week, newest first. Aggregates only: no claim text, no record id, no name. A row counts in the
+    week its record was first checked; ``rechecked`` is how many of that week's rows were checked more than once, and
+    ``attempts_exhausted`` how many are still ``unable`` after the last check allowed (:data:`MAX_ATTEMPTS`). Reads a
+    table an earlier build created as it is (the CLI's connection is read-only)."""
     if type(weeks) is not int or not 1 <= weeks <= MAX_WEEKS:
         raise TruthRequestError("invalid_truth_request")
     names = recent_weeks(weeks, when)
     out = {week: _empty_week(week) for week in names}
     if tables_present(conn):
+        attempts = "COALESCE(c.attempts, 1)" if "attempts" in _columns(conn, CHECKS_TABLE) else "1"
         rows = conn.execute(
             f"SELECT c.week, c.source, c.category, c.verdict, c.latency_ms, c.model IS NOT NULL, "
-            f"c.claim_text IS NOT NULL, l.label FROM {CHECKS_TABLE} c "
+            f"c.claim_text IS NOT NULL, l.label, {attempts} FROM {CHECKS_TABLE} c "
             f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id "
             f"WHERE c.week IN ({','.join('?' for _ in names)})", names).fetchall()
         latencies: Dict[str, List[float]] = {week: [] for week in names}
-        for week, source, category, verdict, latency, modelled, has_claim, label in rows:
+        for week, source, category, verdict, latency, modelled, has_claim, label, tries in rows:
             entry = out[week]
             entry["checked"] += 1
+            if tries > 1:
+                entry["rechecked"] += 1
+            if verdict == "unable" and tries >= MAX_ATTEMPTS:
+                entry["attempts_exhausted"] += 1
             key = {"supported": "backed", "no_evidence": "nothing_found", "unable": "unable",
                    "not_checkable": "not_a_claim"}.get(verdict)
             if key:
