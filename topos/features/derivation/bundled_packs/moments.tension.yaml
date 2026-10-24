@@ -4,7 +4,7 @@
 # the other person felt or did beyond the owner's words (operating principle 4, relational
 # privacy). Ships DISABLED; enabling it is the owner's call.
 pack: moments.tension
-version: 0.1.4
+version: 0.1.5
 status: draft
 title: "Tensions, misunderstandings and unresolved experiences"
 author: topos
@@ -66,7 +66,8 @@ guidance:
   definitions: >
     A tension is a situation the owner described as unresolved or uncomfortable: a conflict,
     a misunderstanding, a disappointment, a conversation not had, a frustration that recurs,
-    a decision that will not settle, something hard to accept. The record must name the
+    a decision that will not settle, something hard to accept; AND the closing of one: talked it
+    out, made up, decided, let it go (moment.tension_resolved). The record must name the
     situation; a mood with no situation is not a tension.
   abstention:
     - "A FIRST-PERSON UNRESOLVED SITUATION IS A TENSION: 'I keep going back and forth on the offer', 'still haven't told my dad', 'got into it again about the schedule' are moment.tension. Extract them; do not wait for the owner to call it a problem."
