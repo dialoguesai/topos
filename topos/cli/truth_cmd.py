@@ -3,7 +3,7 @@
 The same aggregates ``truth_weekly_stats`` answers (``topos/query/truth_checks.py``): counts per ISO week, never a
 claim, a name or a record id. It reads the active database directly through a read-only connection, so it works
 with the node stopped, and it can neither migrate nor write (``mode=ro``). A database with no lane tables prints
-zeros.
+zeros. A table an earlier build created (without the re-check columns) reads as it is.
 """
 from __future__ import annotations
 
@@ -51,6 +51,9 @@ def render(result: Dict[str, Any]) -> str:
             agreement = week["agreement"]
             lines.append(f"  your labels: backed and true {agreement['backed_true']}, backed but false "
                          f"{agreement['backed_false']}, nothing found but true {agreement['nothing_true']}")
+            if week.get("rechecked") or week.get("attempts_exhausted"):
+                lines.append(f"  checked again: {week.get('rechecked', 0)}; still unable after the last check allowed: "
+                             f"{week.get('attempts_exhausted', 0)}")
     return "\n".join(lines)
 
 
