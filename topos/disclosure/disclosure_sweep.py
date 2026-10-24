@@ -310,6 +310,11 @@ class Sweep:
             keyed = {f"{table}:{record_id}:{field}": (record_id, field, text, digest)
                      for _rowid, record_id, field, text, digest in chunk}
             items = [{"id": key, "text": value[2]} for key, value in keyed.items()][:PRIVACY_DISCLOSE_MAX_BATCH]
+            # Kept questions Wave 2 (OFF2N): the node's own sweep (`run_at_startup`, background work) lets a share's
+            # answer job and, under the yield rule, the owner's own frames have the model first; at most 110 s.
+            from ..permissions_v2 import answer_gate
+
+            await answer_gate.yield_to_answers_if_background()
             counts["calls"] += 1
             answer = await client.redact_batch(items)
             if not isinstance(answer, dict) or answer.get("status") in ("unavailable", "failed", "too_large", "invalid"):
@@ -346,12 +351,21 @@ async def run_sweep(connect: Callable[[], Optional[sqlite3.Connection]], *, mode
     return await Sweep(connect, client=client, stop=stop).run(mode=mode, dry_run=dry_run, tables=tables)
 
 
-async def run_at_startup(connect: Callable[[], Optional[sqlite3.Connection]], *,
-                         delay: float = STARTUP_DELAY_SECONDS, recheck: float = RECHECK_SECONDS,
-                         verify_every: float = VERIFY_SECONDS, poll: float = POLL_SECONDS,
-                         client: Any = None, clock: Callable[[], float] = time.monotonic) -> None:
-    """The node's own catch-up: a full walk after startup, pending walks on request and on an interval, a full walk
-    again every ``verify_every`` seconds. Stops between calls when the runtime is shutting down; never raises."""
+async def run_at_startup(connect: Callable[[], Optional[sqlite3.Connection]], **how: Any) -> None:
+    """The node's own catch-up (``_catch_up``), as background work (OFF2N): its privacy-filter calls wait for a
+    share's answer job and, under the yield rule, the owner's own frames (``answer_gate``)."""
+    from ..permissions_v2 import answer_gate
+
+    with answer_gate.background_work():
+        await _catch_up(connect, **how)
+
+
+async def _catch_up(connect: Callable[[], Optional[sqlite3.Connection]], *,
+                    delay: float = STARTUP_DELAY_SECONDS, recheck: float = RECHECK_SECONDS,
+                    verify_every: float = VERIFY_SECONDS, poll: float = POLL_SECONDS,
+                    client: Any = None, clock: Callable[[], float] = time.monotonic) -> None:
+    """A full walk after startup, pending walks on request and on an interval, a full walk again every
+    ``verify_every`` seconds. Stops between calls when the runtime is shutting down; never raises."""
     from ..runtime_shutdown import is_shutdown_requested
 
     if delay:
