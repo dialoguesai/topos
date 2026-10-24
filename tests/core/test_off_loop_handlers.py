@@ -105,8 +105,35 @@ FILE_PAYLOADS = {
 }
 
 
+#: Marked types that answer from memory alone (OFF2N, kept questions Wave 2): measured as never reaching the database
+#: and never running on the loop's thread.
+MEMORY_PAYLOADS = {
+    "get_sharing_readiness": {},
+    # The owner's away settings, held in memory for the connection (R-OFF2 F3).
+    "put_away_config": {"v": 1, "seq": 1, "while_using": "owner_first", "others_when_idle": False},
+}
+
+
 def test_the_marked_types_are_the_ones_this_file_asks():
-    assert set(PAYLOADS) | set(FILE_PAYLOADS) == OFF_LOOP_MESSAGE_TYPES
+    assert set(PAYLOADS) | set(FILE_PAYLOADS) | set(MEMORY_PAYLOADS) == OFF_LOOP_MESSAGE_TYPES
+
+
+@pytest.mark.parametrize("msg_type", sorted(MEMORY_PAYLOADS))
+@pytest.mark.asyncio
+async def test_a_memory_only_handler_runs_off_the_loop_and_never_reaches_the_database(msg_type, slow_database,
+                                                                                     monkeypatch):
+    ran_on = []
+    handler = HANDLERS[msg_type]
+
+    async def recording(message):
+        ran_on.append(threading.get_ident())
+        return await handler(message)
+    monkeypatch.setitem(HANDLERS, msg_type, recording)
+    message = {"id": "req-m", "type": msg_type, "payload": MEMORY_PAYLOADS[msg_type]}
+    gap, response = await longest_gap_during(handle_control_plane_request(message, principal=OWNER))
+    assert isinstance(response, dict) and response.get("id") == "req-m" and response.get("status") == "ok", response
+    assert ran_on and threading.get_ident() not in ran_on and not slow_database
+    assert gap < ALLOWED_PAUSE
 
 
 @pytest.mark.parametrize("msg_type", sorted(FILE_PAYLOADS))

@@ -531,6 +531,24 @@ _CATCHUP_KINDS: frozenset[str] = frozenset((*EMBEDDINGS_CATCHUP_KINDS, STALE_TEX
                                             REFLECTION_SWEEP_KIND))
 
 
+def _note_queued(conn, label: str, kinds: list[str]) -> None:
+    """OFF2N: what this lane has queued now, by kind, for readiness's backlog (``sharing_readiness``). One read on the
+    claim's own thread, after its claim; never raises."""
+    if not kinds:
+        return
+    try:
+        from ..permissions_v2 import sharing_readiness
+
+        marks = ",".join("?" for _ in kinds)
+        rows = conn.execute(
+            f"SELECT kind, COUNT(*) FROM pipeline_jobs WHERE status='queued' AND kind IN ({marks}) GROUP BY kind",
+            list(kinds),
+        ).fetchall()
+        sharing_readiness.note_queued(label, {str(row[0]): int(row[1]) for row in rows})
+    except Exception as exc:  # noqa: BLE001 -- a count is never a reason for the claim loop to fail
+        logger.debug("%s queued count skipped: %s", label, type(exc).__name__)
+
+
 def _executable_kinds() -> list[str]:
     """Kinds the general worker may claim. Computed per claim so tests that patch
     EXECUTORS are honored. A queued row of any other kind (e.g. written by a
@@ -789,7 +807,10 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
         # NR166 R4a: a pipeline job is background work; its local model calls wait for a share's answer job.
         from ..permissions_v2 import answer_gate
 
-        with answer_gate.background_work():
+        from ..permissions_v2 import sharing_readiness
+
+        # OFF2N: a catch-up job running is the node catching up (readiness); counted however it ends.
+        with answer_gate.background_work(), sharing_readiness.job_running(kind):
             result = await executor(payload)
     except asyncio.CancelledError:
         if pipeline_parked() or not rebuild_children_accepted():
@@ -1025,6 +1046,7 @@ async def _worker_loop(
                 claimed = claim_next_job(
                     own, lease_owner=_lease_owner, kinds=_claimable_kinds(own, kinds_fn()), lease_seconds=lease_seconds
                 )
+                _note_queued(own, label, kinds_fn())
                 with handoff_lock:
                     late = handoff["cancelled"]
                     handoff["job"] = None if late else claimed

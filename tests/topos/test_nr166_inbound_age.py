@@ -71,6 +71,9 @@ class Node:
         monkeypatch.setattr(answer_transport, "dispatch_answer", door)
         self.client = ControlPlaneClient(control_plane_url="ws://example/ws/engine", api_key="an-invented-key",
                                          handler=app_handler, verify_ssl=False)
+        # The semaphore's path: the owner lane is on by default since Wave 2 of kept questions (OFF2N), and R3a with
+        # the lane on is pinned in tests/topos/test_nr183_owner_lane.py.
+        self.client._owner_lane = None
         self.client._inbound_semaphore = asyncio.Semaphore(slots)
         self.socket = self.connect()
 

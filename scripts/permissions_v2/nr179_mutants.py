@@ -56,8 +56,8 @@ GRAPH_CHECK = ('    if is_derivation_in_flight():\n        # Checked again: a ba
 MUTANTS = [
     # -- G1: the hold itself ------------------------------------------------------------------------------------------
     ("g1_switch_off_still_waits", [
-        (GATE, "    if not holds_background() or not active():\n        return 0.0\n",
-               "    if not active():\n        return 0.0\n")], G1_TESTS),
+        # OFF2N moved the switch's read into the hold's own line (the owner's part does not read it).
+        (GATE, "    answers = holds_background()\n", "    answers = True\n")], G1_TESTS),
     ("g1_switch_read_as_on", [
         (GATE, "    return switches.on(switches.ANSWER_HOLDS_BACKGROUND)\n", "    return True\n")], G1_TESTS),
     ("g1_owners_own_work_waits", [
@@ -81,11 +81,15 @@ MUTANTS = [
                "    except Exception:  # noqa: BLE001 -- a start that cannot say whether it waits does not wait\n"
                "        pass\n")], G1_TESTS),
     ("g1_the_wait_is_unbounded", [
-        (GATE, "    while active() and clock() - started < limit and not run.is_stop_requested():\n",
-               "    while active() and not run.is_stop_requested():\n")], G1_TESTS),
+        (GATE, "    while (whom.saw(answers and active(), _owner_holds()) and clock() - started < limit\n"
+               "           and not run.is_stop_requested()):\n",
+               "    while whom.saw(answers and active(), _owner_holds()) and not run.is_stop_requested():\n")],
+     G1_TESTS),
     ("g1_a_stop_does_not_end_the_wait", [
-        (GATE, "    while active() and clock() - started < limit and not run.is_stop_requested():\n",
-               "    while active() and clock() - started < limit:\n")], G1_TESTS),
+        (GATE, "    while (whom.saw(answers and active(), _owner_holds()) and clock() - started < limit\n"
+               "           and not run.is_stop_requested()):\n",
+               "    while whom.saw(answers and active(), _owner_holds()) and clock() - started < limit:\n")],
+     G1_TESTS),
     ("g1_a_stop_does_not_wake_the_sleep", [
         (GATE, "    sleep = run.wait if sleep is None else sleep\n",
                "    sleep = time.sleep if sleep is None else sleep\n")], G1_TESTS),

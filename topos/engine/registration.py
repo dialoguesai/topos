@@ -170,6 +170,49 @@ def _kept_answers() -> int:
         return 0
 
 
+def _away_config() -> int:
+    """`permissions_v2_away_config` (kept questions Wave 2, lane OFF2N): 1, this node takes `put_away_config`, the
+    owner's "While you're using Topos" and "Answer others only when …", and schedules by them live. The control plane
+    sends them only to a node that says so. 0 when the module cannot be read."""
+    try:
+        from ..permissions_v2.away_config import CAPABILITY_VERSION
+
+        return int(CAPABILITY_VERSION)
+    except Exception:  # noqa: BLE001 -- an unimportable module takes nothing
+        return 0
+
+
+def _sharing_readiness_version() -> int:
+    """`permissions_v2_sharing_readiness` (kept questions Wave 2, lane OFF2N): 1, this node sends `sharing_readiness`
+    on its heartbeat and register and answers `get_sharing_readiness`; the control plane paces kept questions by it
+    only for a node that says so. 0 when the module cannot be read."""
+    try:
+        from ..permissions_v2.sharing_readiness import CAPABILITY_VERSION
+
+        return int(CAPABILITY_VERSION)
+    except Exception:  # noqa: BLE001 -- an unimportable module reports nothing
+        return 0
+
+
+def sharing_readiness() -> Dict[str, Any] | None:
+    """The readiness object both presence messages carry (contract §C), from memory; None when it cannot be built
+    (the key is then left out, and the control plane treats the node as one without the capability)."""
+    try:
+        from ..permissions_v2.sharing_readiness import build
+
+        return build()
+    except Exception as exc:  # noqa: BLE001 -- readiness never fails a heartbeat
+        logger.debug("sharing readiness not built: %s", type(exc).__name__)
+        return None
+
+
+def _with_readiness(payload: Dict[str, Any]) -> Dict[str, Any]:
+    readiness = sharing_readiness()
+    if readiness is not None:
+        payload["sharing_readiness"] = readiness
+    return payload
+
+
 def _node_key_id() -> Any:
     """`permissions_v2_node_key_id` (A2A-1 §3.5): the key id of this node's sharing config, or None. A hint, read
     from disk on every beat; it takes no lock and loads no runtime."""
@@ -252,6 +295,11 @@ def build_engine_capabilities() -> Dict[str, Any]:
         "permissions_v2_conversation_titles": 1,
         # Kept questions: >= 1 keeps a kept answer for its signed window and defers a kept ask it cannot serve now.
         "permissions_v2_kept_answers": _kept_answers(),
+        # Kept questions, Wave 2: >= 1 takes the owner's away settings (`put_away_config`) and applies them live.
+        "permissions_v2_away_config": _away_config(),
+        # Kept questions, Wave 2: >= 1 sends `sharing_readiness` on the heartbeat and register and answers
+        # `get_sharing_readiness` (whether this node has caught up, as counts; the control plane only, DR-37).
+        "permissions_v2_sharing_readiness": _sharing_readiness_version(),
         "capability_tiers": capability_tiers,
         "signal_providers": [p for p in ("huggingface", "ollama") if p in providers],
         "signal_jobs_available": signal_jobs_available,
@@ -285,7 +333,7 @@ def build_engine_register_message() -> Dict[str, Any]:
     return {
         "id": str(uuid4()),
         "type": "engine_register",
-        "payload": {
+        "payload": _with_readiness({
             "occurred_at": now,
             "status": "connected",
             "transport_mode": resolve_transport_mode(),
@@ -294,7 +342,7 @@ def build_engine_register_message() -> Dict[str, Any]:
                 "engine_mode": settings.engine_mode,
                 "enable_llm": settings.enable_llm,
             },
-        },
+        }),
     }
 
 
@@ -325,7 +373,7 @@ def build_engine_heartbeat_message() -> Dict[str, Any]:
     return {
         "id": str(uuid4()),
         "type": "engine_heartbeat",
-        "payload": {
+        "payload": _with_readiness({
             "occurred_at": now,
             "status": "connected",
             "transport_mode": resolve_transport_mode(),
@@ -335,7 +383,7 @@ def build_engine_heartbeat_message() -> Dict[str, Any]:
                 "enable_llm": settings.enable_llm,
                 **memory_meta,
             },
-        },
+        }),
     }
 
 

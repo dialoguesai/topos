@@ -1193,6 +1193,7 @@ class RefreshLoop:
         ledger, the index service, the rules and the canonical database are read at most once per interval."""
         if not self.settings.catchup or self._worker is None:
             return None
+        self._hold_before_a_slice()
         now = int(self.clock())
         with self._lock:
             if self._pass is not None:
@@ -1229,7 +1230,24 @@ class RefreshLoop:
                    "started_at": now, "progress_at": now, "counts": dict.fromkeys(_COUNTS, 0)}
             self._start_slice(worker, run, now)
             self._pass = run
+            from . import sharing_readiness
+            sharing_readiness.backlog_pass(run["origin"] == "startup_backlog")   # OFF2N: counted while it runs
         return None
+
+    def _hold_before_a_slice(self) -> float:
+        """Kept questions Wave 2 (OFF2N, scope §6.2 item 4): before a tick that may start a slice of a pass (the
+        startup backlog's among them), ``answer_gate.hold_background_start``: it waits while a share answer is in hand
+        (``ANSWER_HOLDS_BACKGROUND``) or, under the yield rule, an owner frame is in flight, at most 110 s. Here, never
+        under the loop's lock, which the daemon sweep's ``observe`` takes after every sweep. Asked only when a wait
+        would follow: whether a running pass's slice has ended, or the next check is due."""
+        from . import answer_gate
+
+        def may_start() -> bool:
+            if self._pass is not None:
+                return not self._worker_object().running()
+            checked = self._last_catchup_check
+            return checked is None or int(self.clock()) >= checked + self.settings.catchup_interval
+        return answer_gate.hold_background_start(only_if=may_start)
 
     def _start_slice(self, worker, run: dict, now: int) -> None:
         """The pass's current slice as one worker run, with what the pass has left of its budget."""
@@ -1288,6 +1306,8 @@ class RefreshLoop:
                 "high_water": run["started_at"] if run["high_water"] is None else run["high_water"]}
 
     def _finish_pass(self, run: dict, state: str, exhausted: bool, now: int) -> CatchUpReceipt:
+        from . import sharing_readiness
+        sharing_readiness.backlog_pass(False)
         counts = run["counts"]
         if state == "complete":
             stored = self._load_state()
@@ -1684,15 +1704,19 @@ def restore_at_start(runtime, *, state: dict) -> list[str]:
     full = token != state.get("token")
     now = int(time.time())
     owed = rebuilds.owed()
-    shares = []
+    shares, active = [], []
     with ledger._transaction() as db:
         for row in db.execute("SELECT grant_id FROM p2a_grants ORDER BY grant_id").fetchall():
             try:
                 authority, policy = ledger._authority(db, row["grant_id"], now)
             except PolicyError:
                 continue
-            if policy.versions.capability in RELEASABLE_SEARCH_CAPABILITIES and row["grant_id"] not in owed:
-                shares.append((row["grant_id"], authority))
+            if policy.versions.capability in RELEASABLE_SEARCH_CAPABILITIES:
+                active.append(row["grant_id"])
+                if row["grant_id"] not in owed:
+                    shares.append((row["grant_id"], authority))
+    from . import sharing_readiness
+    sharing_readiness.note_grants(index.root, active)   # OFF2N: what should serve; served only once proven
     wanted = []
     with SearchVerification(index.resolver, index.reviews) as verified:   # one closure and digest for the round
         for grant_id, authority in shares:

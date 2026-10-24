@@ -270,6 +270,7 @@ async def test_control_plane_client_sends_busy_error_when_saturated(monkeypatch)
         verify_ssl=False,
     )
     client._inbound_max_pending = 1
+    client._owner_lane = None   # the semaphore's path (the owner lane, on by default, has its own tests)
     client._inbound_semaphore = asyncio.Semaphore(1)
     task = asyncio.create_task(client._run())
     await asyncio.sleep(0.05)
@@ -306,6 +307,7 @@ async def test_control_plane_client_fast_lane_bypasses_saturation_gate(monkeypat
         verify_ssl=False,
     )
     client._inbound_max_pending = 1
+    client._owner_lane = None   # the semaphore's path (the owner lane, on by default, has its own tests)
     client._inbound_semaphore = asyncio.Semaphore(1)
     task = asyncio.create_task(client._run())
     await asyncio.sleep(0.05)

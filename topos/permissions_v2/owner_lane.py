@@ -50,12 +50,22 @@ every stamp itself and decides with its own rules. R3a's shedding (``control_pla
 at the same moment, once a slot is held, for both classes. Off, the client uses its one semaphore exactly as before
 and none of this is read.
 
+**"Share evenly"** (kept questions Wave 2, lane OFF2N; ``lanes/OFF2_CONTRACT.md`` §D). The owner's
+``while_using`` (``away_config``) is read on every acquire and every wake. ``owner_first`` (the default) is the lane
+above. ``even`` switches the reserve off live, with no restart: every slot is shared, in arrival order, owner frames
+included, as with the lane switched off. A frame keeps the kind of slot it took until it releases it, so a mode change
+strands no slot and releases none twice: an owner frame on a shared slot counts as borrowed, a recipient's frame on a
+kept slot holds it as kept, and the next ``owner_first`` acquire counts both until they end. Each class keeps its own
+waiting places in both modes (DR-04). The frames are still classified under "Share evenly" (the yield rule's owner
+idleness needs it, ``answer_gate``); only the slots stop telling them apart.
+
 The pool belongs to one event loop (the client's) and is not thread-safe.
 """
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import itertools
 import logging
 from collections import deque
 from typing import Any, Mapping
@@ -118,8 +128,10 @@ def slots_for(limit: int) -> "InboundSlots | None":
     try:
         if not switches.on(switches.OWNER_LANE):
             return None
+        from . import away_config
         lane = InboundSlots(limit, switches.number(switches.OWNER_LANE_SLOTS),
                             shared_cap=switches.number(switches.OWNER_LANE_SHARED_MAX),
+                            shares_evenly=away_config.shares_evenly,
                             types=switches.entries(switches.OWNER_LANE_TYPES))
     except Exception:  # noqa: BLE001 -- a lane that cannot be made is off: the semaphore, as before
         _log.warning("inbound owner lane could not be set up; it is off")
@@ -137,9 +149,12 @@ class InboundSlots:
     when every kept slot is busy and fewer than ``shared_cap`` are borrowed; a borrowed slot is held until its frame
     ends and is never swapped for a kept slot that frees. A freed slot goes to the oldest waiting owner frame that may
     take it, then to the oldest waiting shared one. Every slot taken is given back with
-    ``release``, once. ``admit`` and ``left`` count each class's frames in hand against its own waiting places."""
+    ``release``, once. ``admit`` and ``left`` count each class's frames in hand against its own waiting places.
 
-    def __init__(self, limit: int, reserved: int, *, shared_cap: int = 2, types: Any = None):
+    ``shares_evenly`` (OFF2N, "Share evenly"): read on every acquire and wake; while it says True every slot is
+    shared and the oldest waiting frame of either class goes first (module docstring). An error reads as False."""
+
+    def __init__(self, limit: int, reserved: int, *, shared_cap: int = 2, types: Any = None, shares_evenly=None):
         self.limit = max(1, int(limit))
         self.reserved = max(0, min(int(reserved), self.limit - 1))
         self.general = self.limit - self.reserved
@@ -151,6 +166,10 @@ class InboundSlots:
         self._in_hand = {True: 0, False: 0}
         self._waiting: dict[bool, deque] = {True: deque(), False: deque()}
         self.granted = {(True, GENERAL): 0, (True, RESERVED): 0, (False, GENERAL): 0}
+        self.granted.setdefault((False, RESERVED), 0)   # OFF2N: a recipient on a kept slot, only under "even"
+        self._shares_evenly = shares_evenly
+        self._arrivals = itertools.count()
+        self._arrival: dict = {}   # OFF2N: each waiting frame's place in arrival order, across both classes
 
     def owner_frame(self, message: Any) -> bool:
         """The class a frame waits in: True only when ``is_owner_frame`` says a plain yes; no on any error."""
@@ -190,7 +209,24 @@ class InboundSlots:
         owner = owner is True
         self._in_hand[owner] = max(0, self._in_hand[owner] - 1)
 
+    def evenly(self) -> bool:
+        """OFF2N: whether every slot is shared now ("Share evenly"). No reader, or one that fails: the lane."""
+        try:
+            return self._shares_evenly is not None and self._shares_evenly() is True
+        except Exception:  # noqa: BLE001 -- what cannot be read is the owner's order, the default
+            return False
+
+    def _free_evenly(self, owner: bool) -> str | None:
+        """"Share evenly": any free slot, whoever asks. An owner frame looks at the kept slots first and a recipient
+        at the shared ones first, so a change back to the lane finds as few crossed slots as can be."""
+        for kind in ((RESERVED, GENERAL) if owner else (GENERAL, RESERVED)):
+            if self._used[kind] < (self.reserved if kind == RESERVED else self.general):
+                return BORROWED if owner and kind == GENERAL else kind
+        return None
+
     def _free(self, owner: bool) -> str | None:
+        if self.evenly():
+            return self._free_evenly(owner)
         if owner is True:
             if self._used[RESERVED] < self.reserved:
                 return RESERVED   # DR-04: the owner's own slots first, so recipients keep all theirs
@@ -217,10 +253,11 @@ class InboundSlots:
         owner = owner is True
         queue = self._waiting[owner]
         slot = self._free(owner)
-        if slot is not None and not any(not f.done() for f in queue):
+        if slot is not None and not any(not f.done() for f in queue) and not self._others_ahead(owner):
             return self._take(owner, slot)
         future = asyncio.get_running_loop().create_future()
         queue.append(future)
+        self._arrival[future] = next(self._arrivals)
         try:
             return await future
         except asyncio.CancelledError:
@@ -230,6 +267,12 @@ class InboundSlots:
                 with contextlib.suppress(ValueError):
                     queue.remove(future)
             raise
+        finally:
+            self._arrival.pop(future, None)
+
+    def _others_ahead(self, owner: bool) -> bool:
+        """"Share evenly": a frame of the other class is waiting, so it goes first (arrival order)."""
+        return self.evenly() and any(not f.done() for f in self._waiting[not owner])
 
     def release(self, slot: str) -> None:
         kind = GENERAL if slot == BORROWED else slot
@@ -240,7 +283,14 @@ class InboundSlots:
         self._used[kind] -= 1
         self._wake()
 
+    def wake(self) -> None:
+        """Hand free slots to waiting frames now: after the mode changed (``away_config``), on the pool's loop."""
+        self._wake()
+
     def _wake(self) -> None:
+        if self.evenly():
+            self._wake_evenly()
+            return
         for owner in (True, False):   # D3: a waiting owner frame first
             queue = self._waiting[owner]
             while queue:
@@ -251,3 +301,19 @@ class InboundSlots:
                 if slot is None:
                     break
                 queue.popleft().set_result(self._take(owner, slot))
+
+    def _wake_evenly(self) -> None:
+        """"Share evenly": free slots to the waiting frames in arrival order, whichever their class."""
+        while True:
+            for queue in self._waiting.values():
+                while queue and queue[0].done():   # cancelled while it waited
+                    queue.popleft()
+            heads = [owner for owner in (True, False) if self._waiting[owner]]
+            if not heads:
+                return
+            first = min(heads, key=lambda owner: self._arrival.get(self._waiting[owner][0], 0))
+            slot = self._free(first)
+            if slot is None:
+                return   # every slot is busy: no frame of either class can take one
+            handed = self._waiting[first].popleft()
+            handed.set_result(self._take(first, slot))
