@@ -158,8 +158,9 @@ VHIGH = {**V136, P + "TRUTH_INTERPRET_ENABLED": False, P + "TRUTH_INTERPRET_PER_
 #: instead of its whole share index going; off bound and unbound alike until the owner rules the default. 63 + 1 = 64.
 VOWN = {**VHIGH, P + "INDEX_NARROW_OWN_ROW_EDITS": True}
 #: Kept questions Wave 2 (lane OFF2N; the owner's ruling D-10 of 23 Oct 2026, "on with its built settings"): the NR183
-#: owner lane on, bound and unbound alike, with its built slots, cap and types unchanged. No switch added (64).
-VOFF2 = {**VOWN, P + "OWNER_LANE": True}
+#: owner lane on, bound and unbound alike, with its built slots, cap and types unchanged; and the yield rule's kill
+#: switch (OD-13: background pauses for the owner's own chat), on bound and unbound alike. 64 + 1 = 65.
+VOFF2 = {**VOWN, P + "OWNER_LANE": True, P + "BACKGROUND_YIELDS_TO_OWNER": True}
 TABLE = {**V166, **VOFF2}
 
 
@@ -298,8 +299,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 64
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 63
+    assert len(switches.SWITCHES) == len(TABLE) == 65
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 64
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 

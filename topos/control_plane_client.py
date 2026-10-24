@@ -16,6 +16,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
 
 from .config.settings import settings
+from .permissions_v2 import answer_gate
 from .core.connection_resilience import (
     ConnectionSnapshot,
     ConnectionState,
@@ -197,6 +198,8 @@ class ControlPlaneClient:
         from .permissions_v2 import owner_lane
 
         self._owner_lane = owner_lane.slots_for(self._inbound_concurrency_limit)
+        # OFF2N: with the lane on, the owner's own frames are counted for the yield rule and owner idleness.
+        answer_gate.owner_frames_counted(self._owner_lane is not None)
         if self._owner_lane is not None:
             # OFF2N: "Share evenly" or back, pushed by the control plane on another thread: the pool's waiting frames
             # are handed what the new mode frees, on the client's own loop. A client that is gone hears nothing.
@@ -558,10 +561,16 @@ class ControlPlaneClient:
                 return
             # R3a: when it arrived, and whether on the connection this client holds now (see _shed_at_dequeue).
             arrived = (time.monotonic(), ws is self._ws)
-            task = asyncio.create_task(self._handle_message_guarded(ws, data, arrived) if lane is None
-                                       else self._handle_message_in_lane(lane, owner, ws, data, arrived))
+            # OFF2N: an owner frame's task is marked as one (nothing it runs waits for the owner: it would wait for
+            # itself), and counted in flight from here until it ends, however it ends (the yield rule, idleness).
+            with answer_gate.owner_frame() if owner else contextlib.nullcontext():
+                task = asyncio.create_task(self._handle_message_guarded(ws, data, arrived) if lane is None
+                                           else self._handle_message_in_lane(lane, owner, ws, data, arrived))
             if lane is not None:
                 task.add_done_callback(lambda _done: lane.left(owner))
+            if owner:
+                answer_gate.owner_frame_began()
+                task.add_done_callback(lambda _done: answer_gate.owner_frame_ended())
             self._inbound_tasks.add(task)
             task.add_done_callback(self._on_inbound_task_done)
 
@@ -821,8 +830,12 @@ class ControlPlaneClient:
                 # the CLIENT loop while the app loop is busy — which is the
                 # entire point: a stalled app queues work but never costs the
                 # connection, because pings keep being answered here.
+                # OFF2N: an owner frame's mark does not cross run_coroutine_threadsafe; the handler is wrapped in it.
+                call = self.handler(data)
+                if answer_gate.in_owner_frame():
+                    call = answer_gate.within_owner_frame(call)
                 handler_future = asyncio.wrap_future(
-                    asyncio.run_coroutine_threadsafe(self.handler(data), handler_loop)
+                    asyncio.run_coroutine_threadsafe(call, handler_loop)
                 )
                 if msg_type == "get_device_info":
                     resp = await self._await_with_device_info_fallback(ws, data, handler_future)
