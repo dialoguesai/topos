@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.25] — 2026-10-25
+
 ### Added
 - **`reflection_facts`: the one read the Moments app makes, as an app the owner enrols.** `[P]` `[O]` The owner ruled
   that the node is only queryable by Moments through a grant, and that Moments finds the conversations and composes

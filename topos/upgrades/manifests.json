@@ -1269,6 +1269,14 @@
       ]
     },
     {
+      "version": "1.5.25",
+      "summary": "Release 1.5.25: reflection_facts, the one read the Moments app makes, and apps enrolled as owner agents with their own type list.",
+      "steps": [],
+      "notes": [
+        "reflection_facts and app enrolment (topos#202, topos#203): no step and no prompt. A new read type on the owner socket; nothing changes on an installed node until the owner runs `topos-node agents add moments` in a terminal, which mints an owner-agent label for the Moments app. That app can send only reflection_facts and reach only the dispatch route on the socket; the coding agents' list is unchanged. The read writes nothing: it returns the active facts of the reflection packs the owner enabled, holds special-class facts back from an agent and applies Off-limits by absence. No migration, no new table, no index rebuild. Rollback is the ordinary one: an older node refuses `agents add moments` and answers the app with owner_agent_not_allowed."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
