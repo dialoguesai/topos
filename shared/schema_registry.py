@@ -77,6 +77,8 @@ SCHEMA_REGISTRY: List[Dict[str, Any]] = [
     _row("ai_chat_conversations", "created_at", "created_at", "timestamp_utc", CATEGORY_ORGANIZATIONAL),
     _row("ai_chat_conversations", "updated_at", "updated_at", "timestamp_utc", CATEGORY_ORGANIZATIONAL),
     # ----- browser_visits (7.4) -----
+    _row("browser_visits", "actor", "actor", "text", CATEGORY_ORGANIZATIONAL),
+    _row("browser_events", "actor", "actor", "text", CATEGORY_ORGANIZATIONAL),
     _row("browser_visits", "record_id", "record_id", "identifier", CATEGORY_ORGANIZATIONAL),
     _row("browser_visits", "dataset_id", "dataset_id", "identifier", CATEGORY_ORGANIZATIONAL),
     _row("browser_visits", "url", "url", "text", CATEGORY_INFORMATIONAL),

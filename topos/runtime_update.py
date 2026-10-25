@@ -229,8 +229,9 @@ def local_install_source(package_name: str = DEFAULT_PACKAGE_NAME) -> Optional[s
     came back on 1.3.20, and offered 1.3.21 again, forever. Nothing failed;
     the update simply could never have applied, and nothing said so.
 
-    Parsed with a regex rather than tomllib: the receipt is small, uv owns its
-    shape, and tomllib does not exist on the 3.10 this package still supports.
+    Parsed with a regex rather than tomllib: the receipt is small and uv owns
+    its shape. (The regex dates from when this package still ran on 3.10, which
+    has no tomllib.)
     """
     try:
         text = _uv_tool_receipt(package_name).read_text(encoding="utf-8")
