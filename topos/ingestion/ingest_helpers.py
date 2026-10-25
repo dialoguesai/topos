@@ -480,7 +480,7 @@ async def _ingest_ui_payload_direct(
         if source_id.startswith("browser_"):
             event_or_url = raw_payload.get("event_type") or raw_payload.get("url") or "browser"
             ts = raw_payload.get("visited_at") or raw_payload.get("starred_at") or raw_payload.get("created_at") or ""
-            record_id = f"{event_or_url}_{str(ts)[:24]}_{job_id[:8]}"[:256]
+            record_id = str(raw_payload.get("capture_id") or f"{event_or_url}_{str(ts)[:24]}_{job_id[:8]}")[:256]
             raw_payload.setdefault("id", record_id)
         else:
             record_id = str(

@@ -696,16 +696,21 @@ async def handle_signal_list_timeline(message: Dict[str, Any]) -> Optional[Dict[
     try:
         from ...features.facts.reads import list_timeline
 
-        conn = hub.get_db_connection()
-        result = list_timeline(
-            conn,
+        kwargs = dict(
             canonical_table=payload.get("canonical_table"),
             source_id=payload.get("source_id"),
+            actor_kind=payload.get("actor_kind"),
             date_from=payload.get("date_from"),
             date_to=payload.get("date_to"),
             limit=min(int(payload.get("limit") or 100), 500),
             offset=max(0, int(payload.get("offset") or 0)),
         )
+        # Off the event loop, on the worker's own connection: the controller filter evaluates a Python function per
+        # activity row (~0.9 s a page on 100k rows), which must not stall the control-plane keepalive.
+        def _read(conn):
+            return list_timeline(conn, **kwargs)
+
+        result = await run_db_read(_read)
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}

@@ -188,6 +188,9 @@ def is_engaged(row: Dict[str, Any]) -> bool:
     An engaged ambient item becomes evidence of *interest* (expression-grade),
     never of *belief* — the highlighted words remain the page author's.
     """
+    from .browser_actor import personal_browser_activity
+    if not personal_browser_activity(row):
+        return False
     if _norm(row.get("activity_type")) in _ENGAGED_ACTIVITY_TYPES:
         return True
     if _norm(row.get("event_type")) in _ENGAGED_ACTIVITY_TYPES:
