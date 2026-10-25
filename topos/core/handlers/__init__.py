@@ -428,6 +428,8 @@ OWNER_DOOR_READ_TYPES = frozenset({
     "permissions_v2_share_week", "permissions_v2_evidence_preview", "permissions_v2_evidence_review_read",
     "permissions_v2_evidence_review_queue", "permissions_v2_evidence_totals", "permissions_v2_projection_preview",
     "permissions_v2_projection_review_read",
+    # Kept questions Wave 2: whether this node has caught up, counts from memory only; changes nothing.
+    "get_sharing_readiness",
     # signal_* reads
     "signal_affinity_pairs", "signal_affinity_status", "signal_attention_dashboard", "signal_data_health",
     "signal_entity_graph", "signal_entity_graph_activity", "signal_entity_graph_search", "signal_evaluate_fit",
