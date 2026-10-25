@@ -1,4 +1,7 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+# Recipe arguments also reach the shell as $1, $2, ...: the release recipes pass them on as "$@", so a quoted
+# argument with spaces or brackets (`just release-checks --waive "a b (c)"`) arrives as one argument.
+set positional-arguments
 
 # Public OSS-friendly local workflows for a colocated Topos node.
 # These commands intentionally avoid project-internal deployment details.
@@ -146,12 +149,12 @@ eval-release:
 
 # Preview the automatic policy for every change since the previous node tag.
 release-plan *args:
-    uv run python scripts/select_release_checks.py {{args}}
+    uv run python scripts/select_release_checks.py "$@"
 
 # Run/record Rig D only when the release range requires it. After a squash
 # merge, --evidence <rig-output>/node-release-gate.json reuses the exact tree.
 release-checks *args:
-    uv run python scripts/node_release_gate.py {{args}}
+    uv run python scripts/node_release_gate.py "$@"
 
 # Core release gate: everything ci.yml checks, runnable locally when CI is
 # unavailable (dep pins, migration checksums, public tests, privacy tests,
