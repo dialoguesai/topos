@@ -12,6 +12,17 @@ The machine-readable twin of each release is
 ### Added
 - **Browser activity records who controlled the tab: the owner, an AI agent, or automation.** `[P]` `[E:interests]` The browser plugin's controller envelope (kind `human` / `agent` / `automation` / `unknown`, the method that established it, an agent's provider and name, and a source-scoped parent conversation) is kept through raw ingestion (`browser_visits` / `browser_events` gain `actor_kind`, `actor_provider`, `parent_conversation_source`, `parent_conversation_id` and `actor_json` on first use, no migration), canonical activity and the owner's timeline; a duplicate replay without an actor never erases one (`topos/features/provenance/browser_actor.py`). The timeline takes `actor_kind=human|ai|unknown`, filtered before counting and paging and echoed back as `actor_filter`, so a newer client can tell an older node; the read now runs off the event loop. Personal enrichment (entities, topics, facts, goals, stats, sentiment), topic clusters and the interests family leave out browsing an agent or automation is shown to have driven; browsing with no attribution evidence, including all history from before this release and ordinary browsing the plugin leaves unresolved, counts as the owner's as before (owner ruling, 24 Oct 2026). The interests family's `COUNTING` becomes `interest-visit-count/v3-agent-excluded` (its share indexes rebuild once). Who controlled a tab is the owner's to see only: below `owner_raw` every browser row reads exactly as before, with no `actor_kind`, label or prefix, so nothing tells a grantee which visits an agent drove. Tests: `tests/ingestion/test_browser_actor.py`, `tests/ingestion/test_browser_evidence_replay.py`, `tests/permissions_v2/test_interest_family.py`, `tests/features/test_provenance_roles.py`.
 
+### Fixed
+- **Reflection cards name people, never a raw entity id or handle.** `[P]` `[O]` On 1.5.23 a commitment bound to a
+  message's recipient read "you promised id:ent_…": the derivation writer stores that counterparty as a runner label
+  (`id:<entity id>` or `key:<messenger key>`), and the sweep only resolved bare UUIDs. `reflection.resolve_people` now
+  resolves an `id:` label or a bare entity id through the entity spine and a `key:` label through the owner's contacts;
+  the owner's own entity, an unresolved label and a raw phone number or email are left out ("you promised someone").
+  Every card field also passes a last scrub that replaces any id-, label- or handle-shaped token. Cards built by 1.5.23
+  are rewritten in place at the next sweep (they are keyed by fact, not by text). The scrub's phone-number pattern no
+  longer matches an ISO date: its first version turned every date a card prints into "someone" ("On someone you
+  wrote …"); a phone number or email in the same text is still replaced.
+
 ## [1.5.23] — 2026-10-24
 
 ### Added

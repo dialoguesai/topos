@@ -56,6 +56,16 @@ _HARD_LIFE = {"bereavement", "breakup_divorce", "accident_emergency", "business_
 _STALLED = {"stalled", "paused", "abandoned", "blocked"}
 _OPEN = {"open", "unknown", "", None}
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+#: An entity id as the spine writes them (``ent_<hex>``) or a bare UUID.
+_ENTITY_ID = re.compile(r"^(?:ent_[0-9a-f]{6,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$", re.I)
+#: A raw handle: a phone number or an email address. Never a display name.
+_HANDLE = re.compile(r"^(?:\+?[0-9][0-9 ().-]{5,}|[^@\s]+@[^@\s]+)$")
+#: Anything id-, label- or handle-shaped that must never reach card text (the last line of defence). A phone number is
+#: a run of digits, spaces, dots, dashes and brackets that does not start inside another number and is not an ISO date:
+#: the first version matched every "2026-10-11" the cards print, so every card read "On someone you wrote".
+_LEAK = re.compile(r"(?:\b(?:id|key):\S+|\bent_[0-9a-f]{6,}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
+                   r"|(?<![0-9-])(?![0-9]{4}-[0-9]{2}-[0-9]{2}(?![0-9]))\+?[0-9][0-9 ().-]{8,}[0-9]"
+                   r"|[^@\s]+@[^@\s]+\.[a-z]{2,})", re.I)
 
 _DDL = (
     f"""CREATE TABLE IF NOT EXISTS {CANDIDATES_TABLE} (
@@ -194,8 +204,51 @@ def _names(conn: sqlite3.Connection, ids: Iterable[str]) -> Dict[str, str]:
         for entity_id, name, is_self in conn.execute(
                 f"SELECT entity_id, canonical_name, is_self FROM entities WHERE entity_id IN "
                 f"({','.join('?' for _ in chunk)})", chunk).fetchall():
-            out[str(entity_id)] = "you" if is_self else str(name or "")
+            out[str(entity_id)] = "" if is_self else " ".join(str(name or "").split())
     return out
+
+
+def _is_label(raw: str) -> bool:
+    return raw.lower().startswith(("id:", "key:")) or bool(_ENTITY_ID.match(raw))
+
+
+def resolve_people(conn: sqlite3.Connection, raws: Iterable[str]) -> Dict[str, str]:
+    """Every raw person value a fact carries -> what a card may show: a display name, or "" (leave the person out).
+
+    The derivation writer binds a message's recipient or sender as a RUNNER LABEL, ``id:<entity id>`` or
+    ``key:<messenger key>`` (``template.is_runner_label``), not as a name. A label, an entity id or a raw handle is
+    never shown: an ``id:`` label or a bare entity id resolves through the entity spine (the owner's own entity to
+    nothing), a ``key:`` label through the owner's contacts, and anything that does not resolve to a name is dropped.
+    A plain name passes as written."""
+    from .truth_checks import _contact_name
+
+    raws = [r for r in dict.fromkeys(raws) if r]
+    entity_ids = {}
+    for raw in raws:
+        if raw.lower().startswith("id:"):
+            entity_ids[raw] = raw.split(":", 1)[1].strip()
+        elif _ENTITY_ID.match(raw):
+            entity_ids[raw] = raw
+    names = _names(conn, set(entity_ids.values()))
+    cache: Dict[str, Optional[str]] = {}
+    out: Dict[str, str] = {}
+    for raw in raws:
+        if raw in entity_ids:
+            name = names.get(entity_ids[raw], "")
+        elif raw.lower().startswith("key:"):
+            key = raw.split(":", 1)[1].strip()
+            name = _contact_name(conn, key, cache) or (
+                _contact_name(conn, key.split(":", 1)[1], cache) if ":" in key else None) or ""
+        else:
+            name = raw
+        name = " ".join(str(name).split())
+        out[raw] = "" if (not name or _is_label(name) or _HANDLE.match(name)) else name
+    return out
+
+
+def _scrub(text: str) -> str:
+    """Last line of defence: no id-, label- or handle-shaped token reaches card text."""
+    return _LEAK.sub("someone", text or "")
 
 
 def _people(fact: Dict[str, Any]) -> List[str]:
@@ -250,8 +303,9 @@ def _candidate(rule: str, key: str, section: str, kind: str, valence: str, text:
     newest = max(facts, key=lambda f: _aware(f["at"]) or datetime.min.replace(tzinfo=timezone.utc))
     return {
         "candidate_key": f"{rule}:{key}", "rule": rule, "section_id": section, "kind": kind, "valence": valence,
-        "person": person or None, "text": " ".join(text.split())[:600], "observation": " ".join(observation.split())[:400],
-        "interpretation": " ".join(interpretation.split())[:400], "evidence_refs": _refs(facts),
+        "person": (person if person and not _LEAK.search(person) else None),
+        "text": _scrub(" ".join(text.split()))[:600], "observation": _scrub(" ".join(observation.split()))[:400],
+        "interpretation": _scrub(" ".join(interpretation.split()))[:400], "evidence_refs": _refs(facts),
         "fact_ids": sorted(f["id"] for f in facts), "row_ids": sorted(set(row_ids)),
         "score": score if score is not None else _recency(newest, now) + 0.15 * (len(facts) - 1),
         "event_at": newest["at"],
@@ -259,9 +313,15 @@ def _candidate(rule: str, key: str, section: str, kind: str, valence: str, text:
 
 
 def rules(facts: List[Dict[str, Any]], now: datetime, names: Dict[str, str]) -> List[Dict[str, Any]]:
-    """Every candidate the facts support. Pure: no connection, no clock but ``now``."""
+    """Every candidate the facts support. Pure: no connection, no clock but ``now``. ``names`` is
+    :func:`resolve_people`'s map; a raw value missing from it is shown only when it is a plain name."""
     def name(raw: str) -> str:
-        return names.get(raw, raw) if _UUID.match(raw) else raw
+        if raw in names:
+            return names[raw]
+        return "" if (_is_label(raw) or _HANDLE.match(raw)) else raw
+
+    def persons(fact: Dict[str, Any]) -> List[str]:
+        return [n for n in (name(p) for p in _people(fact)) if n]
 
     by_pred: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for f in facts:
@@ -272,7 +332,7 @@ def rules(facts: List[Dict[str, Any]], now: datetime, names: Dict[str, str]) -> 
     peaks = [f for f in by_pred.get("moment.peak", []) if _days_ago(f["at"], now) <= 365]
     for f in peaks:
         kind = str(f["value"].get("kind") or "other")
-        people = [name(p) for p in _people(f)]
+        people = persons(f)
         who = f" with {', '.join(people)}" if people else ""
         text = f"On {_day(f['at'])} you wrote {_said(f)}{who}."
         obs = f"A moment of kind {kind}, dated {_day(f['at'])}."
@@ -298,15 +358,15 @@ def rules(facts: List[Dict[str, Any]], now: datetime, names: Dict[str, str]) -> 
     for f in by_pred.get("moment.gratitude", []):
         if f["value"].get("acknowledged") is True:
             continue
-        people = [name(p) for p in _people(f)] or ["someone"]
+        people = persons(f) or ["someone"]
         out.append(_candidate("gratitude", f["key"], "S2", "recognition", "positive",
                               f"On {_day(f['at'])} you credited {people[0]}: {_said(f)}. No message of thanks appears after it.",
                               f"One gratitude row dated {_day(f['at'])}; acknowledgement not recorded.", [f], now,
                               person=people[0], row_ids=["RF-015"]))
     company: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for f in peaks:
-        for p in _people(f):
-            company[name(p)].append(f)
+        for p in persons(f):
+            company[p].append(f)
     for person, fs in company.items():
         if len(fs) >= 2:
             out.append(_candidate("company", person, "S2", "recognition", "positive",
@@ -316,9 +376,9 @@ def rules(facts: List[Dict[str, Any]], now: datetime, names: Dict[str, str]) -> 
                                   interpretation="Someone who may bring out the best in you.", row_ids=["RF-019", "RF-042"]))
     events: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for f in by_pred.get("rel.relationship_event", []):
-        people = _people(f)
+        people = persons(f)
         if people:
-            events[name(people[0])].append(f)
+            events[people[0]].append(f)
     for person, fs in events.items():
         fs.sort(key=lambda x: _aware(x["at"]) or now)
         last = fs[-1]
@@ -334,13 +394,13 @@ def rules(facts: List[Dict[str, Any]], now: datetime, names: Dict[str, str]) -> 
 
     # S3 — difficult: open tensions (an avoided conversation also lands in S2), recurring kinds, hard life events.
     tensions = by_pred.get("moment.tension", [])
-    resolved_people = {name(p) for f in by_pred.get("moment.tension_resolved", []) for p in _people(f)}
+    resolved_people = {p for f in by_pred.get("moment.tension_resolved", []) for p in persons(f)}
     for f in tensions:
         status = f["value"].get("status")
         if status not in _OPEN or _days_ago(f["at"], now) > 180:
             continue
         kind = str(f["value"].get("kind") or "other")
-        people = [name(p) for p in _people(f)]
+        people = persons(f)
         person = people[0] if people else ""
         if person and person in resolved_people:
             continue
@@ -405,12 +465,12 @@ def rules(facts: List[Dict[str, Any]], now: datetime, names: Dict[str, str]) -> 
                               f"A stated turning point dated {_day(f['at'])}.", [f], now, row_ids=["RF-049"]))
 
     # S1 — discover: open promises, recurring themes.
-    resolved_counterparties = {name(p) for f in by_pred.get("commit.resolved", []) for p in _people(f)}
+    resolved_counterparties = {p for f in by_pred.get("commit.resolved", []) for p in persons(f)}
     for f in by_pred.get("commit.made", []):
         value = f["value"]
         if value.get("status") not in _OPEN or _days_ago(f["at"], now) < 14 or value.get("direction") == "owed_to_owner":
             continue
-        people = [name(p) for p in _people(f)]
+        people = persons(f)
         person = people[0] if people else ""
         if person and person in resolved_counterparties:
             continue
@@ -460,7 +520,7 @@ def rules(facts: List[Dict[str, Any]], now: datetime, names: Dict[str, str]) -> 
                                   interpretation="Progress that may not have been appreciated yet.", row_ids=["RF-058", "RF-066"]))
 
     # S7 — connect: a person on both sides; places or activities that recur in peak moments.
-    tense_people = {name(p): f for f in tensions for p in _people(f)}
+    tense_people = {p: f for f in tensions for p in persons(f)}
     for person, fs in company.items():
         if person in tense_people:
             t = tense_people[person]
@@ -492,8 +552,7 @@ def sweep(conn: sqlite3.Connection, *, now: Optional[datetime] = None) -> Dict[s
     moment = now or now_utc()
     packs = enabled_packs(conn)
     facts = load_facts(conn, packs)
-    ids = {p for f in facts for p in _people(f) if _UUID.match(p)}
-    produced = rules(facts, moment, _names(conn, ids)) if facts else []
+    produced = rules(facts, moment, resolve_people(conn, [p for f in facts for p in _people(f)])) if facts else []
     stamp = moment.isoformat()
     ensure_tables(conn)
     with with_db_write():
