@@ -91,6 +91,14 @@ and records `release/sharing-rig` on the candidate commit. After merging, reuse
 that evidence on the identical merged tree; a different tree requires a new run.
 For other releases this command automatically reports that no rig is needed.
 
+**Owner waiver.** When Rig D cannot pass for a reason the owner judges unrelated to the release (for example refusal
+timing under host load), the owner may waive it for one exact clean tree:
+`just release-checks --waive "<reason>"` (at most 70 characters, no `;`). No rig runs. The status records
+`Rig D waived by owner: <reason>; tree=<tree>`, never "passed", and `--verify` (in `publish.yml`) accepts it only for
+that tree and only while no newer failure follows it. A waiver is the owner's decision, not the release operator's:
+note it and the failed attempts' evidence in the release PR. After merging, record the waiver again on the merged commit
+(same command, same tree) before tagging, as with `--evidence`.
+
 After the required checks pass, merge the candidate to `main`, verify its tree
 matches the tested candidate, then record the applicable gate and tag it:
 
@@ -98,6 +106,8 @@ matches the tested candidate, then record the applicable gate and tag it:
 git switch main && git pull --ff-only origin main
 # Sharing-impact release: reuse the candidate's identical-tree evidence.
 just release-checks --evidence /absolute/rig-output/node-release-gate.json
+# ...or, when the owner waived the rig, record the same waiver on the merged commit.
+just release-checks --waive "<reason>"
 # Other releases: just release-checks (automatically skips Rig D).
 git tag vX.Y.Z && git push origin vX.Y.Z
 ```

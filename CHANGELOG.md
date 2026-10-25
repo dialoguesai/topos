@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.25] — 2026-10-25
+
 ### Added
 - **`reflection_facts`: the one read the Moments app makes, as an app the owner enrols.** `[P]` `[O]` The owner ruled
   that the node is only queryable by Moments through a grant, and that Moments finds the conversations and composes
@@ -25,6 +27,13 @@ The machine-readable twin of each release is
   `owner_agent`, but it reaches only its own types (`mcp_clients.APP_AGENT_TYPES`: Moments sends `reflection_facts`
   and nothing else, never `query`, `aggregate` or `get_sources`), and only the dispatch door on the socket. The coding
   agents' list is unchanged and does not include the new read. `topos-node mcp` still takes the coding tools only.
+
+### Changed
+- **The release gate accepts a recorded owner waiver of Rig D.** `[O]` `just release-checks --waive "<reason>"` records
+  `Rig D waived by owner: <reason>; tree=<tree>` on a clean candidate without running the rig; `publish.yml`'s
+  `--verify` accepts it for that exact tree only, never after a newer failure, and prints which gate it accepted. 1.5.25
+  is the first release published this way: Rig D failed twice on refusal timing while the build machine was heavily
+  loaded, and the owner waived it.
 
 ## [1.5.24] — 2026-10-24
 
