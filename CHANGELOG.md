@@ -23,6 +23,9 @@ The machine-readable twin of each release is
   longer matches an ISO date: its first version turned every date a card prints into "someone" ("On someone you
   wrote …"); a phone number or email in the same text is still replaced.
 
+### Security
+- **certifi 2026.2.25 → 2026.10.23: the CA bundle drops emSign roots whose intermediate keys were compromised (GHSA-6q48-6c7w-9gw2, Dependabot #59, critical).** `[O]` Three of the bundle's four emSign roots are gone (ECC G3, C1, ECC C3; "emSign Root CA - G1" stays). The node trusts certifi's bundle for its control-plane socket (`control_plane_client`), the sync client and the contact importers. The pin moves from `~=2026.2.25`, which could never reach the fix, to `~=2026.10.23` (the newest release; 2026.10.19 is the first fixed one), so PyPI installs get it too. With the new bundle, TLS still verifies against the control plane, RedPill, Hugging Face, PyPI, OpenAI and the Google APIs the importers call (Google Trust Services, Let's Encrypt, Amazon and GlobalSign chains).
+
 ## [1.5.23] — 2026-10-24
 
 ### Added
