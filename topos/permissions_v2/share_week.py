@@ -7,7 +7,9 @@ line: counts only, never a request id, a record, a question or an answer.
 - ``items_used``: the ``record_count`` of every permit receipt (``topos-local-receipt/v3``, one per search, batch item
   or locator read under a set-level capability) plus the ``records_used`` of every answer receipt
   (``topos-local-receipt/answer-v1``). An item released twice counts twice.
-- ``answered`` and ``no_answer``: answer receipts by outcome. Zero until N7 writes them.
+- ``answered`` and ``no_answer``: answer receipts by outcome. Zero until N7 writes them. A ``deferred`` receipt (lane
+  OFF1N: a kept question the node could not serve then, which the control plane asks again) is neither, and its
+  ``records_used`` is 0.
 
 Which grant a receipt belongs to. A v3 receipt names no grant; it names the hash of the exact policy version it was
 decided under, and that version's binding names the grant (``p2a_policies``, every version a grant ever had). The

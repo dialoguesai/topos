@@ -1235,6 +1235,31 @@
       ]
     },
     {
+      "version": "1.5.21",
+      "summary": "Release 1.5.21: kept questions (node side) and the verify_claim model picker.",
+      "steps": [],
+      "notes": [
+        "Kept questions: no step and no prompt. p2a_kept_question_counts joins the ledger's own schema (CREATE TABLE IF NOT EXISTS, hashes and counts only); kept answers live in memory only. Nothing changes until the control plane's kept-questions switch is on.",
+        "verify_claim model picker: no step and no prompt. Two engine_config keys, read per call; with none stored the environment decides exactly as before."
+      ]
+    },
+    {
+      "version": "1.5.22",
+      "summary": "Release 1.5.22: the updater moves the interpreter when a release needs a newer Python.",
+      "steps": [],
+      "notes": [
+        "No step and no prompt. The in-app updater passes --python from the latest release's Requires-Python, so a node on an older interpreter can reach a release that raises the floor; still requires-python >=3.10, no dependency change."
+      ]
+    },
+    {
+      "version": "1.5.23",
+      "summary": "Release 1.5.23: reflection, moments worth bringing up again, from the fact ontologies the owner switched on.",
+      "steps": [],
+      "notes": [
+        "No step and no prompt. The two new packs (moments.joy, moments.tension) seed disabled; reflection_candidates and reflection_labels are created on first use; the reflection_sweep job queues nothing while no reflection pack is enabled; the three reflection doors answer the owner class only. No migration, no dependency change."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

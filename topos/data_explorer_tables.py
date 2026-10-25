@@ -36,12 +36,12 @@ def is_permission_state_table(table_name: str) -> bool:
 #   (query/truth_checks.py), never shared and never off the node (DISCLOSURE_RULES DR-49).
 OWNER_ONLY_TABLES: frozenset[str] = frozenset(
     {"pipeline_jobs", "mcp_clients", "ai_chat_message_facets", "ai_coding_topos_touches", "truth_checks",
-     "truth_labels"}
+     "truth_labels", "reflection_candidates", "reflection_labels"}
 )
 
 #: ``signal_objects`` rows of these types are withheld from the legacy table tools for everyone but the owner's own
 #: surface, the way the tables above are: the owner's labels of claims (DR-49) ride in that shared table.
-OWNER_ONLY_SIGNAL_OBJECT_TYPES: frozenset[str] = frozenset({"verified_claim"})
+OWNER_ONLY_SIGNAL_OBJECT_TYPES: frozenset[str] = frozenset({"verified_claim", "reflection_label"})
 
 
 def is_owner_only_table(table_name: str) -> bool:

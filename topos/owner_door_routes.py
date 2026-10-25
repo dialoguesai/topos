@@ -166,6 +166,9 @@ CENSUS: Tuple[RouteRule, ...] = (
     _x("POST", "/api/local/truth_weekly_stats", "dispatcher: truth_weekly_stats (a read of counts; owner class only)"),
     _x("POST", "/api/local/truth_claim_cards", "dispatcher: truth_claim_cards (a read; owner class only)"),
     _x("POST", "/api/local/truth_claim_label", "dispatcher: truth_claim_label is in DANGEROUS_TYPES (owner class only)"),
+    _x("POST", "/api/local/reflection_invitations", "dispatcher: reflection_invitations (a read; owner class only)"),
+    _x("POST", "/api/local/reflection_conversation", "dispatcher: reflection_conversation (a read; owner class only)"),
+    _x("POST", "/api/local/reflection_label", "dispatcher: reflection_label is in DANGEROUS_TYPES (owner class only)"),
     # connected_apps.py — through the dispatcher (mcp_client_* types; enroll/revoke/decide/revoke_elevation are dangerous there)
     _x("POST", "/v1/signal/connected-apps/elevations/decide", "dispatcher: mcp_client_decide_elevation"),
     _x("POST", "/v1/signal/connected-apps/elevations/request", "dispatcher: mcp_client_request_elevation (a third party's request)"),
@@ -234,6 +237,9 @@ CENSUS: Tuple[RouteRule, ...] = (
     # facts_llm_config.py / sanitization_ollama_config.py / signal_extraction_config.py
     _d("DELETE", "/v1/facts-llm-config", "delete_*; node-wide model configuration"),
     _d("PUT", "/v1/facts-llm-config", "node-wide model configuration"),
+    # verify_claim_model_config.py: the model verify_claim runs on (a hosted pick spends credits and sends text out)
+    _d("DELETE", "/v1/verify-claim-model-config", "delete_*; node-wide model configuration"),
+    _d("PUT", "/v1/verify-claim-model-config", "node-wide model configuration"),
     _d("DELETE", "/v1/sanitization-ollama-config", "delete_sanitization_ollama_config"),
     _d("PUT", "/v1/sanitization-ollama-config", "put_sanitization_ollama_config (P0.11)"),
     _d("DELETE", "/v1/signal-extraction-config", "delete_signal_extraction_config"),

@@ -465,6 +465,10 @@ OWNER_DOOR_OPEN_TYPES = frozenset({
     # writes by a field is a change) and truth_claim_label (it writes the owner's label, the week's truth set, which
     # an agent must never edit). Both are dangerous on the socket by subtraction.
     "truth_weekly_stats", "truth_claim_cards",
+    # The reflection doors' two reads (owner class only at the truth door): the candidates built from the enabled
+    # packs' facts, and the conversation composed from them. Neither writes (freshness is the client's exclude
+    # list). NOT here: reflection_label (the owner's label, which an agent must never edit): dangerous by subtraction.
+    "reflection_invitations", "reflection_conversation",
     # NOT here: tools_index rebuilds the tool index (INSERT OR REPLACE + DELETE with prune_missing,
     # features/signal/tool_index.py) — a write, and an instruction sink (security re-check N1).
 })
