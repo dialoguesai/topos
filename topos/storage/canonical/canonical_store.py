@@ -865,9 +865,15 @@ class SQLiteCanonicalStore(CanonicalStore):
         door = normalize_writer_class(record.get("writer_class"))
         writer_class = door if activity_writer_recording_enabled() else None
         existing = self._conn.execute(
-            "SELECT event_id FROM activity_events WHERE event_id=?",
+            "SELECT event_id, metadata_json FROM activity_events WHERE event_id=?",
             (event_id,),
         ).fetchone()
+        if existing is not None:
+            from ...features.provenance.browser_actor import _object
+            stored_meta = _object(existing[1])
+            incoming_meta = _object(record.get("metadata_json"))
+            if "browser_actor" in stored_meta and _object(incoming_meta.get("browser_actor")).get("method", "unresolved") == "unresolved":
+                record["metadata_json"] = {**incoming_meta, "browser_actor": stored_meta["browser_actor"]}
         # content/hostname (activity_events_content_v1) are written here: the
         # P2.1 browser mapper and the §5a declared field maps both produce them,
         # and until this INSERT carried the columns every value they computed was

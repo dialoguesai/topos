@@ -94,7 +94,7 @@ def visit(conn, n, when: str, *, cluster_id: str = "tc_hobby", url: str | None =
                  "source_record_id, metadata_json, hostname, writer_class, writer_app_id, writer_dataset_id) "
                  "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
                  (event_id, "browser_visit", url, title or f"Synthetic page {n}", when, source, f"v{n}",
-                  json.dumps(metadata or {}), host, writer, app if writer else None, dataset if writer else None))
+                  json.dumps({"browser_actor": {"version": 1, "kind": "human", "method": "manual"}, **(metadata if isinstance(metadata, dict) else {})}), host, writer, app if writer else None, dataset if writer else None))
     if incognito is not None:
         conn.execute("INSERT OR REPLACE INTO browser_visits (record_id, url, title, hostname, visited_at, incognito) "
                      "VALUES (?,?,?,?,?,?)", (f"v{n}", url, title, host, when, incognito))

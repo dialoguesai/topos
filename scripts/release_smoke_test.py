@@ -63,6 +63,11 @@ modules = [
     "transformers",
     "sentence_transformers",
     "torch",
+    # Compiled extensions the embeddings and entities jobs load. On macOS 27
+    # scipy 1.15.3's Fortran extension failed in dlopen while every module
+    # above still imported (24 Oct 2026).
+    "scipy.sparse.linalg",
+    "sklearn.metrics",
 ]
 failures = []
 for name in modules:

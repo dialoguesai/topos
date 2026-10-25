@@ -91,6 +91,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Iterable, Optional
 
 from .canonical import PolicyError, digest
+from ..features.provenance.browser_actor import personal_browser_activity
 from .entity_boundary import APOSTROPHE_LETTERS, normalized, skeleton
 from .fact_eligibility import canonical_utc_microseconds
 
@@ -132,14 +133,14 @@ LABEL_RULES = "interest-label-rules/v2"
 # visits the clustering placed in the cluster, and every visit with no vector of its own that repeats the page text
 # of one of them (``_repeat_visits``). v1 counted placed visits alone: a page's repeat visits counted nowhere, because
 # the embedding job keeps one vector per distinct page text.
-COUNTING = "interest-visit-count/v2"
+COUNTING = "interest-visit-count/v3-agent-excluded"
 
 # The family whose Off-limits rule also matches a bare part of a protected name, as a whole word
 # (entity_boundary.NAME_PART_TABLES). A label is read under that rule too (_offlimits_name_part).
 NAME_PART_FAMILY = "journal_entries"
 
 # The label and visit checks, in the order they apply. A report counts survivors after each.
-VISIT_CHECKS = ("incognito", "nsfw", "excluded", "provenance")
+VISIT_CHECKS = ("incognito", "nsfw", "excluded", "provenance", "human_actor")
 LABEL_CHECKS = ("browsing", "label_form", "label_host", "label_title", "label_person", "excluded_label",
                 "opted_out", "offlimits")
 # What a bad label breaks: it is not a short topic name, it names a site, or it echoes a page title. A cluster
@@ -162,6 +163,7 @@ class Visit:
     nsfw: bool
     excluded: bool
     proven: bool
+    human_actor: bool
     revision: str
 
 
@@ -688,6 +690,7 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
             nsfw=is_record_nsfw(row),
             excluded=event_id in tombstones["record"] or bool(mentions.get(event_id, set()) & tombstones["entity"]),
             proven=event_id in proven_ids,
+            human_actor=personal_browser_activity({**row, "source_id": SOURCE_ID}),
             revision=capture_receipts.content_revision(TABLE, _receipt_row(row)))
 
     labels = part("labels", lambda: dict(conn.execute("SELECT cluster_id, label FROM topic_clusters")))
@@ -740,6 +743,11 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
                 counts[check], days[check] = len(counted), len({v.day for v in counted})
             members_in_month = browsing[cluster_id][month] + others[cluster_id][month] + unplaced[cluster_id]
             withheld = "browsing" if browsing[cluster_id][month] * 2 <= members_in_month else cluster_check
+            # A label made from an agent's or automation's visits can contaminate a
+            # mixed cluster even when its personal count passes. Withhold that label.
+            # Visits with no attribution evidence are the owner's (ruling 24 Oct 2026).
+            if any(not personal_browser_activity({**r, "source_id": SOURCE_ID}) for r in rows_all):
+                withheld = "human_actor"
             if withheld is None and _visits_protected(boundary, [visits_by_id[v.event_id] for v in month_visits]):
                 withheld = "offlimits"
             member_rev = digest({"version": VERSION, "counting": COUNTING,
@@ -767,7 +775,7 @@ def build(conn, *, owner_id: str, now_us: int, boundary=None, opt_outs: frozense
 
 
 _VISIT_PASSES = {"incognito": lambda v: not v.incognito, "nsfw": lambda v: not v.nsfw,
-                 "excluded": lambda v: not v.excluded, "provenance": lambda v: v.proven}
+                 "excluded": lambda v: not v.excluded, "provenance": lambda v: v.proven, "human_actor": lambda v: v.human_actor}
 #: Where a non-browsing member's time is read, by the member's record id.
 _MEMBER_TIMES = (("activity_events", "event_id", "occurred_at"), ("ai_chat_messages", "message_id", "event_at"),
                  ("conversation_messages", "message_id", "event_at"))
