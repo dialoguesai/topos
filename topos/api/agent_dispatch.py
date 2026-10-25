@@ -8,9 +8,11 @@ presents a valid label; lane L1). The answer is the handler's result dict as the
 
 The class decides, never the body:
 
-* ``owner_agent`` reaches exactly ``OWNER_AGENT_ALLOWED_TYPES`` (``query``, ``aggregate``, ``get_sources``);
-  any other type is 403 ``{"error": "owner_agent_not_allowed"}`` before anything is dispatched. The dispatcher
-  refuses the same types again on its own (``_owner_agent_refusal``), so a second door cannot forget to.
+* ``owner_agent`` reaches exactly ``OWNER_AGENT_ALLOWED_TYPES`` (``query``, ``aggregate``, ``get_sources``), or,
+  for an enrolled app, exactly that app's own list (``mcp_clients.APP_AGENT_TYPES``: Moments sends
+  ``reflection_facts``); any other type is 403 ``{"error": "owner_agent_not_allowed"}`` before anything is
+  dispatched. The dispatcher refuses the same types again on its own (``_owner_agent_refusal``), so a second door
+  cannot forget to.
 * ``owner_app`` keeps today's rights through this door, so the node's own CLI can use it; the dispatcher's
   dangerous-door split still decides what an unattested socket process may change.
 * every other class, and the legacy no-principal mode, is 403 ``owner_mode_required``: this door is the socket's.
@@ -30,7 +32,7 @@ from fastapi.responses import JSONResponse
 
 from .. import principal as _principal_module
 from ..auth import resolve_request_principal
-from ..core.handlers import OWNER_AGENT_ALLOWED_TYPES, handle_control_plane_request
+from ..core.handlers import handle_control_plane_request, owner_agent_allowed_types
 from ..principal import OWNER_APP
 
 OWNER_AGENT = _principal_module.OWNER_AGENT
@@ -58,7 +60,7 @@ async def agent_dispatch(
         payload = {}
     if not isinstance(payload, dict):
         return _error(400, {"error": "payload_must_be_an_object"})
-    if cls == OWNER_AGENT and msg_type not in OWNER_AGENT_ALLOWED_TYPES:
+    if cls == OWNER_AGENT and msg_type not in owner_agent_allowed_types(principal):
         return _error(403, {"error": "owner_agent_not_allowed"})
     message = {"id": str(uuid.uuid4()), "type": msg_type, "payload": dict(payload)}
     out = await handle_control_plane_request(message, principal=principal)

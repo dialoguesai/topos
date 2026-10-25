@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **`reflection_facts`: the one read the Moments app makes, as an app the owner enrols.** `[P]` `[O]` The owner ruled
+  that the node is only queryable by Moments through a grant, and that Moments finds the conversations and composes
+  everything about them (GRANT_DECISIONS G1, G2; DISCLOSURE_RULES DR-61). The new read type returns the active facts of
+  the reflection packs the owner switched on: structured value, the owner's quote, date and sources, people as display
+  names only (`query/reflection_facts.py`). For an agent, special-class facts are held back (by stamp, by the pack
+  definition, or when the current pack no longer declares the predicate), and Off-limits is applied by absence: a fact
+  goes when a person or entity it binds, a name it shows, its own text or a source record it rests on is protected,
+  or when it has no source to judge; while an Off-limits rebuild is pending nothing is returned. A quote or a source
+  excerpt appears only when the owner wrote it (excerpts only when asked); record ids and entity ids never leave. The
+  owner's app reads the same shape unfiltered. Nothing is written; each agent read is logged under the agent's name.
+- **Apps enrol as owner agents with their own type list.** `[P]` `[O]` `topos-node agents add moments` enrols Moments
+  on a terminal, as for a coding tool (the pairing shortcut is refused for an app). An enrolled app is the class
+  `owner_agent`, but it reaches only its own types (`mcp_clients.APP_AGENT_TYPES`: Moments sends `reflection_facts`
+  and nothing else, never `query`, `aggregate` or `get_sources`), and only the dispatch door on the socket. The coding
+  agents' list is unchanged and does not include the new read. `topos-node mcp` still takes the coding tools only.
+
 ## [1.5.24] — 2026-10-24
 
 ### Added

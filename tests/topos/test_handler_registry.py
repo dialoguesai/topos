@@ -237,6 +237,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "read_jsonl_file",
     "record_home_chat_turn_timings",
     "reflection_conversation",
+    "reflection_facts",
     "reflection_invitations",
     "reflection_label",
     "replay_projection",

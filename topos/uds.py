@@ -291,12 +291,16 @@ async def resolve_socket_principal(scope):
 
 def owner_agent_route_allowed(principal, scope) -> bool:
     """Every class but ``owner_agent`` passes here (their routes decide for themselves); an agent reaches only the
-    §1.2 list."""
+    §1.2 list, and an enrolled app (``mcp_clients.APP_AGENT_TYPES``) only the dispatch door."""
     from . import owner_door_routes, principal as principal_module
+    from .mcp_clients import app_agent_of
 
     if getattr(principal, "cls", None) != principal_module.OWNER_AGENT:
         return True
-    return owner_door_routes.owner_agent_route_allowed(str(scope.get("method") or ""), str(scope.get("path") or ""))
+    method, path = str(scope.get("method") or ""), str(scope.get("path") or "")
+    if app_agent_of(principal):
+        return owner_door_routes.app_agent_route_allowed(method, path)
+    return owner_door_routes.owner_agent_route_allowed(method, path)
 
 
 async def _send_json(send, status: int, body: Dict[str, Any]) -> None:
