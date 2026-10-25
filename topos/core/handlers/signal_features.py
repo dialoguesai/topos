@@ -707,7 +707,10 @@ async def handle_signal_list_timeline(message: Dict[str, Any]) -> Optional[Dict[
         )
         # Off the event loop, on the worker's own connection: the controller filter evaluates a Python function per
         # activity row (~0.9 s a page on 100k rows), which must not stall the control-plane keepalive.
-        result = await run_db_read(lambda conn: list_timeline(conn, **kwargs))
+        def _read(conn):
+            return list_timeline(conn, **kwargs)
+
+        result = await run_db_read(_read)
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
