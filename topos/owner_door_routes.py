@@ -367,9 +367,22 @@ OWNER_AGENT_ROUTES: Tuple[Tuple[str, str], ...] = (
 )
 
 
+#: The HTTP routes an enrolled APP (``mcp_clients.APP_AGENT_TYPES``, GRANT_DECISIONS G1) may call on the socket: the
+#: dispatch door alone. An app reads through message types on its own list; the coding agents' read routes (the source
+#: list, the shell status, the scope) are not its business.
+APP_AGENT_ROUTES: Tuple[Tuple[str, str], ...] = (
+    ("POST", "/api/local/agent/dispatch"),
+)
+
+
 def owner_agent_route_allowed(method: str, path: str) -> bool:
     method = str(method or "").upper()
     return any(method == m and _compile(template).fullmatch(path) is not None for m, template in OWNER_AGENT_ROUTES)
+
+
+def app_agent_route_allowed(method: str, path: str) -> bool:
+    method = str(method or "").upper()
+    return any(method == m and _compile(template).fullmatch(path) is not None for m, template in APP_AGENT_ROUTES)
 
 
 READ_RULE = RouteRule("*", "*", READ, "not a mutating method: untouched")

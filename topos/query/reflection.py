@@ -24,18 +24,18 @@ import sqlite3
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional
 
 from ..storage.db.write_gate import commit_connection, with_db_write
+# The packs, the people resolver and the scrub live with the owner-agent read that outlives this module (G6).
+from .reflection_facts import (_ENTITY_ID, _HANDLE, _LEAK, REFLECTION_PACKS, _is_label, _names,  # noqa: F401
+                               _scrub, enabled_packs, pack_status, resolve_people)
 from .reflection_stances import STARTERS, compose
 
 CANDIDATES_TABLE = "reflection_candidates"
 LABELS_TABLE = "reflection_labels"
 TABLES = (CANDIDATES_TABLE, LABELS_TABLE)
 
-#: The packs the sweep reads. The two ``moments.*`` packs are this program's; the rest are bundled already.
-REFLECTION_PACKS: Tuple[str, ...] = ("moments.joy", "moments.tension", "narrative.self", "life.events",
-                                     "aspirations.goals", "obligations.commitments", "relationships.social")
 LABELS = ("worth_it", "opened", "not_now", "not_true", "too_personal")
 LABEL_CONFIDENCE = {"worth_it": 1.0, "not_now": 0.5, "not_true": 0.0, "too_personal": 0.0}
 OBJECT_TYPE = "reflection_label"
@@ -56,13 +56,6 @@ _HARD_LIFE = {"bereavement", "breakup_divorce", "accident_emergency", "business_
 _STALLED = {"stalled", "paused", "abandoned", "blocked"}
 _OPEN = {"open", "unknown", "", None}
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
-#: An entity id as the spine writes them (``ent_<hex>``) or a bare UUID.
-_ENTITY_ID = re.compile(r"^(?:ent_[0-9a-f]{6,}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$", re.I)
-#: A raw handle: a phone number or an email address. Never a display name.
-_HANDLE = re.compile(r"^(?:\+?[0-9][0-9 ().-]{5,}|[^@\s]+@[^@\s]+)$")
-#: Anything id-, label- or handle-shaped that must never reach card text (the last line of defence).
-_LEAK = re.compile(r"(?:\b(?:id|key):\S+|\bent_[0-9a-f]{6,}\b|\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
-                   r"|\+?[0-9][0-9 ().-]{8,}[0-9]|[^@\s]+@[^@\s]+\.[a-z]{2,})", re.I)
 
 _DDL = (
     f"""CREATE TABLE IF NOT EXISTS {CANDIDATES_TABLE} (
@@ -147,19 +140,6 @@ def _days_ago(value: Any, now: datetime) -> float:
 
 
 # --- packs and facts ----------------------------------------------------------------------------------------------------
-def enabled_packs(conn: sqlite3.Connection) -> List[str]:
-    """The reflection packs the owner switched on, in catalog order. No registry table means none on."""
-    if not _present(conn, "pack_registry"):
-        return []
-    on = {str(r[0]) for r in conn.execute("SELECT pack_id FROM pack_registry WHERE enabled=1").fetchall()}
-    return [p for p in REFLECTION_PACKS if p in on]
-
-
-def pack_status(conn: sqlite3.Connection) -> Dict[str, List[str]]:
-    on = enabled_packs(conn)
-    return {"packs_enabled": on, "packs_missing": [p for p in REFLECTION_PACKS if p not in on]}
-
-
 def load_facts(conn: sqlite3.Connection, packs: Iterable[str]) -> List[Dict[str, Any]]:
     """Active ``fact`` objects of the given packs, flattened for the rules. Reads only what the derivation writer
     wrote: predicate, structured value, the owner's quote, source refs, actor role and date."""
@@ -191,61 +171,6 @@ def load_facts(conn: sqlite3.Connection, packs: Iterable[str]) -> List[Dict[str,
             "refs": [r for r in refs if isinstance(r, dict) and r.get("table") and r.get("record_id")],
         })
     return facts
-
-
-def _names(conn: sqlite3.Connection, ids: Iterable[str]) -> Dict[str, str]:
-    wanted = [i for i in dict.fromkeys(ids) if i and _present(conn, "entities")]
-    out: Dict[str, str] = {}
-    for start in range(0, len(wanted), 100):
-        chunk = wanted[start:start + 100]
-        for entity_id, name, is_self in conn.execute(
-                f"SELECT entity_id, canonical_name, is_self FROM entities WHERE entity_id IN "
-                f"({','.join('?' for _ in chunk)})", chunk).fetchall():
-            out[str(entity_id)] = "" if is_self else " ".join(str(name or "").split())
-    return out
-
-
-def _is_label(raw: str) -> bool:
-    return raw.lower().startswith(("id:", "key:")) or bool(_ENTITY_ID.match(raw))
-
-
-def resolve_people(conn: sqlite3.Connection, raws: Iterable[str]) -> Dict[str, str]:
-    """Every raw person value a fact carries -> what a card may show: a display name, or "" (leave the person out).
-
-    The derivation writer binds a message's recipient or sender as a RUNNER LABEL, ``id:<entity id>`` or
-    ``key:<messenger key>`` (``template.is_runner_label``), not as a name. A label, an entity id or a raw handle is
-    never shown: an ``id:`` label or a bare entity id resolves through the entity spine (the owner's own entity to
-    nothing), a ``key:`` label through the owner's contacts, and anything that does not resolve to a name is dropped.
-    A plain name passes as written."""
-    from .truth_checks import _contact_name
-
-    raws = [r for r in dict.fromkeys(raws) if r]
-    entity_ids = {}
-    for raw in raws:
-        if raw.lower().startswith("id:"):
-            entity_ids[raw] = raw.split(":", 1)[1].strip()
-        elif _ENTITY_ID.match(raw):
-            entity_ids[raw] = raw
-    names = _names(conn, set(entity_ids.values()))
-    cache: Dict[str, Optional[str]] = {}
-    out: Dict[str, str] = {}
-    for raw in raws:
-        if raw in entity_ids:
-            name = names.get(entity_ids[raw], "")
-        elif raw.lower().startswith("key:"):
-            key = raw.split(":", 1)[1].strip()
-            name = _contact_name(conn, key, cache) or (
-                _contact_name(conn, key.split(":", 1)[1], cache) if ":" in key else None) or ""
-        else:
-            name = raw
-        name = " ".join(str(name).split())
-        out[raw] = "" if (not name or _is_label(name) or _HANDLE.match(name)) else name
-    return out
-
-
-def _scrub(text: str) -> str:
-    """Last line of defence: no id-, label- or handle-shaped token reaches card text."""
-    return _LEAK.sub("someone", text or "")
 
 
 def _people(fact: Dict[str, Any]) -> List[str]:

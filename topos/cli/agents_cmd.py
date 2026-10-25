@@ -1,4 +1,8 @@
-"""`topos-node agents add|list|disconnect NAME` — enrol and revoke AI coding tools.
+"""`topos-node agents add|list|disconnect NAME` — enrol and revoke AI coding tools and the owner's apps.
+
+An app (``mcp_server.APP_NAMES``: Moments) is enrolled the same way and becomes the same class, ``owner_agent``, but
+reaches only the message types listed for it (``mcp_clients.APP_AGENT_TYPES``) and only the dispatch door on the
+socket (GRANT_DECISIONS G1). It is enrolled on a terminal only: the pairing approval is for coding tools.
 
 The label (CONTRACTS §1.1) is minted by lane L1's ``mint_agent_label`` and
 written here, once, to ``~/.topos/agents/<client>.token`` (0700 dir, 0600 file).
@@ -34,7 +38,7 @@ from typing import Optional
 import click
 
 from topos import mcp_server
-from topos.mcp_server import CLIENT_NAMES, DISPLAY_NAMES
+from topos.mcp_server import AGENT_NAMES, APP_NAMES, DISPLAY_NAMES
 
 EXIT_OK = 0
 EXIT_NEEDS_HUMAN = 2
@@ -86,10 +90,19 @@ def _fail(message: str, code: int = EXIT_NEEDS_HUMAN) -> None:
 
 def _client_or_fail(name: str) -> str:
     try:
-        return mcp_server.validate_client(name)
+        return mcp_server.validate_agent(name)
     except ValueError:
-        _fail(f"Unknown agent {name!r}. One of: {', '.join(CLIENT_NAMES)}.")
+        _fail(f"Unknown agent {name!r}. One of: {', '.join(AGENT_NAMES)}.")
         raise AssertionError  # unreachable
+
+
+def _consent_question(client: str, display: str) -> str:
+    """What the owner says yes to. An app reads only its own list, and the question says so."""
+    if client in APP_NAMES:
+        return (f"Connect {display} to your Topos? It reads only what Topos lets {display} read, as you, "
+                "and every read is recorded under its name.")
+    return (f"Connect {display} to your Topos? It will read what you allow in Topos, as you, "
+            "and every read is recorded under its name.")
 
 
 def _registry():
@@ -210,7 +223,7 @@ def _echo(payload: dict | list, as_json: bool, human: str) -> None:
 
 @click.group("agents")
 def agents_group() -> None:
-    """Connect, list and disconnect AI coding tools (Claude Code, Codex, Cursor, Gemini)."""
+    """Connect, list and disconnect AI coding tools (Claude Code, Codex, Cursor, Gemini) and apps (Moments)."""
 
 
 @agents_group.command("add")
@@ -223,9 +236,11 @@ def agents_group() -> None:
 )
 @click.option("--open-terminal", is_flag=True, help="Open the approval prompt in Terminal on macOS; no command typing needed.")
 def agents_add(name: str, as_json: bool, approved: bool, open_terminal: bool) -> None:
-    """Connect an AI coding tool to this Topos (asks you first)."""
+    """Connect an AI coding tool or an app to this Topos (asks you first)."""
     client = _client_or_fail(name)
     display = DISPLAY_NAMES[client]
+    if client in APP_NAMES and (approved or open_terminal):
+        _fail(f"{display} is connected from a terminal: run `topos-node agents add {client}` yourself.")
     if open_terminal:
         if approved:
             raise click.UsageError("Use either --approved or --open-terminal.")
@@ -264,11 +279,7 @@ def agents_add(name: str, as_json: bool, approved: bool, open_terminal: bool) ->
                     f"`topos-node agents add {client}` yourself, or `topos-node pair --add-agent --client {client}`."
                 )
             # The prompt goes to stderr so `--json` stdout stays one document.
-            if not click.confirm(
-                f"Connect {display} to your Topos? It will read what you allow in Topos, as you, "
-                "and every read is recorded under its name.",
-                err=True,
-            ):
+            if not click.confirm(_consent_question(client, display), err=True):
                 _fail("Not connected.")
         # L1's registry refuses a revoked row unless told the approval happened;
         # the gates above are what decide that, so pass exactly their verdict.

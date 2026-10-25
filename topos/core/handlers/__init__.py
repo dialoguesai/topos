@@ -358,12 +358,23 @@ OWNER_AGENT = _principal_module.OWNER_AGENT
 OWNER_AGENT_ALLOWED_TYPES = frozenset({"query", "aggregate", "get_sources"})
 
 
+def owner_agent_allowed_types(principal: Any) -> frozenset:
+    """The types an ``owner_agent`` may send: an enrolled APP's own list (``mcp_clients.APP_AGENT_TYPES``,
+    GRANT_DECISIONS G1: Moments sends ``reflection_facts`` and nothing else), else the coding agents' three reads.
+    Decided from the channel-verified principal's row id, never from the payload."""
+    from ...mcp_clients import APP_AGENT_TYPES, app_agent_of
+
+    app = app_agent_of(principal)
+    return APP_AGENT_TYPES[app] if app else OWNER_AGENT_ALLOWED_TYPES
+
+
 def _owner_agent_refusal(message: Dict[str, Any], msg_type: str) -> Optional[Dict[str, Any]]:
     """The refusal for an ``owner_agent`` on a type off its list, or None to go on. The owner-only gate's shape with
     its own code, so an agent's refusal is told from the owner's."""
     from ...principal import current_principal
 
-    if getattr(current_principal(), "cls", None) != OWNER_AGENT or msg_type in OWNER_AGENT_ALLOWED_TYPES:
+    principal = current_principal()
+    if getattr(principal, "cls", None) != OWNER_AGENT or msg_type in owner_agent_allowed_types(principal):
         return None
     return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_agent_not_allowed"}
 
@@ -469,6 +480,9 @@ OWNER_DOOR_OPEN_TYPES = frozenset({
     # packs' facts, and the conversation composed from them. Neither writes (freshness is the client's exclude
     # list). NOT here: reflection_label (the owner's label, which an agent must never edit): dangerous by subtraction.
     "reflection_invitations", "reflection_conversation",
+    # The owner-agent reflection read (GRANT_DECISIONS G2, DR-61): the enabled reflection packs' facts, filtered for an
+    # agent; it writes nothing. The owner's app and Moments (an enrolled app) only, decided in its handler.
+    "reflection_facts",
     # NOT here: tools_index rebuilds the tool index (INSERT OR REPLACE + DELETE with prune_missing,
     # features/signal/tool_index.py) — a write, and an instruction sink (security re-check N1).
 })
