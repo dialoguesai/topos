@@ -461,11 +461,11 @@ def doctor_findings(snapshot: dict, *, secret_sightings: int = 0) -> list[dict]:
                 f"{mcp_server.DISPLAY_NAMES.get(client, client)} is enrolled but its label file is missing.",
                 f"Run `topos-node agents add {client}`.",
             )
-    for client in mcp_server.CLIENT_NAMES:
+    for client in mcp_server.AGENT_NAMES:
         if client not in active and mcp_server.label_path(client).is_file():
             add(
                 "label_orphan",
-                f"A label file exists for {mcp_server.DISPLAY_NAMES[client]} but it is not enrolled.",
+                f"A label file exists for {mcp_server.DISPLAY_NAMES.get(client, client)} but it is not enrolled.",
                 f"Run `topos-node agents disconnect {client}`, then `topos-node agents add {client}`.",
             )
     return findings

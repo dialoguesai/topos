@@ -54,7 +54,15 @@ AGENT_DISPLAY_NAMES = {
     "codex": "Codex",
     "cursor": "Cursor",
     "gemini": "Gemini",
+    "moments": "Moments",
 }
+
+#: Apps the owner enrols as owner agents (GRANT_DECISIONS G1, 24 Oct 2026), each with the ONLY message types it may
+#: send. An app is not a coding agent: it never reaches the coding agents' ``query``, ``aggregate`` and
+#: ``get_sources``, and on the socket it reaches the dispatch door alone (``owner_door_routes.APP_AGENT_ROUTES``).
+#: ``topos-node agents add <app>`` enrols one on a terminal, as for a coding tool; ``topos-node mcp`` does not know
+#: them, since an app is not an MCP client. Moments reads the reflection packs' facts and nothing else (DR-61).
+APP_AGENT_TYPES: Dict[str, frozenset] = {"moments": frozenset({"reflection_facts"})}
 
 #: Elevation ceiling (owner decision, Who's Asking §06): a consented client may
 #: reach `facts`, never `facts_all` — special-class content (health, beliefs,
@@ -64,6 +72,18 @@ ELEVATION_CEILING = "facts"
 #: Client ids are slugs: stable, log-safe, and usable as UMA consent subjects
 #: (``client:<id>``) without escaping.
 _CLIENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
+
+
+def app_agent_of(principal: Any) -> Optional[str]:
+    """The listed app an ``owner_agent`` principal is (its row is ``agent-<app>``), else None. Read off the
+    channel-verified principal only, never off a payload: the row id is what the label resolved to at the socket."""
+    if getattr(principal, "cls", None) != AGENT_PRINCIPAL_CLASS:
+        return None
+    client_id = str(getattr(principal, "client_id", "") or "")
+    if not client_id.startswith(AGENT_CLIENT_ID_PREFIX):
+        return None
+    app = client_id[len(AGENT_CLIENT_ID_PREFIX):]
+    return app if app in APP_AGENT_TYPES else None
 
 
 def _now() -> str:

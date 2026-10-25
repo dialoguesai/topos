@@ -18,7 +18,7 @@ from .registry import handles
 _RECORDED_QUERY_CLASSES = frozenset({"owner_agent", "third_party"})
 
 
-async def _record_query_request(message: Dict[str, Any], payload: Dict[str, Any]) -> None:
+async def _record_query_request(message: Dict[str, Any], payload: Dict[str, Any], tool: str = "query") -> None:
     """One request-log row per answered query from an agent or a third party (CONTRACTS §1.5): the
     claimed source and requester beside the channel-verified class and client id, so an approved
     agent's reads are named by its row and the owner's accounting sees them. Off the loop, on the
@@ -39,7 +39,7 @@ async def _record_query_request(message: Dict[str, Any], payload: Dict[str, Any]
         )
         await run_db_write(
             record_mcp_request,
-            "query",
+            tool,
             source=source,
             requester_id=str(payload.get("requester_id") or "") or None,
         )
@@ -482,6 +482,62 @@ async def handle_reflection_label(message: Dict[str, Any]) -> Optional[Dict[str,
     except Exception as exc:  # noqa: BLE001
         _log_query_failure("reflection_label", req_id, exc)
         return _truth_error(req_id, "reflection_unavailable")
+
+
+# --- the owner-agent reflection read (GRANT_DECISIONS G2, DISCLOSURE_RULES DR-61) ---------------------------------
+# The one read the Moments app makes: the enabled reflection packs' facts, filtered for an agent
+# (``query/reflection_facts.py``). The owner's app, and an owner agent on the socket; the dispatcher has already held
+# an agent to its own type list (``owner_agent_allowed_types``: Moments sends this and nothing else), so a coding
+# agent never reaches it. Every other class is refused before the payload is read. A read: writes nothing.
+def _reflection_facts_reader(principal: Any) -> Optional[str]:
+    """"owner" or "agent" for a class this read serves, None for every other."""
+    from ...principal import OWNER_AGENT, OWNER_APP
+
+    cls = getattr(principal, "cls", None)
+    if cls == OWNER_APP:
+        return "owner"
+    if cls == OWNER_AGENT and getattr(principal, "channel", None) == "uds":
+        return "agent"
+    return None
+
+
+@handles("reflection_facts")
+async def handle_reflection_facts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"packs"?, "fact_ids"?, "since"?, "limit"?, "include_excerpts"?}`` -> the active facts of the reflection packs
+    the owner switched on: value (people as display names), the owner's quote, date, sources; plus which reflection
+    packs are on and which are missing. Fixed error codes, never the input."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    from ...principal import current_principal
+
+    principal = current_principal()
+    reader = _reflection_facts_reader(principal)
+    if reader is None:
+        return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
+    from ...query.reflection_facts import ReflectionFactsRequestError, parse_request, read
+    from .common import run_db_read
+
+    try:
+        request = parse_request(message.get("payload"))
+    except ReflectionFactsRequestError as exc:
+        return _truth_error(req_id, str(exc))
+
+    def run(conn: Any) -> Dict[str, Any]:
+        guard = None
+        if reader == "agent":
+            from ...features.lifecycle.blackhole_guard import guard_from_message
+
+            guard = guard_from_message(conn, message)
+        return read(conn, request, agent=reader == "agent", guard=guard)
+
+    try:
+        result = await run_db_read(run)
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("reflection_facts", req_id, exc)
+        return _truth_error(req_id, "reflection_facts_unavailable")
+    await _record_query_request(message, {}, tool="reflection_facts")
+    return {"id": req_id, "status": "ok", "payload": result}
 
 
 @handles("query", "query_live")

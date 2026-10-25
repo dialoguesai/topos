@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
-def list_packs(conn: sqlite3.Connection) -> Dict[str, Any]:
+def list_packs(conn: sqlite3.Connection, *, time_zone: str = "UTC") -> Dict[str, Any]:
     from .packs import load_packs
     from .registry import bundled_pack_dir, seed_pack_registry
 
@@ -40,8 +40,8 @@ def list_packs(conn: sqlite3.Connection) -> Dict[str, Any]:
     packs: List[Dict[str, Any]] = []
     consent_cols = {r[1] for r in conn.execute("PRAGMA table_info(pack_registry)")}
     consent_sql = ", consented_at" if "consented_at" in consent_cols else ", NULL"
-    for pid, ver, enabled, disclosure, last_run, consented_at in conn.execute(
-            "SELECT pack_id, version, enabled, disclosure_default, last_run_at" + consent_sql +
+    for pid, ver, enabled, disclosure, last_run, active_since, consented_at in conn.execute(
+            "SELECT pack_id, version, enabled, disclosure_default, last_run_at, active_since" + consent_sql +
             " FROM pack_registry ORDER BY pack_id"):
         p = catalog.get(pid)
         ns = pid.split(".")[0]
@@ -55,6 +55,7 @@ def list_packs(conn: sqlite3.Connection) -> Dict[str, Any]:
             "consent_required": outward,
             "consented_at": consented_at,
             "pack_id": pid, "version": ver, "enabled": bool(enabled),
+            "active_since": active_since if enabled else None,
             "disclosure_default": disclosure,
             "title": getattr(p, "title", pid) if p else pid,
             "sensitivity_class": getattr(p, "sensitivity_class", "personal") if p else "personal",
@@ -65,7 +66,9 @@ def list_packs(conn: sqlite3.Connection) -> Dict[str, Any]:
             "offer": offers.get(pid),
             "yield_30d": yield_30d.get(pid),
         })
-    return {"packs": packs, "total_conflicts": sum(conflict_counts.values())}
+    from .processing import processing_windows
+    return {"packs": packs, "total_conflicts": sum(conflict_counts.values()),
+            "processing_30d": processing_windows(conn, time_zone)}
 
 
 BFI2_DOMAINS = ("extraversion", "agreeableness", "conscientiousness",
@@ -318,10 +321,10 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     vmodel = verifier_model()
     adapter = OllamaAdapter()
 
-    def llm(m, prompt, n=900):
-        out = adapter._generate(m, prompt, num_predict=n, think=False, temperature=0.0,
-                                num_ctx=8192, timeout=180)
-        return str(out.get("text") or "") if isinstance(out, dict) else str(out or "")
+    def llm(m, prompt, n=900, *, phase="extraction"):
+        from .processing import measured_generate
+        return measured_generate(conn, adapter, m, prompt, pack_id=pack_id,
+                                 phase=phase, mode="backfill", n=n)
 
     verify_mode = _verify_mode()
     pf = PackPrefilter(pack)
@@ -366,7 +369,7 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                     verdict = parse_verdict(llm(vmodel, build_verify_prompt(
                         rec["text"], rec["role"], rec["date"],
                         a["predicate"], a["value"], a.get("about", "owner"),
-                        lens_note=lens_note_for(pack), label_note=label_note_for(rec)), n=250))
+                        lens_note=lens_note_for(pack), label_note=label_note_for(rec)), n=250, phase="verification"))
                 except Exception:  # noqa: BLE001
                     verdict = None
                 a = apply_verdict(a, verdict)

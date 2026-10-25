@@ -6,7 +6,8 @@ import tempfile
 import subprocess
 from unittest.mock import patch
 
-from scripts.node_release_gate import CONTEXT, description, run_gate, validate_evidence, verify_statuses
+from scripts.node_release_gate import (CONTEXT, MAX_WAIVER_REASON, description, run_gate, validate_evidence,
+                                       verify_statuses, waive_gate, waiver_description)
 
 
 class EvidenceTests(unittest.TestCase):
@@ -69,6 +70,54 @@ class EvidenceTests(unittest.TestCase):
                 args = command.call_args.args[0]
                 self.assertIn("repos/dialoguesai/topos/statuses/merged-sha", args)
                 self.assertIn(f"description={description('same-tree')}", args)
+
+
+
+TREE = "a" * 40
+
+
+class WaiverTests(unittest.TestCase):
+    """The owner may waive Rig D for one exact tree; the status says "waived", never "passed"."""
+
+    def test_waiver_records_its_own_text_and_runs_no_rig(self):
+        with patch("scripts.node_release_gate.git", return_value=""), \
+                patch("scripts.node_release_gate.subprocess.run") as command:
+            waive_gate({"sharing_rig": True, "tree": TREE, "head": "candidate-sha"}, "rig timing under host load",
+                       "dialoguesai/topos")
+        command.assert_called_once()
+        args = command.call_args.args[0]
+        self.assertIn("repos/dialoguesai/topos/statuses/candidate-sha", args)
+        self.assertIn("state=success", args)
+        self.assertIn(f"description=Rig D waived by owner: rig timing under host load; tree={TREE}", args)
+        self.assertNotIn(f"description={description(TREE)}", args)
+
+    def test_waiver_needs_a_clean_tree_a_reason_and_an_impact(self):
+        with patch("scripts.node_release_gate.subprocess.run") as command:
+            with patch("scripts.node_release_gate.git", return_value="dirty"):
+                with self.assertRaises(ValueError):
+                    waive_gate({"sharing_rig": True, "tree": TREE, "head": "sha"}, "reason", "dialoguesai/topos")
+            with patch("scripts.node_release_gate.git", return_value=""):
+                for reason in ("", "   ", "a;b", "x" * (MAX_WAIVER_REASON + 1)):
+                    with self.assertRaises(ValueError):
+                        waive_gate({"sharing_rig": True, "tree": TREE, "head": "sha"}, reason, "dialoguesai/topos")
+                waive_gate({"sharing_rig": False}, "reason", "dialoguesai/topos")
+            command.assert_not_called()
+
+    def test_a_full_length_waiver_fits_githubs_limit(self):
+        self.assertEqual(len(waiver_description(TREE, "x" * MAX_WAIVER_REASON)), 140)
+
+    def test_verify_accepts_a_waiver_for_this_exact_tree_only(self):
+        waived = {"context": CONTEXT, "state": "success", "description": waiver_description(TREE, "host load")}
+        self.assertEqual(verify_statuses([waived], TREE), "waived: host load")
+        self.assertEqual(verify_statuses([{**waived, "description": description(TREE)}], TREE), "passed")
+        other = "b" * 40
+        for statuses in ([{**waived, "description": waiver_description(other, "host load")}],
+                         [{**waived, "state": "pending"}],
+                         [{**waived, "description": f"Rig D waived by owner: ; tree={TREE}"}],
+                         [{**waived, "description": f"Rig D waived by someone: host load; tree={TREE}"}],
+                         [{**waived, "state": "failure"}, waived]):
+            with self.assertRaises(ValueError):
+                verify_statuses(statuses, TREE)
 
 
 if __name__ == "__main__":

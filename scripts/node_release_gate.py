@@ -5,6 +5,10 @@ The rig remains local because its private fixture and control-plane checkout
 are unavailable on public GitHub runners. A passing run records the exact
 clean Git tree. After a squash merge the same evidence can be recorded on the
 merged commit without running the hour-long rig again.
+
+The owner may instead waive the rig for one exact tree (`--waive REASON`). The
+status then says so ("Rig D waived by owner: <reason>; tree=<tree>"), never
+"passed", so the commit's history records what actually happened.
 """
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 from urllib.request import Request, urlopen
@@ -22,10 +27,32 @@ except ModuleNotFoundError:  # direct `python scripts/node_release_gate.py`
     from select_release_checks import ROOT, git, make_plan, summary
 
 CONTEXT = "release/sharing-rig"
+WAIVER_PREFIX = "Rig D waived by owner: "
+#: GitHub caps a status description at 140 characters; the prefix and "; tree=<40 hex>" take 70.
+MAX_WAIVER_REASON = 140 - len(WAIVER_PREFIX) - len("; tree=") - 40
 
 
 def description(tree: str) -> str:
     return f"Rig D passed; tree={tree}"
+
+
+def waiver_description(tree: str, reason: str) -> str:
+    return f"{WAIVER_PREFIX}{validate_reason(reason)}; tree={tree}"
+
+
+def validate_reason(reason: str) -> str:
+    reason = " ".join(str(reason or "").split())
+    if not reason:
+        raise ValueError("A waiver needs a reason")
+    if len(reason) > MAX_WAIVER_REASON or ";" in reason:
+        raise ValueError(f"A waiver reason must be at most {MAX_WAIVER_REASON} characters, with no ';'")
+    return reason
+
+
+def waiver_reason(status_description: str, tree: str) -> str | None:
+    """The owner's reason when this status text is a waiver for exactly this tree, else None."""
+    match = re.fullmatch(re.escape(WAIVER_PREFIX) + r"([^;]+); tree=" + re.escape(tree), status_description or "")
+    return (match.group(1).strip() or None) if match else None
 
 
 def validate_evidence(evidence: dict, tree: str) -> None:
@@ -34,12 +61,19 @@ def validate_evidence(evidence: dict, tree: str) -> None:
         raise ValueError("Sharing evidence must pass and match this exact node tree")
 
 
-def verify_statuses(statuses: list[dict], tree: str) -> None:
-    # GitHub lists newest first. Never accept an old success after a new failure.
+def verify_statuses(statuses: list[dict], tree: str) -> str:
+    """"passed" or "waived: <reason>" for the newest gate status on this exact tree; raises otherwise."""
+    # GitHub lists newest first. Never accept an old success (or waiver) after a new failure.
     latest = next((s for s in statuses if s.get("context") == CONTEXT), None)
-    if not latest or latest.get("state") != "success" or latest.get("description") != description(tree):
-        raise ValueError("This release requires Rig D: run `just release-checks` on this clean commit "
-                         "or reuse matching evidence with `just release-checks --evidence <file>`")
+    if latest and latest.get("state") == "success":
+        if latest.get("description") == description(tree):
+            return "passed"
+        reason = waiver_reason(latest.get("description") or "", tree)
+        if reason:
+            return f"waived: {reason}"
+    raise ValueError("This release requires Rig D: run `just release-checks` on this clean commit, "
+                     "reuse matching evidence with `just release-checks --evidence <file>`, or record the "
+                     "owner's waiver with `just release-checks --waive <reason>`")
 
 
 def check_clean() -> None:
@@ -47,11 +81,23 @@ def check_clean() -> None:
         raise ValueError("Commit or remove local changes before recording a release gate")
 
 
-def record_status(plan: dict, repository: str, state: str) -> None:
-    detail = description(plan["tree"]) if state == "success" else f"Rig D {state}; tree={plan['tree']}"
+def record_status(plan: dict, repository: str, state: str, detail: str | None = None) -> None:
+    if detail is None:
+        detail = description(plan["tree"]) if state == "success" else f"Rig D {state}; tree={plan['tree']}"
     subprocess.run(["gh", "api", "--method", "POST", f"repos/{repository}/statuses/{plan['head']}",
                     "-f", f"state={state}", "-f", f"context={CONTEXT}",
                     "-f", f"description={detail}"], cwd=ROOT, check=True, stdout=subprocess.DEVNULL)
+
+
+def waive_gate(plan: dict, reason: str, repository: str) -> None:
+    """Record the owner's waiver for this exact clean tree. No rig runs; the status says it was waived."""
+    if not plan["sharing_rig"]:
+        print("No sharing-impact changes since the previous node release; Rig D is not required, nothing to waive.")
+        return
+    detail = waiver_description(plan["tree"], reason)
+    check_clean()
+    record_status(plan, repository, "success", detail)
+    print(f"Recorded {CONTEXT} for {plan['head'][:12]}: {detail}")
 
 
 def run_gate(plan: dict, evidence_path: Path | None, repository: str) -> None:
@@ -95,9 +141,14 @@ def main() -> int:
     parser.add_argument("--base", default="previous-release")
     parser.add_argument("--verify", action="store_true", help="Read-only publication check")
     parser.add_argument("--force-rig", action="store_true", help="Run the full weekly/manual rig regardless of impact")
-    parser.add_argument("--evidence", type=Path, help="Reuse a passing local run with this exact tree")
+    choice = parser.add_mutually_exclusive_group()
+    choice.add_argument("--evidence", type=Path, help="Reuse a passing local run with this exact tree")
+    choice.add_argument("--waive", metavar="REASON",
+                        help="Record the owner's waiver of Rig D for this exact clean tree (no rig runs)")
     parser.add_argument("--repository", default=os.getenv("GITHUB_REPOSITORY", "dialoguesai/topos"))
     args = parser.parse_args()
+    if args.waive is not None and (args.verify or args.force_rig):
+        parser.error("--waive records a status; it cannot be combined with --verify or --force-rig")
     try:
         plan = make_plan(args.base)
         if args.force_rig:
@@ -115,8 +166,14 @@ def main() -> int:
                 request = Request(f"https://api.github.com/repos/{args.repository}/commits/{plan['head']}/statuses?per_page=100",
                                   headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"})
                 with urlopen(request, timeout=30) as response:
-                    verify_statuses(json.load(response), plan["tree"])
+                    gate = verify_statuses(json.load(response), plan["tree"])
+                print(f"Sharing gate: Rig D {gate}")
+                if os.getenv("GITHUB_STEP_SUMMARY"):
+                    with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as stream:
+                        stream.write(f"\n**Sharing gate:** Rig D {gate}\n")
             print("Automatic node release policy passed")
+        elif args.waive is not None:
+            waive_gate(plan, args.waive, args.repository)
         else:
             run_gate(plan, args.evidence, args.repository)
     except (OSError, ValueError, subprocess.CalledProcessError) as exc:
