@@ -236,6 +236,7 @@ def list_timeline(
     *,
     canonical_table: Optional[str] = None,
     source_id: Optional[str] = None,
+    actor_kind: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
     limit: int = 100,
@@ -245,6 +246,15 @@ def list_timeline(
     offset = max(0, int(offset))
     where = ["1=1"]
     params: List[Any] = []
+    if actor_kind:
+        if actor_kind not in {"human", "ai", "unknown"}:
+            raise ValueError("actor_kind must be human, ai, or unknown")
+        from ..provenance.browser_actor import timeline_controller
+        conn.create_function("topos_browser_controller", 4, timeline_controller, deterministic=True)
+        where.append("canonical_table = 'activity_events' AND EXISTS ("
+                     "SELECT 1 FROM activity_events a WHERE a.event_id = timeline.record_id "
+                     "AND topos_browser_controller(a.event_id, a.source_id, a.activity_type, a.metadata_json) = ?)")
+        params.append(actor_kind)
     if canonical_table and str(canonical_table).strip():
         where.append("canonical_table = ?")
         params.append(str(canonical_table).strip())
@@ -266,7 +276,7 @@ def list_timeline(
         f"""
         SELECT event_at, record_id, source_id, canonical_table, record_type
         FROM timeline WHERE {where_sql}
-        ORDER BY event_at DESC
+        ORDER BY event_at DESC, record_id DESC
         LIMIT ? OFFSET ?
         """,
         (*params, limit, offset),
@@ -275,7 +285,23 @@ def list_timeline(
         "SELECT canonical_table, COUNT(*) FROM timeline GROUP BY canonical_table"
     ).fetchall()
 
+    # The timeline is an owner surface. Resolve attribution in one bounded read,
+    # not from a lossy projection or by inferring the controller from its writer.
+    from ..provenance.browser_actor import browser_actor, is_browser_record
+    actors = {}
+    activity_ids = [r[1] for r in rows if r[3] == "activity_events"]
+    if activity_ids:
+        try:
+            actor_rows = conn.execute("SELECT event_id, source_id, metadata_json, activity_type FROM activity_events WHERE event_id IN ("
+                                      + ",".join("?" for _ in activity_ids) + ")", activity_ids).fetchall()
+            for rid, source, meta, activity_type in actor_rows:
+                actor_row = {"event_id": rid, "source_id": source, "metadata_json": meta, "activity_type": activity_type}
+                if is_browser_record(actor_row):
+                    actors[rid] = browser_actor(actor_row)
+        except sqlite3.OperationalError:
+            pass  # Legacy/minimal tables have no metadata column.
     return {
+        "actor_filter": actor_kind,
         "items": [
             {
                 "event_at": r[0],
@@ -283,6 +309,7 @@ def list_timeline(
                 "source_id": r[2],
                 "canonical_table": r[3],
                 "record_type": r[4],
+                **({"browser_actor": actors[r[1]]} if r[1] in actors else {}),
             }
             for r in rows
         ],

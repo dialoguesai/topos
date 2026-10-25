@@ -497,6 +497,9 @@ class SQLiteCanonicalStore:
 
         spec_key = _native_list_spec_key(self._conn, table, disclosure_tier)
         base, col_names = _NATIVE_LIST_SPECS[spec_key]
+        if table == "activity_events" and disclosure_tier == "owner_raw" and _table_has_column(self._conn, table, "metadata_json"):
+            base = base.replace("occurred_at AS event_at", "occurred_at AS event_at, metadata_json")
+            col_names = [*col_names, "metadata_json"]
         params: List[Any] = []
         clauses: List[str] = []
         # Wrap the spec so filters/ordering see its aliased columns (content,

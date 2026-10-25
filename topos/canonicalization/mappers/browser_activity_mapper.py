@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from ...features.provenance.browser_actor import browser_actor
 from ...ingestion.parsers.base import NormalizedRecord
 from .base import CanonicalMapper, CanonicalRecord, MappingMetadata
 
@@ -66,7 +67,7 @@ def _extract_selected_text(content: Any) -> str:
 
 @dataclass
 class BrowserActivityCanonicalMapper(CanonicalMapper):
-    version: str = "v2"
+    version: str = "v3"
 
     def map(self, normalized: NormalizedRecord) -> CanonicalRecord:
         payload = normalized.payload
@@ -76,6 +77,7 @@ class BrowserActivityCanonicalMapper(CanonicalMapper):
 
         metadata: dict[str, Any] = {
             "schema": payload.get("schema") or payload.get("schema_id"),
+            "browser_actor": browser_actor(payload),
         }
         hostname = payload.get("hostname")
         if not hostname and payload.get("url"):
@@ -92,8 +94,8 @@ class BrowserActivityCanonicalMapper(CanonicalMapper):
         if event_type in _HIGHLIGHT_EVENT_TYPES:
             selected = _extract_selected_text(payload.get("content"))
             if selected:
-                # Annotate-grade engagement: the span is the owner's expression
-                # of INTEREST. Promote to a stable activity_type + carry the
+                # The span remains the page author's words. Actor provenance
+                # determines whether this is evidence of the owner's interest. Promote to a stable activity_type + carry the
                 # span on both the content column and metadata_json.highlight.
                 activity_type = "browser_highlight"
                 content = selected

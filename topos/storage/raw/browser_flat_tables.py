@@ -12,6 +12,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from ..db.write_gate import commit_connection, with_db_write
+from ...features.provenance.browser_actor import browser_actor
 
 logger = logging.getLogger("topos.storage.raw.browser_flat_tables")
 
@@ -30,6 +31,30 @@ def _to_sql_value(val: Any) -> Optional[str]:
     if isinstance(val, (dict, list)):
         return json.dumps(val, ensure_ascii=False)
     return str(val)
+
+
+def _ensure_actor_columns(conn, table):
+    columns = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    for name in ("actor_kind", "actor_provider", "parent_conversation_source", "parent_conversation_id", "actor_json"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} TEXT")
+
+
+def _retain_actor(conn, table, record_id, payload):
+    actor = browser_actor(payload)
+    if actor["method"] == "unresolved":
+        previous = conn.execute(f"SELECT actor_json FROM {table} WHERE record_id=?", (record_id,)).fetchone()
+        if previous and previous[0]:
+            actor = browser_actor({"actor_json": previous[0]})
+    return {**payload, "actor": actor}
+
+
+def _write_actor(conn, table, record_id, payload):
+    actor = browser_actor(payload)
+    conn.execute(f"UPDATE {table} SET actor_kind=?, actor_provider=?, parent_conversation_source=?, "
+                 "parent_conversation_id=?, actor_json=? WHERE record_id=?",
+                 (actor["kind"], actor.get("provider"), actor.get("conversation_source"), actor.get("conversation_id"),
+                  json.dumps(actor), record_id))
 
 
 def ensure_browser_visits_table(conn) -> None:
@@ -71,6 +96,7 @@ def ensure_browser_visits_table(conn) -> None:
             CREATE INDEX IF NOT EXISTS idx_{BROWSER_VISITS_TABLE}_transition_type
             ON {BROWSER_VISITS_TABLE}(transition_type)
         """)
+        _ensure_actor_columns(conn, BROWSER_VISITS_TABLE)
         commit_connection(conn)
     logger.debug("Ensured table %s exists", BROWSER_VISITS_TABLE)
 
@@ -110,6 +136,7 @@ def ensure_browser_events_table(conn) -> None:
             CREATE INDEX IF NOT EXISTS idx_{BROWSER_EVENTS_TABLE}_visited_at
             ON {BROWSER_EVENTS_TABLE}(visited_at)
         """)
+        _ensure_actor_columns(conn, BROWSER_EVENTS_TABLE)
         commit_connection(conn)
     logger.debug("Ensured table %s exists", BROWSER_EVENTS_TABLE)
 
@@ -159,6 +186,11 @@ def backfill_browser_visits_from_raw_retention(conn) -> int:
             FROM {RAW_BROWSER_VISITS_TABLE}
             WHERE url IS NOT NULL AND TRIM(url) != ''
         """)
+        raw_columns = {row[1] for row in conn.execute(f"PRAGMA table_info({RAW_BROWSER_VISITS_TABLE})")}
+        if "actor" in raw_columns or "actor_json" in raw_columns:
+            actor_col = "actor" if "actor" in raw_columns else "actor_json"
+            for row in conn.execute(f"SELECT COALESCE(NULLIF(TRIM(record_id), ''), source_record_id), {actor_col} FROM {RAW_BROWSER_VISITS_TABLE}").fetchall():
+                _write_actor(conn, BROWSER_VISITS_TABLE, row[0], {"actor_json": row[1]})
         commit_connection(conn)
     copied = conn.execute(f"SELECT COUNT(*) FROM {BROWSER_VISITS_TABLE}").fetchone()[0]
     logger.info(
@@ -177,6 +209,7 @@ def write_browser_visit(conn, payload: Dict[str, Any]) -> None:
     url = _to_sql_value(payload.get("url")) or ""
     visited_at = _to_sql_value(payload.get("visited_at")) or ""
     with with_db_write():
+        payload = _retain_actor(conn, BROWSER_VISITS_TABLE, record_id, payload)
         conn.execute(f"""
             INSERT OR REPLACE INTO {BROWSER_VISITS_TABLE}
             (record_id, dataset_id, url, visited_at, title, favicon_url, hostname, device_name,
@@ -201,6 +234,7 @@ def write_browser_visit(conn, payload: Dict[str, Any]) -> None:
             payload.get("opener_tab_id") if isinstance(payload.get("opener_tab_id"), (int, type(None))) else None,
             _to_sql_value(payload.get("referred_by")),
         ))
+        _write_actor(conn, BROWSER_VISITS_TABLE, record_id, payload)
         commit_connection(conn)
     logger.info("[PIPELINE:RAW] Wrote flat row to %s: record_id=%s", BROWSER_VISITS_TABLE, record_id[:24] if record_id else None)
 
@@ -211,6 +245,7 @@ def write_browser_event(conn, payload: Dict[str, Any]) -> None:
     record_id = payload.get("record_id") or ""
     event_type = _to_sql_value(payload.get("event_type")) or "unknown"
     with with_db_write():
+        payload = _retain_actor(conn, BROWSER_EVENTS_TABLE, record_id, payload)
         conn.execute(f"""
             INSERT OR REPLACE INTO {BROWSER_EVENTS_TABLE}
             (record_id, dataset_id, event_type, url, visited_at, title, favicon_url, hostname, device_name,
@@ -237,6 +272,7 @@ def write_browser_event(conn, payload: Dict[str, Any]) -> None:
             payload.get("opener_tab_id") if isinstance(payload.get("opener_tab_id"), (int, type(None))) else None,
             _to_sql_value(payload.get("starred_at")),
         ))
+        _write_actor(conn, BROWSER_EVENTS_TABLE, record_id, payload)
         commit_connection(conn)
     logger.info("[PIPELINE:RAW] Wrote flat row to %s: record_id=%s event_type=%s", BROWSER_EVENTS_TABLE, record_id[:24] if record_id else None, event_type)
 

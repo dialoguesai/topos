@@ -932,6 +932,7 @@ async def list_stat_insights(
 async def list_timeline(
     canonical_table: Optional[str] = Query(default=None, max_length=60),
     source_id: Optional[str] = Query(default=None, max_length=120),
+    actor_kind: Optional[str] = Query(default=None, pattern="^(human|ai|unknown)$"),
     date_from: Optional[str] = Query(default=None, max_length=32),
     date_to: Optional[str] = Query(default=None, max_length=32),
     limit: int = Query(default=100, ge=1, le=500),
@@ -945,6 +946,7 @@ async def list_timeline(
         _entities_conn(),
         canonical_table=canonical_table,
         source_id=source_id,
+        actor_kind=actor_kind,
         date_from=date_from,
         date_to=date_to,
         limit=limit,
