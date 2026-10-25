@@ -9,6 +9,12 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.26] — 2026-10-25
+
+### Added
+- **Fact Pack processing metrics.** `[S1]` `[O]` Record content-free, node-local model-call measurements by pack, resolved model, extraction/verification stage and run mode. The owner catalog exposes local-calendar Today/This week and rolling 30-day summaries with real nearest-rank p95, failures, tokens and model timings. No past calls are estimated; fact confidence, validity and freshness are unchanged. `no-invalidation`: no extraction prompt or acceptance rule changed.
+- **Fact Pack activation dates and inspectable previews.** `[O]` Record known enable transitions without guessing legacy dates, and retain every accepted finding in bounded preview trials.
+
 ## [1.5.25] — 2026-10-25
 
 ### Added

@@ -161,7 +161,41 @@ def test_trial_mints_enable_offer_and_specials_excluded(node_db, monkeypatch):
     run_derivation_batch(node_db, [ROW], stats=stats)
     offers = {r[0]: r[1] for r in node_db.execute("SELECT pack_id, kind FROM pack_offers")}
     assert offers.get("interests.taste") == "enable_offer"
+    preview = json.loads(node_db.execute(
+        "SELECT stats_json FROM pack_offers WHERE pack_id='interests.taste' AND kind='enable_offer'"
+    ).fetchone()[0])
+    assert preview["accepted"] > 3
+    assert len(preview["examples"]) == preview["accepted"]
+    assert all(example["value"] and example["quote"] for example in preview["examples"])
     assert "beliefs.civic" not in offers          # consent precedes computation
     trial_rows = node_db.execute("SELECT COUNT(*) FROM derivation_training_ledger"
                                  " WHERE stage='trial'").fetchone()[0]
     assert trial_rows > 0
+
+
+def test_processing_tracks_extraction_and_verifier_but_not_probe(node_db, monkeypatch):
+    from topos.engine.backends import ollama
+    from topos.features.derivation.surfaces import list_packs
+    extract = json.dumps({'assertions': [{'predicate': 'work.career_event', 'value': {'event': 'hired', 'org': 'Meridian'}, 'about': 'owner', 'occurrence_date': None, 'confidence': .9, 'quote': 'Signed the offer'}]})
+    verify = json.dumps({'supported': True, 'about': 'owner', 'fields_ok': True, 'reason': 'stated'})
+    monkeypatch.setattr(ollama.OllamaAdapter, '_generate', _stub_llm(extract, verify))
+    monkeypatch.setattr('topos.features.facts.llm_extract._resolved_extraction_model', lambda s, c: 'stub-9b')
+    run_derivation_batch(node_db, [ROW])
+    rows = node_db.execute("SELECT model,phase,mode FROM derivation_processing WHERE pack_id='work.career'").fetchall()
+    assert ('stub-9b', 'extraction', 'ingest') in rows
+    assert any(phase == 'verification' for model, phase, mode in rows)
+    data = list_packs(node_db)['processing_30d']
+    assert data['available']
+    assert sum(row['calls'] for row in data['models']) == node_db.execute('SELECT COUNT(*) FROM derivation_processing').fetchone()[0]
+
+
+def test_backfill_records_real_model_and_mode(node_db, monkeypatch):
+    from topos.engine.backends import ollama
+    from topos.features.derivation.surfaces import run_pack_backfill
+    from topos.features.derivation.registry import seed_pack_registry, bundled_pack_dir
+    seed_pack_registry(node_db, bundled_pack_dir())
+    monkeypatch.setattr(ollama.OllamaAdapter, '_generate', _stub_llm('{"assertions": []}'))
+    monkeypatch.setattr('topos.features.facts.llm_extract._resolved_extraction_model', lambda s, c: 'backfill-9b')
+    monkeypatch.setattr('topos.features.signal.derived_index.index_derived_objects', lambda *a, **kw: {})
+    run_pack_backfill(node_db, 'work.career', records=[{'record_id': 'old', 'text': ROW['content'], 'table': 'conversation_messages', 'role': 'authored', 'date': '2026-08-01', 'source_id': 'imessage'}], use_prefilter=False)
+    assert node_db.execute('SELECT pack_id,model,phase,mode FROM derivation_processing').fetchall() == [('work.career', 'backfill-9b', 'extraction', 'backfill')]

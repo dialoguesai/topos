@@ -52,15 +52,28 @@ def seed_pack_registry(conn: sqlite3.Connection, pack_dir: Path) -> None:
     # owner said yes and what they were told; absent means never consented.
     _add_column_if_missing(conn, "pack_registry", "consented_at", "TEXT")
     _add_column_if_missing(conn, "pack_registry", "consent_note", "TEXT")
+    # Record only known activation times. Existing enabled rows remain NULL: neither
+    # created_at nor updated_at proves when the owner last turned a pack on.
+    _add_column_if_missing(conn, "pack_registry", "active_since", "TEXT")
+    # All enable paths (manual and accepted offers) share this transition rule.
+    # Repeated enables and catalog/version refreshes do not restart the clock.
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS pack_registry_active_since
+        AFTER UPDATE OF enabled ON pack_registry
+        WHEN OLD.enabled IS NOT NEW.enabled
+        BEGIN
+          UPDATE pack_registry
+          SET active_since=CASE WHEN NEW.enabled=1 THEN datetime('now') ELSE NULL END
+          WHERE pack_id=NEW.pack_id;
+        END""")
     packs = load_packs(pack_dir)
     for pid, pack in packs.items():
         origin = "first_party" if getattr(pack, "first_party", False) else "third_party"
         conn.execute(
             """INSERT OR IGNORE INTO pack_registry
-               (pack_id, version, enabled, disclosure_default, origin)
-               VALUES (?, ?, ?, ?, ?)""",
+               (pack_id, version, enabled, disclosure_default, origin, active_since)
+               VALUES (?, ?, ?, ?, ?, CASE WHEN ?=1 THEN datetime('now') ELSE NULL END)""",
             (pid, pack.version, 1 if pid in ENABLED_BY_DEFAULT else 0,
-             getattr(pack, "disclosure_default", "owner_only") or "owner_only", origin),
+             getattr(pack, "disclosure_default", "owner_only") or "owner_only", origin, 1 if pid in ENABLED_BY_DEFAULT else 0),
         )
         # Origin follows the file, not the row: a pack that moves between the shipped
         # directory and anywhere else has genuinely changed provenance, and a stale

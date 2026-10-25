@@ -17,7 +17,7 @@ async def handle_get_derivation_packs(message: Dict[str, Any]) -> Optional[Dict[
         return {"id": req_id, "status": "error", "error": "Database not available"}
     try:
         from ...features.derivation.surfaces import list_packs
-        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **list_packs(conn)}}
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **list_packs(conn, time_zone=str((message.get("payload") or {}).get("time_zone") or "UTC"))}}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
 
