@@ -1195,11 +1195,11 @@ async def complexity_influence(
 
 
 @router.get("/derivation/packs")
-async def get_derivation_packs(_api_key: str = Depends(require_api_key)):
+async def get_derivation_packs(time_zone: str = "UTC", _api_key: str = Depends(require_api_key)):
     """Lens catalog (W4.3): registry rows + live fact + quarantine counts."""
     from ..features.derivation.surfaces import list_packs
 
-    return list_packs(_entities_conn())
+    return list_packs(_entities_conn(), time_zone=time_zone)
 
 
 @router.put("/derivation/packs/{pack_id}")

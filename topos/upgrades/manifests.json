@@ -1277,6 +1277,15 @@
       ]
     },
     {
+      "version": "1.5.26",
+      "summary": "Fact Pack processing measurements, calendar ranges, activation dates and complete bounded previews.",
+      "steps": [],
+      "notes": [
+        "[S1] Add node-local derivation processing measurements; automatic schema backup, no historical reprocessing.",
+        "[O] Owner-only processing summaries; no prompt, fact acceptance, freshness, confidence or permission change. no-invalidation."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

@@ -16,6 +16,7 @@ from .calibration_answers_v1 import (
     MIGRATION_ID as CALIBRATION_ANSWERS_V1_ID,
     apply_calibration_answers_v1_up,
 )
+from .derivation_processing_v1 import MIGRATION_ID as DERIVATION_PROCESSING_V1_ID, apply_derivation_processing_v1_up
 from .home_chat_memories_v1 import MIGRATION_ID as HOME_CHAT_MEMORIES_V1_ID, apply_home_chat_memories_v1_up
 from .home_chat_turn_timings_v1 import (
     MIGRATION_ID as HOME_CHAT_TURN_TIMINGS_V1_ID,
@@ -506,6 +507,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(87, CALIBRATION_ANSWERS_V1_ID, apply_calibration_answers_v1_up),
     _spec(88, DASHBOARD_MEASUREMENTS_V1_ID, apply_dashboard_measurements_v1_up, always_run=True),
     _spec(89, SERVE_SPANS_V1_ID, apply_serve_spans_v1_up),
+    _spec(90, DERIVATION_PROCESSING_V1_ID, apply_derivation_processing_v1_up),
 ]
 
 

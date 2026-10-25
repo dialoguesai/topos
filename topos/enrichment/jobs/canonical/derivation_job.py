@@ -189,7 +189,13 @@ def run_derivation_batch(
     vmodel = verifier_model()
     adapter = OllamaAdapter()
 
-    def llm(m: str, prompt: str, n: int = 900) -> str:
+    def llm(m: str, prompt: str, n: int = 900, *, pack_id=None,
+            phase="extraction", mode="ingest") -> str:
+        if pack_id is not None:
+            from ....features.derivation.processing import measured_generate
+            return measured_generate(conn, adapter, m, prompt, pack_id=pack_id,
+                                     phase=phase, mode=mode, n=n)
+        # The availability probe is not a pack extraction or verification call.
         out = adapter._generate(m, prompt, num_predict=n, think=False,
                                 temperature=0.0, num_ctx=8192, timeout=180)
         return str(out.get("text") or "") if isinstance(out, dict) else str(out or "")
@@ -241,7 +247,8 @@ def run_derivation_batch(
                 verdict = parse_verdict(llm(vmodel, build_verify_prompt(
                     rec["text"], rec["role"], rec["date"],
                     a["predicate"], a["value"], a.get("about", "owner"),
-                    lens_note=lens_note_for(pack), label_note=label_note_for(rec)), n=250))
+                    lens_note=lens_note_for(pack), label_note=label_note_for(rec)), n=250,
+                    pack_id=pack.pack, phase="verification", mode=stage))
             except Exception:  # noqa: BLE001
                 verdict = None
             last_verdict = verdict or last_verdict
@@ -280,7 +287,7 @@ def run_derivation_batch(
                     conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
                 continue
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]))
+                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]), pack_id=pack.pack, mode="ingest")
                 _bump_yield(conn, pid, llm_calls=1)
             except Exception as exc:  # noqa: BLE001
                 st["llm_errors"] = st.get("llm_errors", 0) + 1
@@ -467,7 +474,7 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
                 continue
             budget -= 1
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]))
+                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]), pack_id=pack.pack, mode="catchup")
                 _bump_yield(conn, pid, llm_calls=1, prefilter_hits=1)
             except Exception:  # noqa: BLE001
                 st["llm_errors"] = st.get("llm_errors", 0) + 1
@@ -577,7 +584,7 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
             if cancel is not None and cancel.is_set():
                 return
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]))
+                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]), pack_id=pack.pack, mode="trial")
             except Exception:  # noqa: BLE001
                 continue
             valid, _rej = parse_output(raw, pack, record_text=rec["text"])
@@ -588,9 +595,10 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
                               model=model, vmodel=vmodel)
                 if a.get("verifier_status") in ("accepted", "rerouted"):
                     n_acc += 1
-                    if len(examples) < 3:
-                        examples.append({"predicate": a["predicate"],
-                                         "value": a["value"], "quote": a.get("quote", "")})
+                    # The bounded shadow trial must retain every accepted finding,
+                    # so the owner can inspect the evidence behind the offer count.
+                    examples.append({"predicate": a["predicate"],
+                                     "value": a["value"], "quote": a.get("quote", "")})
         conn.commit()
         st[f"trial_{pid}"] = {"sampled": len(sample), "assertions": n_assert, "accepted": n_acc}
         if n_acc >= TRIAL_MIN_ACCEPTED and n_assert and (n_acc / n_assert) >= TRIAL_MIN_ACCEPT_RATE:
