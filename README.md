@@ -86,7 +86,7 @@ topos-node
 
 The node needs Python 3.12 or newer. `--python 3.12` makes uv build it on that version (downloading it if needed) instead of whichever Python it finds first.
 
-Installed it on Python 3.10 before? Current releases need 3.12, and `uv tool upgrade` alone reports "Nothing to upgrade" on a 3.10 install. On macOS 27, 3.10 also stops embeddings and entity extraction, because the last scipy for 3.10 does not load there. Move it with `uv tool upgrade --python 3.12 topos-node`, then restart the node.
+Installed it on Python 3.10 before? Current releases need 3.12, and `uv tool upgrade` alone reports "Nothing to upgrade" on a 3.10 install. On macOS 27, 3.10 also stops embeddings and entity extraction, because the last scipy for 3.10 does not load there. Move it with `uv tool upgrade --python 3.12 topos-node`, then restart the node. A node on 1.5.22 or later does this itself when it updates from the app.
 
 Your key is written to `~/.topos/.env` with restricted permissions. The node starts on port **8676** and connects out to the control plane.
 
