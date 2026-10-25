@@ -13,7 +13,17 @@ version = "1.5.23"
 description = "Topos personal AI engine (FastAPI): local data, sync, control plane WebSocket client"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.10"
+# 3.12, not 3.10: on macOS 27 dyld refuses scipy 1.15's Fortran extensions
+# (measured 24 Oct 2026 on 27.0.1, Python 3.10-3.13), and 1.15.3 is the last
+# scipy for Python 3.10. topos.runtime_platform.INSTALL_PYTHON names the same
+# version for every install and reinstall; a test fails when they disagree.
+requires-python = ">=3.12"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
 dependencies = [
   "fastapi~=0.136.0",
   "uvicorn[standard]~=0.44.0",
@@ -21,7 +31,7 @@ dependencies = [
   "pydantic~=2.13.2",
   "pydantic-settings~=2.15.0",
   "websockets>=16.0,<16.1",
-  "certifi~=2026.2.25",
+  "certifi~=2026.10.23",
   "cryptography~=50.0.1",
   "python-multipart>=0.0.32,<0.0.33",
   "click~=8.4.1",
@@ -58,7 +68,9 @@ dependencies = [
   "grand-cypher>=0.13,<0.14",
   # Complexity readings (topos.features.complexity): entropy/MI + graph math.
   "numpy>=1.26,<3",
-  "scipy>=1.11,<2",
+  # >=1.16: macOS 27 cannot load 1.15.3's gfortran-built extensions on any
+  # Python (scipy.sparse.linalg fails in dlopen); 1.16.3 loads.
+  "scipy>=1.16,<2",
   "scikit-learn>=1.4,<2",
   "sqlite-vec~=0.1.9",
   # Menu-bar/system-tray status icon (topos.cli.tray). Imported lazily and
@@ -99,7 +111,7 @@ engine = [
   "python-louvain>=0.16,<0.17",
   "grand-cypher>=0.13,<0.14",
   "numpy>=1.26,<3",
-  "scipy>=1.11,<2",
+  "scipy>=1.16,<2",
   "scikit-learn>=1.4,<2",
 ]
 # Backward-compatible alias; local runtime deps are in core dependencies.
