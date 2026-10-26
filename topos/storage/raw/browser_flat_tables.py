@@ -42,7 +42,7 @@ def _ensure_actor_columns(conn, table):
 
 def _retain_actor(conn, table, record_id, payload):
     actor = browser_actor(payload)
-    if actor["method"] == "unresolved":
+    if actor["method"] in {"unresolved", "default_human"}:
         previous = conn.execute(f"SELECT actor_json FROM {table} WHERE record_id=?", (record_id,)).fetchone()
         if previous and previous[0]:
             actor = browser_actor({"actor_json": previous[0]})

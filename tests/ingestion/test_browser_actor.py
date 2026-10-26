@@ -49,6 +49,33 @@ def test_invalid_and_incomplete_attribution_never_becomes_human():
     assert browser_actor({"actor": {"kind": "human", "method": "manual", "signals": {"webdriver": True}}})["kind"] == "automation"
 
 
+@pytest.mark.parametrize("actor", [None, {"kind": "unknown"}, {"kind": "unknown", "method": "unresolved"},
+                                  {"kind": "human", "method": "default_human"}])
+def test_ordinary_browsing_defaults_to_human_but_preserves_the_assumption(actor):
+    row = {"source_id": "browser_visits", "actor": actor}
+    normalized = browser_actor(row)
+    assert normalized["kind"] == "human"
+    assert normalized["method"] == "default_human"
+    assert personal_browser_activity(row)
+    assert not any(normalized.get(key) for key in ("provider", "name", "conversation_source", "conversation_id"))
+
+
+@pytest.mark.parametrize("signal", ["webdriver", "synthetic_event", "agent_tab_group"])
+def test_automation_evidence_never_inherits_the_human_default(signal):
+    row = {"source_id": "browser_visits", "actor": {"kind": "human", "method": "default_human", "signals": {signal: True}}}
+    assert browser_actor(row)["kind"] == "automation"
+    assert not personal_browser_activity(row)
+    row["actor"].update(kind="unknown", method="unresolved")
+    assert browser_actor(row)["kind"] == "automation"
+    assert not personal_browser_activity(row)
+
+
+def test_the_human_default_cannot_hide_an_existing_agent_identity():
+    row = {"source_id": "browser_visits", "actor": {**AGENT, "kind": "human", "method": "default_human"}}
+    assert browser_actor(row)["kind"] == "automation"
+    assert not personal_browser_activity(row)
+
+
 @pytest.mark.parametrize("event_type", ["click", "highlight", "VIDEO_PLAY", "star_page"])
 def test_event_actor_survives_parser_mapper_and_flat_write(conn, event_type):
     from topos.ingestion.parsers.browser_parser import BrowserEventsParser
@@ -94,6 +121,11 @@ async def test_timeline_filter_counts_and_paginates_actors_before_returning_page
               {"kind": "automation", "method": "webdriver"}, None]
     for i, actor in enumerate(actors):
         assert (await _owner_capture(f"timeline-{i}", _visit(capture_id=f"timeline-{i}", actor=actor)))["status"] == "ok"
+    # Stored legacy history receives the same default on read, without a migration.
+    legacy = next(dict(row) for row in _rows(conn) if row["event_id"] == "browser:timeline-3")
+    metadata = json.loads(legacy["metadata_json"])
+    metadata["browser_actor"] = {"kind": "unknown", "method": "unresolved"}
+    conn.execute("UPDATE activity_events SET metadata_json=? WHERE event_id=?", (json.dumps(metadata), legacy["event_id"]))
     project_timeline_rows(conn, [{**r, "_table": "activity_events"} for r in _rows(conn)])
     first = list_timeline(conn, actor_kind="ai", limit=1)
     second = list_timeline(conn, actor_kind="ai", limit=1, offset=1)
@@ -101,8 +133,8 @@ async def test_timeline_filter_counts_and_paginates_actors_before_returning_page
     assert first["total"] == second["total"] == 2
     assert first["items"][0]["record_id"] != second["items"][0]["record_id"]
     assert {first["items"][0]["browser_actor"]["kind"], second["items"][0]["browser_actor"]["kind"]} == {"agent", "automation"}
-    assert list_timeline(conn, actor_kind="human")["total"] == 1
-    assert list_timeline(conn, actor_kind="unknown")["total"] == 1
+    assert list_timeline(conn, actor_kind="human")["total"] == 2
+    assert list_timeline(conn, actor_kind="unknown")["total"] == 0
     assert list_timeline(conn)["total"] == 4
     with pytest.raises(ValueError):
         list_timeline(conn, actor_kind="anything")
@@ -124,8 +156,10 @@ def test_every_personal_enrichment_job_excludes_ai_but_recall_and_timeline_keep_
 
 
 @pytest.mark.asyncio
-async def test_a_duplicate_without_actor_cannot_erase_capture_provenance(conn, captured_jobs):
+@pytest.mark.parametrize("retry_actor", [None, {"kind": "human", "method": "default_human"},
+    {"kind": "human", "method": "default_human", "signals": {"webdriver": True}}])
+async def test_a_duplicate_without_actor_cannot_erase_capture_provenance(conn, captured_jobs, retry_actor):
     assert (await _owner_capture("first", _visit(capture_id="same", actor=AGENT)))["status"] == "ok"
-    assert (await _owner_capture("retry", _visit(capture_id="same")))["status"] == "ok"
+    assert (await _owner_capture("retry", _visit(capture_id="same", actor=retry_actor)))["status"] == "ok"
     assert browser_actor(_rows(conn)[0])["kind"] == "agent"
     assert browser_actor(_rows(conn, "browser_visits")[0])["kind"] == "agent"

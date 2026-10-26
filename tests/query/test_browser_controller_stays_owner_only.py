@@ -53,4 +53,5 @@ def test_the_owner_sees_who_drove_the_tab():
     assert agent["browser_actor"]["conversation_id"] == AGENT["conversation_id"]
     assert "Codex" in (agent.get("summary_text") or agent.get("text") or "")
     legacy = _item(_row("browser:l", None), "owner_raw")
-    assert legacy["actor_kind"] == "unknown" and legacy["personal_interest_eligible"] is True
+    assert legacy["actor_kind"] == "human" and legacy["personal_interest_eligible"] is True
+    assert legacy["browser_actor"]["method"] == "default_human"
