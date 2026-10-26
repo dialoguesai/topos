@@ -9,6 +9,26 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Moments read an owner's message with the turns before it (DR-62), and the joy pack hears a thank-you.**
+  `[E:derivation]` `[P]` Owner ruling DR-62, 26 Oct 2026. `moments.tension` and `moments.joy` read an owner-written
+  message in a two-party iMessage or Signal conversation with the previous 3 turns (within 7 days), labelled OWNER or
+  with the other person's agreed contact name. Never a system row, a row the owner excluded, one tagged NSFW or one the
+  owner's Off-limits view protects; no context at all with an Off-limits person, in a group, an AI chat, a journal or a
+  transcript, or for any other pack. A message of 15 characters or fewer, never read before, is read by these two packs
+  when it has context. Only the owner's words are evidence: an assertion whose quote is not in the owner's message, or
+  whose `about` is not the owner, is dropped before it is judged (the quote guard; no switch), a person may be grounded
+  by the context's speaker names but never by its text, and the verifier judges with the same turns (one sentence
+  changed). The fact rests on the owner's record alone; the turns are kept as `context_refs`, which take the fact out
+  when one is excluded, deleted or scrubbed, and which `reflection_facts` never shows (an agent's read leaves the fact
+  out when one is protected, NSFW or gone). On `moments.joy`, an owner message with a thank-word (thank, thanks, thx,
+  appreciate(d), grateful) gets one more hard rule and, in a direct message, binds the gratitude to the recipient's
+  label; every other message gets today's prompt. Read with context, nothing is written about anyone but the owner,
+  review queue included. The owner's backfill control reads the same way. Switches: `TOPOS_DERIVATION_CONTEXT_TURNS` (3; 0 = one record at a time),
+  `TOPOS_DERIVATION_CONTEXT_PACKS` (the two packs; narrows only), `TOPOS_DERIVATION_CONTEXT_SITUATION` (true). With
+  turns 0 and no thank-word every prompt is byte for byte what it was; template `shadow-11`. `no-invalidation`:
+  nothing already written is wrong; records already read are not re-read.
+
 ### Fixed
 - **Commitments read who an owner's direct message was sent to, on every derivation path.** `[E:derivation]` The
   recipient label built for commitments on 6 Sep reached only the commitments lane; the ingest batch, the drip catch-up

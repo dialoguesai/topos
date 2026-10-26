@@ -264,6 +264,26 @@ def ref_record_ids(refs: Any) -> List[str]:
     return out
 
 
+def context_refs_of(payload: Any) -> List[tuple]:
+    """``(table, record_id)`` of every record a fact was read WITH (DR-62: the turns before
+    an owner's message, ``payload["context_refs"]``), apart from the records it rests on.
+
+    They are protection-only refs. Any ONE of them withdrawn — excluded, deleted, its
+    source scrubbed — takes the whole fact out, not just the ref: the fact's description
+    may name what only that record said, so the fact's own surviving source does not keep
+    it. Nothing shows them as a source."""
+    if isinstance(payload, (str, bytes)):
+        if "context_refs" not in (payload.decode() if isinstance(payload, bytes) else payload):
+            return []
+        try:
+            payload = json.loads(payload)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(payload, dict):
+        return []
+    return [key for key in (ref_record_key(r) for r in payload.get("context_refs") or []) if key and key[1]]
+
+
 def _delete_entity_cascade(conn: sqlite3.Connection, entity_id: str) -> Dict[str, int]:
     """Hard-delete one entity and its mention/edge/vector/review footprint.
 
@@ -656,20 +676,21 @@ def purge_facts_for_source(
     """
     rows = conn.execute(
         """
-        SELECT object_id, source_refs_json, object_key FROM signal_objects
+        SELECT object_id, source_refs_json, object_key, payload_json FROM signal_objects
         WHERE object_type='fact'
         """
     ).fetchall()
 
     all_ref_ids: Set[str] = set()
     parsed: List[tuple] = []
-    for object_id, refs_json, object_key in rows:
+    for object_id, refs_json, object_key, payload_json in rows:
         try:
             refs = json.loads(refs_json or "[]")
         except json.JSONDecodeError:
             refs = []
-        parsed.append((str(object_id), refs, object_key))
-        for ref in refs:
+        context = [{"table": t, "record_id": r} for t, r in context_refs_of(payload_json)]
+        parsed.append((str(object_id), refs, object_key, context))
+        for ref in [*refs, *context]:
             ref_key = ref_record_key(ref)
             if ref_key and ref_key[1]:
                 all_ref_ids.add(ref_key[1])
@@ -695,7 +716,13 @@ def purge_facts_for_source(
     # The per-fact judgement is in-memory (maps precomputed above), so the
     # batch hold covers writes only.
     with batched_writes(conn):
-        for object_id, refs, object_key in parsed:
+        for object_id, refs, object_key, context in parsed:
+            if any(_ref_is_scrubbed(r) for r in context):
+                # DR-62: a fact read with a scrubbed record goes with it (`context_refs_of`).
+                conn.execute("DELETE FROM signal_objects WHERE object_id=?", (object_id,))
+                erased_keys.add(object_key)
+                deleted += 1
+                continue
             if not refs:
                 continue
             scrubbed = [r for r in refs if isinstance(r, dict) and _ref_is_scrubbed(r)]
@@ -804,14 +831,20 @@ def close_dangling_facts(conn: sqlite3.Connection) -> int:
     """
     rows = conn.execute(
         """
-        SELECT object_id, source_refs_json FROM signal_objects
+        SELECT object_id, source_refs_json, payload_json FROM signal_objects
         WHERE valid_to IS NULL
         """
     ).fetchall()
     # Read pass first: the per-ref liveness checks are SELECTs, so they must
     # not run under the gate. Writes happen in one short gated pass below.
     to_close: List[str] = []
-    for object_id, refs_json in rows:
+    for object_id, refs_json, payload_json in rows:
+        # DR-62: ONE deleted record the fact was read with closes it (`context_refs_of`). A
+        # ref this cannot verify (None) counts as alive, as below.
+        if any(_ref_record_exists(conn, table, record_id) is False
+               for table, record_id in context_refs_of(payload_json)):
+            to_close.append(str(object_id))
+            continue
         try:
             refs = [r for r in json.loads(refs_json or "[]") if isinstance(r, dict)]
         except json.JSONDecodeError:
@@ -1089,13 +1122,20 @@ def purge_derived_for_records(
     # withdrawn record outlives it exactly as a fact would.
     id_set = set(ids)
     rows = conn.execute(
-        "SELECT object_id, source_refs_json, object_key, object_type FROM signal_objects"
+        "SELECT object_id, source_refs_json, object_key, object_type, payload_json FROM signal_objects"
     ).fetchall()
     facts_deleted = 0
     facts_trimmed = 0
     erased_keys = set()
     with batched_writes(conn):
-        for object_id, refs_json, object_key, object_type in rows:
+        for object_id, refs_json, object_key, object_type, payload_json in rows:
+            if any(record_id in id_set for _table, record_id in context_refs_of(payload_json)):
+                # DR-62: read with a withdrawn record, so withdrawn with it (`context_refs_of`).
+                conn.execute("DELETE FROM signal_objects WHERE object_id=?", (str(object_id),))
+                if object_type == "fact":
+                    erased_keys.add(object_key)
+                facts_deleted += 1
+                continue
             try:
                 refs = json.loads(refs_json or "[]")
             except json.JSONDecodeError:

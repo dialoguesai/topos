@@ -289,13 +289,15 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     record the caller did not feed is left UNMARKED in `derivation_progress`, so the
     ordinary history walk can still reach it later."""
     from ...enrichment.jobs.canonical.derivation_job import (
-        _bump_yield, _iter_history, _ledger_write, _verify_mode, retire_role_skipped_progress)
+        _bump_yield, _context_for, _context_refs, _iter_history, _ledger_write, _owners_own, _verify_mode,
+        retire_role_skipped_progress)
     from ..provenance.posture import make_posture_resolver
+    from .commitments import UNNAMED_RECIPIENT
     from .packs import load_packs
     from .prefilter import PackPrefilter
     from . import template as _T
     from .registry import bundled_pack_dir
-    from .template import addressing_for, build_prompt, parse_output
+    from .template import addressing_for, build_prompt, context_packs, parse_output
     from .verify import (apply_verdict, build_verify_prompt, label_note_for, lens_note_for,
                          parse_verdict, verifier_model)
     from .writer import DerivationWriter
@@ -334,16 +336,23 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     done = {r[0] for r in conn.execute("SELECT key FROM derivation_progress")}
     stats = {"processed": 0, "assertions": 0, "accepted": 0, "written": 0, "quarantined0": writer.stats.get("quarantined", 0)}
     source = records if records is not None else _iter_history(conn, limit=20000, posture_for=posture_for)
+    reads_context = pack_id in context_packs()
+    ctx_cache: Dict[str, Any] = {}
     for rec in source:
         if stats["processed"] >= limit:
             break
+        if rec.get("short") and not reads_context:
+            continue                     # an owner's short message is only a context pack's to read (DR-62)
         key = f"{pack_id}@{pack.version}:{rec['table']}:{rec['record_id']}"
         if key in done:
             continue
-        if rec["role"] not in pack.allowed_roles() or (use_prefilter and not pf.passes(rec["text"])):
+        if (rec["role"] not in pack.allowed_roles() or (use_prefilter and not pf.passes(rec["text"]))
+                or (rec.get("short") and not _context_for(conn, pack, rec, ctx_cache))):
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
             continue
         stats["processed"] += 1
+        # The owner's backfill reads a record as ingest does: the conversation for a context pack.
+        context = _context_for(conn, pack, rec, ctx_cache) or None
         rec = addressing_for(pack, rec)
         try:
             raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"],
@@ -351,17 +360,20 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                                           speaker_entity_id=str(rec.get("speaker_entity_id") or ""),
                                           recipient=str(rec.get("recipient") or ""),
                                           recipient_entity_id=str(rec.get("recipient_entity_id") or ""),
-                                          recipient_key=str(rec.get("recipient_key") or "")))
+                                          recipient_key=str(rec.get("recipient_key") or ""),
+                                          context=context))
             _bump_yield(conn, pack_id, llm_calls=1, prefilter_hits=1)
         except Exception:  # noqa: BLE001
             continue
         valid, _rej = parse_output(
             raw, pack, record_text=rec["text"],
-            grounded_exempt=(rec.get("recipient"), rec.get("speaker")),
+            # Not the stand-in for an unnamed partner: exempted, it would be stored as a person.
+            grounded_exempt=tuple(x for x in (rec.get("recipient"), rec.get("speaker")) if x and x != UNNAMED_RECIPIENT),
             runner_labels=[l for l in (
                 f"id:{rec['recipient_entity_id']}" if rec.get("recipient_entity_id") else "",
                 f"key:{rec['recipient_key']}" if rec.get("recipient_key") else "",
-                f"id:{rec['speaker_entity_id']}" if rec.get("speaker_entity_id") else "") if l])
+                f"id:{rec['speaker_entity_id']}" if rec.get("speaker_entity_id") else "") if l],
+            context=context)
         stats["assertions"] += len(valid)
         _bump_yield(conn, pack_id, assertions=len(valid))
         for a in valid:
@@ -370,10 +382,11 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                     verdict = parse_verdict(llm(vmodel, build_verify_prompt(
                         rec["text"], rec["role"], rec["date"],
                         a["predicate"], a["value"], a.get("about", "owner"),
-                        lens_note=lens_note_for(pack), label_note=label_note_for(rec)), n=250, phase="verification"))
+                        lens_note=lens_note_for(pack), label_note=label_note_for(rec),
+                        context=context), n=250, phase="verification"))
                 except Exception:  # noqa: BLE001
                     verdict = None
-                a = apply_verdict(a, verdict)
+                a = _owners_own(apply_verdict(a, verdict), context)
             else:
                 a = dict(a); a["verifier_status"] = "skipped"
             if a.get("verifier_status") == "rejected":
@@ -388,7 +401,7 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                 source_refs=[{"table": rec["table"], "record_id": rec["record_id"]}],
                 confidence=a["confidence"], occurrence=a["occurrence"],
                 quote=a.get("quote", ""), about=a.get("about", "owner"),
-                event_date=rec["date"] or None)
+                event_date=rec["date"] or None, context_refs=_context_refs(context))
             stored = out.get("outcome") in ("written", "corroborated", "retelling_merged",
                                             "field_update", "corrected", "superseded")
             if stored:

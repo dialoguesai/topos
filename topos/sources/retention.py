@@ -465,11 +465,18 @@ def _object_index(conn: sqlite3.Connection, ids: Set[str]) -> Dict[str, Dict[str
     One pass at the start of a run, outside the gate; each batch then re-reads only
     the objects its rows feed.
     """
+    from ..features.lifecycle.derived_scrub import context_refs_of
+
     index: Dict[str, Dict[str, Set[str]]] = {"signal_objects": {}, "extraction_artifacts": {}}
     for table, key in (("signal_objects", "object_id"), ("extraction_artifacts", "artifact_id")):
         if not _table_exists(conn, table):
             continue
-        for object_id, refs_json in conn.execute(f"SELECT {key}, source_refs_json FROM {table}"):
+        payload = "payload_json" if table == "signal_objects" else "NULL"
+        for object_id, refs_json, payload_json in conn.execute(f"SELECT {key}, source_refs_json, {payload} FROM {table}"):
+            # DR-62: a record a fact was read with feeds it as much as one it rests on.
+            for _table, record_id in context_refs_of(payload_json):
+                if record_id in ids:
+                    index[table].setdefault(record_id, set()).add(str(object_id))
             try:
                 refs = json.loads(refs_json or "[]")
             except (TypeError, ValueError):
@@ -488,7 +495,12 @@ def _object_outcomes(conn: sqlite3.Connection, removed: Set[str]) -> Dict[str, i
     out = {"signal_objects_deleted": 0, "signal_objects_trimmed": 0, "payload_evidence_items_removed": 0,
            "extraction_artifacts_deleted": 0, "extraction_artifacts_trimmed": 0}
     if _table_exists(conn, "signal_objects"):
+        from ..features.lifecycle.derived_scrub import context_refs_of
+
         for refs_json, payload_json in conn.execute("SELECT source_refs_json, payload_json FROM signal_objects"):
+            if any(record_id in removed for _table, record_id in context_refs_of(payload_json)):
+                out["signal_objects_deleted"] += 1
+                continue
             refs = _load_list(refs_json)
             surviving, changed = _trim_refs(refs, removed)
             if not changed:
@@ -839,6 +851,8 @@ def _remove_batch(
 
 def _trim_objects(conn: sqlite3.Connection, removed: Set[str], index: Dict[str, Dict[str, Set[str]]],
                   run: _Run) -> bool:
+    from ..features.lifecycle.derived_scrub import context_refs_of
+
     touched = False
     for table, key, has_payload in (("signal_objects", "object_id", True), ("extraction_artifacts", "artifact_id", False)):
         object_ids = sorted({oid for rid in removed for oid in index.get(table, {}).get(rid, ())})
@@ -846,6 +860,12 @@ def _trim_objects(conn: sqlite3.Connection, removed: Set[str], index: Dict[str, 
             columns = "source_refs_json, payload_json" if has_payload else "source_refs_json"
             row = conn.execute(f"SELECT {columns} FROM {table} WHERE {key}=?", (object_id,)).fetchone()
             if row is None:
+                continue
+            if has_payload and any(record_id in removed for _t, record_id in context_refs_of(row[1])):
+                # DR-62: read with a removed record, so removed with it, whatever it rests on.
+                touched = True
+                conn.execute(f"DELETE FROM {table} WHERE {key}=?", (object_id,))
+                run.deleted[table].add(object_id)
                 continue
             surviving, changed = _trim_refs(_load_list(row[0]), removed)
             if not changed:
