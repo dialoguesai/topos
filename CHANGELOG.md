@@ -9,6 +9,11 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.27] — 2026-10-25
+
+### Added
+- **Kept questions, Wave 2: the owner's order when the Topos comes back.** `[P]` The heartbeat and register carry `sharing_readiness` (share indexes served now / total, the grant ids not served yet, at most 64, the pipeline backlog, `catching_up`, and owner idleness only while the owner has "Answer others only when you're away from Topos" on); `get_sharing_readiness` is a new owner-only fast-lane read of the same object from memory, with no SQLite and no write gate. A share index counts as ready only while it is proven served. Background model calls and starts (index builds, graph rebuilds, catch-up batches, sharing assessments, the truth lane's local client, the PII sweep, person readings) wait while one of the owner's own frames is in flight, at most 110 s and never preempting a call already sent (owner ruling OD-13; kill switch `TOPOS_PERMISSIONS_V2_BACKGROUND_YIELDS_TO_OWNER`, default on); the catch-up lanes check the answer gate before every batch. The owner lane is on by default (D-10); "Share evenly" switches its reserve off live. `put_away_config` (owner-only) holds the owner's `while_using` and idle-only choice in memory for the current control-plane connection, ordered by `seq`. Capabilities `permissions_v2_sharing_readiness: 1` and `permissions_v2_away_config: 1`. With the owner lane, the yield rule and `ANSWER_HOLDS_BACKGROUND` off, the client and the gate behave exactly as before. Ships with the control plane's owner-order switch, which stays off until this release is installed. No migration.
+
 ## [1.5.26] — 2026-10-25
 
 ### Added
