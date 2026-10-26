@@ -1286,6 +1286,14 @@
       ]
     },
     {
+      "version": "1.5.27",
+      "summary": "Release 1.5.27: kept questions Wave 2, the owner's order (readiness, background yields to the owner, owner lane on, away config).",
+      "steps": [],
+      "notes": [
+        "Kept questions Wave 2: no step and no prompt, no migration. Readiness and the away config live in memory; the owner lane is on by default and background work yields to the owner's own chat (kill switch TOPOS_PERMISSIONS_V2_BACKGROUND_YIELDS_TO_OWNER). Nothing about delivery order changes until the control plane's owner-order switch is on."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
