@@ -23,6 +23,7 @@ class RetrievalRequest:
     manifest: Any
     access_mode: AccessMode
     query_text: Optional[str] = None
+    dataset_id: Optional[str] = None
     #: What the RARE GATE should treat as discriminative needles, when the caller can
     #: say it better than the raw text can. Defaults to `query_text`.
     #:

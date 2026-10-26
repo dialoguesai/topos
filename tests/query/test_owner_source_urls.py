@@ -29,3 +29,29 @@ def test_missing_url_tables_leave_evidence_intact():
     token=set_principal(Principal('owner_app','internal'))
     try: assert _annotate_owner_chat_urls([{'record_id':'m'}],conn)==[{'record_id':'m'}]
     finally:reset_principal(token)
+
+
+def test_conversation_origins_cover_all_families_without_exposing_them_to_grantees():
+    from topos.query.retrieval import _annotate_owner_conversation_origins
+    conn = sqlite3.connect(':memory:')
+    for table, key, thread in [('ai_chat_messages', 'message_id', 'conversation_id'),
+                               ('conversation_messages', 'message_id', 'conversation_id'),
+                               ('transcript_segments', 'segment_id', 'transcript_id')]:
+        conn.execute(f'create table {table} ({key}, {thread}, source_id)')
+        conn.execute(f'insert into {table} values (?, ?, ?)', (table, 'thread', 'origin'))
+    for cls in ['owner_app', 'owner_automation', 'third_party', 'cp_relay']:
+        token = set_principal(Principal(cls, 'internal'))
+        try:
+            items = [{'record_id': table} for table in ['ai_chat_messages', 'conversation_messages', 'transcript_segments']]
+            items.append({'record_id': 'absent'})
+            result = _annotate_owner_conversation_origins(items, conn)
+            assert result[-1] == {'record_id': 'absent'}
+            for item in result[:-1]:
+                if cls.startswith('owner_'):
+                    assert item['origin_table'] == item['record_id']
+                    assert item['source_id'] == 'origin'
+                    assert item.get('conversation_id', item.get('transcript_id')) == 'thread'
+                else:
+                    assert set(item) == {'record_id'}
+        finally:
+            reset_principal(token)

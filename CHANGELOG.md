@@ -9,6 +9,16 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.28] — 2026-10-26
+
+### Added
+- **Conversation sources and reference anchors.** `[P]` `[O]` Owner database reads accept scoped conversation/message filters, exact reference anchors, and a local conversation index searched before pagination. AI titles, contact names, and transcript titles are returned with the selected records. Captured chat titles survive ingestion, and local Codex conversation names follow the session index. Timeline events use the same resolved titles and participant names while retaining their original copyable IDs. These reads preserve selected-dataset and owner-access boundaries; older clients remain compatible.
+- **Latest text exchanges from the intended participant.** `[O]` Owner retrieval resolves contacts within the selected dataset and conversation source, sorts matching messages by event time before limiting, and returns an explicit identity/recency receipt. Explicit text-only requests exclude AI conversations. Latest-text and dated-activity queries bypass stale answer caches; date-window paraphrases preserve their intended window.
+- **Response-quality regression gate.** `[O]` A repeatable question-family suite records before/after results, inventory and runtime-policy changes, and genuine retrieval failures separately from healthy empty results.
+
+### Data impact
+- No schema migration, background reprocessing, or contact edits. Names must exist in the authorized source data; unavailable identities remain unresolved. The all-conversation index currently requires a local SQLite runtime. Source and viewer features also require the coordinated web and control-plane deployment.
+
 ## [1.5.27] — 2026-10-25
 
 ### Added

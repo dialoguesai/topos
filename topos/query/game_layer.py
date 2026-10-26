@@ -310,6 +310,9 @@ class DefaultGameLayer:
             payload["answer_type"] = "raw"
             payload["rows"] = context_packet.get("rows") or []
 
+        if context_packet.get("latest_exchange"):
+            payload["latest_exchange"] = context_packet["latest_exchange"]
+
         # Retrieval publishes this only when it enforced the evidence window.
         # Keep it in inference too, so a dated empty isn't an all-time denial.
         if context_packet.get("time_window"):

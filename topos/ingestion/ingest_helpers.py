@@ -55,7 +55,9 @@ def chat_ui_raw_payload(payload: dict, *, job_id: str, dataset_id: str) -> dict:
     # canonicalizer._declared_title reads. Only that key passes: other _metadata keys
     # steer conversation reconstruction, which a UI stream never declares.
     metadata = payload.get("_metadata")
-    title = metadata.get("conversation_title") if isinstance(metadata, dict) else None
+    title = next((value.strip() for value in (payload.get("conversation_title"), payload.get("title"),
+                  metadata.get("conversation_title") if isinstance(metadata, dict) else None)
+                  if isinstance(value, str) and value.strip()), None)
     if isinstance(title, str) and title.strip():
         record["_metadata"] = {"conversation_title": title.strip()[:MAX_UI_CONVERSATION_TITLE_CHARS]}
     return record

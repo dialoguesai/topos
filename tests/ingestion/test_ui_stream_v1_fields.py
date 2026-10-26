@@ -102,3 +102,10 @@ def test_an_overlong_title_is_capped():
         dataset_id="d",
     )
     assert len(out["_metadata"]["conversation_title"]) == 300
+
+
+def test_declared_top_level_title_preserves_only_title_metadata():
+    payload = {"id": "m", "thread_id": "c", "role": "user", "content": "hello", "created_at": 1,
+               "title": "Renamed discussion", "_metadata": {"conversation_title": "Old name", "parent_id": "p"}}
+    out = chat_ui_raw_payload(payload, job_id="j", dataset_id="owner:scope")
+    assert out["_metadata"] == {"conversation_title": "Renamed discussion"}

@@ -321,6 +321,7 @@ class QueryPipelineOrchestrator:
         #:
         #: None (the default) means "same as query_text", so every existing caller and
         #: every MCP client that never sends it is byte-identical.
+        dataset_id: Optional[str] = None,
         retrieval_text: Optional[str] = None,
         #: The same needles, split PER PART of a multi-part request (P3 slice 2). One
         #: flattened needle set cannot gate a multi-part ask: the rare gate vetoes on
@@ -597,6 +598,14 @@ class QueryPipelineOrchestrator:
                 "audit": audit,
             }
 
+        from .latest_exchange import latest_text_participant
+        from .planner import is_dated_activity_query
+        # "Latest" must observe new imports and newly resolved contacts, even
+        # inside an existing chat whose semantic artifact was cached earlier.
+        if (trusted_owner and classification.outcome == TurnOutcome.MEMORY_HIT
+                and (latest_text_participant(query_text) or is_dated_activity_query(query_text))):
+            classification.outcome = TurnOutcome.LIVE_QUERY
+
         if classification.outcome == TurnOutcome.MEMORY_HIT and session:
             cache_key = classification.cache_key or build_cache_key(
                 scope_id=scope_id, access_mode=access_mode, intent_hash=intent_hash,
@@ -634,6 +643,7 @@ class QueryPipelineOrchestrator:
                     manifest=manifest,
                     access_mode=access_mode,
                     query_text=query_text,
+                    dataset_id=dataset_id,
                     # Needle matching ONLY — see RetrievalRequest.needle_text. The
                     # planner, the embeddings and the classifier all keep the sentence.
                     needle_text=str(retrieval_text).strip() or None

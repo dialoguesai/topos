@@ -897,6 +897,71 @@ async def handle_get_table_count(message: Dict[str, Any]) -> Optional[Dict[str, 
         logger.error("Failed to get table count: %s", exc, exc_info=True)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
+def _conversation_row_selection(table_name, col_names, scope_field, scope_value, payload, placeholder="?"):
+    """Narrow an existing authorized table read; never replace its tenant predicate."""
+    allowed = {
+        "ai_chat_messages": {"conversation_id", "message_id"},
+        "conversation_messages": {"conversation_id", "message_id"},
+        "transcript_segments": {"transcript_id", "segment_id"},
+    }
+    column = payload.get("filter_column")
+    value = payload.get("filter_value")
+    terms, params = [], []
+    if scope_field and scope_value:
+        terms.append(f'"{scope_field}" = {placeholder}')
+        params.append(scope_value)
+    if column is not None or value is not None:
+        if (column not in allowed.get(table_name, set()) or column not in col_names
+                or not isinstance(value, str) or not value or len(value) > 2048):
+            raise ValueError("Invalid conversation row filter")
+        terms.append(f'"{column}" = {placeholder}')
+        params.append(value)
+    return (" WHERE " + " AND ".join(terms) if terms else ""), tuple(params)
+
+
+def _conversation_anchor_offset(conn, table, where, values, order, payload, limit, offset, placeholder="?"):
+    anchor = payload.get("anchor_id")
+    if anchor is None:
+        return offset
+    thread = "transcript_id" if table == "transcript_segments" else "conversation_id"
+    if (table not in {"ai_chat_messages", "conversation_messages", "transcript_segments"}
+            or payload.get("filter_column") != thread or not isinstance(anchor, str)
+            or not anchor or len(anchor) > 2048):
+        raise ValueError("Invalid conversation anchor")
+    key = "segment_id" if table == "transcript_segments" else "message_id"
+    # Rank only within the already authorized dataset AND thread. No whole-table lookup.
+    row = conn.execute(
+        f'SELECT position FROM (SELECT "{key}", ROW_NUMBER() OVER (ORDER BY {order}) - 1 AS position '
+        f'FROM "{table}"{where}) ranked WHERE "{key}" = {placeholder}', values + (anchor,)).fetchone()
+    return max(0, int(row[0]) - limit // 2) if row else 0
+
+
+def _conversation_sender_names(conn, rows):
+    """Owner-only names for visible rows, using indexed identity lookups, never message counts."""
+    from ...principal import current_principal
+    if getattr(current_principal(), "cls", None) != "owner_app":
+        return
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE name IN ('contacts', 'contact_identifiers')")}
+    if len(tables) != 2:
+        return
+    names = {}
+    for row in rows:
+        key = (row.get("dataset_id"), row.get("source_id"), row.get("sender_id"))
+        if not all(key) or row.get("sender_name"):
+            continue
+        if key not in names:
+            match = conn.execute("""
+                SELECT c.display_name FROM contact_identifiers ci
+                JOIN contacts c ON c.contact_id = ci.contact_id AND c.dataset_id = ci.dataset_id
+                WHERE ci.dataset_id = ? AND ci.source_id IN (?, '*') AND ci.identifier = ?
+                  AND c.display_name IS NOT NULL AND c.display_name != ''
+                ORDER BY CASE WHEN ci.source_id = '*' THEN 1 ELSE 0 END, c.contact_id LIMIT 1
+            """, key).fetchone()
+            names[key] = match[0] if match else None
+        if names[key]:
+            row["sender_name"] = names[key]
+
+
 @handles("get_table_rows", off_loop=True)
 async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
@@ -910,6 +975,11 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
 
         payload = message.get("payload") or {}
         table_name = (payload.get("table_name") or "").strip()
+        conversation_index = payload.get("conversation_view") == "index"
+        if payload.get("search") and not conversation_index:
+            raise ValueError("Search requires the conversation index")
+        if conversation_index and settings.topos_database_mode == "postgres":
+            raise ValueError("Conversation search requires a local Topos runtime")
         requested_limit = max(1, int(payload.get("limit") or 500))
         limit = min(requested_limit, 2000)
         cap_reason = "max_rows_limit" if limit < requested_limit else None
@@ -1004,36 +1074,23 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
                     order_by=order_by,
                     order_dir=order_dir,
                 )
-                if _is_sqlite_conn(conn):
-                    if scope_field and scope_value:
-                        sql = (
-                            f'SELECT * FROM "{table_name}" WHERE "{scope_field}" = ? '
-                            f"ORDER BY {order_clause} LIMIT ? OFFSET ?"
-                        )
-                        sql_params = (scope_value, limit + 1, offset)
-                        query_plan = _sqlite_query_plan(conn, sql, sql_params)
-                        cursor = conn.execute(
-                            sql,
-                            sql_params,
-                        )
-                    else:
-                        sql = f'SELECT * FROM "{table_name}" ORDER BY {order_clause} LIMIT ? OFFSET ?'
-                        sql_params = (limit + 1, offset)
-                        query_plan = _sqlite_query_plan(conn, sql, sql_params)
-                        cursor = conn.execute(sql, sql_params)
+                sqlite = _is_sqlite_conn(conn)
+                placeholder = "?" if sqlite else "%s"
+                where, values = _conversation_row_selection(
+                    table_name, col_names, scope_field, scope_value, payload, placeholder)
+                if payload.get("filter_column"):
+                    key = "segment_id" if table_name == "transcript_segments" else "message_id"
+                    order_clause += f', "{key}" ASC'
+                offset = _conversation_anchor_offset(conn, table_name, where, values, order_clause, payload, limit, offset, placeholder)
+                sql = (f'SELECT * FROM "{table_name}"{where} ORDER BY {order_clause} '
+                       f'LIMIT {placeholder} OFFSET {placeholder}')
+                sql_params = values + (limit + 1, offset)
+                if sqlite:
+                    query_plan = _sqlite_query_plan(conn, sql, sql_params)
+                cursor = conn.execute(sql, sql_params)
+                if sqlite:
                     rows = [dict(r) for r in cursor.fetchall()]
                 else:
-                    if scope_field and scope_value:
-                        cursor = conn.execute(
-                            f'SELECT * FROM "{table_name}" WHERE "{scope_field}" = %s '
-                            f"ORDER BY {order_clause} LIMIT %s OFFSET %s",
-                            (scope_value, limit + 1, offset),
-                        )
-                    else:
-                        cursor = conn.execute(
-                            f'SELECT * FROM "{table_name}" ORDER BY {order_clause} LIMIT %s OFFSET %s',
-                            (limit + 1, offset),
-                        )
                     result_col_names = [desc[0] for desc in (cursor.description or [])]
                     rows = [dict(zip(result_col_names, r)) for r in cursor.fetchall()]
         else:
@@ -1072,22 +1129,19 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
                 order_by=order_by,
                 order_dir=order_dir,
             )
-            if scope_field and scope_value:
-                sql = (
-                    f'SELECT * FROM "{table_name}" WHERE "{scope_field}" = ? '
-                    f"ORDER BY {order_clause} LIMIT ? OFFSET ?"
-                )
-                sql_params = (scope_value, limit + 1, offset)
-                query_plan = _sqlite_query_plan(conn, sql, sql_params)
-                cursor = conn.execute(
-                    sql,
-                    sql_params,
-                )
-            else:
-                sql = f'SELECT * FROM "{table_name}" ORDER BY {order_clause} LIMIT ? OFFSET ?'
-                sql_params = (limit + 1, offset)
-                query_plan = _sqlite_query_plan(conn, sql, sql_params)
-                cursor = conn.execute(sql, sql_params)
+            where, values = _conversation_row_selection(
+                table_name, col_names, scope_field, scope_value, payload)
+            if payload.get("filter_column"):
+                key = "segment_id" if table_name == "transcript_segments" else "message_id"
+                order_clause += f', "{key}" ASC'
+            offset = _conversation_anchor_offset(conn, table_name, where, values, order_clause, payload, limit, offset)
+            sql = f'SELECT * FROM "{table_name}"{where} ORDER BY {order_clause} LIMIT ? OFFSET ?'
+            sql_params = values + (limit + 1, offset)
+            if conversation_index:
+                from .conversation_view import conversation_index_sql
+                sql, sql_params = conversation_index_sql(conn, table_name, where, values, payload, limit, offset)
+            query_plan = _sqlite_query_plan(conn, sql, sql_params)
+            cursor = conn.execute(sql, sql_params)
             rows = [dict(r) for r in cursor.fetchall()]
         has_more = len(rows) > limit
         if has_more:
@@ -1108,13 +1162,24 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
                 rows = carried.veto_rows(table_name, rows)
             finally:
                 carried.close()
+        if table_name == "conversation_messages" and _is_sqlite_conn(conn):
+            _conversation_sender_names(conn, rows)
+        if _is_sqlite_conn(conn):
+            from .conversation_view import enrich_conversation_rows
+            enrich_conversation_rows(conn, table_name, rows)
         query_duration_ms = round((time_module.perf_counter() - started_at) * 1000, 3)
         return {
             "id": req_id,
             "status": "ok",
             "payload": {
+                "conversation_view": "index" if conversation_index else None,
+                "search": payload.get("search", "") if conversation_index else None,
                 "rows": rows,
+                "applied_offset": offset,
+                "anchor_id": payload.get("anchor_id"),
                 "table_name": table_name,
+                "row_filter": ({"column": payload["filter_column"], "value": payload["filter_value"]}
+                               if payload.get("filter_column") else None),
                 "policy": {
                     "mode": "pooled" if pooled_mode else "off",
                     "scope_applied": bool(pooled_mode),

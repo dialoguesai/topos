@@ -217,3 +217,37 @@ async def test_inflight_protection_during_artifact_persistence_blocks_release(se
                                         manifest=resolve_scope_manifest("schedule:read"), query_session_id="qs-protection-race")
     assert result["public_result"] is None
     assert result["audit"]["deny_reason"] == "authorization_changed"
+
+@pytest.mark.asyncio
+async def test_latest_text_exchange_rechecks_identity_instead_of_replaying_cache(orchestrator):
+    from topos.principal import Principal, set_principal, reset_principal
+    token = set_principal(Principal('owner_app', 'internal'))
+    try:
+        kwargs = dict(query_text='Find my latest text messages with Rowan Testperson',
+                      scope_id='messages:read', access_mode='summary',
+                      manifest=resolve_scope_manifest('messages:read'),
+                      query_session_id='qs-latest-exchange', dataset_id='user:default:device')
+        first = await orchestrator.execute(**kwargs)
+        calls = orchestrator._retrieval.retrieve_call_count
+        second = await orchestrator.execute(**kwargs)
+        assert first['turn_outcome'] == second['turn_outcome'] == 'live_query'
+        assert orchestrator._retrieval.retrieve_call_count == calls + 1
+        assert second['public_result']['latest_exchange']['status'] == 'identity_unresolved'
+    finally:
+        reset_principal(token)
+
+@pytest.mark.asyncio
+async def test_activity_recap_does_not_replay_pre_window_fix_cache(orchestrator):
+    from topos.principal import Principal, set_principal, reset_principal
+    token = set_principal(Principal('owner_app', 'internal'))
+    try:
+        kwargs = dict(query_text='What was I doing yesterday?', scope_id='activity:read',
+                      access_mode='summary', manifest=resolve_scope_manifest('activity:read'),
+                      query_session_id='qs-yesterday-recap')
+        first = await orchestrator.execute(**kwargs)
+        calls = orchestrator._retrieval.retrieve_call_count
+        second = await orchestrator.execute(**kwargs)
+        assert first['turn_outcome'] == second['turn_outcome'] == 'live_query'
+        assert orchestrator._retrieval.retrieve_call_count == calls + 1
+    finally:
+        reset_principal(token)
