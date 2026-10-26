@@ -872,7 +872,9 @@ class SQLiteCanonicalStore(CanonicalStore):
             from ...features.provenance.browser_actor import _object
             stored_meta = _object(existing[1])
             incoming_meta = _object(record.get("metadata_json"))
-            if "browser_actor" in stored_meta and _object(incoming_meta.get("browser_actor")).get("method", "unresolved") == "unresolved":
+            incoming_actor = _object(incoming_meta.get("browser_actor"))
+            provisional_actor = incoming_actor.get("method", "unresolved") in {"unresolved", "default_human"}
+            if "browser_actor" in stored_meta and provisional_actor:
                 record["metadata_json"] = {**incoming_meta, "browser_actor": stored_meta["browser_actor"]}
         # content/hostname (activity_events_content_v1) are written here: the
         # P2.1 browser mapper and the §5a declared field maps both produce them,

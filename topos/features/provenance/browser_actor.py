@@ -1,13 +1,11 @@
 """Who operated a browser, independently of the authenticated capture writer.
 
 The extension's declaration is evidence, not a new principal or an access grant.
-Missing/legacy attribution remains unknown; absence of bot signals is not human
-evidence. One rule differs, for personal enrichment and interests only: browsing
-with no attribution evidence either way (no envelope, or kind unknown with method
-unresolved, no signals and no identity) counts as the owner's own (owner ruling,
-24 Oct 2026). History stored before attribution, and ordinary browsing the plugin
-leaves unresolved, keep feeding interests as they always have; positive agent or
-automation evidence keeps a row out. The timeline still labels it "unknown". Conversation IDs are opaque source-scoped references, never timestamps
+Ordinary browsing defaults to human-controlled (owner ruling, 26 Oct 2026).
+The default_human method records that assumption without claiming detection.
+Positive agent or automation evidence still keeps a row out of personal interests.
+Legacy unmarked history uses the same default on read, without rewriting storage.
+Conversation IDs are opaque source-scoped references, never timestamps
 or similarity matches. A missing parent may arrive on a later source sync.
 """
 from __future__ import annotations
@@ -17,7 +15,7 @@ from typing import Any
 
 BROWSER_SOURCES = frozenset({"browser_visits", "browser_events", "starred_websites"})
 KINDS = frozenset({"human", "agent", "automation", "unknown"})
-METHODS = frozenset({"manual", "controller_declared", "inherited_tab", "followup", "webdriver", "synthetic_event", "tab_group_declared", "tab_group_hint", "unresolved"})
+METHODS = frozenset({"manual", "controller_declared", "inherited_tab", "followup", "webdriver", "synthetic_event", "tab_group_declared", "tab_group_hint", "unresolved", "default_human"})
 IDENTITY_FIELDS = ("provider", "name", "session_id", "conversation_source", "conversation_id", "turn_id")
 
 
@@ -43,13 +41,22 @@ def browser_actor(row: dict) -> dict:
             out[key] = val.strip()
     signals = _object(raw.get("signals"))
     out["signals"] = {key: True for key in ("webdriver", "synthetic_event", "agent_tab_group") if signals.get(key) is True}
-    # Unsubstantiated human declarations must not open the personal-interest lane.
-    declared = method in {"manual", "controller_declared", "inherited_tab", "tab_group_declared"} or (
-        method == "followup" and out.get("identity_method") in {"manual", "controller_declared", "inherited_tab", "tab_group_declared"})
+    declared = method in {"manual", "controller_declared", "inherited_tab", "tab_group_declared", "default_human"} or (
+        method == "followup" and out.get("identity_method") in {"manual", "controller_declared", "inherited_tab", "tab_group_declared", "default_human"})
     if kind == "human" and (not declared or out["signals"]):
         out["kind"] = "automation" if out["signals"] else "unknown"
+    if out["kind"] == "unknown" and out["signals"]:
+        out["kind"] = "automation"
     if kind == "agent" and not all(out.get(key) for key in ("provider", "name", "conversation_source", "conversation_id")):
         out["kind"] = "automation"  # Preserve partial identity, never invent a parent.
+    if kind == "human" and method == "default_human" and any(out.get(key) for key in IDENTITY_FIELDS):
+        out["kind"] = "automation"  # Agent identity cannot be discarded by a default-human marker.
+    # Old clients explicitly sent unknown/unresolved for ordinary human use.
+    # Only that empty envelope (or no envelope) receives the product default.
+    if (out["kind"] == "unknown" and method == "unresolved" and not out["signals"]
+            and not any(out.get(key) for key in IDENTITY_FIELDS)
+            and raw.get("kind") in (None, "unknown") and raw.get("method") in (None, "unresolved")):
+        out.update(kind="human", method="default_human")
     return out
 
 
@@ -78,13 +85,15 @@ def has_attribution_evidence(row: dict) -> bool:
     """Whether anything says who controlled the tab: a kind other than unknown, a resolved method, a signal or an
     identity. A record stored before attribution, or one the plugin left unresolved, carries none."""
     actor = browser_actor(row)
+    if actor["kind"] == "human" and actor["method"] == "default_human":
+        return False
     return (actor["kind"] != "unknown" or actor["method"] != "unresolved" or bool(actor["signals"])
             or any(actor.get(key) for key in IDENTITY_FIELDS))
 
 
 def personal_browser_activity(row: dict) -> bool:
-    """Non-browser records are unaffected. Browser evidence counts as personal when it is explicitly human or when
-    nothing says who controlled the tab (owner ruling, 24 Oct 2026); agent, automation and unknown-with-evidence
+    """Non-browser records are unaffected. Human browsing includes the ordinary default;
+    agent, automation and unknown-with-evidence
     stay out."""
     if not is_browser_record(row):
         return True
