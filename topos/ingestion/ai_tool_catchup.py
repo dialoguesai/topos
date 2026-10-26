@@ -170,6 +170,8 @@ async def _execute_catchup_inner(payload: dict) -> dict:
         done = _processed_record_ids(get_db_connection(), sid, job, job_spec_version(job))
         return [by_id[rid] for rid in ids if rid in by_id and rid not in done]
 
+    from ..permissions_v2 import answer_gate
+
     for job, ids in (payload.get("missing") or {}).items():
         batch = await asyncio.to_thread(remaining, job, ids)
         if not batch:
@@ -177,6 +179,9 @@ async def _execute_catchup_inner(payload: dict) -> dict:
         if job != "ai_tool_pipeline" and job not in current_jobs:
             continue
         if job != "ai_tool_pipeline":
+            # Kept questions Wave 2 (OFF2N): each batch waits for a share answer in hand and, under the yield rule,
+            # an owner frame in flight (at most 110 s), as every chunk below does.
+            await answer_gate.hold_background_batch()
             result = await orchestrator.run_canonical(batch, job_names=[job], progress_callback=progress)
             errors.extend(result.get("errors") or [])
         processed.update(str(r.get("message_id") or r.get("record_id")) for r in batch)
@@ -192,6 +197,7 @@ async def _execute_catchup_inner(payload: dict) -> dict:
             # Previously queued 256-record payloads must also use the
             # incremental path when resumed by a newer node.
             chunk = batch[start:start + BATCH_SIZE]
+            await answer_gate.hold_background_batch()
             await asyncio.to_thread(lambda: project_stored_outputs(
                 get_db_connection(), sid, chunk, [j for j in resolved_jobs if j in canonical_jobs]
             ))

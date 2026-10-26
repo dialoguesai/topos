@@ -228,17 +228,20 @@ SEARCH_ATTRIBUTION = _switch(
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
     "and caller, and each \"nothing changed\" fast path's hits and misses; no content. Needs search timings.")
 # Lane NR183 (15 Oct 2026, plan item O1, the owner's ruling D3: the owner's own requests go ahead of recipients' when
-# the node is busy). Off bound and unbound alike until WS0 flips it after the owner confirms; reading it costs no
+# the node is busy). On bound and unbound alike since kept questions Wave 2 (lane OFF2N; the owner's ruling D-10 of 23
+# Oct 2026, "on with its built settings": 4 kept slots, at most 2 borrowed, the built types); reading it costs no
 # `is_bound()` stat. Read once, when the control-plane client is made (`owner_lane.slots_for`): a change needs a restart.
+# The owner's "Share evenly" (`away_config`, pushed by the control plane) switches the reserve off live instead.
 OWNER_LANE = _switch(
-    "OWNER_LANE", "bool", False, False,
+    "OWNER_LANE", "bool", True, True,
     "NR183 O1. Of the node's inbound handler slots for control-plane requests (16), OWNER_LANE_SLOTS are kept for "
     "the owner's interactive requests (a type in OWNER_LANE_TYPES the control plane signed as the owner's own app, "
     "never a recipient door's), which take those first, borrow at most OWNER_LANE_SHARED_MAX of the others, and go "
     "first when a slot comes free; everything else, recipients' share requests, the owner's background work and "
     "every unstamped frame included, shares the rest in arrival order. Each class's waiting places count its own "
-    "frames only, so the owner's activity never makes a recipient's request busy (DR-04). Off (the default): one "
-    "pool in arrival order, as in 1.5.9.")
+    "frames only, so the owner's activity never makes a recipient's request busy (DR-04). On by default since Wave 2 "
+    "of kept questions (D-10); the owner's \"Share evenly\" shares every slot in arrival order, live. Off: one pool in "
+    "arrival order, as in 1.5.9, and no owner frame is classified (no yield to the owner, no owner idleness).")
 OWNER_LANE_SLOTS = _switch(
     "OWNER_LANE_SLOTS", "int", 4, 4,
     "NR183 O1. How many inbound slots the owner lane keeps, at least 1 and never all; the shared class's waiting "
@@ -261,6 +264,17 @@ OWNER_LANE_TYPES = _switch(
     "(unstamped today, so inert until the control plane stamps it) and its own store. Any other owner type (ingest, "
     "sync, upload, reprocess, settings, sharing commands) shares the slots in arrival order; a recipient door's type "
     "is never taken whatever this says. A blank value names nothing. Read only while OWNER_LANE is on.")
+# Kept questions Wave 2 (lane OFF2N; the owner's ruling OD-13 of 23 Oct 2026: background pauses for the owner's own
+# chat). On bound and unbound alike; reading it costs no `is_bound()` stat. Read at every wait, so a change is live.
+BACKGROUND_YIELDS_TO_OWNER = _switch(
+    "BACKGROUND_YIELDS_TO_OWNER", "bool", True, True,
+    "OFF2N, the yield rule. The node's background model calls and background starts (index builds, graph rebuilds, "
+    "the catch-up batches, the sharing assessments) also wait while one of the owner's own interactive frames is in "
+    "flight (one the owner lane takes: a type in OWNER_LANE_TYPES the control plane signed as the owner's own app), "
+    "polled, at most 110 s per wait, never preempting a call already sent, and only while the owner's \"While "
+    "you're using Topos\" is \"My work first\" (pushed by the control plane; \"Share evenly\" turns it off live). "
+    "Never the owner's own work, an answer job, or the owner frame's own handling. Inert with OWNER_LANE off (no "
+    "frame is classified). Off: background work waits for share answers only, as in 1.5.21.")
 OWNER_CAPTURE_APP_IDS = Switch(
     "TOPOS_OWNER_CAPTURE_APP_IDS", "list", ("chatgpt-shadow-extension",), ("chatgpt-shadow-extension",),
     "Capture apps whose stamped AI-chat rows count as the owner's (OD-39); mirrors the control plane's list.")
@@ -406,7 +420,9 @@ ANSWER_HOLDS_BACKGROUND = _switch(
     "ends (at most 110 s, the job's own deadline, and never past the node's stop) before they start. Starts only: a "
     "build already running is not stopped or shortened. An ended share's removal never waits, and the owner's own "
     "rebuilds never wait. Fresh data reaches the index later. On bound and unbound alike since 1.5.10 (owner, 15 Oct: 'Yes on "
-    "the first 4 of those', D2). Off: they start at once, as in 1.5.9.")
+    "the first 4 of those', D2). Since kept questions Wave 2 it also holds each catch-up batch (the embeddings and AI-tool "
+    "catch-ups, the refresh loop's slices) for a share's answer job, so catch-up waits between kept answers. Off: they "
+    "start at once, as in 1.5.9.")
 ANSWER_JUDGE_RESERVE_SECONDS = _switch(
     "ANSWER_JUDGE_RESERVE_SECONDS", "int", 8, 8,
     "NR179 G2 (decision D1). Seconds before an answer job's deadline (110 s from acceptance) under which no further "
@@ -470,7 +486,8 @@ SWITCHES = (
     ASSESSMENT_CATCHUP, INDEX_RESTORE_MIN_INTERVAL, ASSESSMENT_CATCHUP_MAX_PER_PASS, AUTO_RESYNC, JOURNAL_SOURCES,
     JOURNAL_GOAL_FIELD, INTEREST_SOURCES, INTEREST_RELABEL, DERIVED_FACTS, PERMITTED_DERIVATION,
     ENTAILMENT_GROUNDING, ENTAILMENT_MODEL_JUDGE, ENTAILMENT_SENTENCE_REPORTING, SEARCH_TIMINGS, SEARCH_ATTRIBUTION,
-    DECIDE_OUTSIDE_GATE, OWNER_LANE, OWNER_LANE_SLOTS, OWNER_LANE_SHARED_MAX, OWNER_LANE_TYPES, REVIEW_PASS_BOUNDARY,
+    DECIDE_OUTSIDE_GATE, OWNER_LANE, OWNER_LANE_SLOTS, OWNER_LANE_SHARED_MAX, OWNER_LANE_TYPES,
+    BACKGROUND_YIELDS_TO_OWNER, REVIEW_PASS_BOUNDARY,
     REVIEW_PASS_BOUNDARY_MAX_AGE, SWEEP_INTEREST_VERDICT, SWEEP_INTEREST_VERDICT_FULL_EVERY,
     INDEX_NARROW_MEMBERS, INDEX_NARROW_OWN_ROW_EDITS,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,

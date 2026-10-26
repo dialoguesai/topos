@@ -71,6 +71,9 @@ class Node:
         monkeypatch.setattr(answer_transport, "dispatch_answer", door)
         self.client = ControlPlaneClient(control_plane_url="ws://example/ws/engine", api_key="an-invented-key",
                                          handler=app_handler, verify_ssl=False)
+        # The semaphore's path: the owner lane is on by default since Wave 2 of kept questions (OFF2N), and R3a with
+        # the lane on is pinned in tests/topos/test_nr183_owner_lane.py.
+        self.client._owner_lane = None
         self.client._inbound_semaphore = asyncio.Semaphore(slots)
         self.socket = self.connect()
 
@@ -95,7 +98,8 @@ def bounds(monkeypatch, seconds: float) -> None:
 def test_the_table_is_the_four_share_doors_at_the_control_planes_budgets():
     # The control plane's relay budgets as production runs them: search 25 s (its default), answers 20 s (its
     # default is 10). A bound below the control plane's sheds requests it is still waiting for.
-    assert INBOUND_AGE_BOUND_SECONDS == {SEARCH: 25.0, BATCH: 25.0, SUBMIT: 20.0, FETCH: 20.0}
+    # Kept questions Wave 2 (R-OFF2 R2.3): the owner's away settings, a generous bound, dropped with their connection.
+    assert INBOUND_AGE_BOUND_SECONDS == {SEARCH: 25.0, BATCH: 25.0, SUBMIT: 20.0, FETCH: 20.0, "put_away_config": 300.0}
     assert not set(NEVER_AGED) & set(INBOUND_AGE_BOUND_SECONDS)
     assert not set(INBOUND_AGE_BOUND_SECONDS) & control_plane_client._FAST_INBOUND_MESSAGE_TYPES
     assert "ping" not in INBOUND_AGE_BOUND_SECONDS

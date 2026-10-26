@@ -381,8 +381,7 @@ class Node:
         monkeypatch.setattr(search_transport, "dispatch_message_search", door)
         monkeypatch.setattr(search_transport, "dispatch_message_search_batch", door)
         monkeypatch.setattr(answer_transport, "dispatch_answer", door)
-        if lane:
-            monkeypatch.setenv(LANE, "true")
+        monkeypatch.setenv(LANE, "true" if lane else "false")   # on by default since Wave 2 (D-10): off is one line
         self.client = ControlPlaneClient(control_plane_url="ws://example/ws/engine", api_key="an-invented-key",
                                          handler=app_handler, verify_ssl=False)
         if lane:
@@ -639,18 +638,23 @@ async def test_a_reply_never_goes_to_a_newer_connection_with_the_lane_on(monkeyp
 
 # --- the switch off: as before ---------------------------------------------------------------------------------------
 
-def test_the_lane_is_off_unless_its_switch_is_on(monkeypatch):
+def test_the_lane_is_on_by_default_and_off_is_one_environment_line(monkeypatch):
+    """NR183 shipped off; Wave 2 of kept questions turns it on by default (the owner's ruling D-10), bound and not,
+    with its built settings. Off is still one line, and then the count alone turns nothing on."""
     async def handler(message):
         return None
 
     def made():
         return ControlPlaneClient("ws://example/ws/engine", "an-invented-key", handler, False)._owner_lane
-    assert made() is None
-    monkeypatch.setattr(switches, "is_bound", lambda env=None: True)         # off on a bound node too
+    lane = made()
+    assert (lane.limit, lane.reserved, lane.general, lane.shared_cap) == (16, 4, 12, 2)
+    assert lane.types == switches.OWNER_LANE_TYPES.bound
+    monkeypatch.setattr(switches, "is_bound", lambda env=None: True)         # on on a bound node too
+    assert made() is not None
+    monkeypatch.setenv(LANE, "false")
     assert made() is None
     monkeypatch.setenv(SLOTS, "2")                                            # the count alone turns nothing on
     assert made() is None
-    monkeypatch.setenv(LANE, "false")
     assert made() is None
     monkeypatch.setenv(LANE, "maybe")                                         # unreadable is off
     assert made() is None

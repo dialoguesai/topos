@@ -171,8 +171,9 @@ MUTANTS = [
          "        slot = await lane.acquire(owner)\n        try:\n            await self._handle_message(ws, data)\n"
          "        finally:\n            lane.release(slot)\n")], LANE_TESTS),
     # -- the switch --------------------------------------------------------------------------------------------------
-    ("the_lane_on_by_default", [
-        (SWITCHES, '    "OWNER_LANE", "bool", False, False,\n', '    "OWNER_LANE", "bool", True, True,\n')],
+    # OFF2N (D-10): the lane is on by default now, so the mutant is the old default.
+    ("the_lane_off_by_default", [
+        (SWITCHES, '    "OWNER_LANE", "bool", True, True,\n', '    "OWNER_LANE", "bool", False, False,\n')],
      LANE_TESTS + ["tests/permissions_v2/test_switches.py"]),
     ("the_classifier_read_while_off", [
         (CLIENT, "        owner = lane is not None and lane.owner_frame(data)\n",

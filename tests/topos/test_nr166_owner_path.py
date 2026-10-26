@@ -109,7 +109,9 @@ async def test_the_owners_own_request_is_handled_when_its_socket_closed_while_it
 def test_what_this_branch_sheds_and_what_it_moves_off_the_loop():
     assert set(INBOUND_AGE_BOUND_SECONDS) == {
         "permissions_v2_message_search", "permissions_v2_message_search_batch", "permissions_v2_answer_submit",
-        "permissions_v2_answer_fetch"}
+        "permissions_v2_answer_fetch",
+        # Kept questions Wave 2 (R-OFF2 R2.3): the owner's away settings, dropped with their connection.
+        "put_away_config"}
     assert not set(OWNERS_OWN) & set(INBOUND_AGE_BOUND_SECONDS)
     assert not set(OWNERS_OWN) & OFF_LOOP_MESSAGE_TYPES
     assert OFF_LOOP_MESSAGE_TYPES == {
@@ -123,4 +125,6 @@ def test_what_this_branch_sheds_and_what_it_moves_off_the_loop():
         # Daily owner metrics read SQLite aggregates off the event loop.
         "get_dashboard_measurements",
         # Calibrate SQLite reads/writes use the same off-loop handler dispatch.
-        "calibration_catalog", "calibration_answer", "calibration_preview"}
+        "calibration_catalog", "calibration_answer", "calibration_preview",
+        # Kept questions Wave 2 (OFF2N): the owner's away settings and readiness, both from memory.
+        "put_away_config", "get_sharing_readiness"}
