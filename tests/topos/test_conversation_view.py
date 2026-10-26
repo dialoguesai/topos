@@ -99,6 +99,7 @@ def test_timeline_resolves_all_three_kinds_without_changing_ids_or_pagination(db
       INSERT INTO conversation_messages VALUES ('text','chat','selected','imessage','body','2026','self',1);
     ''')
     events = [('codex:msg','codex_sessions','ai_chat_messages'),('claude:msg','claude_code_sessions','ai_chat_messages'),('text','imessage','conversation_messages'),('segment','recording','transcript_segments')]
+    db.execute('ALTER TABLE ai_chat_messages DROP COLUMN dataset_id')
     db.executemany('INSERT INTO timeline VALUES (?,?,?,?,NULL)', [('2026', *e) for e in events])
     result = list_timeline(db)
     assert result['total'] == 4

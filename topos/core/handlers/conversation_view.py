@@ -156,9 +156,11 @@ def enrich_timeline_conversations(conn, entries):
         columns = _columns(conn, table)
         key = "segment_id" if table == "transcript_segments" else "message_id"
         thread = "transcript_id" if table == "transcript_segments" else "conversation_id"
-        wanted = [key, thread, "dataset_id", "source_id"]
-        if not set(wanted).issubset(columns):
+        if not {key, thread, "source_id"}.issubset(columns):
             continue  # Older/minimal schemas can still render the timeline.
+        # AI messages use globally unique conversation IDs; unlike human and
+        # transcript messages, their canonical schema has no dataset_id column.
+        wanted = [column for column in [key, thread, "dataset_id", "source_id"] if column in columns]
         ids = list(dict.fromkeys(entry["record_id"] for entry in selected))
         placeholders = ','.join('?' for _ in ids)
         cursor = conn.execute(f'SELECT {", ".join(wanted)} FROM "{table}" WHERE "{key}" IN ({placeholders})', ids)
