@@ -140,6 +140,32 @@ async def test_timeline_filter_counts_and_paginates_actors_before_returning_page
         list_timeline(conn, actor_kind="anything")
 
 
+@pytest.mark.asyncio
+async def test_timeline_returns_the_captured_full_url_for_an_opaque_record_id(conn, captured_jobs):
+    from topos.features.facts.reads import list_timeline
+    from topos.features.timeline_projection import project_timeline_rows
+    url = "https://example.test/articles/browser-attribution?view=timeline#controller"
+    assert (await _owner_capture("url-test", _visit(capture_id="opaque-id", url=url)))["status"] == "ok"
+    project_timeline_rows(conn, [{**row, "_table": "activity_events"} for row in _rows(conn)])
+    (item,) = list_timeline(conn)["items"]
+    assert item["record_id"] == "browser:opaque-id"
+    assert item["url"] == url
+    assert item["browser_actor"]["kind"] == "human"
+
+
+def test_timeline_keeps_legacy_actor_reads_when_the_url_column_is_absent():
+    import sqlite3
+    from topos.features.facts.reads import list_timeline
+    with sqlite3.connect(":memory:") as db:
+        db.execute("CREATE TABLE timeline(event_at, record_id, source_id, canonical_table, record_type)")
+        db.execute("CREATE TABLE activity_events(event_id, source_id, metadata_json, activity_type)")
+        db.execute("INSERT INTO timeline VALUES('2026-10-26T09:00:00Z', 'browser:legacy', 'browser_visits', 'activity_events', 'visit')")
+        db.execute("INSERT INTO activity_events VALUES('browser:legacy', 'browser_visits', '{}', 'visit')")
+        (item,) = list_timeline(db, actor_kind="human")["items"]
+        assert item["browser_actor"]["kind"] == "human"
+        assert "url" not in item
+
+
 def test_every_personal_enrichment_job_excludes_ai_but_recall_and_timeline_keep_it():
     from topos.enrichment.authored_only import rows_for_job
     agent = {"source_id": "browser_visits", "actor": AGENT}

@@ -289,15 +289,25 @@ def list_timeline(
     # not from a lossy projection or by inferring the controller from its writer.
     from ..provenance.browser_actor import browser_actor, is_browser_record
     actors = {}
+    urls = {}
     activity_ids = [r[1] for r in rows if r[3] == "activity_events"]
     if activity_ids:
         try:
-            actor_rows = conn.execute("SELECT event_id, source_id, metadata_json, activity_type FROM activity_events WHERE event_id IN ("
-                                      + ",".join("?" for _ in activity_ids) + ")", activity_ids).fetchall()
-            for rid, source, meta, activity_type in actor_rows:
+            placeholders = ",".join("?" for _ in activity_ids)
+            try:
+                actor_rows = conn.execute("SELECT event_id, source_id, metadata_json, activity_type, url FROM activity_events WHERE event_id IN ("
+                                          + placeholders + ")", activity_ids).fetchall()
+            except sqlite3.OperationalError as exc:
+                if "no such column: url" not in str(exc):
+                    raise
+                actor_rows = conn.execute("SELECT event_id, source_id, metadata_json, activity_type, NULL FROM activity_events WHERE event_id IN ("
+                                          + placeholders + ")", activity_ids).fetchall()
+            for rid, source, meta, activity_type, url in actor_rows:
                 actor_row = {"event_id": rid, "source_id": source, "metadata_json": meta, "activity_type": activity_type}
                 if is_browser_record(actor_row):
                     actors[rid] = browser_actor(actor_row)
+                    if isinstance(url, str) and url:
+                        urls[rid] = url
         except sqlite3.OperationalError:
             pass  # Legacy/minimal tables have no metadata column.
     return {
@@ -310,6 +320,7 @@ def list_timeline(
                 "canonical_table": r[3],
                 "record_type": r[4],
                 **({"browser_actor": actors[r[1]]} if r[1] in actors else {}),
+                **({"url": urls[r[1]]} if r[1] in urls else {}),
             }
             for r in rows
         ],

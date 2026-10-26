@@ -18,7 +18,9 @@ source + conversation ID is an exact reference, not a guessed timestamp match.
 
 Owner timeline reads return the actor and accept `actor_kind=human|ai|unknown`.
 AI includes identified agents and unidentified automation. Filtering precedes
-counts and pagination. Owner recall and vector results retain controller labels;
+counts and pagination. The same bounded activity read also returns each browser
+record's captured URL, preserving its path, query and fragment independently of
+the record ID. Owner recall and vector results retain controller labels;
 full provider and conversation references are not added to lower disclosure tiers.
 
 Personal enrichment jobs exclude AI, automation and unresolved browser rows carrying evidence in both
