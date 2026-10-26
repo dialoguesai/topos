@@ -114,3 +114,40 @@ def test_multiple_datasets_require_selection_even_when_name_is_unique(conn):
     rows, receipt = latest_exchange_rows(conn, 'Rowan Testperson', source_ids=['imessage'], dataset_id='selected')
     assert rows == []
     assert receipt['status'] == 'identity_unresolved'
+
+
+@pytest.mark.parametrize("access_mode", ["raw", "summary"])
+@pytest.mark.parametrize("filter_stage", ["summary_policy", "carried_items"])
+def test_policy_removes_latest_row_and_its_ordering_receipt(conn, monkeypatch, access_mode, filter_stage):
+    """The fast path must not re-expose a withheld message through its latest-exchange receipt."""
+    import topos.query.retrieval as retrieval
+
+    key = "rows" if access_mode == "raw" else "summaries"
+
+    def without_latest(items):
+        return [item for item in items if item["record_id"] != "latest"]
+
+    class CarriedRule:
+        def withhold_from(self, packet, *, text):
+            assert text is False
+            return {**packet, key: without_latest(packet[key])}
+
+    monkeypatch.setattr(retrieval, "_blackhole_policy_for_summary",
+                        lambda items, **kw: without_latest(items) if filter_stage == "summary_policy" else items)
+    monkeypatch.setattr(retrieval, "_carried_items",
+                        lambda conn: CarriedRule() if filter_stage == "carried_items" else None)
+    monkeypatch.setattr(retrieval, "_enforce_request_exclusions", lambda *args, **kw: None)
+    manifest = ScopeResolutionManifest(
+        scope_id="messages:read", primary_dimensions=[], canonical_tables=["conversation_messages"],
+        default_source_ids=["imessage"], access_mode_ceiling="raw")
+    request = RetrievalRequest(manifest=manifest, access_mode=access_mode, query_text=QUERY,
+                               owner_mode=True, dataset_id="selected")
+    adapter = DefaultSignalRetrievalAdapter(SimpleNamespace(signal=SimpleNamespace(_conn=conn)))
+
+    bundle = adapter.retrieve(request)
+
+    assert [row["record_id"] for row in bundle.context_packet[key]] == ["lexical_trap", "old"]
+    assert bundle.record_counts == {key: 2}
+    expected_receipt = {"status": "latest_not_visible", "coverage": "stored_messages"}
+    assert bundle.context_packet["latest_exchange"] == expected_receipt
+    assert bundle.retrieval_metadata["latest_exchange"] == expected_receipt
