@@ -365,7 +365,7 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
               read_timeout_s: Optional[float] = None) -> Dict[str, Any]:
     """The ``truth_checks`` row for one verify_claim v2 answer: verdict, the reader's main claim, cited refs only,
     stamped with the engine build (the answer's ``version``, else ``VERSION``: a row the engine's gate refused got no
-    answer, but the gate is the engine's own; and the sha16 of ``verify_v2.py``)."""
+    answer, but the gate is the engine's own; and ``engine_sha16()``, one digest over the engine's four files)."""
     from ..query.truth_checks import VERDICTS
     from ..query.verify_v2 import VERSION, engine_sha16
 

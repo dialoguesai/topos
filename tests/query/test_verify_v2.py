@@ -806,12 +806,42 @@ def test_the_reader_schema_is_the_same_for_every_source_kind():
 
 
 def test_the_engine_sha16_is_the_digest_the_weekly_lock_captures():
-    """The lock (eval/weekly_lock.py) takes sha256(verify_v2.py)[:16] of the installed file; rows carry the same."""
+    """The lock (eval/weekly_lock.py) hashes the same four-file manifest of the installed package; rows carry the same.
+    The recipe is pinned here byte for byte (path, NUL, bytes, NUL, in manifest order) because the lock tool copies
+    it rather than importing it."""
     import hashlib
+    from pathlib import Path
 
-    with open(v2.__file__, "rb") as source:
-        assert v2.engine_sha16() == hashlib.sha256(source.read()).hexdigest()[:16]
+    root = Path(v2.__file__).resolve().parents[1]
+    assert v2.ENGINE_MANIFEST == ("query/verify_v2.py", "query/verify_v2_models.py", "query/truth_checks.py", "ingestion/truth_inbound.py")
+    digest = hashlib.sha256()
+    for relative in v2.ENGINE_MANIFEST:
+        digest.update(relative.encode() + b"\0" + root.joinpath(*relative.split("/")).read_bytes() + b"\0")
+    assert v2.engine_sha16() == digest.hexdigest()[:16] == v2.manifest_sha16(str(root))
     assert len(v2.engine_sha16()) == 16 and v2.engine_sha16() is v2.engine_sha16()
+    with open(v2.__file__, "rb") as source:  # no longer the one-file digest: a companion's change moves the stamp
+        assert v2.engine_sha16() != hashlib.sha256(source.read()).hexdigest()[:16]
+    assert v2.manifest_sha16("/nonexistent") == ""
+
+
+def test_one_time_rule_for_every_stored_time():
+    """The engine and the store read a stored time by one rule (truth_checks.instant): an offset or Z is honoured, a
+    naive time is the node's LOCAL time (the journal writes wall-clock times with no offset), a bare date is not an
+    instant. Until 27 Oct 2026 the store read naive as UTC and the engine as local."""
+    from topos.query import truth_checks as store
+
+    local_noon = datetime(2026, 10, 22, 12, 0).astimezone(timezone.utc)  # what the node's own zone makes of it
+    for value, expected in [("2026-10-22T12:00:00", local_noon), ("2026-10-22T12:00:00Z", datetime(2026, 10, 22, 12, tzinfo=timezone.utc)),
+                            ("2026-10-22T12:00:00-05:00", datetime(2026, 10, 22, 17, tzinfo=timezone.utc)),
+                            ("2026-10-22T12:00:00+00:00", datetime(2026, 10, 22, 12, tzinfo=timezone.utc)),
+                            ("2026-10-22", None), ("", None), (None, None), ("not a time", None)]:
+        assert store.instant(value) == expected, value
+        assert v2._instant(value) == expected, value
+        assert store._aware(value) == expected, value  # the old name reflection.py reads
+    assert v2.conversation_time("2026-10-22T12:00:00-05:00") == datetime(2026, 10, 22, 17, tzinfo=timezone.utc)
+    assert v2.conversation_time("2026-10-22T12:00:00") == local_noon
+    assert abs((v2.conversation_time(None) - datetime.now(timezone.utc)).total_seconds()) < 5
+    assert store.with_offset("2026-10-22T12:00:00Z") == datetime(2026, 10, 22, 12, tzinfo=timezone.utc).astimezone().isoformat()
 
 
 # --- VERIFY_V2_LEAN_READ (tracker round r2) -----------------------------------------------------------------------------

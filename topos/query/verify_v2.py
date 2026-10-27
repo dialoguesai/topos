@@ -40,23 +40,46 @@ from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from .truth_checks import instant
 from .verify_v2_models import ModelUnavailable, OutputSchema, Usage
 
 VERSION = "verify-claim/v2.0-dev"
 
 
-@lru_cache(maxsize=1)
-def engine_sha16() -> str:
-    """The first 16 hex digits of this file's SHA-256: the build identity a stored result is stamped with beside
-    ``VERSION`` (which changes only when bumped by hand). The weekly eval's lock captures the same digest of the
-    installed ``verify_v2.py``, so a row and a lock name one build. Empty when the file cannot be read."""
-    import hashlib
+#: The files whose bytes make up the engine build a stored result is stamped with, relative to the ``topos`` package,
+#: in this order. Hashing ``verify_v2.py`` alone (until 27 Oct 2026) missed a build change in any of the others: the
+#: r1 relock found verify_v2.py's digest unchanged since 1.5.20 while truth_checks.py and verify_v2_models.py had
+#: moved, so two builds the lane could not tell apart carried one stamp. The weekly lock hashes the same manifest.
+ENGINE_MANIFEST = ("query/verify_v2.py", "query/verify_v2_models.py", "query/truth_checks.py", "ingestion/truth_inbound.py")
 
+
+def manifest_sha16(package_root: str) -> str:
+    """The first 16 hex digits of one SHA-256 over :data:`ENGINE_MANIFEST` under ``package_root`` (the ``topos``
+    package directory): each path, a NUL, the file's bytes, a NUL. Empty when any file cannot be read. The eval's
+    lock tool carries the same function so a row and a lock name one build."""
+    import hashlib
+    import os
+
+    digest = hashlib.sha256()
     try:
-        with open(__file__, "rb") as source:
-            return hashlib.sha256(source.read()).hexdigest()[:16]
+        for relative in ENGINE_MANIFEST:
+            with open(os.path.join(package_root, *relative.split("/")), "rb") as source:
+                digest.update(relative.encode())
+                digest.update(b"\0")
+                digest.update(source.read())
+                digest.update(b"\0")
     except OSError:
         return ""
+    return digest.hexdigest()[:16]
+
+
+@lru_cache(maxsize=1)
+def engine_sha16() -> str:
+    """The build identity a stored result is stamped with beside ``VERSION`` (which changes only when bumped by hand):
+    :func:`manifest_sha16` of this package. Empty when a manifest file cannot be read."""
+    import os
+
+    return manifest_sha16(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MAX_STATEMENT_CHARS = 1000  # the truth-mirror's own statement cap
 DEFAULT_DEADLINE_S = 10.0
 SHOWN = 10
@@ -425,26 +448,15 @@ def _day(value: Any) -> Optional[date]:
 
 
 def _instant(value: Any) -> Optional[datetime]:
-    """A stored time as an aware UTC instant (a naive time is the node's local time, as ``truth_checks.with_offset``
-    reads it); None for a date-only or unreadable value."""
-    text = str(value or "").strip()
-    if len(text) <= 10:
-        return None
-    try:
-        t = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return t.astimezone(timezone.utc)
+    """A stored time as an aware UTC instant, by the one rule the store keeps (``truth_checks.instant``: a naive time
+    is the node's local time); None for a date-only or unreadable value."""
+    return instant(value)
 
 
 def conversation_time(said_at: Optional[str]) -> datetime:
-    if said_at:
-        try:
-            t = datetime.fromisoformat(str(said_at).replace("Z", "+00:00"))
-            return (t if t.tzinfo else t.replace(tzinfo=timezone.utc)).astimezone(timezone.utc)
-        except ValueError:
-            pass
-    return datetime.now(timezone.utc)
+    """When the statement was said, as an aware UTC instant: the reader's date and, unless ``as_of`` says otherwise,
+    the evidence cutoff. Read by the same rule as every other stored time; now when there is no usable value."""
+    return _instant(said_at) or datetime.now(timezone.utc)
 
 
 def gate(statement: str) -> Optional[str]:
@@ -771,12 +783,15 @@ def journal_records(conn: sqlite3.Connection, query: str, needles: str, now: dat
 
 
 def owner_labels(conn: sqlite3.Connection) -> List[Tuple[Any, ...]]:
-    """The open ``verified_claim`` rows (the owner's labels), newest label first; none on a node without them."""
+    """The open ``verified_claim`` rows the OWNER wrote (their labels, ``created_by = 'owner'`` as
+    ``truth_checks._write_verified_claim`` stamps them), newest label first; none on a node without them. The
+    provenance clause is what keeps this evidence the owner's own judgement: a ``verified_claim`` any engine wrote
+    would otherwise confirm the claims it was derived from."""
     try:
         return conn.execute(
             "SELECT object_id, payload_json, source_refs_json, COALESCE(updated_at, created_at), valid_from FROM signal_objects "
-            "WHERE object_type = 'verified_claim' AND valid_to IS NULL ORDER BY COALESCE(updated_at, created_at) DESC "
-            "LIMIT 2000").fetchall()
+            "WHERE object_type = 'verified_claim' AND valid_to IS NULL AND created_by = 'owner' "
+            "ORDER BY COALESCE(updated_at, created_at) DESC LIMIT 2000").fetchall()
     except sqlite3.OperationalError:
         return []
 

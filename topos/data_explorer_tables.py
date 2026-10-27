@@ -33,11 +33,18 @@ def is_permission_state_table(table_name: str) -> bool:
 # Unlike the permission-state tables, the owner can still inspect these.
 #
 # - truth_checks, truth_labels: the inbound truth lane's claims and the owner's labels of them
-#   (query/truth_checks.py), never shared and never off the node (DISCLOSURE_RULES DR-49).
+#   (query/truth_checks.py), never shared and never off the node (DISCLOSURE_RULES DR-49). Listed for the
+#   readers that import this set; the rule that hides them is the ``truth_`` prefix below.
 OWNER_ONLY_TABLES: frozenset[str] = frozenset(
     {"pipeline_jobs", "mcp_clients", "ai_chat_message_facets", "ai_coding_topos_touches", "truth_checks",
      "truth_labels", "reflection_candidates", "reflection_labels"}
 )
+
+#: Every table the inbound truth lane creates is owner-only, by name prefix rather than by listing: the lane added
+#: ``truth_dismissals`` (which carries the owner's free-text note), ``truth_skips`` and ``truth_lane_daily`` after the
+#: set above was written, and for a while the legacy table tools served those three to any principal. A prefix cannot
+#: miss a table a later build adds; ``tests/query/test_truth_owner_doors.py`` walks the lane's DDL to prove it.
+OWNER_ONLY_TABLE_PREFIXES: tuple[str, ...] = ("truth_",)
 
 #: ``signal_objects`` rows of these types are withheld from the legacy table tools for everyone but the owner's own
 #: surface, the way the tables above are: the owner's labels of claims (DR-49) ride in that shared table.
@@ -45,7 +52,8 @@ OWNER_ONLY_SIGNAL_OBJECT_TYPES: frozenset[str] = frozenset({"verified_claim", "r
 
 
 def is_owner_only_table(table_name: str) -> bool:
-    return str(table_name or "").strip() in OWNER_ONLY_TABLES
+    name = str(table_name or "").strip()
+    return name in OWNER_ONLY_TABLES or name.startswith(OWNER_ONLY_TABLE_PREFIXES)
 
 
 def withhold_owner_only_rows(table_name: str, rows: list) -> list:

@@ -349,7 +349,7 @@ async def handle_truth_weekly_stats(message: Dict[str, Any]) -> Optional[Dict[st
 
 @handles("truth_claim_cards")
 async def handle_truth_claim_cards(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``{"limit": <=50, "unlabelled_only": true}`` -> the claims the lane found, newest first, with snippets cut from
+    """``{"limit": <=500, "unlabelled_only": true}`` -> the claims the lane found, newest first, with snippets cut from
     the cited records' own text (400 characters)."""
     req_id = message.get("id")
     if not req_id:

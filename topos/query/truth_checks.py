@@ -65,7 +65,9 @@ OBJECT_DIMENSION = "memory"
 EXTRACTOR_VERSION = "truth_inbound_v1"
 SNIPPET_CHARS = 400
 STATEMENT_CHARS = 1000
-MAX_CARDS = 50
+#: The most cards one read returns. 500 (was 50): the node returns every open claim and the app chooses how many to
+#: show; on 27 Oct 2026 105 cards waited behind the 50 cap, and the owner never saw the other 55.
+MAX_CARDS = 500
 MAX_WEEKS = 8
 MAX_NOTE_CHARS = 1000
 
@@ -147,8 +149,9 @@ _DDL = (
 #: of the record (1 for every row stored before retries existed); ``read_timeout_s`` is the reader cap the last check
 #: ran with (NULL for a row stored before it was recorded, or for a row the gate refused without a model call);
 #: ``checked_at`` is when the last check ran (NULL: ``created_at``). ``engine_version`` / ``engine_sha16`` name the
-#: engine build of the last check: ``verify_v2.VERSION`` and the sha16 of ``verify_v2.py`` (NULL on rows stored
-#: before the stamp), so the weekly eval tells builds apart by stamp rather than by time.
+#: engine build of the last check: ``verify_v2.VERSION`` and ``verify_v2.engine_sha16()`` (one digest over the four
+#: engine files of ``verify_v2.ENGINE_MANIFEST``; before 27 Oct 2026 the digest of ``verify_v2.py`` alone; NULL on rows
+#: stored before the stamp), so the weekly eval tells builds apart by stamp rather than by time.
 #: ``contradicted`` (27 Oct 2026): 1 when the engine answered "contradicted" (only for a category the owner opted in,
 #: ``verify_v2.CONTRADICTION_CATEGORIES``). The verdict column keeps its four values (its CHECK cannot change in place):
 #: such a row is ``no_evidence`` with reason ``contradicted`` and this flag set.
@@ -207,20 +210,33 @@ def iso_week(when: Optional[datetime] = None) -> str:
     return f"{year}-W{week:02d}"
 
 
-def _aware(value: Any) -> Optional[datetime]:
+def instant(value: Any) -> Optional[datetime]:
+    """A stored time as an aware UTC instant: the one reading of the checked tables' times, shared with the engine
+    (``verify_v2`` imports it). None for an empty, date-only or unreadable value: a bare date is not an instant.
+
+    A naive time (no offset, no ``Z``) is the node's LOCAL time. Until 27 Oct 2026 this module read naive as UTC
+    while ``verify_v2._instant`` read it as local, so the reader's date and the as-of cutoff could disagree about the
+    same row. A read-only census of the owner's node that day decided the rule: ``conversation_messages.event_at``
+    is written with an offset (98,502 of 98,568 rows; 59 ``Z``; 7 naive, all voice transcripts), while every
+    ``journal_entries.entry_at`` (616 of 616) is naive, because the journal normaliser strips an entry's offset without
+    converting it, so the stored value is the wall clock where it was written, i.e. local. Reading it as UTC had put
+    every journal entry five hours early."""
     text = str(value or "").strip()
-    if not text:
+    if len(text) <= 10:
         return None
     try:
         when = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError:
         return None
-    return when if when.tzinfo else when.replace(tzinfo=timezone.utc)  # a naive time is UTC, the engine's rule
+    return when.astimezone(timezone.utc)  # a naive time is local: astimezone() applies the node's own zone
+
+
+_aware = instant  # the old name, read by reflection.py and reflection_facts.py
 
 
 def with_offset(value: Any) -> Optional[str]:
     """A stored time as ISO 8601 with the node's local offset (``said_at``)."""
-    when = _aware(value)
+    when = instant(value)
     return when.astimezone().isoformat() if when else None
 
 
@@ -670,25 +686,65 @@ def _write_verified_claim(conn: sqlite3.Connection, key: str, payload: Dict[str,
     )
 
 
-def forget_records(conn: sqlite3.Connection, record_ids: Optional[Iterable[str]] = None) -> int:
-    """Delete the checks of removed records, with their labels and ``verified_claim`` objects: a claim read out of a
-    record does not outlive it. With ``record_ids`` (the owner's "remove this" flow) those records' checks; without
-    (a source scrub), every check whose record is no longer in its table. Returns the number of checks removed."""
+def _gone_from(conn: sqlite3.Connection, table: str) -> str:
+    """The SQL clause that keeps only checks whose record is no longer in ``table`` (every check, when the table itself
+    is absent)."""
+    id_column = CHECKED_TABLES[table][0]
+    return "" if not _present(conn, table) else (
+        f" AND NOT EXISTS (SELECT 1 FROM {table} m WHERE m.{id_column} = c.record_id)")
+
+
+def forget_records(conn: sqlite3.Connection, records: Optional[Iterable[Any]] = None) -> int:
+    """Delete the checks of removed records, with their labels, dismissals, skips and ``verified_claim`` objects: a
+    claim read out of a record does not outlive it. Returns the number of checks removed.
+
+    ``records`` (the owner's "remove this" flow) names records as ``(record_table, record_id)`` pairs, or as bare ids
+    when the caller knows only those. A check is keyed on both: record ids are unique within a table, not across the
+    checked tables. A bare id that one checked table's rows carry names that check; a bare id two tables' rows carry
+    (a collision) names only the checks whose record is actually gone from its own table (until 27 Oct 2026 a bare id
+    removed every check carrying it, whichever table the record lived in). Without ``records`` (a source scrub), every
+    check whose record is no longer in its table."""
     if not tables_present(conn):
         return 0
     gone: List[str] = []
-    if record_ids is not None:
-        ids = sorted({str(r) for r in record_ids if str(r).strip()})
+    if records is not None:
+        pairs: set = set()
+        bare: set = set()
+        for item in records:
+            if isinstance(item, (tuple, list)) and len(item) == 2:
+                if str(item[0]) in CHECKED_TABLES and str(item[1]).strip():
+                    pairs.add((str(item[0]), str(item[1])))
+            elif str(item).strip():
+                bare.add(str(item))
+        for table in CHECKED_TABLES:
+            ids = sorted({record_id for t, record_id in pairs if t == table})
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                gone += [str(r[0]) for r in conn.execute(
+                    f"SELECT c.check_id FROM {CHECKS_TABLE} c WHERE c.record_table = ? "
+                    f"AND c.record_id IN ({','.join('?' for _ in chunk)})", (table, *chunk))]
+        ids = sorted(bare)
+        carrying: Dict[str, List[Tuple[str, str, bool]]] = {}
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]
-            gone += [str(r[0]) for r in conn.execute(
-                f"SELECT check_id FROM {CHECKS_TABLE} WHERE record_id IN ({','.join('?' for _ in chunk)})", chunk)]
+            for table in CHECKED_TABLES:
+                present = _present(conn, table)
+                id_column = CHECKED_TABLES[table][0]
+                exists = f"EXISTS (SELECT 1 FROM {table} m WHERE m.{id_column} = c.record_id)" if present else "0"
+                for check_id, record_id, still_there in conn.execute(
+                        f"SELECT c.check_id, c.record_id, {exists} FROM {CHECKS_TABLE} c WHERE c.record_table = ? "
+                        f"AND c.record_id IN ({','.join('?' for _ in chunk)})", (table, *chunk)):
+                    carrying.setdefault(str(record_id), []).append((str(check_id), table, bool(still_there)))
+        for found in carrying.values():
+            if len(found) == 1:
+                gone.append(found[0][0])
+            else:
+                gone += [check_id for check_id, _, still_there in found if not still_there]
+        gone = sorted(set(gone))
     else:
-        for table, (id_column, _, _) in CHECKED_TABLES.items():
-            missing = "" if not _present(conn, table) else (
-                f" AND NOT EXISTS (SELECT 1 FROM {table} m WHERE m.{id_column} = c.record_id)")
+        for table in CHECKED_TABLES:
             gone += [str(r[0]) for r in conn.execute(
-                f"SELECT c.check_id FROM {CHECKS_TABLE} c WHERE c.record_table = ?{missing}", (table,))]
+                f"SELECT c.check_id FROM {CHECKS_TABLE} c WHERE c.record_table = ?{_gone_from(conn, table)}", (table,))]
     if not gone:
         return 0
     with with_db_write():

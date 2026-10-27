@@ -685,15 +685,13 @@ def test_each_source_tells_the_reader_its_kind(node, monkeypatch):
 
 # --- re-checks of unable rows -----------------------------------------------------------------------------------------
 def _engine():
-    import hashlib
-
     from topos.query import verify_v2
 
-    with open(verify_v2.__file__, "rb") as source:
-        return verify_v2.VERSION, hashlib.sha256(source.read()).hexdigest()[:16]
+    return verify_v2.VERSION, verify_v2.engine_sha16()
 
 
-#: The stamp every row this build stores carries: the engine's VERSION and the sha16 of verify_v2.py.
+#: The stamp every row this build stores carries: the engine's VERSION and the manifest digest of its four files
+#: (verify_v2.ENGINE_MANIFEST; tests/query/test_verify_v2.py pins the recipe).
 ENGINE = _engine()
 
 
@@ -995,3 +993,37 @@ def test_a_contradiction_is_stored_as_nothing_found_with_its_flag(node, monkeypa
     assert json.loads(row["cited_refs_json"])[0]["record_id"] == "j-old"
     [card] = store.claim_cards(node.conn, 10, True)["cards"]
     assert card["contradicted"] is True and store.weekly_stats(node.conn, 1)["weeks"][0]["contradicted"] == 1
+
+
+# --- the engine writes no answer row (lean v3 increment A, 27 Oct 2026) -------------------------------------------------
+def test_a_full_lane_run_with_no_owner_answer_writes_no_label_dismissal_skip_or_object(node, monkeypatch):
+    """First checks, then a re-check of the unable row: the lane writes truth_checks and truth_lane_daily only. The
+    owner's three answer tables and signal_objects are byte-identical across the re-check and signal_objects across
+    both runs, and an answered verdict is never rewritten (only an ``unable`` row is checked again)."""
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    add_journal(node.conn, "j2", "I painted both shed doors a deep blue today.")
+    node.conn.commit()
+    turn_on(node.conn)
+    objects_before = node.conn.execute("SELECT * FROM signal_objects ORDER BY object_id").fetchall()
+    late = {"verdict": "unable", "reason": "deadline", "claim": {"text": "The owner painted the shed doors."}, "evidence": [],
+            "timings_ms": {"total": 31000.0}}
+    monkeypatch.setattr(lane, "_verify", Recorder({"I painted both shed doors a deep blue today.": late}))
+    assert run_job({"records": [["journal_entries", "j1"], ["journal_entries", "j2"]]})["checked"] == 2
+    first = {c["record_id"]: (c["verdict"], c["cited_refs_json"]) for c in checks(node.conn)}
+    assert first["j1"][0] == "supported" and first["j2"][0] == "unable"
+
+    def answers():
+        return [node.conn.execute(f"SELECT * FROM {t} ORDER BY 1").fetchall()
+                for t in ("truth_labels", "truth_dismissals", "truth_skips", "signal_objects")]
+
+    after_first = answers()
+    assert after_first[:3] == [[], [], []] and after_first[3] == objects_before
+    node.conn.execute("UPDATE truth_checks SET checked_at=? WHERE record_id='j2'", (_hours_ago(7),))
+    node.conn.commit()
+    monkeypatch.setattr(lane, "_verify", Recorder())  # the re-check answers supported
+    out = run_job({"records": [["journal_entries", "j2"]]})
+    assert out["checked"] == 1 and out["rechecked"] == 1
+    after = {c["record_id"]: (c["verdict"], c["cited_refs_json"]) for c in checks(node.conn)}
+    assert after["j1"] == first["j1"] and after["j2"][0] == "supported"
+    assert answers() == after_first
+    assert node.conn.execute("SELECT COUNT(*) FROM truth_checks").fetchone()[0] == 2

@@ -204,10 +204,23 @@ def test_a_deleted_record_drops_its_card_and_a_deleted_cited_record_drops_its_sn
     assert card["check_id"] == week.me and card["cited"] == []
 
 
-@pytest.mark.parametrize("limit, unlabelled_only", [(0, True), (51, True), ("5", True), (5, "yes")])
-def test_cards_take_a_limit_of_fifty(node, limit, unlabelled_only):
+@pytest.mark.parametrize("limit, unlabelled_only", [(0, True), (501, True), ("5", True), (5, "yes")])
+def test_cards_take_a_limit_of_five_hundred(node, limit, unlabelled_only):
     with pytest.raises(store.TruthRequestError):
         store.claim_cards(node.conn, limit, unlabelled_only)
+
+
+def test_every_open_claim_is_returned_and_the_app_chooses_how_many_to_show(node):
+    """The node returns every open claim (the owner sees everything; the app shows 20 a week). The 50 cap this replaces
+    held 105 waiting cards behind it on 27 Oct 2026."""
+    for i in range(60):
+        add_message(node.conn, f"m-{i}", f"I painted shed door number {i} blue.", from_self=True, at=ago(minutes=i + 1))
+    node.conn.commit()
+    for i in range(60):
+        _check(node.conn, "conversation_messages", f"m-{i}", "imessage", True, claim=f"The owner painted shed door {i} blue.")
+    assert store.MAX_CARDS == 500
+    assert len(store.claim_cards(node.conn, 500, True)["cards"]) == 60
+    assert len(store.claim_cards(node.conn, 20, True)["cards"]) == 20
 
 
 # --- the four doors ---------------------------------------------------------------------------------------------------
@@ -271,7 +284,7 @@ def test_the_owner_reads_stats_and_cards_and_labels_through_the_doors(node, week
     cards = _as(owner, "truth_claim_cards", {"limit": 50, "unlabelled_only": True, "speakers": "all"})["payload"]["cards"]
     assert [c["check_id"] for c in cards] == [week.them, week.me]
     assert _as(owner, "truth_claim_cards", {"speakers": "contacts"})["error"] == "invalid_truth_request"
-    assert _as(owner, "truth_claim_cards", {"limit": 51})["error"] == "invalid_truth_request"
+    assert _as(owner, "truth_claim_cards", {"limit": 501})["error"] == "invalid_truth_request"
     labelled = _as(owner, "truth_claim_label", {"check_id": week.me, "label": "true", "note": "yes"})
     assert labelled["status"] == "ok" and labelled["payload"]["ok"] is True and labelled["payload"]["label_id"]
     assert _as(owner, "truth_claim_label", {"check_id": "nope", "label": "true"})["error"] == "unknown_check"
@@ -451,21 +464,29 @@ def test_share_side_readers_of_signal_objects_read_facts_or_named_ids_only():
 
 def test_the_truth_tables_and_verified_claims_are_withheld_from_the_table_tools_for_all_but_the_owner(node, week):
     from topos.core.handlers import handle_control_plane_request
-    from topos.data_explorer_tables import OWNER_ONLY_TABLES
+    from topos.data_explorer_tables import OWNER_ONLY_TABLE_PREFIXES, OWNER_ONLY_TABLES, is_owner_only_table
 
     store.label_claim(node.conn, week.me, "true")
     node.conn.execute("INSERT INTO signal_objects (object_id, signal_dimension, object_type, object_key, payload_json, "
                       "valid_from, created_at, updated_at) VALUES ('f1', 'memory', 'fact', 'k', '{}', 'x', 'x', 'x')")
     node.conn.commit()
-    assert {"truth_checks", "truth_labels"} <= OWNER_ONLY_TABLES
+    # Every table the lane's DDL creates is owner-only, by the ``truth_`` prefix: a table a later build adds cannot miss
+    # the rule. Until 27 Oct 2026 the rule was a two-name set, and truth_dismissals (the owner's free-text note),
+    # truth_skips and truth_lane_daily were served to any principal by the legacy table tools.
+    assert {"truth_checks", "truth_labels"} <= OWNER_ONLY_TABLES and OWNER_ONLY_TABLE_PREFIXES == ("truth_",)
+    truth_tables = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", "\n".join(store._DDL))
+    assert set(truth_tables) == {"truth_checks", "truth_labels", "truth_dismissals", "truth_skips", "truth_lane_daily"}
+    assert all(is_owner_only_table(t) for t in truth_tables) and is_owner_only_table("truth_anything_later")
+    assert not is_owner_only_table("conversation_messages") and not is_owner_only_table("truthiness")
+    assert all(store._present(node.conn, t) for t in truth_tables)
 
     def rows(principal, table):
         message = {"id": "r1", "type": "get_table_rows", "payload": {"table_name": table, "limit": 100}}
         return asyncio.run(handle_control_plane_request(message, principal=principal))
 
     for relay in (Principal(CP_RELAY, "cp_relay"), Principal("owner_automation", "cp_relay")):
-        for table in ("truth_checks", "truth_labels"):
-            assert rows(relay, table)["error"] == "owner_mode_required"
+        for table in truth_tables:
+            assert rows(relay, table)["error"] == "owner_mode_required", table
         objects = rows(relay, "signal_objects")["payload"]["rows"]
         assert [o["object_type"] for o in objects] == ["fact"]
     owner = Principal(OWNER_APP, "uds")
@@ -598,3 +619,141 @@ def test_the_owner_skips_through_the_door(node, week):
     assert out["status"] == "ok" and out["payload"]["skip_id"]
     assert _skips(node.conn) == [(week.me, "unclear_claim", 0)]
     assert _as(owner, "truth_claim_label", {"check_id": week.me, "relevance": "skipped", "skip_reason": "x"})["error"] == "invalid_truth_label"
+
+
+# --- a record id is unique within a table, not across them (27 Oct 2026) ----------------------------------------------
+def test_a_bare_record_id_two_tables_share_forgets_only_the_record_that_is_gone(node):
+    """``forget_records`` is keyed on (table, id). The owner's "remove this" flow knows ids only, so a bare id that
+    two checked tables' rows carry removes the check whose record is gone from its own table and keeps the other
+    (until 27 Oct 2026 it removed both). A (table, id) pair names its check outright."""
+    add_journal(node.conn, "dup-1", "I painted both shed doors a deep blue today.")
+    add_message(node.conn, "dup-1", "I painted the shed doors blue yesterday afternoon.", from_self=True)
+    node.conn.commit()
+    journal = _check(node.conn, "journal_entries", "dup-1", "journal", True)
+    message = _check(node.conn, "conversation_messages", "dup-1", "imessage", True)
+    store.label_claim(node.conn, message, "true")
+    assert store.forget_records(node.conn, ["dup-1"]) == 0  # both records still exist: the id names neither
+    node.conn.execute("DELETE FROM conversation_messages WHERE message_id='dup-1'")
+    node.conn.commit()
+    assert store.forget_records(node.conn, ["dup-1"]) == 1
+    assert [r[0] for r in node.conn.execute("SELECT check_id FROM truth_checks")] == [journal]
+    assert node.conn.execute("SELECT COUNT(*) FROM truth_labels").fetchone()[0] == 0 and _objects(node.conn) == []
+    assert store.forget_records(node.conn, [("journal_entries", "dup-1")]) == 1  # a pair names its table outright
+    assert node.conn.execute("SELECT COUNT(*) FROM truth_checks").fetchone()[0] == 0
+    assert store.forget_records(node.conn, [("not_a_checked_table", "dup-1"), "", ("journal_entries", "")]) == 0
+
+
+# --- the public reads are blind to the lane (lean v3 increment A, 27 Oct 2026) ------------------------------------------
+PUBLIC_STATEMENTS = ("I love playing the mandolin", "I have never played the mandolin", "I play tennis every week",
+                     "I hate cilantro", "I only listen to vinyl records", "I was never diagnosed with an allergy")
+
+
+def _seed_fun_fact(conn):
+    from topos.features.facts.store import FactStore
+
+    FactStore(conn).assert_fact(subject_entity_id="self-1", predicate="enjoys", object_value="playing the mandolin",
+                                dimension="interests", confidence=0.8, source_refs=[], disclosure="scoped")
+    conn.commit()
+
+
+def _public_reads(conn):
+    """Both reads the truth door opens to the CP relay and enrolled clients, as the caller sees them (no ``_audit``)."""
+    from topos.query.truth_prompts import suggest_prompts
+    from topos.query.verify import verify_claim
+
+    out = {}
+    for statement in PUBLIC_STATEMENTS:
+        result = verify_claim(conn, statement=statement, mode="fun", caller_app_id="tru-test-app")
+        result.pop("_audit", None)
+        out[statement] = result
+    prompts = suggest_prompts(conn, mode="fun", caller_app_id="tru-test-app", limit=8)
+    prompts.pop("_audit", None)
+    out["prompts"] = prompts
+    return json.dumps(out, sort_keys=True)
+
+
+def test_the_public_reads_answer_the_same_bytes_whatever_the_lane_holds(node):
+    """verify_claim and truth_prompts read the fact store and nothing of the lane: the owner's own utterance, its
+    negation, five repeats and a label ruled true change not one byte of either answer, and neither path touches a
+    truth_ table. The label writes a ``verified_claim`` into signal_objects, which the public path legitimately reads
+    for ``object_type = 'fact'``, so the bytes are the property; a trace alone could not see that route."""
+    _seed_fun_fact(node.conn)
+    before = _public_reads(node.conn)
+    assert '"stance": "contradicts"' in before  # the seeded fact is found: the reads are not trivially empty
+    texts = ["I love playing the mandolin", "I have never played the mandolin"] + ["I love playing the mandolin"] * 5
+    ids = [_check(node.conn, "conversation_messages", f"m-{i}", "imessage", True, claim=text, category="view")
+           for i, text in enumerate(texts)]
+    store.label_claim(node.conn, ids[0], "true", evidence_ok=True)
+    assert node.conn.execute("SELECT COUNT(*) FROM truth_checks").fetchone()[0] == 7 and len(_objects(node.conn)) == 1
+    statements = []
+    node.conn.set_trace_callback(statements.append)
+    try:
+        after = _public_reads(node.conn)
+    finally:
+        node.conn.set_trace_callback(None)
+    assert after == before
+    assert {m for s in statements for m in re.findall(r"\btruth_\w+", s)} == set()
+    assert any("signal_objects" in s for s in statements)
+
+
+class _OwnerChat:
+    """The owner engine's model, stood in: one claim about the shed doors, and "shows" for the one record offered."""
+
+    name = "fake"
+
+    def __call__(self, system, user, schema, timeout, usage):
+        from topos.query import verify_v2 as v2
+
+        usage.add(1, 1)
+        if system in (v2.READ_SYSTEM, v2.READ_SYSTEM_WITH_OTHERS):
+            return {"category": "did", "not_checkable_because": "", "claims": [
+                {"type": "did_or_made", "subject": "owner", "reported_speech": False,
+                 "claim": "The owner painted the shed doors blue.", "names": ["shed"], "date_from": "", "date_to": ""}]}
+        return {"labels": [{"n": 1, "label": "shows"}]}
+
+
+def test_the_request_paths_write_nothing_even_with_labels_as_evidence_on(node, week, monkeypatch):
+    """verify_claim, truth_prompts and verify_claim_owner are reads. With LABELS_AS_EVIDENCE and CONSISTENCY on, the
+    owner path reads the owner's labels as evidence (one label shown, cited, supported) and still issues no INSERT,
+    UPDATE or DELETE; and only a label the OWNER wrote counts: a ``verified_claim`` some engine wrote with the same
+    payload is not evidence (``owner_labels`` requires ``created_by = 'owner'``)."""
+    from topos.query import verify_v2 as v2
+    from topos.query.truth_prompts import suggest_prompts
+    from topos.query.verify import verify_claim
+
+    _seed_fun_fact(node.conn)
+    store.label_claim(node.conn, week.me, "true")  # CLAIM_ME, the owner's own judgement
+    node.conn.execute("INSERT INTO signal_objects (object_id, signal_dimension, object_type, object_key, payload_json, confidence, "
+                      "source_refs_json, valid_from, created_at, updated_at, created_by) SELECT 'engine-copy', signal_dimension, "
+                      "object_type, 'truth_check:engine', payload_json, confidence, source_refs_json, valid_from, created_at, "
+                      "updated_at, 'derivation' FROM signal_objects WHERE object_type='verified_claim'")
+    node.conn.commit()
+    assert len(_objects(node.conn)) == 2 and len(v2.owner_labels(node.conn)) == 1
+    monkeypatch.setattr(v2, "LABELS_AS_EVIDENCE", True)
+    monkeypatch.setattr(v2, "CONSISTENCY", True)
+
+    class NoRecords:  # retrieval stood in: the only evidence on offer is the owner's label
+        def __init__(self, conn):
+            pass
+
+        def gather(self, query, needles, now):
+            return [], {"candidates": 0}
+
+    monkeypatch.setattr(v2, "NodeEvidence", NoRecords)
+
+    async def gather(fn):
+        return fn(node.conn)
+
+    changes, statements = node.conn.total_changes, []
+    node.conn.set_trace_callback(statements.append)
+    try:
+        verify_claim(node.conn, statement="I love playing the mandolin", mode="fun", caller_app_id="tru-test-app")
+        suggest_prompts(node.conn, mode="fun", caller_app_id="tru-test-app")
+        request = v2.ClaimRequest(statement="I got the shed doors painted blue earlier.", speaker="owner", speaker_is_owner=True)
+        out = asyncio.run(v2.verify_owner_claim(request, chat=_OwnerChat(), gather_in_worker=gather, to_thread=asyncio.to_thread))
+    finally:
+        node.conn.set_trace_callback(None)
+    assert out["verdict"] == "supported" and out["stages"]["retrieve"]["owner_labels"] == 1
+    assert [e["source"] for e in out["evidence"] if e["cited"]] == ["verified_claim"]
+    writes = [s for s in statements if re.match(r"\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP)\b", s, re.I)]
+    assert writes == [] and node.conn.total_changes == changes and len(_objects(node.conn)) == 2
