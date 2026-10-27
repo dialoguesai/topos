@@ -38,9 +38,9 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
-from .truth_checks import instant
+from .truth_checks import instant, occurrence_refs
 from .verify_v2_models import ModelUnavailable, OutputSchema, Usage
 
 VERSION = "verify-claim/v2.0-dev"
@@ -139,6 +139,13 @@ GROUNDED_VECTOR = False
 #: against the lane's 20 s cap (27 Oct 2026). Generation is greedy and left to right, so the first claim is written the
 #: same way either way; the grammar only closes the list after it. Off: the reader is asked for up to three, as before.
 LEAN_READ = False
+#: VERIFY_V2_READ_POLARITY (lean v3 increment B, 27 Oct 2026): the reader says of each claim whether it affirms or
+#: denies ("I use X" / "I never use X"): one more enum field in the same call. The lane stores it beside the claim's
+#: polarity-blind key (``claim_key``), so a statement and its negation are two groups in the cards and a reversal can
+#: never raise the "said N times" count. A lexical key alone would merge them: ``claim_words`` strips ``_ENGLISH``,
+#: which holds "no" and "not". Off: today's reader; polarity is NULL, every row is its own group, cards per check as
+#: in 1.5.28. Storing the reading and re-checking from it are not behind this switch.
+READ_POLARITY = False
 #: Calibrate step 1 (owner, 27 Oct 2026): three evidence rules found on the first claim cards. Module switches like the
 #: ones above, on; off restores 1.5.28's behaviour for paired readings.
 #: SPEAKER_SUBJECT: the reader's "owner" subject means the speaker, while the evidence roles are the node owner's. When
@@ -289,21 +296,31 @@ _SCOPE_WITH_OTHERS = ("Prefer an assertion about the speaker themself; take one 
                       "speaker. A claim about someone else is still checkable: the owner's messages may show it.")
 
 
-def read_system(about_others: bool = False, source_kind: str = "spoken") -> str:
+#: The reader's polarity field (READ_POLARITY), spliced into the template so the switch-off prompt is byte-identical to
+#: the pinned one.
+_POLARITY_LINE = ('"polarity": "affirms" when the claim states that something is so, was done or is held; "denies" when it\n'
+                  'states that something is not so, was not done or is not held ("I never ...", "I don\'t ...", "it isn\'t ...").\n')
+
+
+def read_system(about_others: bool = False, source_kind: str = "spoken", polarity: Optional[bool] = None) -> str:
     """The reader's system prompt for a scope and a source kind: one string object per pair, and an unknown kind
-    reads as spoken."""
-    return _read_system(bool(about_others), source_kind if source_kind in SOURCE_KINDS else "spoken")
+    reads as spoken. ``polarity`` (default: READ_POLARITY) adds the polarity field's line."""
+    return _read_system(bool(about_others), source_kind if source_kind in SOURCE_KINDS else "spoken",
+                        bool(READ_POLARITY) if polarity is None else bool(polarity))
 
 
 @lru_cache(maxsize=None)
-def _read_system(about_others: bool, source_kind: str) -> str:
-    return _READ_TEMPLATE.format(scope=_SCOPE_WITH_OTHERS if about_others else _SCOPE_OWN, **_SOURCE_TEXT[source_kind])
+def _read_system(about_others: bool, source_kind: str, polarity: bool = False) -> str:
+    system = _READ_TEMPLATE.format(scope=_SCOPE_WITH_OTHERS if about_others else _SCOPE_OWN, **_SOURCE_TEXT[source_kind])
+    if polarity:
+        system = system.replace('"reported_speech": true if', _POLARITY_LINE + '"reported_speech": true if')
+    return system
 
 
-READ_SYSTEM = read_system(False, "spoken")
-READ_SYSTEM_WITH_OTHERS = read_system(True, "spoken")
+READ_SYSTEM = read_system(False, "spoken", polarity=False)
+READ_SYSTEM_WITH_OTHERS = read_system(True, "spoken", polarity=False)
 
-def _read_schema(why_not) -> Dict[str, Any]:
+def _read_schema(why_not, polarity: bool = False) -> Dict[str, Any]:
     claim = {
         "type": "object",
         "properties": {
@@ -318,6 +335,9 @@ def _read_schema(why_not) -> Dict[str, Any]:
         },
         "required": ["type", "subject", "reported_speech", "claim", "names", "date_from", "date_to", "as_written"],
     }
+    if polarity:
+        claim["properties"]["polarity"] = {"type": "string", "enum": ["affirms", "denies"]}
+        claim["required"] = ["type", "subject", "reported_speech", "polarity", "claim", "names", "date_from", "date_to", "as_written"]
     return {
         "type": "object",
         "properties": {
@@ -334,20 +354,23 @@ READ_SCHEMA_WITH_OTHERS = _read_schema(w for w in WHY_NOT if w != "not_about_the
 
 
 @lru_cache(maxsize=None)
-def _lean_read_schema(about_others: bool, max_claims: int) -> Dict[str, Any]:
-    schema = _read_schema(w for w in WHY_NOT if not about_others or w != "not_about_the_owner")
+def _lean_read_schema(about_others: bool, max_claims: int, polarity: bool = False) -> Dict[str, Any]:
+    schema = _read_schema((w for w in WHY_NOT if not about_others or w != "not_about_the_owner"), polarity)
     schema["properties"]["claims"]["maxItems"] = max_claims
     return schema
 
 
 def read_schema_for(req: "ClaimRequest") -> Dict[str, Any]:
     """The reader's output schema for a request: up to MAX_CLAIMS claims, or with LEAN_READ on, no more than its effort
-    checks."""
+    checks; with READ_POLARITY on, each claim carries its polarity."""
+    polarity = bool(READ_POLARITY)
     if LEAN_READ:
         levels = efforts()
         wanted = int((levels.get(req.effort) or levels["high"])["claims"])
         if 0 < wanted < MAX_CLAIMS:
-            return _lean_read_schema(bool(req.about_others), wanted)
+            return _lean_read_schema(bool(req.about_others), wanted, polarity)
+    if polarity:
+        return _lean_read_schema(bool(req.about_others), MAX_CLAIMS, True)
     return READ_SCHEMA_WITH_OTHERS if req.about_others else READ_SCHEMA
 
 LABEL_SYSTEM = """You check excerpts from a person's own records against one claim. Each excerpt is numbered and shows its
@@ -425,6 +448,12 @@ class ClaimRequest:
     #: SAME_THREAD_GUARD.
     source_ref: Optional[str] = None
     conversation_id: Optional[str] = None
+    #: A stored reading (``{"category", "claims": [...]}`` in the reader's own output shape, as ``out["reading"]``
+    #: returns it): the engine checks these claims and makes no reader call. The inbound lane passes it on a re-check.
+    reading: Optional[Dict[str, Any]] = None
+    #: Records ("table:id") that must not be shown as evidence beyond the claim's own record. Only removes records,
+    #: never adds or re-ranks; the engine adds the lane's other occurrences of the same claim itself.
+    exclude_refs: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -437,6 +466,56 @@ class Claim:
     date_from: str
     date_to: str
     as_written: str = ""
+    #: +1 affirms, -1 denies, None when the reader was not asked (READ_POLARITY off) or did not say.
+    polarity: Optional[int] = None
+
+
+def claim_dict(c: Claim) -> Dict[str, Any]:
+    """A claim in the reader's own output shape, so a stored reading (``out["reading"]``) round-trips through
+    :func:`_claim_from` with no reader call."""
+    return {"type": c.kind, "subject": c.subject, "reported_speech": c.reported_speech, "claim": c.text, "names": list(c.names),
+            "date_from": c.date_from, "date_to": c.date_to, "as_written": c.as_written,
+            "polarity": {1: "affirms", -1: "denies"}.get(c.polarity)}
+
+
+def window_class(claim: Claim) -> str:
+    """What the claim's dates cover: ``none`` (no dates), ``day``, ``range`` or ``open`` (one end only)."""
+    lo, hi = _day(claim.date_from), _day(claim.date_to)
+    if not lo and not hi:
+        return "none"
+    if lo and hi:
+        return "day" if lo == hi else "range"
+    return "open"
+
+
+def claim_key(category: Optional[str], claim: Claim) -> str:
+    """The proposition a claim asserts, as a grouping key: ``category | kind | window class | words``, where the words
+    are the claim's distinctive names plus the first three distinctive words of the reader's claim text that are not
+    names, all lowercased and sorted. Names alone would merge every claim about one thing ("read the Orbit paper",
+    "pushed the Orbit fix"); the reader's claim text is normalised wording ("The owner uses X every day." for "I use
+    X" and "I never use X" alike), so its words tell claims apart without splitting a repeat. Polarity-blind by design:
+    polarity is its own column, so a statement and its negation share a key and differ in polarity, and the cards
+    never count a reversal as a repeat. Cardinal-blind by construction: ``claim_words`` keeps words that start with a
+    letter and a bare number is not a name, so "a team of five" and "a team of eight" group as one claim whose
+    current value is the newest utterance's. Negation words never enter the key. This function is the one iterable
+    part of grouping: widening it (shared-word thresholds, an embedding lane) is a later weekly round, read by the
+    grouped share and the owner's splits."""
+    from .verify import _NEGATION_CUES
+
+    names = {n.lower() for n in claim.names if re.search(r"[A-Za-z]", n)}
+    words = [w.lower() for w in claim_words(claim.text) if w.lower() not in _NEGATION_CUES and w.lower() not in names][:3]
+    return "|".join((str(category or ""), claim.kind, window_class(claim), " ".join(sorted(names | set(words)))))
+
+
+def reading_key(reading: Any) -> Tuple[Optional[str], Optional[int]]:
+    """``(claim_key, polarity)`` of a stored reading's main claim, for the lane's row; ``(None, None)`` without one."""
+    claims = reading.get("claims") if isinstance(reading, dict) else None
+    if not isinstance(claims, list) or not claims:
+        return None, None
+    claim = _claim_from(claims[0], "")
+    if claim is None or not claim.text:
+        return None, None
+    return claim_key(reading.get("category"), claim), claim.polarity
 
 
 # --- small pure helpers --------------------------------------------------------------------------------------------
@@ -559,7 +638,7 @@ def _claim_from(item: Dict[str, Any], fallback: str) -> Optional[Claim]:
     return Claim(kind=item["type"], subject=item.get("subject") if item.get("subject") in SUBJECTS else "owner",
                  reported_speech=item.get("reported_speech") is True, text=str(item.get("claim") or fallback)[:300],
                  names=clean_names(item.get("names")), date_from=str(item.get("date_from") or ""), date_to=str(item.get("date_to") or ""),
-                 as_written=str(item.get("as_written") or "")[:300])
+                 as_written=str(item.get("as_written") or "")[:300], polarity={"affirms": 1, "denies": -1}.get(item.get("polarity")))
 
 
 def read_claims(req: ClaimRequest, chat: Callable, usage: Usage, timeout: float) -> Tuple[str, List[Claim], Optional[str]]:
@@ -797,13 +876,15 @@ def owner_labels(conn: sqlite3.Connection) -> List[Tuple[Any, ...]]:
 
 
 def select_evidence(records, sentence: str, claim: Claim, now: datetime, *, source_ref: Optional[str] = None,
-                    conversation_id: Optional[str] = None):
-    """As of the conversation; not the claim's own exchange; no quoting records; one per source record; first SHOWN in
-    retrieval order."""
+                    conversation_id: Optional[str] = None, exclude_refs: Optional[Iterable[str]] = None):
+    """As of the conversation; not the claim's own exchange; not another utterance of the same claim (``exclude_refs``:
+    repetition is counted on the card, never credited as evidence); no quoting records; one per source record; first
+    SHOWN in retrieval order."""
     cutoff = (now + timedelta(days=1)).date()
     thread_floor = now - timedelta(hours=SAME_THREAD_HOURS)
     grams = ngrams(sentence)
-    seen, kept, dropped = set(), [], {"as_of": 0, "quoting": 0, "own_record": 0, "same_thread": 0}
+    excluded = {str(ref) for ref in (exclude_refs or ())}
+    seen, kept, dropped = set(), [], {"as_of": 0, "quoting": 0, "own_record": 0, "same_thread": 0, "occurrence": 0}
     for r in records:
         key = (r["table"], r["record_id"])
         if key in seen:
@@ -811,6 +892,9 @@ def select_evidence(records, sentence: str, claim: Claim, now: datetime, *, sour
         seen.add(key)
         if SAME_THREAD_GUARD and source_ref and f"{r['table']}:{r['record_id']}" == source_ref:
             dropped["own_record"] += 1
+            continue
+        if excluded and f"{r['table']}:{r['record_id']}" in excluded:
+            dropped["occurrence"] += 1
             continue
         d, at = _day(r["event_at"]), _instant(r["event_at"])
         late = ((at > now) if at else bool(d and d > now.date())) if STRICT_AS_OF else bool(d and d > cutoff)
@@ -1017,16 +1101,24 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
     out["stages"]["gate"] = "passed"
     try:
         t = time.perf_counter()
-        category, claims, why = await to_thread(read_claims, req, chat, usage, min(read_cap, left()))
+        stored = isinstance(req.reading, dict) and bool(req.reading.get("claims"))
+        if stored:  # a re-check: the claims the reader made of this utterance once, and no reader call
+            category = req.reading.get("category") if req.reading.get("category") in CATEGORIES else "did"
+            claims = [c for c in (_claim_from(x, req.statement) for x in list(req.reading["claims"])[:MAX_CLAIMS]) if c]
+            why = None if claims else "too_vague"
+        else:
+            category, claims, why = await to_thread(read_claims, req, chat, usage, min(read_cap, left()))
         out["timings_ms"]["read"] = round((time.perf_counter() - t) * 1000, 1)
         out["category"] = category
+        # The reading is on the answer from here on, deadline or not, so the lane can store it and never read twice.
+        out["reading"] = {"category": category, "claims": [claim_dict(c) for c in claims]}
         if not claims:
             out["stages"]["read"] = f"not_checkable:{why}"
             return respond(unable(f"not_checkable:{why}", out), started, usage)
         claims = claims[:effort["claims"]]
-        out["stages"]["read"] = {"claims": len(claims)}
+        out["stages"]["read"] = {"claims": len(claims), **({"stored": True} if stored else {})}
         as_dict = lambda c: {"kind": c.kind, "subject": c.subject, "reported_speech": c.reported_speech, "text": c.text,
-                             "period": {"from": c.date_from, "to": c.date_to}}
+                             "polarity": c.polarity, "period": {"from": c.date_from, "to": c.date_to}}
         out["claim"] = as_dict(claims[0])
         if left() <= 1.0:
             return respond(unable("deadline", out), started, usage)
@@ -1046,11 +1138,17 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
                     labels = labelled_evidence(owner_labels(conn), claim, now, source_ref=req.source_ref)
                     counts["owner_labels"] = len(labels)
                     found = labels + found
+                if req.source_ref and claim.kind != "opinion" and claim.polarity is not None:
+                    # Another utterance of the same claim is counted on the card, never shown as evidence for it; for a
+                    # view the owner's own earlier words ARE the evidence (CONSISTENCY), so views are not excluded.
+                    counts["excluded_refs"] = occurrence_refs(conn, claim_key(category, claim), claim.polarity, own=req.source_ref)
                 return found, counts
 
             records, stats = await gather_in_worker(gather_all)
+            excluded = list(req.exclude_refs or []) + list(stats.pop("excluded_refs", None) or [])
+            stats["excluded_occurrences"] = len(excluded)
             evidence, dropped = select_evidence(records, req.statement, claim, now, source_ref=req.source_ref,
-                                                conversation_id=req.conversation_id)
+                                                conversation_id=req.conversation_id, exclude_refs=excluded)
             r["timings_ms"]["retrieve"] = round((time.perf_counter() - t) * 1000, 1)
             r["stages"]["retrieve"] = {**stats, **{f"dropped_{k}": v for k, v in dropped.items()}, "shown": len(evidence)}
             if not evidence:

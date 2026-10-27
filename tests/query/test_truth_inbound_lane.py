@@ -287,7 +287,10 @@ def test_the_stored_row_has_the_designs_columns_and_cited_refs_without_text(node
     assert set(row) == {"check_id", "record_table", "record_id", "conversation_id", "source", "speaker_kind", "week",
                         "category", "claim_text", "verdict", "reason", "cited_refs_json", "effort", "model",
                         "latency_ms", "created_at", "attempts", "read_timeout_s", "checked_at", "engine_version",
-                        "engine_sha16", "contradicted"}
+                        "engine_sha16", "contradicted", "reading_json", "polarity", "claim_key", "said_at",
+                        "group_override", "owner_labels_shown"}
+    assert row["reading_json"] is None and row["polarity"] is None and row["claim_key"] is None  # the stub gave no reading
+    assert row["said_at"] and datetime.fromisoformat(row["said_at"]).utcoffset() is not None and row["group_override"] is None
     assert row["attempts"] == 1 and row["read_timeout_s"] == lane.LOCAL_READ_TIMEOUT_S and row["checked_at"] == row["created_at"]
     assert (row["engine_version"], row["engine_sha16"]) == ENGINE  # the stub answered without a version: VERSION
     assert row["verdict"] == "supported" and row["claim_text"] == "The owner finished the garden shed."
@@ -867,7 +870,8 @@ def test_a_table_the_1519_lane_created_gains_the_columns_and_its_timed_out_rows_
     job_id = lane.enqueue_truth_checks(node.conn)
     assert job_id
     columns = [r[1] for r in node.conn.execute("PRAGMA table_info(truth_checks)").fetchall()]
-    assert columns[-6:] == ["attempts", "read_timeout_s", "checked_at", "engine_version", "engine_sha16", "contradicted"]
+    assert columns[-12:] == ["attempts", "read_timeout_s", "checked_at", "engine_version", "engine_sha16", "contradicted",
+                             "reading_json", "polarity", "claim_key", "said_at", "group_override", "owner_labels_shown"]
     [row] = checks(node.conn)
     assert row["attempts"] == 1 and row["read_timeout_s"] is None and row["checked_at"] is None
     assert row["engine_version"] is None and row["engine_sha16"] is None  # 1.5.19's rows: unstamped
@@ -1027,3 +1031,63 @@ def test_a_full_lane_run_with_no_owner_answer_writes_no_label_dismissal_skip_or_
     assert after["j1"] == first["j1"] and after["j2"][0] == "supported"
     assert answers() == after_first
     assert node.conn.execute("SELECT COUNT(*) FROM truth_checks").fetchone()[0] == 2
+
+
+# --- the stored reading (lean v3 increment B, 27 Oct 2026) ----------------------------------------------------------------
+def test_the_row_stores_the_reading_its_polarity_key_and_time(node, monkeypatch):
+    add_journal(node.conn, "j1", "I never use tabs in Python.", at="2026-10-22T09:30:00")
+    node.conn.commit()
+    turn_on(node.conn)
+    reading = {"category": "state", "claims": [{"type": "setup", "subject": "owner", "reported_speech": False,
+                                                "claim": "The owner uses tabs in Python.", "names": ["Python", "tabs"],
+                                                "date_from": "", "date_to": "", "as_written": "", "polarity": "denies"}]}
+    answer = {**supported(claim="The owner uses tabs in Python."), "category": "state", "reading": reading,
+              "stages": {"retrieve": {"owner_labels": 0, "candidates": 3}}}
+    monkeypatch.setattr(lane, "_verify", Recorder({"I never use tabs in Python.": answer}))
+    run_job({"records": [["journal_entries", "j1"]]})
+    [row] = checks(node.conn)
+    assert json.loads(row["reading_json"]) == reading and row["polarity"] == -1
+    assert row["claim_key"] == "state|setup|none|python tabs" and row["owner_labels_shown"] == 0
+    assert row["said_at"] == store.with_offset("2026-10-22T09:30:00")  # the record's own time, local, with its offset
+    state = store.check_state(node.conn, "journal_entries", "j1")
+    assert json.loads(state["reading_json"]) == reading and state["category"] == "state"
+
+
+def test_a_recheck_runs_from_the_stored_reading_with_no_reader_call(node, monkeypatch):
+    """An unable row that already carries its reading is checked again through the real engine: retrieval and the
+    judge only. The chat is never called for a read (here never at all: no records, so no judge either), the reading
+    survives the in-place rewrite, and the row is answered."""
+    from topos.query import verify_v2
+
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    _unable(node.conn, checked_at=_hours_ago(7))
+    reading = {"category": "did", "claims": [{"type": "did_or_made", "subject": "owner", "reported_speech": False,
+                                              "claim": "The owner finished building the garden shed.", "names": ["shed"],
+                                              "date_from": "", "date_to": "", "as_written": "", "polarity": "affirms"}]}
+    node.conn.execute("UPDATE truth_checks SET reading_json=?, claim_key=?, polarity=1 WHERE record_id='j1'",
+                      (json.dumps(reading), "did|did_or_made|none|building finished garden shed"))
+    node.conn.commit()
+    turn_on(node.conn)
+
+    class NoModel:
+        name, model = "local", "stand-in"
+
+        def __call__(self, system, user, schema, timeout, usage):
+            raise AssertionError("a re-check from a stored reading makes no reader call")
+
+    class NoRecords:
+        def __init__(self, conn):
+            pass
+
+        def gather(self, query, needles, now):
+            return [], {"candidates": 0}
+
+    monkeypatch.setattr(lane, "_chat_for", lambda m: NoModel())
+    monkeypatch.setattr(verify_v2, "NodeEvidence", NoRecords)
+    out = run_job({"records": [["journal_entries", "j1"]]})
+    assert out["checked"] == 1 and out["rechecked"] == 1
+    [row] = checks(node.conn)
+    assert row["verdict"] == "no_evidence" and row["attempts"] == 2
+    assert json.loads(row["reading_json"]) == reading and row["claim_key"] == "did|did_or_made|none|building finished garden shed" and row["polarity"] == 1
+    assert row["claim_text"] == "The owner finished building the garden shed."

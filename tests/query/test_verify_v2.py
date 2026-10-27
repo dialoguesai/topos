@@ -102,7 +102,9 @@ def test_select_evidence_as_of_quote_and_dedupe():
                rec(3, "authored", text="note: i changed it so the pinwheel sidebar looks better today")]
     shown, dropped = v2.select_evidence(records, SENTENCE, claim(), now)
     assert [e["ref"] for e in shown] == ["journal_entries:r2"]
-    assert dropped == {"as_of": 1, "quoting": 1, "own_record": 0, "same_thread": 0}
+    assert dropped == {"as_of": 1, "quoting": 1, "own_record": 0, "same_thread": 0, "occurrence": 0}
+    shown, dropped = v2.select_evidence(records, SENTENCE, claim(), now, exclude_refs=["journal_entries:r2"])
+    assert shown == [] and dropped["occurrence"] == 1  # an excluded ref only removes; nothing is added or re-ranked
 
 
 def test_supported_with_role_and_both_calls_agreeing(monkeypatch):
@@ -824,6 +826,109 @@ def test_the_engine_sha16_is_the_digest_the_weekly_lock_captures():
     assert v2.manifest_sha16("/nonexistent") == ""
 
 
+# --- VERIFY_V2_READ_POLARITY and the stored reading (lean v3 increment B) ------------------------------------------------
+#: Twenty propositions as the reader words them for a statement and for its negation alike ("I use Pinwheel every day"
+#: and "I never use Pinwheel" both read as the first), with the names the reader gives; polarity is the only difference.
+NEGATION_PAIRS = [
+    ("The owner uses Pinwheel every day.", ["Pinwheel"]), ("The owner finished the Pinwheel sidebar.", ["Pinwheel", "sidebar"]),
+    ("The owner drinks coffee in the morning.", ["coffee"]), ("The owner runs on Sundays.", ["running"]),
+    ("The owner likes the new keyboard.", ["keyboard"]), ("The owner read the Orbit paper.", ["Orbit"]),
+    ("The owner pushed the Orbit fix.", ["Orbit"]), ("The owner owns a Fender bass.", ["Fender"]),
+    ("The owner uses tabs in Python.", ["Python", "tabs"]), ("The owner speaks French at home.", ["French"]),
+    ("The owner called Robin on Monday.", ["Robin"]), ("The owner backs up the Vault nightly.", ["Vault"]),
+    ("The owner eats cilantro.", ["cilantro"]), ("The owner pays for Orbit.", ["Orbit"]),
+    ("The owner finished the shed roof.", ["shed"]), ("The owner keeps a journal.", ["journal"]),
+    ("The owner uses Signal with Robin.", ["Signal", "Robin"]), ("The owner watered the Monstera.", ["Monstera"]),
+    ("The owner merged the Pinwheel branch.", ["Pinwheel"]), ("The owner likes vinyl records.", ["vinyl"]),
+]
+
+
+def _read_claim(text, names, polarity):
+    return v2.Claim(kind="did_or_made", subject="owner", reported_speech=False, text=text, names=names, date_from="", date_to="",
+                    polarity=polarity)
+
+
+def test_the_claim_key_is_polarity_blind_and_the_pair_groups_apart():
+    """Twenty propositions, each read once affirmed and once denied: the pair shares one key and differs in polarity, so
+    (key, polarity) makes forty groups and zero shared ones. Different claims about one named thing keep different
+    keys; negation words never enter the key; a bare number is not a name."""
+    groups, keys = set(), set()
+    for text, names in NEGATION_PAIRS:
+        key_yes = v2.claim_key("did", _read_claim(text, names, 1))
+        key_no = v2.claim_key("did", _read_claim(text, names, -1))
+        assert key_yes == key_no, text
+        keys.add(key_yes)
+        groups.add((key_yes, 1))
+        groups.add((key_no, -1))
+    assert len(keys) == 20 and len(groups) == 40  # three Orbit claims and three Pinwheel claims stay apart
+    assert v2.claim_key("did", _read_claim("The owner uses Pinwheel every day.", ["Pinwheel"], 1)) == "did|did_or_made|none|day every pinwheel"
+    # no names: the first three distinctive words, minus negation cues, lowercased; the key never sees the negation
+    assert v2.claim_key("did", _read_claim("I never pushed the fix.", [], -1)) == v2.claim_key("did", _read_claim("I pushed the fix.", [], 1))
+    assert v2.claim_key("did", _read_claim("I never pushed the fix.", [], -1)) == "did|did_or_made|none|fix pushed"
+    # cardinal-blind, sorted, lowercased; the window class is part of the key
+    five, eight = _read_claim("My team has 5 people.", ["Team", "5"], 1), _read_claim("My team has 8 people.", ["5", "team"], 1)
+    assert v2.claim_key("count", five) == v2.claim_key("count", eight) == "count|did_or_made|none|people team"
+    dated = v2.Claim(kind="did_or_made", subject="owner", reported_speech=False, text="x", names=["Orbit"], date_from="2026-10-06", date_to="2026-10-06")
+    assert v2.window_class(dated) == "day" and v2.window_class(v2.replace(dated, date_to="2026-10-08")) == "range"
+    assert v2.window_class(v2.replace(dated, date_to="")) == "open" and v2.claim_key("did", dated) == "did|did_or_made|day|orbit"
+    assert v2.reading_key({"category": "did", "claims": [v2.claim_dict(dated)]}) == ("did|did_or_made|day|orbit", None)
+    assert v2.reading_key({"claims": []}) == (None, None) and v2.reading_key(None) == (None, None)
+
+
+def test_read_polarity_adds_one_field_behind_its_switch(monkeypatch):
+    req = v2.ClaimRequest(statement=SENTENCE)
+    assert v2.read_schema_for(req) is v2.READ_SCHEMA and "polarity" not in v2.READ_SCHEMA["properties"]["claims"]["items"]["properties"]
+    assert v2.read_system(False, "spoken") == v2.READ_SYSTEM and '"polarity"' not in v2.READ_SYSTEM
+    monkeypatch.setattr(v2, "READ_POLARITY", True)
+    schema = v2.read_schema_for(req)
+    assert schema["properties"]["claims"]["items"]["properties"]["polarity"] == {"type": "string", "enum": ["affirms", "denies"]}
+    assert "polarity" in schema["properties"]["claims"]["items"]["required"] and schema["properties"]["claims"]["maxItems"] == v2.MAX_CLAIMS
+    system = v2.read_system(False, "spoken")
+    assert system != v2.READ_SYSTEM and '"polarity": "affirms"' in system and system.replace(v2._POLARITY_LINE, "") == v2.READ_SYSTEM
+    monkeypatch.setattr(v2, "LEAN_READ", True)
+    lean = v2.read_schema_for(v2.ClaimRequest(statement=SENTENCE, effort="low"))
+    assert lean["properties"]["claims"]["maxItems"] == 1 and "polarity" in lean["properties"]["claims"]["items"]["required"]
+    assert v2._claim_from({**read_reply()["claims"][0], "polarity": "denies"}, "").polarity == -1
+    assert v2._claim_from({**read_reply()["claims"][0], "polarity": "affirms"}, "").polarity == 1
+    assert v2._claim_from(read_reply()["claims"][0], "").polarity is None
+
+
+class PolarityChat(FakeChat):
+    """FakeChat that recognises the reader's prompt with the polarity line on."""
+
+    def __call__(self, system, user, schema, timeout, usage):
+        if system.startswith("You prepare"):
+            usage.add(10, 2)
+            return self.read
+        return super().__call__(system, user, schema, timeout, usage)
+
+
+def test_the_answer_carries_the_reading_and_a_stored_reading_makes_no_reader_call(monkeypatch):
+    monkeypatch.setattr(v2, "READ_POLARITY", True)
+    out = run([rec(1, "authored")], PolarityChat(read_reply(polarity="denies"), {1: "shows"}))
+    assert out["verdict"] == "supported" and out["claim"]["polarity"] == -1 and out["usage"]["model_calls"] == 2
+    reading = out["reading"]
+    assert reading["category"] == "did" and [c["polarity"] for c in reading["claims"]] == ["denies"]
+    assert set(reading["claims"][0]) == {"type", "subject", "reported_speech", "claim", "names", "date_from", "date_to", "as_written", "polarity"}
+
+    class NoReader(FakeChat):
+        def __call__(self, system, user, schema, timeout, usage):
+            assert not system.startswith("You prepare"), "a stored reading must make no reader call"
+            return super().__call__(system, user, schema, timeout, usage)
+
+    again = run([rec(1, "authored")], NoReader(None, {1: "shows"}), reading=reading)
+    assert again["verdict"] == "supported" and again["usage"]["model_calls"] == 1 and again["stages"]["read"] == {"claims": 1, "stored": True}
+    assert again["reading"] == reading and again["claim"]["polarity"] == -1 and again["claim"]["kind"] == "did_or_made"
+
+
+def test_the_reading_survives_a_deadline_right_after_the_read():
+    """The lane stores the reading off any answer, so a deadline that lands after the read still leaves nothing to
+    read twice."""
+    out = run([rec(1, "authored")], FakeChat(read_reply(), {1: "shows"}, delay=0.35), deadline_s=1.2)
+    assert out["verdict"] == "unable" and out["reason"] == "deadline"
+    assert out["reading"]["category"] == "did" and len(out["reading"]["claims"]) == 1 and out["claim"]["kind"] == "did_or_made"
+
+
 def test_one_time_rule_for_every_stored_time():
     """The engine and the store read a stored time by one rule (truth_checks.instant): an offset or Z is honoured, a
     naive time is the node's LOCAL time (the journal writes wall-clock times with no offset), a bare date is not an
@@ -907,7 +1012,7 @@ def test_strict_as_of_drops_a_record_made_after_the_claim_even_the_same_day(monk
     later, earlier = at(minutes=3, n=1, conversation="other"), at(minutes=-3, n=2, conversation="other")
     day_only = {**at(n=3, conversation="other"), "event_at": "2026-10-26"}
     next_day = {**at(n=4, conversation="other"), "event_at": "2026-10-27"}
-    assert refs([later, earlier, day_only, next_day]) == (["m2", "m3"], {"as_of": 2, "quoting": 0, "own_record": 0, "same_thread": 0})
+    assert refs([later, earlier, day_only, next_day]) == (["m2", "m3"], {"as_of": 2, "quoting": 0, "own_record": 0, "same_thread": 0, "occurrence": 0})
     monkeypatch.setattr(v2, "STRICT_AS_OF", False)  # 1.5.28: anything up to the next day counted
     assert refs([later, earlier, day_only, next_day])[0] == ["m1", "m2", "m3", "m4"]
 

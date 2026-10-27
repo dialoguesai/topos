@@ -47,6 +47,7 @@ a stopped Ollama never marks a week of rows ``unable``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -322,6 +323,14 @@ def _prepare(conn: Any, table: str, record_id: str, sources: List[str], signatur
         return None
     if OWNER_CLAIMS_ONLY and not record["owner"]:
         return None
+    reading = None
+    if state is not None and state.get("reading_json"):  # a re-check runs from what the reader made of the row once
+        try:
+            stored = json.loads(str(state["reading_json"]))
+            if isinstance(stored, dict) and stored.get("claims"):
+                reading = {"category": stored.get("category") or state.get("category"), "claims": stored["claims"]}
+        except ValueError:
+            reading = None
     request = ClaimRequest(
         statement=record["text"][:STATEMENT_CHARS],
         context=previous_turns(conn, record, CONTEXT_TURNS, names),
@@ -335,6 +344,7 @@ def _prepare(conn: Any, table: str, record_id: str, sources: List[str], signatur
         speaker_is_owner=bool(record["owner"]),
         source_ref=f"{table}:{record_id}",
         conversation_id=record.get("conversation_id"),
+        reading=reading,
     )
     record.pop("row", None)
     return record, request, (state["attempts"] + 1 if state else 1)
@@ -362,12 +372,14 @@ def pause_cause(result: Dict[str, Any], hosted: bool) -> Optional[str]:
 
 
 def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional[str],
-              read_timeout_s: Optional[float] = None) -> Dict[str, Any]:
+              read_timeout_s: Optional[float] = None, said_at: Optional[str] = None) -> Dict[str, Any]:
     """The ``truth_checks`` row for one verify_claim v2 answer: verdict, the reader's main claim, cited refs only,
     stamped with the engine build (the answer's ``version``, else ``VERSION``: a row the engine's gate refused got no
-    answer, but the gate is the engine's own; and ``engine_sha16()``, one digest over the engine's four files)."""
+    answer, but the gate is the engine's own; and ``engine_sha16()``, one digest over the engine's four files). With the
+    answer's ``reading`` (what the reader made of the row), the row also carries it, the main claim's polarity and
+    polarity-blind key, the record's own time (``said_at``) and how many owner labels the check was shown."""
     from ..query.truth_checks import VERDICTS
-    from ..query.verify_v2 import VERSION, engine_sha16
+    from ..query.verify_v2 import VERSION, engine_sha16, reading_key
 
     verdict, reason = result.get("verdict"), result.get("reason")
     contradicted = verdict == "contradicted"  # stored as no_evidence + the flag (truth_checks._ADDED_COLUMNS)
@@ -386,6 +398,10 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
         if table and record_id:
             cited.append({"table": table, "record_id": record_id, "role": item.get("role"), "date": item.get("date")})
     latency = (result.get("timings_ms") or {}).get("total")
+    reading = result.get("reading") if isinstance(result.get("reading"), dict) and result["reading"].get("claims") else None
+    claim_key, polarity = reading_key(reading) if reading else (None, None)
+    retrieve = (result.get("stages") or {}).get("retrieve") if isinstance(result.get("stages"), dict) else None
+    shown = retrieve.get("owner_labels") if isinstance(retrieve, dict) else None
     return {
         "record_table": record["table"], "record_id": record["record_id"], "conversation_id": record.get("conversation_id"),
         "source": record["source"], "speaker_kind": "owner" if record["owner"] else "contact",
@@ -394,6 +410,8 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
         "model": model, "latency_ms": latency, "read_timeout_s": read_timeout_s,
         "engine_version": str(result.get("version") or VERSION)[:80], "engine_sha16": engine_sha16() or None,
         "contradicted": contradicted,
+        "reading_json": json.dumps(reading) if reading else None, "polarity": polarity, "claim_key": claim_key,
+        "said_at": said_at, "owner_labels_shown": int(shown or 0) if retrieve is not None else None,
     }
 
 
@@ -509,7 +527,7 @@ async def _run_batch(records, settings, chat, pace, signature, started, counts, 
         if refused:
             # The engine's own gate, asked first: a refused row is stored without a model call or a pacing slot.
             row = check_row(record, {"verdict": "unable", "reason": f"not_checkable:{refused}",
-                                     "timings_ms": {"total": 0.0}}, model=None)
+                                     "timings_ms": {"total": 0.0}}, model=None, said_at=request.said_at)
             await asyncio.to_thread(_db, _store, row, attempt)
             counts["not_checkable_by_gate"] += 1
             counts["rechecked"] += int(attempt > 1)
@@ -535,7 +553,7 @@ async def _run_batch(records, settings, chat, pace, signature, started, counts, 
             tally(record["source"], "paused")
             tally(record["source"], "deferred", len(records) - index)
             break
-        row = check_row(record, result, model=_model_label(chat), read_timeout_s=request.read_timeout_s)
+        row = check_row(record, result, model=_model_label(chat), read_timeout_s=request.read_timeout_s, said_at=request.said_at)
         await asyncio.to_thread(_db, _store, row, attempt)
         tally(record["source"], "checked")
         counts["checked"] += 1

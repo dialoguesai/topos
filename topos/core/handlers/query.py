@@ -380,7 +380,9 @@ async def handle_truth_claim_label(message: Dict[str, Any]) -> Optional[Dict[str
     ``{"check_id", "relevance": "dismissed", "dismiss_reason", "note"?}`` -> ``{"ok": true, "dismissal_id"}``. A second
     submit for the same check replaces the first (and a label replaces a dismissal, and the reverse); a label writes
     the owner-only ``verified_claim`` object, a dismissal removes it. ``{"check_id", "relevance": "skipped",
-    "skip_reason"?, "evidence_opened"?}`` -> ``{"ok": true, "skip_id"}`` records a skip and changes nothing else."""
+    "skip_reason"?, "evidence_opened"?}`` -> ``{"ok": true, "skip_id"}`` records a skip and changes nothing else.
+    ``{"check_id", "relevance": "split"}`` -> ``{"ok": true, "check_id"}``: "Not the same": the utterance leaves the
+    group its card put it in and becomes its own; its label, if any, stays (never a dismissal)."""
     req_id = message.get("id")
     if not req_id:
         return None
@@ -390,13 +392,15 @@ async def handle_truth_claim_label(message: Dict[str, Any]) -> Optional[Dict[str
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
     if payload is None:
         return _truth_error(req_id, "invalid_truth_label")
-    from ...query.truth_checks import TruthRequestError, dismiss_claim, label_claim, skip_claim
+    from ...query.truth_checks import TruthRequestError, dismiss_claim, label_claim, skip_claim, split_claim
     from .common import run_db_write
 
     try:
         if payload.get("relevance") == "skipped":
             result = await run_db_write(skip_claim, payload.get("check_id"), payload.get("skip_reason"),
                                         payload.get("evidence_opened"))
+        elif payload.get("relevance") == "split":
+            result = await run_db_write(split_claim, payload.get("check_id"))
         elif payload.get("relevance") == "dismissed":
             result = await run_db_write(dismiss_claim, payload.get("check_id"), payload.get("dismiss_reason"),
                                         payload.get("note"))

@@ -155,8 +155,20 @@ _DDL = (
 #: ``contradicted`` (27 Oct 2026): 1 when the engine answered "contradicted" (only for a category the owner opted in,
 #: ``verify_v2.CONTRADICTION_CATEGORIES``). The verdict column keeps its four values (its CHECK cannot change in place):
 #: such a row is ``no_evidence`` with reason ``contradicted`` and this flag set.
+#: Lean v3 increment B (27 Oct 2026), six more, each with a reader this quarter and none a migration:
+#: ``reading_json`` is what the reader made of the utterance (``verify_v2.claim_dict`` per claim, under the row's
+#: category), stored once so a re-check runs retrieval and the judge from it and never the reader again; ``polarity``
+#: (+1 affirms, -1 denies; NULL when ``verify_v2.READ_POLARITY`` was off at the read) and ``claim_key``
+#: (``verify_v2.claim_key``: the proposition, polarity-blind) group the owner's repeated statements into one card, with
+#: a statement and its negation always two groups; ``said_at`` is the record's own time with its offset, so no later
+#: read joins the source table for it; ``group_override`` is set to the row's own check_id by the owner's "Not the same"
+#: (a split: the row is its own group from then on; nothing else changes); ``owner_labels_shown`` is how many of the
+#: owner's labels the check was shown as evidence (``verify_v2.LABELS_AS_EVIDENCE``), so the weekly readout scores
+#: accuracy only on rows the owner's own judgement did not back.
 _ADDED_COLUMNS = (("attempts", "INTEGER NOT NULL DEFAULT 1"), ("read_timeout_s", "REAL"), ("checked_at", "TEXT"),
-                  ("engine_version", "TEXT"), ("engine_sha16", "TEXT"), ("contradicted", "INTEGER"))
+                  ("engine_version", "TEXT"), ("engine_sha16", "TEXT"), ("contradicted", "INTEGER"),
+                  ("reading_json", "TEXT"), ("polarity", "INTEGER"), ("claim_key", "TEXT"), ("said_at", "TEXT"),
+                  ("group_override", "TEXT"), ("owner_labels_shown", "INTEGER"))
 #: Added to ``truth_labels`` by step 1: whether the owner says the cited evidence shows the claim (1 / 0; NULL when not
 #: asked: the card was not "backed", or the owner did not answer).
 _ADDED_LABEL_COLUMNS = (("evidence_ok", "INTEGER"),)
@@ -421,17 +433,28 @@ def record_check(conn: sqlite3.Connection, check: Dict[str, Any]) -> Optional[st
         cursor = conn.execute(
             f"INSERT OR IGNORE INTO {CHECKS_TABLE} (check_id, record_table, record_id, conversation_id, source, "
             "speaker_kind, week, category, claim_text, verdict, reason, cited_refs_json, effort, model, latency_ms, "
-            "created_at, attempts, read_timeout_s, checked_at, engine_version, engine_sha16, contradicted) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
+            "created_at, attempts, read_timeout_s, checked_at, engine_version, engine_sha16, contradicted, "
+            "reading_json, polarity, claim_key, said_at, owner_labels_shown) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (check_id, check["record_table"], check["record_id"], check.get("conversation_id"), check["source"],
              check["speaker_kind"], iso_week(created), check.get("category"), check.get("claim_text"),
              check["verdict"], check.get("reason"), json.dumps(check.get("cited_refs") or []), check.get("effort"),
              check.get("model"), check.get("latency_ms"), created.isoformat(), check.get("read_timeout_s"),
              created.isoformat(), check.get("engine_version"), check.get("engine_sha16"),
-             1 if check.get("contradicted") else None),
+             1 if check.get("contradicted") else None, *_reading_columns(check)),
         )
         commit_connection(conn)
     return check_id if cursor.rowcount else None
+
+
+def _reading_columns(check: Dict[str, Any]) -> Tuple[Optional[str], Optional[int], Optional[str], Optional[str], Optional[int]]:
+    """``(reading_json, polarity, claim_key, said_at, owner_labels_shown)`` of a check row as the lane built it."""
+    reading = check.get("reading_json")
+    polarity = check.get("polarity")
+    shown = check.get("owner_labels_shown")
+    return (str(reading) if reading else None, int(polarity) if polarity in (1, -1) else None,
+            str(check["claim_key"]) if check.get("claim_key") else None, str(check["said_at"]) if check.get("said_at") else None,
+            int(shown) if shown is not None else None)
 
 
 # --- re-checks of unable rows -----------------------------------------------------------------------------------------
@@ -448,10 +471,12 @@ def state_columns(conn: sqlite3.Connection) -> str:
     labelled = (f"EXISTS (SELECT 1 FROM {LABELS_TABLE} l WHERE l.check_id = c.check_id)"
                 if _present(conn, LABELS_TABLE) else "0")
     return (f"c.check_id, c.verdict, c.model, c.effort, {col('read_timeout_s', 'NULL')}, "
-            f"COALESCE({col('attempts', 'NULL')}, 1), COALESCE({col('checked_at', 'NULL')}, c.created_at), {labelled}")
+            f"COALESCE({col('attempts', 'NULL')}, 1), COALESCE({col('checked_at', 'NULL')}, c.created_at), {labelled}, "
+            f"{col('reading_json', 'NULL')}, c.category")
 
 
-_STATE_KEYS = ("check_id", "verdict", "model", "effort", "read_timeout_s", "attempts", "checked_at", "labelled")
+_STATE_KEYS = ("check_id", "verdict", "model", "effort", "read_timeout_s", "attempts", "checked_at", "labelled",
+               "reading_json", "category")
 
 
 def state_of(found: Iterable[Any]) -> Dict[str, Any]:
@@ -512,18 +537,51 @@ def recheck(conn: sqlite3.Connection, check: Dict[str, Any], attempt: int) -> Op
             (check["record_table"], check["record_id"], attempt - 1)).fetchone()
         if found is None:
             return None
+        reading_json, polarity, claim_key, said_at, shown = _reading_columns(check)
         conn.execute(
             f"UPDATE {CHECKS_TABLE} SET conversation_id=?, source=?, speaker_kind=?, category=?, claim_text=?, "
             "verdict=?, reason=?, cited_refs_json=?, effort=?, model=?, latency_ms=?, attempts=?, read_timeout_s=?, "
-            "checked_at=?, engine_version=?, engine_sha16=?, contradicted=? WHERE check_id=?",
+            "checked_at=?, engine_version=?, engine_sha16=?, contradicted=?, reading_json=COALESCE(?, reading_json), "
+            "polarity=COALESCE(?, polarity), claim_key=COALESCE(?, claim_key), said_at=COALESCE(?, said_at), "
+            "owner_labels_shown=? WHERE check_id=?",
             (check.get("conversation_id"), check["source"], check["speaker_kind"], check.get("category"),
              check.get("claim_text"), check["verdict"], check.get("reason"), json.dumps(check.get("cited_refs") or []),
              check.get("effort"), check.get("model"), check.get("latency_ms"), attempt, check.get("read_timeout_s"),
              now_utc().isoformat(), check.get("engine_version"), check.get("engine_sha16"),
-             1 if check.get("contradicted") else None, found[0]),
+             1 if check.get("contradicted") else None, reading_json, polarity, claim_key, said_at, shown, found[0]),
         )
         commit_connection(conn)
     return str(found[0])
+
+
+def occurrence_refs(conn: sqlite3.Connection, claim_key: Optional[str], polarity: Optional[int], *,
+                    own: Optional[str] = None) -> List[str]:
+    """``table:id`` of the owner's other utterances of the same claim (same ``claim_key`` and polarity, not dismissed,
+    not split off), newest first: the engine keeps them out of a non-view claim's evidence, so saying a thing again
+    is counted on the card and never credited as a record of it. Empty without a key or a polarity, or on a node
+    without the column."""
+    if not claim_key or polarity not in (1, -1) or not _present(conn, CHECKS_TABLE) or "claim_key" not in _columns(conn, CHECKS_TABLE):
+        return []
+    dismissed, join = _dismissal_join(conn)
+    rows = conn.execute(
+        f"SELECT c.record_table, c.record_id FROM {CHECKS_TABLE} c{join} "
+        f"WHERE COALESCE(c.group_override, c.claim_key) = ? AND c.polarity = ? AND c.speaker_kind = 'owner' "
+        f"AND {dismissed} IS NULL ORDER BY COALESCE(c.said_at, c.created_at) DESC, c.check_id DESC LIMIT 200",
+        (claim_key, int(polarity))).fetchall()
+    refs = [f"{table}:{record_id}" for table, record_id in rows]
+    return [ref for ref in refs if ref != own]
+
+
+def split_claim(conn: sqlite3.Connection, check_id: Any) -> Dict[str, Any]:
+    """The owner says this utterance is not the same claim as the card it was grouped with ("Not the same"): the row
+    becomes its own group (``group_override`` = its check_id) and nothing else changes: its label, if any, and its
+    ``verified_claim`` stay, and the card stays visible. Never a dismissal, which would delete the label."""
+    check, _ = _claim_check(conn, check_id, None)
+    ensure_tables(conn)
+    with with_db_write():
+        conn.execute(f"UPDATE {CHECKS_TABLE} SET group_override = check_id WHERE check_id = ?", (check["check_id"],))
+        commit_connection(conn)
+    return {"ok": True, "check_id": check["check_id"]}
 
 
 def _claim_check(conn: sqlite3.Connection, check_id: Any, note: Any) -> Tuple[Dict[str, Any], Optional[str]]:
@@ -781,7 +839,10 @@ def _empty_week(week: str) -> Dict[str, Any]:
             "rechecked": 0, "attempts_exhausted": 0,
             "by_source": {s: 0 for s in SOURCES}, "by_category": {}, "labelled": 0, "dismissed": 0, "skipped": 0, "contradicted": 0, "to_confirm": 0,
             "lane": {k: 0 for k in LANE_COUNTS},
-            "agreement": {"backed_true": 0, "backed_false": 0, "nothing_true": 0}, "latency_ms_p50": None}
+            "agreement": {"backed_true": 0, "backed_false": 0, "nothing_true": 0}, "latency_ms_p50": None,
+            # increment B: the owner's repeated statements as groups (claim_key + polarity), counts only
+            "groups": 0, "grouped": 0, "restated_distribution": {}, "distinct_days_distribution": {},
+            "opposite_polarity_pairs": 0, "splits": 0}
 
 
 def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[datetime] = None) -> Dict[str, Any]:
@@ -837,6 +898,7 @@ def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[dat
         for week, values in latencies.items():
             if values:
                 out[week]["latency_ms_p50"] = round(statistics.median(values), 1)
+        _group_counts(conn, out, names)
     if _present(conn, LANE_DAILY_TABLE):
         for day, *values in conn.execute(f"SELECT day, {', '.join(LANE_COUNTS)} FROM {LANE_DAILY_TABLE}").fetchall():
             try:
@@ -849,6 +911,62 @@ def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[dat
     return {"weeks": [out[week] for week in names], "sources": sources_health(conn)}
 
 
+def _group_rows(conn: sqlite3.Connection) -> Dict[Tuple[str, int], Dict[str, Any]]:
+    """Every group of the owner's claims (``COALESCE(group_override, claim_key)``, polarity) over the live, undismissed
+    rows: how often it was said, on how many distinct local days, first and last. A row with no key or no polarity
+    (stored before increment B, or read with READ_POLARITY off) is in no group here: it is its own card."""
+    if "claim_key" not in _columns(conn, CHECKS_TABLE):
+        return {}
+    dismissed, join = _dismissal_join(conn)
+    rows = conn.execute(
+        f"SELECT COALESCE(c.group_override, c.claim_key), c.polarity, COUNT(*), COUNT(DISTINCT substr(c.said_at, 1, 10)), "
+        f"MIN(COALESCE(c.said_at, c.created_at)), MAX(COALESCE(c.said_at, c.created_at)), c.claim_key, "
+        f"SUM(c.group_override IS NOT NULL) FROM {CHECKS_TABLE} c{join} "
+        f"WHERE c.claim_key IS NOT NULL AND c.polarity IS NOT NULL AND c.speaker_kind = 'owner' AND c.claim_text IS NOT NULL "
+        f"AND c.verdict != 'not_checkable' AND {dismissed} IS NULL GROUP BY 1, 2").fetchall()
+    return {(str(key), int(polarity)): {"count": int(n), "distinct_days": max(1, int(days or 0)), "first": first, "last": last,
+                                        "claim_key": claim_key, "split": bool(splits)}
+            for key, polarity, n, days, first, last, claim_key, splits in rows}
+
+
+def _group_counts(conn: sqlite3.Connection, out: Dict[str, Dict[str, Any]], weeks: List[str]) -> None:
+    """Increment B's counts per week, aggregates only: ``groups`` (distinct groups among the week's claim rows),
+    ``grouped`` (the week's rows beyond the first of their group), ``restated_distribution`` and
+    ``distinct_days_distribution`` (over those groups, counting every live row of each, as ``{count: groups}``),
+    ``opposite_polarity_pairs`` (claim keys among them said with both polarities, anywhere) and ``splits`` (the week's
+    rows the owner split off)."""
+    groups = _group_rows(conn)
+    if "claim_key" not in _columns(conn, CHECKS_TABLE):
+        return
+    both = {}
+    for (key, polarity), group in groups.items():
+        both.setdefault(group["claim_key"], set()).add(polarity)
+    rows = conn.execute(
+        f"SELECT c.week, c.check_id, COALESCE(c.group_override, c.claim_key), c.polarity, c.group_override IS NOT NULL "
+        f"FROM {CHECKS_TABLE} c WHERE c.week IN ({','.join('?' for _ in weeks)}) AND c.speaker_kind = 'owner' "
+        f"AND c.claim_text IS NOT NULL AND c.verdict != 'not_checkable'", weeks).fetchall()
+    seen: Dict[str, set] = {week: set() for week in weeks}
+    for week, check_id, key, polarity, split in rows:
+        entry = out[week]
+        entry["splits"] += int(bool(split))
+        # a row with no key or no polarity is its own group, as in the cards; it can never be "grouped"
+        group = (str(key), int(polarity)) if key is not None and polarity is not None else ("row", str(check_id))
+        if group in seen[week]:
+            entry["grouped"] += 1
+            continue
+        seen[week].add(group)
+    for week, found in seen.items():
+        entry = out[week]
+        entry["groups"] = len(found)
+        for group in found:
+            info = groups.get(group)
+            count, days = (str(info["count"]), str(info["distinct_days"])) if info else ("1", "1")
+            entry["restated_distribution"][count] = entry["restated_distribution"].get(count, 0) + 1
+            entry["distinct_days_distribution"][days] = entry["distinct_days_distribution"].get(days, 0) + 1
+        keys = {groups[g]["claim_key"] for g in found if g in groups}
+        entry["opposite_polarity_pairs"] = sum(1 for k in keys if len(both.get(k, ())) == 2)
+
+
 def _dismissal_join(conn: sqlite3.Connection) -> Tuple[str, str]:
     """The dismissal reason column and its join, or NULL on a node whose tables predate dismissals (a read never
     creates a table)."""
@@ -859,45 +977,75 @@ def _dismissal_join(conn: sqlite3.Connection) -> Tuple[str, str]:
 
 def claim_cards(conn: sqlite3.Connection, limit: int = 20, unlabelled_only: bool = True,
                 speakers: str = "owner") -> Dict[str, Any]:
-    """The claims the lane found, newest check first, for the owner to label in the app. A card whose record is gone
-    is skipped; a cited record that is gone is left out of its card. ``unlabelled_only``: neither labelled nor
-    dismissed. ``speakers``: ``owner`` (the default: the owner's own claims) or ``all``. Each card carries what was
-    said (``said``: the record's own text) beside the claim the reader took from it (``claim_text``)."""
+    """The claims the lane found, newest check first, for the owner to label in the app: one card per GROUP of the
+    owner's utterances of one claim (``COALESCE(group_override, claim_key)`` and polarity; a row with no key or no
+    polarity is its own group, so a node with READ_POLARITY off sees one card per check as before). The card is the
+    group's newest utterance whose record still exists, with the others' ids in ``check_ids`` and ``restated`` (how
+    often the claim was said, on how many distinct local days, first and last). A cited record that is gone is left
+    out of its card. ``unlabelled_only``: neither labelled nor dismissed (a group whose every row the owner answered is
+    gone from the list). ``speakers``: ``owner`` (the default: the owner's own claims) or ``all``. Each card carries
+    what was said (``said``: the record's own text) beside the claim the reader took from it (``claim_text``)."""
     if (type(limit) is not int or not 1 <= limit <= MAX_CARDS or type(unlabelled_only) is not bool
             or speakers not in CARD_SPEAKERS):
         raise TruthRequestError("invalid_truth_request")
     if not tables_present(conn):
         return {"cards": []}
     dismissed, join = _dismissal_join(conn)
+    have = set(_columns(conn, CHECKS_TABLE))
+    col = lambda name: f"c.{name}" if name in have else "NULL"  # noqa: E731
     evidence_ok = "l.evidence_ok" if "evidence_ok" in _columns(conn, LABELS_TABLE) else "NULL"
-    contradicted = "c.contradicted" if "contradicted" in _columns(conn, CHECKS_TABLE) else "NULL"
     where = f" AND l.check_id IS NULL AND {dismissed} IS NULL" if unlabelled_only else ""
     if speakers == "owner":
         where += " AND c.speaker_kind = 'owner'"
     rows = conn.execute(
         f"SELECT c.check_id, c.record_table, c.record_id, c.source, c.category, c.claim_text, c.verdict, "
-        f"c.cited_refs_json, c.latency_ms, l.label, l.note, {evidence_ok}, {dismissed}, {contradicted} FROM {CHECKS_TABLE} c "
+        f"c.cited_refs_json, c.latency_ms, l.label, l.note, {evidence_ok}, {dismissed}, {col('contradicted')}, "
+        f"COALESCE({col('group_override')}, {col('claim_key')}), {col('polarity')}, {col('reading_json')}, "
+        f"COALESCE({col('said_at')}, c.created_at) FROM {CHECKS_TABLE} c "
         f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id{join} "
-        f"WHERE c.claim_text IS NOT NULL AND c.verdict != 'not_checkable'{where} "
-        f"ORDER BY c.created_at DESC, c.check_id DESC LIMIT ?", (limit * 3,)).fetchall()
+        f"WHERE c.claim_text IS NOT NULL AND c.verdict != 'not_checkable'{where}").fetchall()
+    # Newest utterance first (the record's own time; the check's time for a row stored without one), read by the one
+    # time rule rather than compared as text, since said_at carries the local offset and created_at is UTC.
+    floor = datetime.min.replace(tzinfo=timezone.utc)
+    rows.sort(key=lambda r: (instant(r[-1]) or floor, str(r[0])), reverse=True)
+    groups = _group_rows(conn) if "claim_key" in have else {}
     names: Dict[str, Optional[str]] = {}
-    cards = []
+    cards: List[Dict[str, Any]] = []
+    faces: Dict[Any, Dict[str, Any]] = {}  # group -> its card, once one row of it has a live record
     for (check_id, table, record_id, source, category, claim_text, verdict, refs_json, latency, label, note, ok,
-         reason, against) in rows:
+         reason, against, key, polarity, reading_json, _when) in rows:
+        group = (str(key), int(polarity)) if key is not None and polarity is not None else ("row", check_id)
+        face = faces.get(group)
+        if face is not None:
+            face["check_ids"].append(check_id)
+            continue
+        if len(cards) >= limit:
+            continue  # a later row of a group already shown still joins its card above; a new group is past the limit
         record = load_record(conn, table, record_id, names)
         if record is None:
             continue
-        cards.append({
+        kind = None
+        if reading_json:
+            try:
+                kind = ((json.loads(reading_json).get("claims") or [{}])[0] or {}).get("type")
+            except (ValueError, AttributeError, IndexError):
+                kind = None
+        info = groups.get(group)
+        said_at = with_offset(record["at"])
+        card = {
             "check_id": check_id, "speaker": speaker_for_card(record), "speaker_is_owner": bool(record["owner"]),
-            "source": source, "date": with_offset(record["at"]),
+            "source": source, "date": said_at,
             "said": " ".join(record["text"].split())[:STATEMENT_CHARS], "claim_text": claim_text, "category": category,
             "verdict": verdict, "cited": list(_cited(conn, refs_json)), "latency_ms": latency, "label": label,
             "note": note, "evidence_ok": None if ok is None else bool(ok),
             "relevance": "dismissed" if reason else ("relevant" if label else None), "dismiss_reason": reason,
             "contradicted": bool(against),
-        })
-        if len(cards) >= limit:
-            break
+            "polarity": int(polarity) if polarity is not None else None, "kind": kind, "check_ids": [],
+            "restated": ({"count": info["count"], "distinct_days": info["distinct_days"], "first": info["first"], "last": info["last"]}
+                         if info else {"count": 1, "distinct_days": 1, "first": said_at, "last": said_at}),
+        }
+        faces[group] = card
+        cards.append(card)
     return {"cards": cards}
 
 

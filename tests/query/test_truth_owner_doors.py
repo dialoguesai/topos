@@ -184,8 +184,10 @@ def test_cards_are_the_claims_newest_first_with_snippets_from_the_cited_records(
     assert cited["snippet"].startswith("Painted both shed doors a deep blue today.") and len(cited["snippet"]) == 400
     assert set(me) == {"check_id", "speaker", "speaker_is_owner", "source", "date", "said", "claim_text", "category",
                        "verdict", "cited", "latency_ms", "label", "note", "evidence_ok", "relevance", "dismiss_reason",
-                       "contradicted"}
+                       "contradicted", "polarity", "kind", "check_ids", "restated"}
     assert me["speaker_is_owner"] is True and them["speaker_is_owner"] is False
+    assert me["polarity"] is None and me["kind"] is None and me["check_ids"] == []  # a row with no reading is its own group
+    assert me["restated"] == {"count": 1, "distinct_days": 1, "first": me["date"], "last": me["date"]}
     assert me["said"] and me["said"] != me["claim_text"]  # what was said, beside the claim taken from it
 
 
@@ -757,3 +759,80 @@ def test_the_request_paths_write_nothing_even_with_labels_as_evidence_on(node, w
     assert [e["source"] for e in out["evidence"] if e["cited"]] == ["verified_claim"]
     writes = [s for s in statements if re.match(r"\s*(INSERT|UPDATE|DELETE|REPLACE|CREATE|ALTER|DROP)\b", s, re.I)]
     assert writes == [] and node.conn.total_changes == changes and len(_objects(node.conn)) == 2
+
+
+# --- said before: one card per group of the owner's utterances (lean v3 increment B, 27 Oct 2026) -------------------------
+def _reading(text, names, polarity, kind="did_or_made", category="did"):
+    return {"category": category, "claims": [{"type": kind, "subject": "owner", "reported_speech": False, "claim": text,
+                                              "names": names, "date_from": "", "date_to": "", "as_written": "",
+                                              "polarity": {1: "affirms", -1: "denies"}.get(polarity)}]}
+
+
+def _said(conn, record_id, said, *, claim, names, polarity, hours_ago, verdict="no_evidence", shown=None):
+    """One owner message and its check, with what the reader made of it: the lane's row for increment B."""
+    add_message(conn, record_id, said, from_self=True, at=ago(hours=hours_ago))
+    conn.commit()
+    result = {"verdict": verdict, "reason": None, "category": "did", "claim": {"text": claim}, "evidence": [],
+              "timings_ms": {"total": 900.0}, "reading": _reading(claim, names, polarity),
+              **({"stages": {"retrieve": {"owner_labels": shown}}} if shown is not None else {})}
+    record = {"table": "conversation_messages", "record_id": record_id, "source": "imessage", "owner": True}
+    return store.record_check(conn, lane.check_row(record, result, model="local:test", said_at=store.with_offset(ago(hours=hours_ago))))
+
+
+PINWHEEL_KEY = "did|did_or_made|none|day every pinwheel"  # claim_key of "The owner uses Pinwheel every day." named Pinwheel ("uses" is a stop word)
+
+
+def test_repeated_statements_make_one_card_with_the_count_and_a_negation_makes_another(node):
+    yes = [_said(node.conn, f"m-yes-{i}", f"I use Pinwheel every day, said again {i}.", claim="The owner uses Pinwheel every day.",
+                 names=["Pinwheel"], polarity=1, hours_ago=30 * i + 1) for i in range(3)]
+    no = _said(node.conn, "m-no", "I never use Pinwheel.", claim="The owner uses Pinwheel every day.", names=["Pinwheel"], polarity=-1, hours_ago=2)
+    plain = _said(node.conn, "m-plain", "I watered the Monstera today.", claim="The owner watered the Monstera.", names=["Monstera"], polarity=None, hours_ago=3)
+    row = node.conn.execute("SELECT claim_key, polarity, said_at, reading_json FROM truth_checks WHERE check_id=?", (yes[0],)).fetchone()
+    assert row[0] == PINWHEEL_KEY and row[1] == 1 and row[2] and json.loads(row[3])["claims"][0]["polarity"] == "affirms"
+    cards = store.claim_cards(node.conn, 10, True)["cards"]
+    assert [c["check_id"] for c in cards] == [yes[0], no, plain]  # newest utterance of each group leads
+    said, denied, single = cards
+    assert said["check_ids"] == [yes[1], yes[2]] and said["polarity"] == 1 and said["kind"] == "did_or_made"
+    assert said["restated"]["count"] == 3 and said["restated"]["distinct_days"] >= 2
+    assert said["restated"]["first"] < said["restated"]["last"] == said["date"]
+    assert denied["check_ids"] == [] and denied["polarity"] == -1 and denied["restated"]["count"] == 1
+    assert single["polarity"] is None and single["check_ids"] == [] and single["restated"]["count"] == 1
+    assert store.occurrence_refs(node.conn, PINWHEEL_KEY, 1, own="conversation_messages:m-yes-0") == [
+        "conversation_messages:m-yes-1", "conversation_messages:m-yes-2"]
+    assert store.occurrence_refs(node.conn, PINWHEEL_KEY, -1) == ["conversation_messages:m-no"]
+    assert store.occurrence_refs(node.conn, PINWHEEL_KEY, None) == []
+    [entry] = store.weekly_stats(node.conn, 1)["weeks"]
+    assert (entry["groups"], entry["grouped"], entry["splits"]) == (3, 2, 0)  # the no-polarity row is its own group
+    assert entry["restated_distribution"] == {"3": 1, "1": 2} and entry["opposite_polarity_pairs"] == 1
+    assert entry["distinct_days_distribution"]["1"] == 2 and sum(entry["distinct_days_distribution"].values()) == 3
+
+
+def test_a_split_leaves_the_group_and_keeps_the_label_and_the_card(node):
+    first = _said(node.conn, "m-a", "I use Pinwheel daily.", claim="The owner uses Pinwheel every day.", names=["Pinwheel"], polarity=1, hours_ago=20)
+    second = _said(node.conn, "m-b", "I use the Pinwheel app most days.", claim="The owner uses Pinwheel every day.", names=["Pinwheel"], polarity=1, hours_ago=1)
+    store.label_claim(node.conn, first, "true")
+    [card] = store.claim_cards(node.conn, 10, False)["cards"]
+    assert card["check_id"] == second and card["check_ids"] == [first] and card["restated"]["count"] == 2
+    assert store.split_claim(node.conn, first) == {"ok": True, "check_id": first}
+    cards = store.claim_cards(node.conn, 10, False)["cards"]
+    assert [(c["check_id"], c["check_ids"], c["restated"]["count"], c["label"]) for c in cards] == [(second, [], 1, None), (first, [], 1, "true")]
+    assert node.conn.execute("SELECT COUNT(*) FROM truth_labels").fetchone()[0] == 1 and len(_objects(node.conn)) == 1  # nothing deleted
+    assert store.occurrence_refs(node.conn, PINWHEEL_KEY, 1) == ["conversation_messages:m-b"]
+    [entry] = store.weekly_stats(node.conn, 1)["weeks"]
+    assert entry["splits"] == 1 and entry["groups"] == 2 and entry["grouped"] == 0
+    owner = Principal(OWNER_APP, "uds")
+    assert _as(owner, "truth_claim_label", {"check_id": second, "relevance": "split"})["payload"] == {"ok": True, "check_id": second}
+    assert _as(owner, "truth_claim_label", {"check_id": "nope", "relevance": "split"})["error"] == "unknown_check"
+    with pytest.raises(store.TruthRequestError):
+        store.split_claim(node.conn, "")
+
+
+def test_the_lane_row_carries_how_many_owner_labels_the_check_was_shown(node):
+    """The export scores accuracy only on rows with owner_labels_shown = 0: a check that retrieved with
+    LABELS_AS_EVIDENCE off reads 0, one that was shown two labels reads 2, and a row that never reached retrieval (the
+    gate or the reader refused it, or a deadline came first) reads NULL."""
+    shown = _said(node.conn, "m-s", "I merged the Pinwheel branch.", claim="The owner merged the Pinwheel branch.", names=["Pinwheel"], polarity=1, hours_ago=1, shown=2)
+    none = _said(node.conn, "m-n", "I watered the Monstera.", claim="The owner watered the Monstera.", names=["Monstera"], polarity=1, hours_ago=2, shown=0)
+    unread = _said(node.conn, "m-u", "I fixed the Orbit build.", claim="The owner fixed the Orbit build.", names=["Orbit"], polarity=1, hours_ago=3)
+    rows = dict(node.conn.execute("SELECT check_id, owner_labels_shown FROM truth_checks").fetchall())
+    assert rows[shown] == 2 and rows[none] == 0 and rows[unread] is None
