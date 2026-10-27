@@ -19,18 +19,25 @@ from __future__ import annotations
 import json
 import os
 import re
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 VERIFIER_VERSION = "a4-2"
 DEFAULT_VERIFIER_MODEL = "smtek/Qwen3.8-27B:IQ2_M"
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
+#: The one sentence DR-62 changes when the verifier sees the extractor's conversation context.
+#: Judged on the record alone, an assertion that rests on the turns before it reads as
+#: unsupported ("the record lacks the situation"), so the verifier reads the same turns.
+VERIFY_RECORD_ONLY = "Judge the CLAIM against the RECORD only — no outside knowledge."
+VERIFY_WITH_CONTEXT = ("Judge the CLAIM against the RECORD, read with the conversation context shown (the claim must "
+                       "rest on the OWNER's own words in the record) — no outside knowledge.")
+
 _PROMPT = """You are a strict fact-checker for a personal knowledge store.
 The OWNER wrote or received the record below. An extraction system claims the record
-states a fact. Judge the CLAIM against the RECORD only — no outside knowledge.
+states a fact. {judge}
 
-Record (role={role}, date={date}):
+{conversation}Record (role={role}, date={date}):
 ---
 {text}
 ---
@@ -68,9 +75,11 @@ def verifier_model() -> str:
 
 def build_verify_prompt(record_text: str, role: str, date: str,
                         predicate: str, value: Any, about: str,
-                        lens_note: str = "", label_note: str = "") -> str:
+                        lens_note: str = "", label_note: str = "",
+                        context: Optional[Sequence[Mapping[str, Any]]] = None) -> str:
     """`lens_note` is the pack's own definition of what its facts ARE; `label_note` is the
-    runner's addressing for the record (who sent it, who it was sent to, as labels).
+    runner's addressing for the record (who sent it, who it was sent to, as labels); `context`
+    is the turns the extractor saw before the record (DR-62), shown the same way.
 
     Measured 2026-09-06 on the commitment ledger: with neither, the verifier rejected
     every parsed commitment — "a plan, not a completed commit" (it read `commit.made` as
@@ -79,21 +88,23 @@ def build_verify_prompt(record_text: str, role: str, date: str,
     record's own recipient label, which is never in the text by construction). The judge
     has to know the lens's semantics and the record's addressing to judge it at all.
     """
-    from .template import clean_record_text
-    context = ""
+    from .template import clean_record_text, render_context
+    notes = ""
     if lens_note:
-        context += f"Lens: {lens_note.strip()}\n"
+        notes += f"Lens: {lens_note.strip()}\n"
     if label_note:
-        context += (f"Addressing (from the record itself, not from its text): {label_note.strip()} "
-                    f"A person value equal to one of these labels is the record's own addressing — "
-                    f"judge it as stated, never as invented.\n")
-    if context:
-        context += "\n"
+        notes += (f"Addressing (from the record itself, not from its text): {label_note.strip()} "
+                  f"A person value equal to one of these labels is the record's own addressing — "
+                  f"judge it as stated, never as invented.\n")
+    if notes:
+        notes += "\n"
     return _PROMPT.format(
         role=role, date=date, text=clean_record_text(record_text)[:2400],
         predicate=predicate,
         value=json.dumps(value, ensure_ascii=False, default=str)[:400],
-        about=about or "owner", context=context,
+        about=about or "owner", context=notes,
+        judge=VERIFY_WITH_CONTEXT if context else VERIFY_RECORD_ONLY,
+        conversation=render_context(context) if context else "",
     )
 
 

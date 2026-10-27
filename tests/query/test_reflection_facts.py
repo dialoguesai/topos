@@ -52,7 +52,7 @@ def ref(table, record_id, days_ago, role="authored"):
 
 
 def add_fact(conn, pack, predicate, value, *, at, refs, quote="", actor_role="authored", sensitivity="personal",
-             subject="owner", object_entity_id=None):
+             subject="owner", object_entity_id=None, context_refs=None):
     """A fact as the derivation writer stores one."""
     payload = {"subject_entity_id": subject, "predicate": predicate, "object_value": value.get("description") or predicate,
                "object_entity_id": object_entity_id, "disclosure": "owner_only", "asserted_by": "owner",
@@ -61,6 +61,8 @@ def add_fact(conn, pack, predicate, value, *, at, refs, quote="", actor_role="au
         payload["sensitivity"] = sensitivity
     if quote:
         payload["quote"] = quote
+    if context_refs:
+        payload["context_refs"] = context_refs
     oid = uuid.uuid4().hex
     conn.execute(
         "INSERT INTO signal_objects (object_id, signal_dimension, object_type, object_key, payload_json, confidence, "
@@ -359,6 +361,57 @@ def test_a_fact_with_no_source_is_left_out_once_anything_is_off_limits(world):
     protect(world.conn, "Somebody Unrelated")
     assert bare not in by_id(dispatch(MOMENTS)["payload"])
     assert bare in by_id(dispatch(OWNER)["payload"])
+
+
+@pytest.fixture
+def read_with_turns(world):
+    """DR-62: a joy fact on the owner's DM message, read with the other person's turn before it."""
+    conn = world.conn
+    add_message(conn, "m-news", "Juno here: I got the Lisbon offer, starting in March", at=day(3),
+                conversation_id="dm-juno", sender_id="+15550000009")
+    add_message(conn, "m-proud", "So proud of you, this made my whole week", at=day(3), conversation_id="dm-juno",
+                from_self=True)
+    conn.commit()
+    world.ids.read_with = add_fact(
+        conn, "moments.joy", "moment.peak", {"kind": "accomplished", "description": "a friend's new job abroad"},
+        at=day(3), refs=ref("conversation_messages", "m-proud", 3), quote="this made my whole week",
+        context_refs=[{"table": "conversation_messages", "record_id": "m-news"}])
+    return world
+
+
+def test_the_turns_a_moment_was_read_with_are_never_a_source_or_an_excerpt(read_with_turns):
+    for principal in (MOMENTS, OWNER):
+        out = dispatch(principal, {"include_excerpts": True})["payload"]
+        fact = by_id(out)[read_with_turns.ids.read_with]
+        assert fact["sources"] == [{"source": "imessage", "date": day(3)[:10], "authored": True,
+                                    "excerpt": "So proud of you, this made my whole week"}]
+        text = json.dumps(out)
+        assert "Lisbon" not in text and "m-news" not in text and "context_refs" not in text
+
+
+@pytest.mark.parametrize("withhold", ["protected record", "off-limits name", "nsfw", "deleted"])
+def test_a_turn_it_was_read_with_protects_it_from_an_agent_and_not_from_the_owner(read_with_turns, withhold):
+    from topos.features.lifecycle.record_protection import RecordProtectionStore
+
+    conn, fact = read_with_turns.conn, read_with_turns.ids.read_with
+    assert fact in by_id(dispatch(MOMENTS)["payload"])
+    if withhold == "protected record":
+        RecordProtectionStore(conn).protect(canonical_table="conversation_messages", record_id="m-news")
+    elif withhold == "off-limits name":
+        protect(conn, "Juno Example")
+        conn.execute("UPDATE conversation_messages SET content='Juno Example here: big news' WHERE message_id='m-news'")
+    elif withhold == "nsfw":
+        conn.execute("UPDATE conversation_messages SET content_nsfw=1 WHERE message_id='m-news'")
+    else:
+        conn.execute("DELETE FROM conversation_messages WHERE message_id='m-news'")
+    conn.commit()
+    agent = by_id(dispatch(MOMENTS)["payload"])
+    assert fact not in agent and world_rest(read_with_turns) <= set(agent)
+    assert fact in by_id(dispatch(OWNER)["payload"])
+
+
+def world_rest(world):
+    return {world.ids.peak, world.ids.promise, world.ids.tension}
 
 
 def test_what_was_left_out_is_never_counted(world):

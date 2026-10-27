@@ -78,7 +78,7 @@ def test_about_other_preserved():
     assert valid[0]["about"] == "other:Nora"
 
 def test_template_version_bumped():
-    assert TEMPLATE_VERSION == "shadow-10"
+    assert TEMPLATE_VERSION == "shadow-11"
 
 # --- A4: verdict parsing + merge semantics ---
 def test_verdict_reject_unsupported():

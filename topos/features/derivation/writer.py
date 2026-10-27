@@ -120,6 +120,18 @@ def _canon_value(value: Any) -> str:
     return _norm(value)
 
 
+def _with_context_refs(payload: Dict[str, Any], refs: Optional[List[Dict[str, Any]]]) -> Dict[str, Any]:
+    """Add the records a reading was made with to `payload["context_refs"]` (DR-62), once each.
+    A fact keeps every context it was read with: any one of them protects it."""
+    if refs:
+        merged = [r for r in (payload.get("context_refs") or []) if isinstance(r, dict)]
+        for ref in refs:
+            if ref not in merged:
+                merged.append(ref)
+        payload["context_refs"] = merged
+    return payload
+
+
 class DerivationSchemaMissing(RuntimeError):
     """The provenance columns are absent — the database has not been migrated."""
 
@@ -323,8 +335,15 @@ class DerivationWriter:
         about: str = "owner",               # A2/A3 routing: owner | other:<name> | unclear
         event_date: Optional[str] = None,   # source-record date: a fact's time is its
                                             # EVIDENCE time, never extraction time
+        context_refs: Optional[List[Dict[str, Any]]] = None,  # DR-62: read WITH, not resting on
     ) -> Dict[str, Any]:
+        """`context_refs` are the records the extractor read beside the source (DR-62: the turns
+        before an owner's message). Kept in the payload apart from `source_refs`: protection
+        reads them (Off-limits, exclusions and deletion take the fact out), and nothing shows
+        them as a source or an excerpt."""
         pred = pack.predicates.get(predicate)
+        context_refs = [{"table": str(r.get("table")), "record_id": str(r.get("record_id"))}
+                        for r in (context_refs or []) if isinstance(r, dict) and r.get("record_id")]
         if pred is None:
             return {"outcome": "schema_reject", "reason": f"unknown predicate {predicate}"}
         # Bind the person NAMES in the value to entity ids. Done here rather than at each
@@ -431,7 +450,7 @@ class DerivationWriter:
                 self._corroborate({"object_id": retold["object_id"],
                                    "payload": json.loads(retold["payload_json"] or "{}"),
                                    "source_refs": (json.loads(retold["payload_json"] or "{}").get("source_refs") or [])},
-                                  confidence, source_refs)
+                                  confidence, source_refs, context_refs)
                 self.stats["retelling_merged"] = self.stats.get("retelling_merged", 0) + 1
                 return {"outcome": "retelling_merged", "object_id": retold["object_id"]}
         now = _now_iso()
@@ -453,7 +472,7 @@ class DerivationWriter:
                 if self._within_noop_window(pack, incumbent):
                     self.stats["noop"] += 1
                     return {"outcome": "noop", "object_id": incumbent["object_id"]}
-                self._corroborate(incumbent, confidence, source_refs)
+                self._corroborate(incumbent, confidence, source_refs, context_refs)
                 self.stats["corroborated"] += 1
                 return {"outcome": "corroborated", "object_id": incumbent["object_id"]}
 
@@ -464,7 +483,7 @@ class DerivationWriter:
                 changed = {k for k in set(value) | set(inc_payload["value_struct"])
                            if _norm(json.dumps(value.get(k), default=str)) != _norm(json.dumps(inc_payload["value_struct"].get(k), default=str))}
                 if changed and not (changed & sup_on):
-                    self._update_fields(incumbent, value, confidence, source_refs)
+                    self._update_fields(incumbent, value, confidence, source_refs, context_refs)
                     self.stats["updated_fields"] += 1
                     return {"outcome": "field_update", "object_id": incumbent["object_id"], "changed": sorted(changed)}
 
@@ -480,19 +499,22 @@ class DerivationWriter:
                     self._close(incumbent, reason="correction", at=now)
                     row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
                                        confidence, object_entity_id, occurrence, quote,
-                                       valid_from=incumbent.get("valid_from") or now, key=key)
+                                       valid_from=incumbent.get("valid_from") or now, key=key,
+                                       context_refs=context_refs)
                 self.stats["corrected"] += 1
                 return {"outcome": "corrected", "object_id": row}
             # SUPERSESSION: new evidence, the world changed
             with self._revision():
                 self._close(incumbent, reason="superseded", at=now)
                 row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
-                                   confidence, object_entity_id, occurrence, quote, valid_from=anchor, key=key)
+                                   confidence, object_entity_id, occurrence, quote, valid_from=anchor, key=key,
+                                   context_refs=context_refs)
             self.stats["superseded"] += 1
             return {"outcome": "superseded", "object_id": row}
 
         row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
-                           confidence, object_entity_id, occurrence, quote, valid_from=anchor, key=key)
+                           confidence, object_entity_id, occurrence, quote, valid_from=anchor, key=key,
+                           context_refs=context_refs)
         self.conn.commit()
         self.stats["written"] += 1
         # Tier-2 `closes`: a value transition that closes OTHER active rows of this predicate
@@ -636,8 +658,9 @@ class DerivationWriter:
                 return {"object_id": r[0], "object_key": r[1], "payload_json": r[2]}
         return None
 
-    def _corroborate(self, incumbent: Dict[str, Any], confidence: float, refs: List[Dict[str, Any]]) -> None:
-        payload = dict(incumbent["payload"])
+    def _corroborate(self, incumbent: Dict[str, Any], confidence: float, refs: List[Dict[str, Any]],
+                     context_refs: Optional[List[Dict[str, Any]]] = None) -> None:
+        payload = _with_context_refs(dict(incumbent["payload"]), context_refs)
         hist = list(payload.get("extractions") or [])
         hist.append({"model": self.model, "template": TEMPLATE_VERSION, "ts": _now_iso(),
                      "agrees": True})
@@ -654,8 +677,9 @@ class DerivationWriter:
         self.conn.commit()
 
     def _update_fields(self, incumbent: Dict[str, Any], value: Dict[str, Any],
-                       confidence: float, refs: List[Dict[str, Any]]) -> None:
-        payload = dict(incumbent["payload"])
+                       confidence: float, refs: List[Dict[str, Any]],
+                       context_refs: Optional[List[Dict[str, Any]]] = None) -> None:
+        payload = _with_context_refs(dict(incumbent["payload"]), context_refs)
         struct = dict(payload.get("value_struct") or {})
         struct.update(value)
         payload["value_struct"] = struct
@@ -724,7 +748,8 @@ class DerivationWriter:
 
     def _insert(self, pack: Pack, pred: Predicate, subject: str, value: Any, actor_role: str,
                 refs: List[Dict[str, Any]], confidence: float, object_entity_id: Optional[str],
-                occurrence: Optional[str], quote: str, *, valid_from: str, key: str) -> str:
+                occurrence: Optional[str], quote: str, *, valid_from: str, key: str,
+                context_refs: Optional[List[Dict[str, Any]]] = None) -> str:
         """Uncommitted: the caller commits, `_revision` together with the close it succeeds."""
         oid = str(uuid.uuid4())
         payload = {
@@ -746,6 +771,7 @@ class DerivationWriter:
             payload["value_struct"] = value
         if quote:
             payload["quote"] = quote[:200]
+        _with_context_refs(payload, context_refs)
         now = _now_iso()
         self.conn.execute(
             """INSERT INTO signal_objects (object_id, signal_dimension, object_type, object_key,

@@ -102,6 +102,9 @@ READERS = {
     "features/derivation/social_bench.py": OWN,
     "features/derivation/person_reading.py": OWN,
     "features/derivation/synthesize.py": OWN,
+    # DR-62 (owner, 26 Oct 2026): the Moments packs read an owner's message with the turns before it, never a turn
+    # the owner's own Off-limits view protects, nor any turn of a conversation with an Off-limits person.
+    "enrichment/jobs/canonical/derivation_job.py": OWN,
     "features/entities/affinity.py": OWN,
     "features/entities/affinity_owner.py": OWN,
     "features/entities/affinity_quality.py": OWN,

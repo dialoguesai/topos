@@ -74,10 +74,18 @@ def _record_role_for(row: Dict[str, Any], table: str, posture_for: Callable[[Dic
     return "observed"
 
 
+#: A record this short ("Wow. Okay.", "Thank you!!") says too little alone. DR-62 reads one in a
+#: context pack when its conversation gives it context; every other pack, and a context pack
+#: without context, still never reads it.
+SHORT_RECORD_CHARS = 15
+
+
 def _row_to_record(row: Dict[str, Any], *,
-                   posture_for: Callable[[Dict[str, Any]], str]) -> Optional[Dict[str, Any]]:
+                   posture_for: Callable[[Dict[str, Any]], str],
+                   keep_short: bool = False) -> Optional[Dict[str, Any]]:
     text = str(row.get("content") or row.get("text") or row.get("title") or "")
-    if len(text.strip()) <= 15:
+    short = len(text.strip()) <= SHORT_RECORD_CHARS
+    if short and not (keep_short and text.strip()):
         return None
     rid = str(row.get("record_id") or row.get("message_id") or row.get("entry_id")
               or row.get("event_id") or row.get("id") or "")
@@ -85,10 +93,153 @@ def _row_to_record(row: Dict[str, Any], *,
         return None
     table = str(row.get("_table") or row.get("canonical_table") or "")
     role = _record_role_for(row, table, posture_for)
+    if short and not (role == "authored" and table == "conversation_messages"):
+        return None                          # only an owner's message can have a conversation's context
     date = str(row.get("event_at") or row.get("entry_at") or row.get("occurred_at") or "")[:10]
-    return {"record_id": rid, "table": table or "canonical", "text": text,
-            "role": role, "date": date,
-            "source_id": str(row.get("source_id") or "")}
+    rec = {"record_id": rid, "table": table or "canonical", "text": text,
+           "role": role, "date": date,
+           "source_id": str(row.get("source_id") or "")}
+    if short:
+        rec["short"] = True
+    return rec
+
+
+#: DR-62: a context turn older than this before the owner's message belongs to another exchange.
+CONTEXT_MAX_AGE_DAYS = 7
+#: The messengers whose two-party conversations DR-62 reads. Groups, AI chats, journals and
+#: transcripts get no context.
+_CONTEXT_SOURCES = frozenset({"imessage", "signal"})
+
+
+def _aware(value: Any):
+    import datetime as _dt
+    try:
+        parsed = _dt.datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=_dt.timezone.utc)
+
+
+def _conversation_context(conn, rec: Dict[str, Any], k: int, *,
+                          cache: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """The k turns before an owner-written message in a two-party iMessage or Signal
+    conversation, oldest first (DR-62, owner, 26 Oct 2026). [] for anything else, and on any
+    error: no context is today's one-record reading, never a failed batch.
+
+    Within CONTEXT_MAX_AGE_DAYS of the message, never a system row, never a row the owner
+    excluded (`lifecycle.exclusions`), one tagged NSFW or one the Off-limits guard withholds
+    from the owner's own processing (`for_own_processing`: a protected record, or text naming a
+    protected entity). A conversation whose other person is Off-limits gives none. A withheld
+    turn is dropped, not replaced by an older one. Each turn is labelled OWNER or with the
+    sender's agreed contact name (`resolve_peer_identities`, "Contact" when none agrees), and
+    carries its record id, which the fact keeps as a protection-only ref (`context_refs`).
+    `cache` holds the guard, the exclusions and each conversation's verdict across a batch."""
+    if k <= 0 or rec.get("role") != "authored" or rec.get("table") != "conversation_messages":
+        return []
+    try:
+        return _read_conversation_context(conn, rec, k, cache if cache is not None else {})
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("derivation: no conversation context for %s (%s)", rec.get("record_id"), exc)
+        return []
+
+
+def _read_conversation_context(conn, rec, k, cache) -> List[Dict[str, Any]]:
+    import datetime as _dt
+    from ....features.derivation.template import CONTEXT_OWNER, CONTEXT_UNNAMED, is_diarisation_label
+    rid = str(rec.get("record_id") or "")
+    found = conn.execute("SELECT conversation_id, event_at, source_id FROM conversation_messages"
+                         " WHERE message_id=?", (rid,)).fetchone()
+    if not found or not found[0] or str(found[2] or "").lower() not in _CONTEXT_SOURCES:
+        return []
+    conv, at = str(found[0]), str(found[1] or "")
+    when = _aware(at)
+    if when is None:
+        return []
+    if "columns" not in cache:
+        cache["columns"] = {str(r[1]) for r in conn.execute("PRAGMA table_info(conversation_messages)")}
+        from ....features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+        from ....features.lifecycle.exclusions import excluded_record_ids
+        from ....features.lifecycle.off_limits_view import for_own_processing
+        cache["guard"] = BlackholeGuard(conn, caller_class=CallerClass.UNKNOWN, view=for_own_processing())
+        cache["excluded"] = excluded_record_ids(conn)
+        cache["conversations"] = {}
+    guard = cache["guard"]
+    if conv not in cache["conversations"]:
+        cache["conversations"][conv] = _other_party(conn, conv, guard, is_diarisation_label)
+    other = cache["conversations"][conv]
+    if other is None:
+        return []
+    cols = cache["columns"]
+    nsfw = "COALESCE(content_nsfw,0)" if "content_nsfw" in cols else "0"
+    system = " AND COALESCE(message_type,'')<>'system'" if "message_type" in cols else ""
+    rows = conn.execute(
+        f"SELECT message_id, content, event_at, COALESCE(is_from_self,0), {nsfw} FROM conversation_messages"
+        f" WHERE conversation_id=? AND message_id<>? AND (event_at < ? OR (event_at = ? AND message_id < ?))"
+        f" AND content IS NOT NULL AND TRIM(content)<>''{system}"
+        f" ORDER BY event_at DESC, message_id DESC LIMIT ?", (conv, rid, at, at, rid, int(k))).fetchall()
+    turns = []
+    for mid, text, turn_at, is_self, flagged in reversed(rows):
+        then = _aware(turn_at)
+        if then is None or when - then > _dt.timedelta(days=CONTEXT_MAX_AGE_DAYS):
+            continue
+        if str(mid) in cache["excluded"] or flagged:
+            continue
+        turns.append({"table": "conversation_messages", "record_id": str(mid), "content": str(text),
+                      "owner": bool(is_self), "at": str(turn_at)[:16].replace("T", " ")})
+    if guard.active:
+        turns = guard.filter_canonical_rows(turns, record_id_keys=("record_id",), text_keys=("content",))
+    return [{"table": t["table"], "record_id": t["record_id"], "owner": t["owner"], "at": t["at"],
+             "speaker": CONTEXT_OWNER if t["owner"] else (other or CONTEXT_UNNAMED), "text": t["content"]}
+            for t in turns]
+
+
+def _other_party(conn, conv: str, guard, is_diarisation_label) -> Optional[str]:
+    """The other person's agreed contact name ("" when none agrees) when the conversation has
+    exactly one other sender who is not Off-limits; None otherwise (a group, a recording, or
+    nobody else)."""
+    peers = {str(s) for (s,) in conn.execute(
+        "SELECT DISTINCT sender_id FROM conversation_messages WHERE conversation_id=?"
+        " AND COALESCE(is_from_self,0)=0 AND sender_id IS NOT NULL AND sender_id<>'' AND sender_id<>'self'",
+        (conv,)).fetchall()}
+    if len(peers) != 1:
+        return None
+    peer = next(iter(peers))
+    if is_diarisation_label(peer):
+        return None
+    from ....analytics.messenger_directed import resolve_peer_identities
+    _cid, eid, display = resolve_peer_identities(conn, [peer]).get(peer, (None, None, None))
+    name = " ".join(str(display or "").split()) if display and any(ch.isalpha() for ch in str(display)) else ""
+    if guard.active and (guard.blocks_entity_id(eid) or guard.text_mentions_blackholed(peer)
+                         or (name and (guard.blocks_name(name) or guard.text_mentions_blackholed(name)))):
+        return None
+    return name
+
+
+def _context_for(conn, pack, rec: Dict[str, Any], cache: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The turns `pack` reads before `rec`: `_conversation_context` for a pack in
+    `template.context_packs()`, [] for every other pack. Read once per record and kept on it, so
+    the prompt, the parser and the verifier see the same turns."""
+    from ....features.derivation.template import context_packs, context_turns
+    if str(getattr(pack, "pack", "") or "") not in context_packs():
+        return []
+    if "context" not in rec:
+        rec["context"] = _conversation_context(conn, rec, context_turns(), cache=cache)
+    return rec["context"]
+
+
+def _context_refs(context: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str]]:
+    """The records a fact was read with, for `writer.assert_pack_fact(context_refs=...)`."""
+    return [{"table": t["table"], "record_id": t["record_id"]} for t in (context or ())]
+
+
+def _owners_own(a: Dict[str, Any], context) -> Dict[str, Any]:
+    """DR-62: nothing read with someone else's words is written about anyone but the owner, not
+    even to the review queue. A verifier that moves `about` off the owner rejects it instead."""
+    if context and a.get("verifier_status") == "rerouted":
+        a = dict(a)
+        a["verifier_status"] = "rejected"
+        a["verifier_reason"] = f"read with context, not about the owner ({a.get('about')})"[:120]
+    return a
 
 
 def _attach_dm_recipients(conn, recs: List[Dict[str, Any]]) -> None:
@@ -303,13 +454,17 @@ def run_derivation_batch(
             return True
         return False
 
+    ctx_cache: Dict[str, Any] = {}
+
     def judge(pack, rec, a, stage):
         """Verify one assertion; high-harm predicate classes get 3-vote majority
         (measured 2026-08-26: single quantized-verifier votes are variance-exposed
-        exactly where errors hurt most). Everything else keeps one vote."""
+        exactly where errors hurt most). Everything else keeps one vote. A record read with
+        its conversation is judged with the same turns (DR-62)."""
         if verify_mode == "off":
             a = dict(a); a["verifier_status"] = "skipped"
             return a
+        context = _context_for(conn, pack, rec, ctx_cache) or None
         votes_needed = 3 if _is_high_harm(a) else 1
         accepts = 0
         last_verdict = None
@@ -318,7 +473,8 @@ def run_derivation_batch(
                 verdict = parse_verdict(llm(vmodel, build_verify_prompt(
                     rec["text"], rec["role"], rec["date"],
                     a["predicate"], a["value"], a.get("about", "owner"),
-                    lens_note=lens_note_for(pack), label_note=label_note_for(addressing_for(pack, rec))), n=250,
+                    lens_note=lens_note_for(pack), label_note=label_note_for(addressing_for(pack, rec)),
+                    context=context), n=250,
                     pack_id=pack.pack, phase="verification", mode=stage))
             except Exception:  # noqa: BLE001
                 verdict = None
@@ -329,9 +485,11 @@ def run_derivation_batch(
             a = dict(a); a["verifier_status"] = "rejected"
             a["verifier_reason"] = f"majority {accepts}/{votes_needed} against"
             return a
-        return apply_verdict(a, last_verdict)
+        return _owners_own(apply_verdict(a, last_verdict), context)
 
-    recs = [rec for rec in (_row_to_record(row, posture_for=posture_for) for row in rows) if rec is not None]
+    ctx_packs = _T.context_packs()
+    recs = [rec for rec in (_row_to_record(row, posture_for=posture_for, keep_short=bool(ctx_packs))
+                            for row in rows) if rec is not None]
     _attach_dm_recipients(conn, recs)
     written = 0
     for rec in recs:
@@ -339,14 +497,18 @@ def run_derivation_batch(
             st["cancelled"] = True
             break
         _rec_vec = None
-        if _router_hybrid:
+        if _router_hybrid and not rec.get("short"):
             from ....features.derivation.router import embed_record
             _rec_vec = embed_record(rec["text"])
         for pid, pack in all_packs.items():
+            if rec.get("short") and pid not in ctx_packs:
+                continue                     # a short message is read only with its conversation
             hit = rec["role"] in pack.allowed_roles() and filters[pid].passes(rec["text"])
-            if not hit and _router_hybrid and rec["role"] in pack.allowed_roles():
+            if not hit and _router_hybrid and not rec.get("short") and rec["role"] in pack.allowed_roles():
                 from ....features.derivation.router import semantic_passes
                 hit = semantic_passes(pack, _rec_vec)
+            if hit and rec.get("short") and not _context_for(conn, pack, rec, ctx_cache):
+                hit = False
             if hit:
                 _bump_yield(conn, pid, prefilter_hits=1)
             if pid not in packs:
@@ -356,17 +518,22 @@ def run_derivation_batch(
                 if hit:
                     conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
                 continue
+            context = _context_for(conn, pack, rec, ctx_cache) or None
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec)),
+                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec),
+                                              context=context),
                           pack_id=pack.pack, mode="ingest")
                 _bump_yield(conn, pid, llm_calls=1)
             except Exception as exc:  # noqa: BLE001
                 st["llm_errors"] = st.get("llm_errors", 0) + 1
                 logger.debug("derivation llm error on %s: %s", key, exc)
                 continue
-            valid, rejects = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec))
+            valid, rejects = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec),
+                                          context=context)
             st["parse_rejects"] = st.get("parse_rejects", 0) + rejects
             _bump_yield(conn, pid, assertions=len(valid))
+            if context:
+                st["context_reads"] = st.get("context_reads", 0) + 1
             for a in valid:
                 a = judge(pack, rec, a, "ingest")
                 st[f"v_{a.get('verifier_status')}"] = st.get(f"v_{a.get('verifier_status')}", 0) + 1
@@ -383,7 +550,7 @@ def run_derivation_batch(
                     confidence=a["confidence"],
                     occurrence=a["occurrence"],   # NEVER defaulted to record date
                     quote=a.get("quote", ""), about=a.get("about", "owner"),
-                    event_date=rec["date"] or None)
+                    event_date=rec["date"] or None, context_refs=_context_refs(context))
                 stored = out.get("outcome") in ("written", "corroborated", "retelling_merged",
                                                 "field_update", "corrected", "superseded")
                 if stored:
@@ -397,11 +564,11 @@ def run_derivation_batch(
 
     _drip_catchup(conn, packs=packs, filters=filters, llm=llm, judge=judge,
                   writer=writer, owner=owner, done=done, st=st, cancel=cancel,
-                  posture_for=posture_for)
+                  posture_for=posture_for, ctx_cache=ctx_cache)
 
     _self_gate(conn, all_packs=all_packs, enabled=set(packs), filters=filters,
                llm=llm, judge=judge, model=model, vmodel=vmodel, st=st,
-               cancel=cancel, posture_for=posture_for)
+               cancel=cancel, posture_for=posture_for, ctx_cache=ctx_cache)
 
     for pid, pack in packs.items():
         mark_pack_run(conn, pid, pack.version)
@@ -496,6 +663,19 @@ def _iter_history(conn, limit=2000, posture_for=None):
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role"
             f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")]
+    # DR-62: the owner's short messages, for the context packs only. A query of their own, so
+    # the walk above, and every other pack's history, is exactly what it was.
+    from ....features.derivation.template import context_packs
+    short_ids = set()
+    if context_packs():
+        short_rows = _rows(
+            f"SELECT 'conversation_messages', message_id, content, event_at, actor_role, NULL,"
+            f" is_from_self, sender_id, sender_type, source_id, dataset_id, conversation_id"
+            f" FROM conversation_messages WHERE COALESCE(is_from_self,0)=1 AND content IS NOT NULL"
+            f" AND LENGTH(content)<={SHORT_RECORD_CHARS} AND LENGTH(TRIM(content))>0"
+            f" ORDER BY event_at DESC LIMIT {int(limit)}")
+        short_ids = {str(r[1]) for r in short_rows}
+        msg_rows = list(msg_rows) + list(short_rows)
     # The SENDER of each observed row, from the record — the label an any_with_label pack
     # carries into the prompt so a self-statement lands on the speaker's own node.
     speakers = {}
@@ -516,6 +696,8 @@ def _iter_history(conn, limit=2000, posture_for=None):
                     "speaker": str(display or "") if eid else "",
                     "speaker_entity_id": str(eid or ""),
                     "conversation_id": str(conv or "")})
+        if str(rid) in short_ids:
+            out[-1]["short"] = True
     # The RECIPIENT of each owner-authored DM, for the same reason the speaker is carried:
     # who the message was addressed to comes from the record, never from the text.
     _attach_dm_recipients(conn, out)
@@ -526,36 +708,44 @@ def _iter_history(conn, limit=2000, posture_for=None):
 
 
 def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, cancel,
-                  posture_for=None):
+                  posture_for=None, ctx_cache=None):
     """Process up to CATCHUP_PER_BATCH unprocessed HISTORY (record, pack) pairs
     per batch. Newest-first: recent history answers queries soonest."""
     if not packs:
         return
-    from ....features.derivation.template import build_prompt, parse_output
+    from ....features.derivation.template import build_prompt, context_packs, parse_output
     from ....features.facts.llm_extract import _resolved_extraction_model
     from ....config.settings import settings as _settings
     model = _resolved_extraction_model(_settings, conn)
+    ctx_packs = context_packs()
+    ctx_cache = ctx_cache if ctx_cache is not None else {}
     budget = CATCHUP_PER_BATCH
     for rec in _iter_history(conn, posture_for=posture_for):
         if budget <= 0 or (cancel is not None and cancel.is_set()):
             return
         for pid, pack in packs.items():
+            if rec.get("short") and pid not in ctx_packs:
+                continue                     # never this pack's to read: no progress key either
             key = f"{pid}@{pack.version}:{rec['table']}:{rec['record_id']}"
             if key in done:
                 continue
-            if rec["role"] not in pack.allowed_roles() or not filters[pid].passes(rec["text"]):
+            if (rec["role"] not in pack.allowed_roles() or not filters[pid].passes(rec["text"])
+                    or (rec.get("short") and not _context_for(conn, pack, rec, ctx_cache))):
                 conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
                 done.add(key)
                 continue
+            context = _context_for(conn, pack, rec, ctx_cache) or None
             budget -= 1
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec)),
+                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec),
+                                              context=context),
                           pack_id=pack.pack, mode="catchup")
                 _bump_yield(conn, pid, llm_calls=1, prefilter_hits=1)
             except Exception:  # noqa: BLE001
                 st["llm_errors"] = st.get("llm_errors", 0) + 1
                 continue
-            valid, _rej = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec))
+            valid, _rej = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec),
+                                       context=context)
             _bump_yield(conn, pid, assertions=len(valid))
             for a in valid:
                 a = judge(pack, rec, a, "catchup")
@@ -570,7 +760,7 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
                     source_refs=[{"table": rec["table"], "record_id": rec["record_id"]}],
                     confidence=a["confidence"], occurrence=a["occurrence"],
                     quote=a.get("quote", ""), about=a.get("about", "owner"),
-                    event_date=rec["date"] or None)
+                    event_date=rec["date"] or None, context_refs=_context_refs(context))
                 stored = out.get("outcome") in ("written", "corroborated", "retelling_merged",
                                                 "field_update", "corrected", "superseded")
                 if stored:
@@ -587,17 +777,18 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
 
 
 def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, st, cancel,
-               posture_for=None):
+               posture_for=None, ctx_cache=None):
     """Per-node self-gating (owner design, 2026-08-26): the node OFFERS, never
     switches. Enable offers come from a capped shadow trial on a disabled pack
     whose prefilter keeps hitting; disable nudges come from an enabled pack
     burning calls with zero yield. Special-class packs (health, beliefs) are
     NEVER auto-trialed — extracting their content requires the owner's opt-in
     first (consent precedes computation)."""
-    from ....features.derivation.template import build_prompt, parse_output
+    from ....features.derivation.template import build_prompt, context_packs, parse_output
     if posture_for is None:
         from ....features.provenance.posture import make_posture_resolver
         posture_for = make_posture_resolver(conn)
+    ctx_cache = ctx_cache if ctx_cache is not None else {}
 
     for pid, pack in all_packs.items():
         if cancel is not None and cancel.is_set():
@@ -632,6 +823,17 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
                 """SELECT 'conversation_messages', message_id, content, event_at, actor_role
                    FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15
                    AND event_at >= datetime('now','-14 day') ORDER BY event_at DESC LIMIT 400""")]
+        short_ids = set()
+        if pid in context_packs():
+            # DR-62: the trial reads the owner's short messages as ingest will, with their context.
+            short_rows = _rows(
+                f"""SELECT 'conversation_messages', message_id, content, event_at, actor_role,
+                          is_from_self, sender_id, sender_type, source_id, dataset_id
+                   FROM conversation_messages WHERE COALESCE(is_from_self,0)=1 AND content IS NOT NULL
+                   AND LENGTH(content)<={SHORT_RECORD_CHARS} AND LENGTH(TRIM(content))>0
+                   AND event_at >= datetime('now','-14 day') ORDER BY event_at DESC LIMIT 200""")
+            short_ids = {str(r[1]) for r in short_rows}
+            msg_rows = list(msg_rows) + list(short_rows)
         recent = []
         for tbl, rid, text, at, stored, *who in msg_rows:
             row = dict(zip(("actor_role", "is_from_self", "sender_id", "sender_type", "source_id",
@@ -648,8 +850,13 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
         for tbl, rid, text, at, role in recent:
             role = role or "observed"
             if role in pack.allowed_roles() and filters[pid].passes(text):
-                sample.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
-                               "date": str(at or "")[:10], "role": role, "source_id": ""})
+                rec = {"table": tbl, "record_id": rid, "text": (text or "")[:6000],
+                       "date": str(at or "")[:10], "role": role, "source_id": ""}
+                if str(rid) in short_ids:
+                    rec["short"] = True
+                    if not _context_for(conn, pack, rec, ctx_cache):
+                        continue
+                sample.append(rec)
             if len(sample) >= TRIAL_SAMPLE_CAP:
                 break
         if len(sample) < 5:
@@ -662,12 +869,15 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
         for rec in sample:
             if cancel is not None and cancel.is_set():
                 return
+            context = _context_for(conn, pack, rec, ctx_cache) or None
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec)),
+                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec),
+                                              context=context),
                           pack_id=pack.pack, mode="trial")
             except Exception:  # noqa: BLE001
                 continue
-            valid, _rej = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec))
+            valid, _rej = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec),
+                                       context=context)
             for a in valid:
                 a = judge(pack, rec, a, "trial")
                 n_assert += 1
