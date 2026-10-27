@@ -51,6 +51,11 @@ DISMISS_REASONS = ("someone_else", "not_a_claim", "trivial", "misread", "private
 #: ``reason`` is optional (NULL: skipped without saying why); ``evidence_opened``: whether "What it leaned on" was open.
 SKIPS_TABLE = "truth_skips"
 SKIP_REASONS = ("dont_know", "unclear_claim", "need_context", "not_now")
+#: The lane's denominator (owner, 27 Oct 2026: a starved lane read like a quiet one): per local day and truth source,
+#: what the lane's batches did with the rows they were given. ``unresolved`` holds rows a batch deferred or skipped
+#: before their source was known.
+LANE_DAILY_TABLE = "truth_lane_daily"
+LANE_COUNTS = ("queued", "gated", "checked", "deferred", "skipped", "paused")
 #: Which cards the owner sees by default: their own claims (the lane checks only those from step 1 on; contacts'
 #: claims checked by earlier builds stay stored and appear with ``speakers: "all"``).
 CARD_SPEAKERS = ("owner", "all")
@@ -124,6 +129,17 @@ _DDL = (
         skipped_at TEXT NOT NULL
     )""",
     f"CREATE INDEX IF NOT EXISTS idx_{SKIPS_TABLE}_check ON {SKIPS_TABLE}(check_id)",
+    f"""CREATE TABLE IF NOT EXISTS {LANE_DAILY_TABLE} (
+        day TEXT NOT NULL,
+        source TEXT NOT NULL,
+        queued INTEGER NOT NULL DEFAULT 0,
+        gated INTEGER NOT NULL DEFAULT 0,
+        checked INTEGER NOT NULL DEFAULT 0,
+        deferred INTEGER NOT NULL DEFAULT 0,
+        skipped INTEGER NOT NULL DEFAULT 0,
+        paused INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (day, source)
+    )""",
 )
 #: Columns added after 1.5.19 shipped the table: added in place, on first use, to a table an earlier build created
 #: (the table itself was created lazily, with no migration, so its columns are too). ``attempts`` counts the checks
@@ -165,7 +181,7 @@ def _missing_columns(conn: sqlite3.Connection) -> List[Tuple[str, str, str]]:
 def ensure_tables(conn: sqlite3.Connection) -> None:
     """Create the tables on first use, and add the later tables and columns to what an earlier build created. The
     probes are reads, so a node that has everything takes no write gate."""
-    if (tables_present(conn) and _present(conn, DISMISSALS_TABLE) and _present(conn, SKIPS_TABLE)
+    if (tables_present(conn) and all(_present(conn, t) for t in (DISMISSALS_TABLE, SKIPS_TABLE, LANE_DAILY_TABLE))
             and not _missing_columns(conn)):
         return
     with with_db_write():
@@ -580,6 +596,53 @@ def skip_claim(conn: sqlite3.Connection, check_id: Any, reason: Any = None, evid
     return {"ok": True, "skip_id": skip_id}
 
 
+def count_lane(conn: sqlite3.Connection, counts: Dict[str, Dict[str, int]], when: Optional[datetime] = None) -> None:
+    """Add one batch's counts (``{source: {count: n}}``, names from :data:`LANE_COUNTS`) to today's rows."""
+    rows = [(source, {k: int(v) for k, v in c.items() if k in LANE_COUNTS and v}) for source, c in counts.items()]
+    rows = [(source, c) for source, c in rows if c]
+    if not rows:
+        return
+    day = (when or now_utc()).astimezone().date().isoformat()
+    ensure_tables(conn)
+    with with_db_write():
+        for source, c in rows:
+            cols = sorted(c)
+            conn.execute(
+                f"INSERT INTO {LANE_DAILY_TABLE} (day, source, {', '.join(cols)}) VALUES (?, ?, {', '.join('?' for _ in cols)}) "
+                f"ON CONFLICT(day, source) DO UPDATE SET {', '.join(f'{k} = {k} + excluded.{k}' for k in cols)}",
+                (day, str(source)[:40], *[c[k] for k in cols]))
+        commit_connection(conn)
+
+
+#: What a failed local sync's stored error says, as a closed category (the error text itself never leaves the node's
+#: job table): the first matching phrase wins.
+_SYNC_FAILURES = (("full_disk_access", ("operation not permitted", "full disk access")), ("disk_floor", ("disk space",)),
+                  ("source_missing", ("no such file", "not found")))
+
+
+def sources_health(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """The synced truth sources' last sync, read from the job table: when it last ran, whether it succeeded, when it
+    last succeeded, and a failure category. Journal and transcripts arrive through other doors and are not listed."""
+    out: Dict[str, Any] = {}
+    if not _present(conn, "pipeline_jobs"):
+        return out
+    for source in ("imessage", "signal"):
+        rows = conn.execute(
+            "SELECT status, updated_at, detail_json FROM pipeline_jobs WHERE kind = 'local_sync' "
+            "AND json_extract(payload_json, '$.source_id') = ? AND status IN ('done', 'failed') "
+            "ORDER BY updated_at DESC LIMIT 50", (source,)).fetchall()
+        if not rows:
+            continue
+        status, at, detail = rows[0]
+        ok_at = next((r[1] for r in rows if r[0] == "done"), None)
+        failure = None
+        if status == "failed":
+            text = str(detail or "").lower()
+            failure = next((name for name, phrases in _SYNC_FAILURES if any(p in text for p in phrases)), "other")
+        out[source] = {"last_sync_at": at, "last_sync_ok": status == "done", "last_ok_at": ok_at, "failure": failure}
+    return out
+
+
 def _write_verified_claim(conn: sqlite3.Connection, key: str, payload: Dict[str, Any], confidence: float,
                           refs: List[Dict[str, Any]], valid_from: str, now: str) -> None:
     """Inside the caller's gate. Direct SQL, as FactStore writes facts: the memory dimension's definition lists the
@@ -655,6 +718,7 @@ def _empty_week(week: str) -> Dict[str, Any]:
     return {"week": week, "checked": 0, "backed": 0, "nothing_found": 0, "unable": 0, "not_a_claim": 0,
             "rechecked": 0, "attempts_exhausted": 0,
             "by_source": {s: 0 for s in SOURCES}, "by_category": {}, "labelled": 0, "dismissed": 0, "skipped": 0, "to_confirm": 0,
+            "lane": {k: 0 for k in LANE_COUNTS},
             "agreement": {"backed_true": 0, "backed_false": 0, "nothing_true": 0}, "latency_ms_p50": None}
 
 
@@ -709,7 +773,16 @@ def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[dat
         for week, values in latencies.items():
             if values:
                 out[week]["latency_ms_p50"] = round(statistics.median(values), 1)
-    return {"weeks": [out[week] for week in names]}
+    if _present(conn, LANE_DAILY_TABLE):
+        for day, *values in conn.execute(f"SELECT day, {', '.join(LANE_COUNTS)} FROM {LANE_DAILY_TABLE}").fetchall():
+            try:
+                week = iso_week(datetime.fromisoformat(str(day)).replace(hour=12).astimezone())
+            except ValueError:
+                continue
+            if week in out:
+                for key, value in zip(LANE_COUNTS, values):
+                    out[week]["lane"][key] += int(value or 0)
+    return {"weeks": [out[week] for week in names], "sources": sources_health(conn)}
 
 
 def _dismissal_join(conn: sqlite3.Connection) -> Tuple[str, str]:

@@ -465,18 +465,42 @@ async def execute_truth_check(payload: Dict[str, Any], *, pacer: Optional[Pacer]
     signature = signature_for(chat, settings["model"])
     started = time.monotonic()
     counts = {"checked": 0, "not_checkable_by_gate": 0, "skipped": 0, "deferred": 0, "paused": False, "rechecked": 0}
+    daily: Dict[str, Dict[str, int]] = {}  # the lane's denominator, by source (truth_checks.LANE_DAILY_TABLE)
+
+    def tally(source: str, key: str, n: int = 1) -> None:
+        daily.setdefault(source, {}).setdefault(key, 0)
+        daily[source][key] += n
+    try:
+        return await _run_batch(records, settings, chat, pace, signature, started, counts, tally, hosted, gate)
+    finally:
+        try:
+            await asyncio.to_thread(_db, _count_lane, daily)
+        except Exception:  # noqa: BLE001 — the denominator never fails a batch
+            logger.warning("truth lane daily counts not stored", exc_info=True)
+
+
+def _count_lane(conn: Any, daily: Dict[str, Dict[str, int]]) -> None:
+    from ..query.truth_checks import count_lane
+
+    count_lane(conn, daily)
+
+
+async def _run_batch(records, settings, chat, pace, signature, started, counts, tally, hosted, gate) -> Dict[str, Any]:
     warming = not hosted and warm_local_on()
     if warming:
         counts.update({"warmed": 0, "warm_failed": 0, "warm_s": 0.0})
     for index, (table, record_id) in enumerate(records):
         if time.monotonic() - started >= JOB_BUDGET_S:
             counts["deferred"] = len(records) - index
+            tally("unresolved", "deferred", len(records) - index)
             break
         prepared = await asyncio.to_thread(_db, _prepare, table, record_id, settings["sources"], signature)
         if prepared is None:
             counts["skipped"] += 1
+            tally("unresolved", "skipped")
             continue
         record, request, attempt = prepared
+        tally(record["source"], "queued")
         refused = gate(request.statement)
         if refused:
             # The engine's own gate, asked first: a refused row is stored without a model call or a pacing slot.
@@ -485,6 +509,7 @@ async def execute_truth_check(payload: Dict[str, Any], *, pacer: Optional[Pacer]
             await asyncio.to_thread(_db, _store, row, attempt)
             counts["not_checkable_by_gate"] += 1
             counts["rechecked"] += int(attempt > 1)
+            tally(record["source"], "gated")
             continue
         await pace.wait(settings["rate_per_minute"])
         if warming:
@@ -495,6 +520,7 @@ async def execute_truth_check(payload: Dict[str, Any], *, pacer: Optional[Pacer]
             if not ready:
                 counts["warm_failed"] += 1
                 counts["deferred"] = len(records) - index
+                tally(record["source"], "deferred", len(records) - index)
                 break
         result = await _verify(request, chat)
         cause = pause_cause(result, hosted)
@@ -502,9 +528,12 @@ async def execute_truth_check(payload: Dict[str, Any], *, pacer: Optional[Pacer]
             await asyncio.to_thread(_db, _pause, cause)
             counts["paused"] = True
             counts["deferred"] = len(records) - index
+            tally(record["source"], "paused")
+            tally(record["source"], "deferred", len(records) - index)
             break
         row = check_row(record, result, model=_model_label(chat), read_timeout_s=request.read_timeout_s)
         await asyncio.to_thread(_db, _store, row, attempt)
+        tally(record["source"], "checked")
         counts["checked"] += 1
         counts["rechecked"] += int(attempt > 1)
     return {"status": "ok", **counts}

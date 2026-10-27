@@ -928,3 +928,54 @@ def test_the_request_names_its_record_its_thread_and_whether_the_owner_spoke(nod
     assert (message.speaker_is_owner, message.source_ref, message.conversation_id) == (
         True, "conversation_messages:m-owner", "thread-9")
     assert (journal.speaker_is_owner, journal.source_ref, journal.conversation_id) == (True, "journal_entries:j1", None)
+
+
+# --- the lane's denominator (owner, 27 Oct 2026) ----------------------------------------------------------------------
+def _daily(conn):
+    return {r[0]: dict(zip(store.LANE_COUNTS, r[1:])) for r in conn.execute(
+        f"SELECT source, {', '.join(store.LANE_COUNTS)} FROM truth_lane_daily ORDER BY source")}
+
+
+def test_each_batch_adds_what_it_did_to_the_days_counts_by_source(node, monkeypatch):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    add_journal(node.conn, "j2", "Yeah.", at=ago(hours=2))  # the gate refuses a fragment
+    add_message(node.conn, "m1", "I painted the shed doors blue this afternoon.", from_self=True, at=ago(hours=3))
+    node.conn.commit()
+    turn_on(node.conn)
+    monkeypatch.setattr(lane, "_verify", Recorder())
+    run_job({"records": [["journal_entries", "j1"], ["journal_entries", "j2"], ["conversation_messages", "m1"],
+                         ["journal_entries", "gone"]]})
+    daily = _daily(node.conn)
+    assert daily["journal"] == {"queued": 2, "gated": 1, "checked": 1, "deferred": 0, "skipped": 0, "paused": 0}
+    assert daily["imessage"]["checked"] == 1 and daily["unresolved"]["skipped"] == 1
+    run_job({"records": [["journal_entries", "j1"]]})  # already checked: skipped, and the day's row grows
+    assert _daily(node.conn)["unresolved"]["skipped"] == 2
+    [week] = store.weekly_stats(node.conn, 1)["weeks"]
+    assert week["lane"] == {"queued": 3, "gated": 1, "checked": 2, "deferred": 0, "skipped": 2, "paused": 0}
+
+
+def test_a_pause_is_counted_with_what_it_deferred(node, monkeypatch):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    add_journal(node.conn, "j2", "I bought new hinges for the shed doors today.", at=ago(hours=3))
+    node.conn.commit()
+    turn_on(node.conn, model="hosted")
+    monkeypatch.setattr(lane, "_verify", Recorder({"I finished building the garden shed this morning.": _hosted_402()}))
+    monkeypatch.setattr(lane, "_chat_for", lambda model: SimpleNamespace(name=model, model="test"))
+    run_job({"records": [["journal_entries", "j1"], ["journal_entries", "j2"]]})
+    assert _daily(node.conn)["journal"]["paused"] == 1 and _daily(node.conn)["journal"]["deferred"] == 2
+
+
+def test_the_sources_last_sync_is_a_category_never_the_error_text(node):
+    from topos.pipeline.job_store import ensure_pipeline_jobs_schema
+
+    ensure_pipeline_jobs_schema(node.conn)
+    rows = [("j-ok", "done", "2026-10-26 08:01:02", '{"status": "ok"}'),
+            ("j-bad", "failed", "2026-10-27 14:32:13", '{"error": "Cannot copy chat.db: [Errno 1] Operation not permitted: /x. Full Disk Access may be required."}')]
+    for job_id, status, at, detail in rows:
+        node.conn.execute("INSERT INTO pipeline_jobs (job_id, kind, status, payload_json, detail_json, created_at, updated_at) "
+                          "VALUES (?, 'local_sync', ?, '{\"source_id\": \"imessage\"}', ?, ?, ?)", (job_id, status, detail, at, at))
+    node.conn.commit()
+    health = store.weekly_stats(node.conn, 1)["sources"]
+    assert health == {"imessage": {"last_sync_at": "2026-10-27 14:32:13", "last_sync_ok": False, "last_ok_at": "2026-10-26 08:01:02",
+                                   "failure": "full_disk_access"}}
+    assert "chat.db" not in json.dumps(health)
