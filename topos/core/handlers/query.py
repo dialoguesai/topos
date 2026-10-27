@@ -652,6 +652,7 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 logger.debug("unparseable query now=%r ignored", raw_now)
         result = await get_query_orchestrator(conn=hub.get_db_connection()).execute(
             query_text=intent,
+            dataset_id=str(payload.get("dataset_id") or "").strip() or None,
             # Optional companion to `query`: what to MATCH on, when the caller can name
             # the subject better than its own request text does. Absent for every client
             # that does not send it, which is every client today except home chat.

@@ -5895,6 +5895,34 @@ def _annotate_owner_chat_urls(items, conn, *, now=None):
     return items
 
 
+def _annotate_owner_conversation_origins(items, conn):
+    """Attach navigation IDs only for evidence already returned to its owner."""
+    from ..principal import current_principal
+    if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation"}:
+        return items
+    ids = list({str(item.get("record_id") or "") for item in items if item.get("record_id")})
+    for table, key, thread in (("ai_chat_messages", "message_id", "conversation_id"),
+                               ("conversation_messages", "message_id", "conversation_id"),
+                               ("transcript_segments", "segment_id", "transcript_id")):
+        context = {}
+        try:
+            for offset in range(0, len(ids), 400):
+                batch = ids[offset:offset + 400]
+                rows = conn.execute(
+                    f"SELECT {key}, {thread}, source_id FROM {table} WHERE {key} IN ({','.join('?' for _ in batch)})", batch).fetchall()
+                context.update({str(row[0]): row for row in rows})
+        except Exception:
+            # Older databases may not have every conversation family yet.
+            continue
+        for item in items:
+            row = context.get(str(item.get("record_id") or ""))
+            if row and not item.get("origin_table"):
+                item.update({"origin_table": table, key: str(row[0]), thread: str(row[1])})
+                if row[2]:
+                    item["source_id"] = str(row[2])
+    return items
+
+
 def _annotate_owner_ai_threads(items: List[Dict[str, Any]], conn, *, now=None) -> List[Dict[str, Any]]:
     """Give an owner's chat snippets their conversation context, from existing records.
 
@@ -5904,6 +5932,7 @@ def _annotate_owner_ai_threads(items: List[Dict[str, Any]], conn, *, now=None) -
     from ..principal import current_principal
     if conn is None or str(getattr(current_principal(), "cls", "")) not in {"owner_app", "owner_automation", "owner_agent"}:
         return items
+    items = _annotate_owner_conversation_origins(items, conn)
     ids = list({str(i.get("record_id") or "") for i in items if i.get("record_id")})
     context = {}
     headings = {}
@@ -7981,6 +8010,58 @@ class DefaultSignalRetrievalAdapter:
             logger.debug("index-lag stamp skipped: %s", exc)
         return bundle
 
+    def _retrieve_latest_text(self, request, participant):
+        from .latest_exchange import latest_exchange_rows
+
+        manifest = request.manifest
+        conn = getattr(self._adapters.signal, "_conn", None)
+        sources = _resolve_source_ids(manifest, request.installed_source_ids)
+        # Never widen a scope to the messages table or to other connectors.
+        sources = [sid for sid in sources if sid in {"imessage", "signal", "sms"}]
+        if "conversation_messages" not in (manifest.canonical_tables or []):
+            sources = []
+        rows, receipt = latest_exchange_rows(
+            conn, participant, source_ids=sources, dataset_id=request.dataset_id)
+        rows = _apply_filter_manifest_rows(rows, request.filter_manifest)
+        items = []
+        for row in rows:
+            row["record_id"] = row["message_id"]
+            if request.access_mode == "raw":
+                item = dict(row)
+            else:
+                item = _canonical_row_to_item(
+                    "conversation_messages", row, manifest=manifest,
+                    query_text=request.query_text or "", conn=conn, first_person=False,
+                    belief_intent=False, exposure_visible=True, role_cache={},
+                    display_cache={}, highlight_cache={}, disclosure_tier="owner_raw",
+                )
+            if item:
+                item.update(origin_table="conversation_messages",
+                            conversation_id=row["conversation_id"], message_id=row["message_id"])
+                items.append(item)
+        items = _blackhole_policy_for_summary(items, conn=conn, disclosure_tier="owner_raw")
+        key = "rows" if request.access_mode == "raw" else "summaries"
+        packet = {"scope_id": manifest.scope_id, "access_mode": request.access_mode,
+                  key: items}
+        packet = _strip_forbidden(packet, manifest.must_not_retrieve)
+        carried = _carried_items(conn)
+        if carried is not None:
+            packet = carried.withhold_from(packet, text=False)
+        exclusion = _enforce_request_exclusions(
+            packet, query_text=request.query_text or "", conn=conn, ledger=request.ledger)
+        if exclusion:
+            packet["exclusion"] = exclusion
+        # The ordering receipt must never cite a row removed by a later policy.
+        surviving = {str(i.get("record_id")) for i in packet.get(key, [])}
+        if receipt.get("latest_record_id") and str(receipt["latest_record_id"]) not in surviving:
+            receipt = {"status": "latest_not_visible", "coverage": "stored_messages"}
+        packet["latest_exchange"] = receipt
+        self._last_stores = ["canonical"]
+        return RetrievalBundle(context_packet=packet, stores_touched=self._last_stores,
+                               record_counts={key: len(packet.get(key, []))},
+                               retrieval_metadata={"retrieval_strategy": "participant_event_time",
+                                                   "latest_exchange": receipt})
+
     def _stamp_lane_faults(
         self, request: RetrievalRequest, bundle: RetrievalBundle, faults: Dict[str, str]
     ) -> None:
@@ -8072,6 +8153,14 @@ class DefaultSignalRetrievalAdapter:
                     reason="mode_ceiling_exceeded",
                 )
             raise RetrievalError("mode_ceiling_exceeded", f"{request.access_mode} exceeds ceiling {manifest.access_mode_ceiling}")
+
+        # Latest exchanges are a relational lookup, not semantic similarity.
+        # Only the authenticated owner's raw door may read contact identities.
+        from .latest_exchange import latest_text_participant
+        participant = latest_text_participant(query_text)
+        if (participant and request.owner_mode and request.disclosure_tier == "owner_raw"
+                and request.access_mode in ("summary", "raw")):
+            return self._retrieve_latest_text(request, participant)
 
         touched: List[str] = []
         counts: Dict[str, int] = {}

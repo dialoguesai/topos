@@ -29,6 +29,7 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 .DS_Store
+.response-quality-artifacts/
 *.log
 demo/
 

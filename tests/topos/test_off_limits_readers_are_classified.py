@@ -178,8 +178,14 @@ def test_the_view_that_leaves_out_what_is_carried_is_never_taken_without_the_ite
     # each place the pipeline narrows the name scan is a place it asks the item rule: the exit filter, the cluster
     # filter and the thread roster
     assert retrieval.count("view=_name_scan_view(carried)") == 3
-    assert retrieval.count("carried = _carried_items(conn)") == 3
     assert retrieval.count("carried.names(") == 3
+    # The latest-text shortcut also applies the item rule to its final packet. It does not narrow a name
+    # scan itself: the summary policy above still owns that scan, for both raw and summary items.
+    latest_text = retrieval.split("    def _retrieve_latest_text(", 1)[1].split("\n    def ", 1)[0]
+    assert latest_text.count("carried = _carried_items(conn)") == 1
+    assert "packet = carried.withhold_from(packet, text=False)" in latest_text
+    assert "_name_scan_view(" not in latest_text
+    assert retrieval.count("carried = _carried_items(conn)") == 4
 
 
 def test_the_item_rule_is_built_on_the_share_boundary_and_holds_no_matcher_of_its_own():

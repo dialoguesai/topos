@@ -12,6 +12,12 @@ stages — see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 ## Tests
 
+Changes affecting answers must include an entry in the
+[response-quality change log](response-quality-changelog.md), including contrasting
+cases and verification limits. The log covers node, web, and control-plane changes.
+Run the full [before/after regression gate](response-quality-regression.md) for each
+such change and retain its reports, including failures.
+
 ```bash
 pip install -e ".[dev,engine]"
 pytest tests -q

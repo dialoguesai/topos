@@ -2,6 +2,8 @@
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 import sqlite3
+from types import SimpleNamespace
+import pytest
 
 from topos.query.planner import _relative_time_range
 from topos.query.retrieval import _rrf_fuse_summary_lists, _fact_source_event_at, _activity_in_window
@@ -192,7 +194,8 @@ def test_empty_activity_window_does_not_claim_the_store_is_empty():
     assert ledger.empty_cause is None
 
 
-def test_empty_window_is_no_match_when_source_history_exists(monkeypatch):
+@pytest.mark.parametrize("broken_vector, expected", [(False, "no_match"), (True, "engine_failed")])
+def test_empty_window_is_no_match_when_source_history_exists(monkeypatch, broken_vector, expected):
     from topos.query.retrieval import DefaultSignalRetrievalAdapter, _rrf_fuse_summary_lists
     from topos.storage.adapters.factory import AdapterFactory
     from topos.query.manifest_validation import resolve_scope_manifest
@@ -207,8 +210,46 @@ def test_empty_window_is_no_match_when_source_history_exists(monkeypatch):
     def empty_summary(**kwargs):
         return _rrf_fuse_summary_lists([],ledger=kwargs.get('ledger'))
     monkeypatch.setattr('topos.query.retrieval._build_summary_items',empty_summary)
+    # This test is about a completed empty search, not local model availability.
+    # Exercise the real semantic-lane error handling with a deterministic service.
+    def search_vectors(**kwargs):
+        if broken_vector:
+            raise RuntimeError('synthetic vector outage')
+        return {'items': []}
+    monkeypatch.setattr('topos.features.signal.service.get_signal_service',
+                        lambda: SimpleNamespace(search_vectors=search_vectors))
     ledger=NarrowingLedger()
     DefaultSignalRetrievalAdapter(adapters).retrieve(RetrievalRequest(
         manifest=resolve_scope_manifest('messages:read'),access_mode='summary',
         query_text='What messages did I send today?',owner_mode=True,now=NOW,ledger=ledger))
-    assert ledger.empty_cause=='no_match'
+    assert ledger.empty_cause == expected
+
+def test_everyday_activity_paraphrases_use_event_window():
+    from topos.query.planner import is_dated_activity_query
+    for query in ['What was I doing yesterday?', 'What was I up to yesterday?',
+                  'What have I been doing this week?', 'What am I doing today?']:
+        assert is_dated_activity_query(query), query
+    assert not is_dated_activity_query('What did Peter say about doing the interview?')
+
+
+def test_yesterday_recap_passes_strict_window_to_fusion(monkeypatch):
+    from types import SimpleNamespace
+    from topos.query import retrieval
+    from topos.query.manifest import ScopeResolutionManifest
+    from topos.query.planner import _relative_time_range
+    from topos.storage.adapters.factory import AdapterFactory
+    window = _relative_time_range('yesterday', NOW)
+    captured = {}
+    def fuse(lanes, **kwargs):
+        captured.update(kwargs)
+        return []
+    monkeypatch.setattr(retrieval, '_rrf_fuse_summary_lists', fuse)
+    monkeypatch.setattr(retrieval, '_default_conn', lambda: None)
+    monkeypatch.setattr('topos.core.state.get_db_connection', lambda: None)
+    monkeypatch.setattr('topos.features.signal.vector_settings.fusion_rrf_enabled', lambda: True)
+    retrieval._build_summary_items_unfiltered(
+        manifest=ScopeResolutionManifest(scope_id='activity:read', primary_dimensions=[]),
+        adapters=AdapterFactory.create('memory'), query_text='What was I doing yesterday?',
+        semantic_hits=[], ranked_clusters=[],
+        plan=SimpleNamespace(time_range=window), now=NOW)
+    assert captured['activity_time_range'] == window

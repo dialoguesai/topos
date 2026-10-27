@@ -1294,6 +1294,16 @@
       ]
     },
     {
+      "version": "1.5.28",
+      "summary": "Conversation reference viewing, source names, scoped latest-text retrieval, and response-quality regression coverage.",
+      "steps": [],
+      "notes": [
+        "[P] [O] Add owner-scoped conversation filtering, anchors, titles, contact names and SQLite index search.",
+        "[O] Resolve latest text exchanges within the selected dataset; bypass stale latest-text/activity cache hits.",
+        "No migration, automatic reprocessing, or contact writes. Coordinated control-plane and web deployment required for viewer features."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

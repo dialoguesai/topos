@@ -540,4 +540,4 @@ def build_query_plan(
 
 def is_dated_activity_query(query: str) -> bool:
     """Event recall, rather than identity, aggregate statistics or goal browsing."""
-    return bool(re.search(r"\b(?:been up to|been working|worked on|working on|did I work on|the work I did|did I do|my activity|my activities|main activities|work did I progress|code changes|recap of (?:yesterday|today)|summary of (?:yesterday|today))\b", query, re.I))
+    return bool(re.search(r"\b(?:been up to|(?:was|am) I (?:doing|up to)|have I been doing|been working|worked on|working on|did I work on|the work I did|did I do|my activity|my activities|main activities|work did I progress|code changes|recap of (?:yesterday|today)|summary of (?:yesterday|today))\b", query, re.I))

@@ -310,9 +310,7 @@ def list_timeline(
                         urls[rid] = url
         except sqlite3.OperationalError:
             pass  # Legacy/minimal tables have no metadata column.
-    return {
-        "actor_filter": actor_kind,
-        "items": [
+    items = [
             {
                 "event_at": r[0],
                 "record_id": r[1],
@@ -323,7 +321,12 @@ def list_timeline(
                 **({"url": urls[r[1]]} if r[1] in urls else {}),
             }
             for r in rows
-        ],
+        ]
+    from ...core.handlers.conversation_view import enrich_timeline_conversations
+    enrich_timeline_conversations(conn, items)
+    return {
+        "actor_filter": actor_kind,
+        "items": items,
         "total": int(total),
         "limit": limit,
         "offset": offset,
