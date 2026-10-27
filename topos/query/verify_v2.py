@@ -130,6 +130,14 @@ STRICT_AS_OF = True
 #: evidence for it. An older message in the same thread (last week's) still counts.
 SAME_THREAD_GUARD = True
 SAME_THREAD_HOURS = 12
+#: LABELS_AS_EVIDENCE (owner, 27 Oct 2026: "labels never feed back"): the owner's earlier labels (``verified_claim``
+#: objects the Calibrate cards write) are evidence for a later claim that shares at least LABEL_MATCH_WORDS of its
+#: distinctive words or names, as the owner's own judgement (role ``authored``; dated by when the labelled claim was made,
+#: for the period rule, and dropped when the label itself came after the claim being checked). A "false" label reads as the owner saying the claim is false, which the judge can only
+#: mark "does not show" until contradictions are on. Off until labelled weeks measure it.
+LABELS_AS_EVIDENCE = False
+LABEL_MATCH_WORDS = 2
+LABELS_SHOWN = 3
 ROLE_RANK = {"authored": 0, "addressed": 1, "participated": 2, "observed": 3, "ambient": 4, "derived": 5}
 #: Embedding record types that name a source table when the retrieval item itself carries none.
 EMBEDDED_TABLES = {"conversation_message": "conversation_messages", "ai_chat_message": "ai_chat_messages",
@@ -679,6 +687,51 @@ class NodeEvidence:
         return records, stats
 
 
+_LABEL_WORDS = {"true": "The owner confirmed this is true", "partly": "The owner said this is partly true",
+                "false": "The owner said this is false"}
+
+
+def labelled_evidence(rows, claim: Claim, now: datetime, *, source_ref: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Evidence records from the owner's earlier labels: ``rows`` are ``(object_id, payload_json, source_refs_json,
+    labelled_at, valid_from)`` of open ``verified_claim`` objects. A label counts when it was made before ``now`` (the
+    claim's moment), shares at least LABEL_MATCH_WORDS distinctive words or names with the claim, and is not the label
+    of the claim's own record; most shared words first. Its date is when the labelled claim was made."""
+    terms = {w.lower() for w in claim.names + claim_words(claim.text)}
+    scored = []
+    for object_id, payload_json, refs_json, labelled_at, valid_from in rows:
+        made = _instant(labelled_at)
+        if made is None or made > now:
+            continue
+        try:
+            payload, refs = json.loads(payload_json or "{}"), json.loads(refs_json or "[]")
+        except ValueError:
+            continue
+        label, text = payload.get("label"), str(payload.get("claim") or "")
+        if label not in _LABEL_WORDS or not text:
+            continue
+        if source_ref and any(f"{r.get('table')}:{r.get('record_id')}" == source_ref for r in refs if isinstance(r, dict)):
+            continue
+        shared = terms & {w.lower() for w in claim_words(text)}
+        if len(shared) >= LABEL_MATCH_WORDS:
+            scored.append((len(shared), str(labelled_at or ""), {
+                "table": "verified_claim", "record_id": str(object_id), "event_at": str(valid_from or labelled_at or ""), "role": "authored",
+                "lanes": ["owner_label"], "lane": "owner_label", "text": f"{_LABEL_WORDS[label]}: {text}", "context": "",
+                "conversation_id": "", "origin": "verified_claim"}))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [record for _, _, record in scored[:LABELS_SHOWN]]
+
+
+def owner_labels(conn: sqlite3.Connection) -> List[Tuple[Any, ...]]:
+    """The open ``verified_claim`` rows (the owner's labels), newest label first; none on a node without them."""
+    try:
+        return conn.execute(
+            "SELECT object_id, payload_json, source_refs_json, COALESCE(updated_at, created_at), valid_from FROM signal_objects "
+            "WHERE object_type = 'verified_claim' AND valid_to IS NULL ORDER BY COALESCE(updated_at, created_at) DESC "
+            "LIMIT 2000").fetchall()
+    except sqlite3.OperationalError:
+        return []
+
+
 def select_evidence(records, sentence: str, claim: Claim, now: datetime, *, source_ref: Optional[str] = None,
                     conversation_id: Optional[str] = None):
     """As of the conversation; not the claim's own exchange; no quoting records; one per source record; first SHOWN in
@@ -881,7 +934,15 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
         async def check(claim: Claim) -> Dict[str, Any]:
             r: Dict[str, Any] = {**as_dict(claim), "verdict": None, "reason": None, "evidence": [], "stages": {}, "timings_ms": {}}
             t = time.perf_counter()
-            records, stats = await gather_in_worker(lambda conn: NodeEvidence(conn).gather(retrieval_query(claim), " ".join(claim.names), now))
+            def gather_all(conn):
+                found, counts = NodeEvidence(conn).gather(retrieval_query(claim), " ".join(claim.names), now)
+                if LABELS_AS_EVIDENCE:
+                    labels = labelled_evidence(owner_labels(conn), claim, now, source_ref=req.source_ref)
+                    counts["owner_labels"] = len(labels)
+                    found = labels + found
+                return found, counts
+
+            records, stats = await gather_in_worker(gather_all)
             evidence, dropped = select_evidence(records, req.statement, claim, now, source_ref=req.source_ref,
                                                 conversation_id=req.conversation_id)
             r["timings_ms"]["retrieve"] = round((time.perf_counter() - t) * 1000, 1)

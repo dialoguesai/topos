@@ -357,8 +357,8 @@ def previous_turns(conn: sqlite3.Connection, record: Dict[str, Any], limit: int 
 
 def _cited_text(conn: sqlite3.Connection, table: str, record_id: str) -> Optional[Dict[str, Any]]:
     """A cited record's own text and source, read now; None when it no longer exists."""
-    if table == "signal_objects":
-        found = _row(conn, table, "object_id", record_id)
+    if table in ("signal_objects", "verified_claim"):  # an owner label cited as evidence (verify_v2.LABELS_AS_EVIDENCE)
+        found = _row(conn, "signal_objects", "object_id", record_id)
         if found is None:
             return None
         try:

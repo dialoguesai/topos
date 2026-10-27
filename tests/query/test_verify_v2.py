@@ -904,3 +904,59 @@ def test_a_contacts_first_person_claim_is_someone_else_to_the_evidence_rules(mon
     assert subjects(speaker="a contact", speaker_is_owner=False, about_others=False) == []  # and still out of scope
     monkeypatch.setattr(v2, "SPEAKER_SUBJECT", False)
     assert subjects(speaker="a contact", speaker_is_owner=False, about_others=True) == ["owner"]
+
+
+# --- LABELS_AS_EVIDENCE --------------------------------------------------------------------------------------------------
+def _label_row(n, label, text, refs=(), at="2026-10-07T10:00:00+00:00", said="2026-10-06T09:00:00+00:00"):
+    import json as _json
+    return (f"vc{n}", _json.dumps({"claim": text, "label": label}), _json.dumps(list(refs)), at, said)
+
+
+LATER = datetime(2026, 10, 8, 0, 47, tzinfo=timezone.utc)
+
+
+def test_an_earlier_label_sharing_the_claims_words_is_the_owners_own_evidence():
+    c = claim(text="The owner restyled the pinwheel sidebar.", names=["pinwheel"])
+    rows = [_label_row(1, "true", "I restyled the pinwheel sidebar last month."),
+            _label_row(2, "false", "The pinwheel sidebar was never restyled by me."),
+            _label_row(3, "true", "I walked the dog."),                          # nothing shared
+            _label_row(4, "maybe", "The pinwheel sidebar restyle happened."),     # not a label value
+            _label_row(5, "true", "Pinwheel sidebar restyled.", refs=[{"table": "conversation_messages", "record_id": "m9"}])]
+    got = v2.labelled_evidence(rows, c, LATER, source_ref="conversation_messages:m9")
+    assert [r["record_id"] for r in got] == ["vc1", "vc2"]
+    assert got[0]["role"] == "authored" and got[0]["text"].startswith("The owner confirmed this is true: ")
+    assert got[1]["text"].startswith("The owner said this is false: ")
+    assert all(r["table"] == "verified_claim" and r["event_at"] == "2026-10-06T09:00:00+00:00" for r in got)
+
+
+def test_a_label_made_after_the_claim_never_counts():
+    c = claim()
+    assert v2.labelled_evidence([_label_row(1, "true", "I restyled the pinwheel sidebar.", at="2026-10-09T10:00:00+00:00")], c, LATER) == []
+    assert len(v2.labelled_evidence([_label_row(1, "true", "I restyled the pinwheel sidebar.")], c, LATER)) == 1
+
+
+def test_labels_are_read_only_when_the_switch_is_on(monkeypatch):
+    seen = []
+
+    class Gather:
+        def __init__(self, conn):
+            pass
+
+        def gather(self, *args):
+            return [], {"candidates": 0}
+
+    monkeypatch.setattr(v2, "NodeEvidence", Gather)
+    monkeypatch.setattr(v2, "owner_labels", lambda conn: seen.append(1) or [_label_row(1, "true", "I restyled the pinwheel sidebar.")])
+
+    async def gather_in_worker(fn):
+        return fn(None)
+
+    def go():
+        request = v2.ClaimRequest(statement=SENTENCE, said_at="2026-10-07T19:47:36-05:00")
+        return asyncio.run(v2.verify_owner_claim(request, chat=FakeChat(read_reply(), {1: "shows"}), gather_in_worker=gather_in_worker,
+                                                 to_thread=asyncio.to_thread))
+
+    assert go()["verdict"] == "no_evidence" and seen == []
+    monkeypatch.setattr(v2, "LABELS_AS_EVIDENCE", True)
+    out = go()
+    assert seen == [1] and out["verdict"] == "supported" and out["evidence"][0]["source"] == "verified_claim"
