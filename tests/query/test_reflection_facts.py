@@ -157,12 +157,23 @@ def test_moments_reads_and_a_coding_agent_is_refused(world):
     assert dispatch(CODING_AGENT) == {"id": "r1", "status": "error", "code": 403, "error": "owner_agent_not_allowed"}
 
 
-@pytest.mark.parametrize("msg_type", ["query", "aggregate", "get_sources", "reflection_invitations",
-                                      "reflection_conversation", "reflection_label", "signal_list_facts",
+@pytest.mark.parametrize("msg_type", ["query", "aggregate", "get_sources", "signal_list_facts",
                                       "get_messages", "verify_claim"])
 def test_moments_reaches_nothing_else(world, msg_type):
     assert dispatch(MOMENTS, {}, msg_type) == {"id": "r1", "status": "error", "code": 403,
                                                 "error": "owner_agent_not_allowed"}
+
+
+@pytest.mark.parametrize("msg_type", ["reflection_invitations", "reflection_conversation", "reflection_label"])
+def test_the_retired_reflection_doors_answer_no_one(world, msg_type):
+    """The 1.5.23 doors are retired (GRANT_DECISIONS G6): no handler, so Moments and the owner alike get the
+    unknown-type error, and nothing was read or written."""
+    from topos.core.handlers import HANDLERS
+
+    assert msg_type not in HANDLERS
+    unknown = {"id": "r1", "status": "error", "error": f"unhandled message type: {msg_type}"}
+    assert dispatch(MOMENTS, {}, msg_type) == unknown
+    assert dispatch(OWNER, {}, msg_type) == unknown
 
 
 def test_the_coding_agents_list_is_unchanged():

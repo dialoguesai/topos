@@ -34,6 +34,9 @@ def is_permission_state_table(table_name: str) -> bool:
 #
 # - truth_checks, truth_labels: the inbound truth lane's claims and the owner's labels of them
 #   (query/truth_checks.py), never shared and never off the node (DISCLOSURE_RULES DR-49).
+# - reflection_candidates, reflection_labels: written by the 1.5.23 reflection sweep and doors, retired under
+#   GRANT_DECISIONS G6 (DR-60). Nothing writes them now, but they still hold rows on installed nodes and dropping
+#   the owner's data is the owner's call, so the guard stays until a migration the owner approves drops them.
 OWNER_ONLY_TABLES: frozenset[str] = frozenset(
     {"pipeline_jobs", "mcp_clients", "ai_chat_message_facets", "ai_coding_topos_touches", "truth_checks",
      "truth_labels", "reflection_candidates", "reflection_labels"}
@@ -41,6 +44,8 @@ OWNER_ONLY_TABLES: frozenset[str] = frozenset(
 
 #: ``signal_objects`` rows of these types are withheld from the legacy table tools for everyone but the owner's own
 #: surface, the way the tables above are: the owner's labels of claims (DR-49) ride in that shared table.
+#: ``reflection_label`` objects come from the retired reflection doors (G6); none are written now, but installed
+#: nodes still hold them, so the guard stays.
 OWNER_ONLY_SIGNAL_OBJECT_TYPES: frozenset[str] = frozenset({"verified_claim", "reflection_label"})
 
 
