@@ -183,7 +183,8 @@ def test_cards_are_the_claims_newest_first_with_snippets_from_the_cited_records(
     assert cited["source"] == "journal" and cited["role"] == "authored" and cited["date"] == "2026-10-22"
     assert cited["snippet"].startswith("Painted both shed doors a deep blue today.") and len(cited["snippet"]) == 400
     assert set(me) == {"check_id", "speaker", "speaker_is_owner", "source", "date", "said", "claim_text", "category",
-                       "verdict", "cited", "latency_ms", "label", "note", "evidence_ok", "relevance", "dismiss_reason"}
+                       "verdict", "cited", "latency_ms", "label", "note", "evidence_ok", "relevance", "dismiss_reason",
+                       "contradicted"}
     assert me["speaker_is_owner"] is True and them["speaker_is_owner"] is False
     assert me["said"] and me["said"] != me["claim_text"]  # what was said, beside the claim taken from it
 

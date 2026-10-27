@@ -370,6 +370,9 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
     from ..query.verify_v2 import VERSION, engine_sha16
 
     verdict, reason = result.get("verdict"), result.get("reason")
+    contradicted = verdict == "contradicted"  # stored as no_evidence + the flag (truth_checks._ADDED_COLUMNS)
+    if contradicted:
+        verdict, reason = "no_evidence", "contradicted"
     if verdict == "unable" and str(reason or "").startswith("not_checkable:"):
         verdict = "not_checkable"
     if verdict not in VERDICTS:
@@ -390,6 +393,7 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
         "verdict": verdict, "reason": str(reason)[:120] if reason else None, "cited_refs": cited, "effort": EFFORT,
         "model": model, "latency_ms": latency, "read_timeout_s": read_timeout_s,
         "engine_version": str(result.get("version") or VERSION)[:80], "engine_sha16": engine_sha16() or None,
+        "contradicted": contradicted,
     }
 
 

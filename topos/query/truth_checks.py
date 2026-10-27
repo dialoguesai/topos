@@ -103,7 +103,8 @@ _DDL = (
         read_timeout_s REAL,
         checked_at TEXT,
         engine_version TEXT,
-        engine_sha16 TEXT
+        engine_sha16 TEXT,
+        contradicted INTEGER
     )""",
     f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{CHECKS_TABLE}_record ON {CHECKS_TABLE}(record_table, record_id)",
     f"CREATE INDEX IF NOT EXISTS idx_{CHECKS_TABLE}_week ON {CHECKS_TABLE}(week, created_at)",
@@ -148,8 +149,11 @@ _DDL = (
 #: ``checked_at`` is when the last check ran (NULL: ``created_at``). ``engine_version`` / ``engine_sha16`` name the
 #: engine build of the last check: ``verify_v2.VERSION`` and the sha16 of ``verify_v2.py`` (NULL on rows stored
 #: before the stamp), so the weekly eval tells builds apart by stamp rather than by time.
+#: ``contradicted`` (27 Oct 2026): 1 when the engine answered "contradicted" (only for a category the owner opted in,
+#: ``verify_v2.CONTRADICTION_CATEGORIES``). The verdict column keeps its four values (its CHECK cannot change in place):
+#: such a row is ``no_evidence`` with reason ``contradicted`` and this flag set.
 _ADDED_COLUMNS = (("attempts", "INTEGER NOT NULL DEFAULT 1"), ("read_timeout_s", "REAL"), ("checked_at", "TEXT"),
-                  ("engine_version", "TEXT"), ("engine_sha16", "TEXT"))
+                  ("engine_version", "TEXT"), ("engine_sha16", "TEXT"), ("contradicted", "INTEGER"))
 #: Added to ``truth_labels`` by step 1: whether the owner says the cited evidence shows the claim (1 / 0; NULL when not
 #: asked: the card was not "backed", or the owner did not answer).
 _ADDED_LABEL_COLUMNS = (("evidence_ok", "INTEGER"),)
@@ -401,13 +405,14 @@ def record_check(conn: sqlite3.Connection, check: Dict[str, Any]) -> Optional[st
         cursor = conn.execute(
             f"INSERT OR IGNORE INTO {CHECKS_TABLE} (check_id, record_table, record_id, conversation_id, source, "
             "speaker_kind, week, category, claim_text, verdict, reason, cited_refs_json, effort, model, latency_ms, "
-            "created_at, attempts, read_timeout_s, checked_at, engine_version, engine_sha16) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)",
+            "created_at, attempts, read_timeout_s, checked_at, engine_version, engine_sha16, contradicted) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?)",
             (check_id, check["record_table"], check["record_id"], check.get("conversation_id"), check["source"],
              check["speaker_kind"], iso_week(created), check.get("category"), check.get("claim_text"),
              check["verdict"], check.get("reason"), json.dumps(check.get("cited_refs") or []), check.get("effort"),
              check.get("model"), check.get("latency_ms"), created.isoformat(), check.get("read_timeout_s"),
-             created.isoformat(), check.get("engine_version"), check.get("engine_sha16")),
+             created.isoformat(), check.get("engine_version"), check.get("engine_sha16"),
+             1 if check.get("contradicted") else None),
         )
         commit_connection(conn)
     return check_id if cursor.rowcount else None
@@ -494,11 +499,12 @@ def recheck(conn: sqlite3.Connection, check: Dict[str, Any], attempt: int) -> Op
         conn.execute(
             f"UPDATE {CHECKS_TABLE} SET conversation_id=?, source=?, speaker_kind=?, category=?, claim_text=?, "
             "verdict=?, reason=?, cited_refs_json=?, effort=?, model=?, latency_ms=?, attempts=?, read_timeout_s=?, "
-            "checked_at=?, engine_version=?, engine_sha16=? WHERE check_id=?",
+            "checked_at=?, engine_version=?, engine_sha16=?, contradicted=? WHERE check_id=?",
             (check.get("conversation_id"), check["source"], check["speaker_kind"], check.get("category"),
              check.get("claim_text"), check["verdict"], check.get("reason"), json.dumps(check.get("cited_refs") or []),
              check.get("effort"), check.get("model"), check.get("latency_ms"), attempt, check.get("read_timeout_s"),
-             now_utc().isoformat(), check.get("engine_version"), check.get("engine_sha16"), found[0]),
+             now_utc().isoformat(), check.get("engine_version"), check.get("engine_sha16"),
+             1 if check.get("contradicted") else None, found[0]),
         )
         commit_connection(conn)
     return str(found[0])
@@ -717,7 +723,7 @@ def _empty_week(week: str) -> Dict[str, Any]:
 
     return {"week": week, "checked": 0, "backed": 0, "nothing_found": 0, "unable": 0, "not_a_claim": 0,
             "rechecked": 0, "attempts_exhausted": 0,
-            "by_source": {s: 0 for s in SOURCES}, "by_category": {}, "labelled": 0, "dismissed": 0, "skipped": 0, "to_confirm": 0,
+            "by_source": {s: 0 for s in SOURCES}, "by_category": {}, "labelled": 0, "dismissed": 0, "skipped": 0, "contradicted": 0, "to_confirm": 0,
             "lane": {k: 0 for k in LANE_COUNTS},
             "agreement": {"backed_true": 0, "backed_false": 0, "nothing_true": 0}, "latency_ms_p50": None}
 
@@ -736,13 +742,14 @@ def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[dat
         dismissed, join = _dismissal_join(conn)
         skipped = (f"EXISTS (SELECT 1 FROM {SKIPS_TABLE} s WHERE s.check_id = c.check_id)"
                    if _present(conn, SKIPS_TABLE) else "0")
+        against = "COALESCE(c.contradicted, 0)" if "contradicted" in _columns(conn, CHECKS_TABLE) else "0"
         rows = conn.execute(
             f"SELECT c.week, c.source, c.category, c.verdict, c.latency_ms, c.model IS NOT NULL, "
-            f"c.claim_text IS NOT NULL, l.label, {attempts}, {dismissed}, c.speaker_kind, {skipped} FROM {CHECKS_TABLE} c "
+            f"c.claim_text IS NOT NULL, l.label, {attempts}, {dismissed}, c.speaker_kind, {skipped}, {against} FROM {CHECKS_TABLE} c "
             f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id{join} "
             f"WHERE c.week IN ({','.join('?' for _ in names)})", names).fetchall()
         latencies: Dict[str, List[float]] = {week: [] for week in names}
-        for week, source, category, verdict, latency, modelled, has_claim, label, tries, reason, speaker, was_skipped in rows:
+        for week, source, category, verdict, latency, modelled, has_claim, label, tries, reason, speaker, was_skipped, was_against in rows:
             entry = out[week]
             entry["checked"] += 1
             if tries > 1:
@@ -754,6 +761,7 @@ def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[dat
             if key:
                 entry[key] += 1
             entry["skipped"] += int(bool(was_skipped))  # cards skipped at least once, whatever happened after
+            entry["contradicted"] += int(bool(was_against))
             if source in entry["by_source"]:
                 entry["by_source"][source] += 1
             if category:
@@ -806,19 +814,20 @@ def claim_cards(conn: sqlite3.Connection, limit: int = 20, unlabelled_only: bool
         return {"cards": []}
     dismissed, join = _dismissal_join(conn)
     evidence_ok = "l.evidence_ok" if "evidence_ok" in _columns(conn, LABELS_TABLE) else "NULL"
+    contradicted = "c.contradicted" if "contradicted" in _columns(conn, CHECKS_TABLE) else "NULL"
     where = f" AND l.check_id IS NULL AND {dismissed} IS NULL" if unlabelled_only else ""
     if speakers == "owner":
         where += " AND c.speaker_kind = 'owner'"
     rows = conn.execute(
         f"SELECT c.check_id, c.record_table, c.record_id, c.source, c.category, c.claim_text, c.verdict, "
-        f"c.cited_refs_json, c.latency_ms, l.label, l.note, {evidence_ok}, {dismissed} FROM {CHECKS_TABLE} c "
+        f"c.cited_refs_json, c.latency_ms, l.label, l.note, {evidence_ok}, {dismissed}, {contradicted} FROM {CHECKS_TABLE} c "
         f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id{join} "
         f"WHERE c.claim_text IS NOT NULL AND c.verdict != 'not_checkable'{where} "
         f"ORDER BY c.created_at DESC, c.check_id DESC LIMIT ?", (limit * 3,)).fetchall()
     names: Dict[str, Optional[str]] = {}
     cards = []
     for (check_id, table, record_id, source, category, claim_text, verdict, refs_json, latency, label, note, ok,
-         reason) in rows:
+         reason, against) in rows:
         record = load_record(conn, table, record_id, names)
         if record is None:
             continue
@@ -829,6 +838,7 @@ def claim_cards(conn: sqlite3.Connection, limit: int = 20, unlabelled_only: bool
             "verdict": verdict, "cited": list(_cited(conn, refs_json)), "latency_ms": latency, "label": label,
             "note": note, "evidence_ok": None if ok is None else bool(ok),
             "relevance": "dismissed" if reason else ("relevant" if label else None), "dismiss_reason": reason,
+            "contradicted": bool(against),
         })
         if len(cards) >= limit:
             break

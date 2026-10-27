@@ -1023,3 +1023,37 @@ def test_consistency_lets_several_own_words_together_back_an_opinion(monkeypatch
     assert run(records, no)["verdict"] == "no_evidence" and no.asked == 1
     single = Together(True)
     assert run([rec(1, "authored")], single)["verdict"] == "no_evidence"  # one record is not a set
+
+
+# --- contradictions, per category -------------------------------------------------------------------------------------
+class ContraChat(FakeChat):
+    """Labels from {n: label}; asked with the contradiction prompt only when the category is opted in."""
+
+    def __init__(self, labels):
+        super().__init__(read_reply(), labels)
+        self.systems = []
+
+    def __call__(self, system, user, schema, timeout, usage):
+        if system not in (v2.READ_SYSTEM, v2.READ_SYSTEM_WITH_OTHERS):
+            self.systems.append(system)
+        return super().__call__(system, user, schema, timeout, usage)
+
+
+def test_contradictions_are_asked_for_only_in_an_opted_in_category(monkeypatch):
+    chat = ContraChat({1: "contradicts"})
+    out = run([rec(1, "authored")], chat)
+    assert out["verdict"] == "no_evidence" and all(s == v2.LABEL_SYSTEM for s in chat.systems)
+    monkeypatch.setattr(v2, "CONTRADICTION_CATEGORIES", frozenset({"did"}))
+    chat = ContraChat({1: "contradicts"})
+    out = run([rec(1, "authored")], chat)
+    assert out["verdict"] == "contradicted" and all(s == v2.LABEL_SYSTEM_CONTRA for s in chat.systems)
+    assert [e["ref"] for e in out["evidence"] if e.get("contradicts")] == ["journal_entries:r1"]
+
+
+def test_support_wins_over_contradiction_and_the_rules_still_apply(monkeypatch):
+    monkeypatch.setattr(v2, "CONTRADICTION_CATEGORIES", frozenset({"did"}))
+    assert run([rec(1, "authored"), rec(2, "authored")], ContraChat({1: "contradicts", 2: "shows"}))["verdict"] == "supported"
+    # someone else's message cannot contradict the owner's own claim, as it cannot back it
+    assert run([rec(1, "observed")], ContraChat({1: "contradicts"}))["verdict"] == "no_evidence"
+    # out of the claim's period: no contradiction
+    assert run([rec(1, "authored", day="2026-09-01")], ContraChat({1: "contradicts"}))["verdict"] == "no_evidence"

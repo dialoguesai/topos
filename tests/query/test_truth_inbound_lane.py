@@ -287,7 +287,7 @@ def test_the_stored_row_has_the_designs_columns_and_cited_refs_without_text(node
     assert set(row) == {"check_id", "record_table", "record_id", "conversation_id", "source", "speaker_kind", "week",
                         "category", "claim_text", "verdict", "reason", "cited_refs_json", "effort", "model",
                         "latency_ms", "created_at", "attempts", "read_timeout_s", "checked_at", "engine_version",
-                        "engine_sha16"}
+                        "engine_sha16", "contradicted"}
     assert row["attempts"] == 1 and row["read_timeout_s"] == lane.LOCAL_READ_TIMEOUT_S and row["checked_at"] == row["created_at"]
     assert (row["engine_version"], row["engine_sha16"]) == ENGINE  # the stub answered without a version: VERSION
     assert row["verdict"] == "supported" and row["claim_text"] == "The owner finished the garden shed."
@@ -869,7 +869,7 @@ def test_a_table_the_1519_lane_created_gains_the_columns_and_its_timed_out_rows_
     job_id = lane.enqueue_truth_checks(node.conn)
     assert job_id
     columns = [r[1] for r in node.conn.execute("PRAGMA table_info(truth_checks)").fetchall()]
-    assert columns[-5:] == ["attempts", "read_timeout_s", "checked_at", "engine_version", "engine_sha16"]
+    assert columns[-6:] == ["attempts", "read_timeout_s", "checked_at", "engine_version", "engine_sha16", "contradicted"]
     [row] = checks(node.conn)
     assert row["attempts"] == 1 and row["read_timeout_s"] is None and row["checked_at"] is None
     assert row["engine_version"] is None and row["engine_sha16"] is None  # 1.5.19's rows: unstamped
@@ -979,3 +979,19 @@ def test_the_sources_last_sync_is_a_category_never_the_error_text(node):
     assert health == {"imessage": {"last_sync_at": "2026-10-27 14:32:13", "last_sync_ok": False, "last_ok_at": "2026-10-26 08:01:02",
                                    "failure": "full_disk_access"}}
     assert "chat.db" not in json.dumps(health)
+
+
+def test_a_contradiction_is_stored_as_nothing_found_with_its_flag(node, monkeypatch):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    turn_on(node.conn)
+    against = {"verdict": "contradicted", "reason": None, "category": "did", "claim": {"text": "The owner built a shed."},
+               "evidence": [{"n": 1, "ref": "journal_entries:j-old", "source": "journal_entries", "date": "2026-10-01",
+                             "role": "authored", "snippet": "x", "cited": True, "contradicts": True}], "timings_ms": {"total": 900.0}}
+    monkeypatch.setattr(lane, "_verify", Recorder({"I finished building the garden shed this morning.": against}))
+    run_job({"records": [["journal_entries", "j1"]]})
+    [row] = checks(node.conn)
+    assert (row["verdict"], row["reason"], row["contradicted"]) == ("no_evidence", "contradicted", 1)
+    assert json.loads(row["cited_refs_json"])[0]["record_id"] == "j-old"
+    [card] = store.claim_cards(node.conn, 10, True)["cards"]
+    assert card["contradicted"] is True and store.weekly_stats(node.conn, 1)["weeks"][0]["contradicted"] == 1

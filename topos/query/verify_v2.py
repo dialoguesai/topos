@@ -153,6 +153,11 @@ JOURNAL_SHOWN = 3
 #: same position count: one more judge call over the owner-written excerpts (at least CONSISTENCY_MIN of them).
 CONSISTENCY = False
 CONSISTENCY_MIN = 2
+#: Contradictions, per category (owner, 23 Oct 2026: "opt-in per category once labelled"; never un-withheld globally).
+#: For a claim whose turn is in one of these categories, the judge may also label an excerpt "contradicts" (it shows the
+#: claim's core is false), under the same agreement and role/period rules as "shows"; with no supporting record and an
+#: agreed, accepted contradicting one, the verdict is "contradicted". Empty: the judge is asked exactly as before.
+CONTRADICTION_CATEGORIES: frozenset = frozenset()
 ROLE_RANK = {"authored": 0, "addressed": 1, "participated": 2, "observed": 3, "ambient": 4, "derived": 5}
 #: Embedding record types that name a source table when the retrieval item itself carries none.
 EMBEDDED_TABLES = {"conversation_message": "conversation_messages", "ai_chat_message": "ai_chat_messages",
@@ -334,6 +339,20 @@ LABEL_SCHEMA = {
     "type": "object",
     "properties": {"labels": {"type": "array", "items": {
         "type": "object", "properties": {"n": {"type": "integer"}, "label": {"type": "string", "enum": ["shows", "related", "unrelated"]}},
+        "required": ["n", "label"]}}},
+    "required": ["labels"],
+}
+
+LABEL_SYSTEM_CONTRA = LABEL_SYSTEM.replace(
+    '- "related": about the same topic or thing, but it does not show the claim.',
+    '- "contradicts": the excerpt itself shows the claim\'s core is false: the same specific thing, stated otherwise, at a\n'
+    '  time the claim covers. Not merely missing, older or about something else.\n'
+    '- "related": about the same topic or thing, but it neither shows nor contradicts the claim.')
+LABEL_SCHEMA_CONTRA = {
+    "type": "object",
+    "properties": {"labels": {"type": "array", "items": {
+        "type": "object", "properties": {"n": {"type": "integer"},
+                                         "label": {"type": "string", "enum": ["shows", "contradicts", "related", "unrelated"]}},
         "required": ["n", "label"]}}},
     "required": ["labels"],
 }
@@ -806,17 +825,18 @@ def select_evidence(records, sentence: str, claim: Claim, now: datetime, *, sour
 
 
 # --- stage 4: judge -------------------------------------------------------------------------------------------------
-def judge(claim: Claim, evidence, chat, usage: Usage, timeout: float, orders: int = 2, tiebreak: Optional[bool] = None) -> Dict[str, Any]:
+def judge(claim: Claim, evidence, chat, usage: Usage, timeout: float, orders: int = 2, tiebreak: Optional[bool] = None,
+          contra: bool = False) -> Dict[str, Any]:
     """One judge (a chat callable) or several (a sequence of them). With several, each runs its own opposite-order pair
     in parallel and a record counts when any judge's own pair agrees and the rules accept it: different models miss
     different records, so the union finds more without loosening any one judge's agreement rule. ``orders`` = 1 asks
     one order only (low effort: no agreement, no split); ``tiebreak`` defaults to the module switch."""
     judges = list(chat) if isinstance(chat, (list, tuple)) else [chat]
     if len(judges) == 1:
-        return _judge_one(claim, evidence, judges[0], usage, timeout, orders, tiebreak)
+        return _judge_one(claim, evidence, judges[0], usage, timeout, orders, tiebreak, contra)
     results, failures = [], []
     with ThreadPoolExecutor(max_workers=len(judges)) as pool:
-        futures = [pool.submit(_judge_one, claim, evidence, j, usage, timeout, orders, tiebreak) for j in judges]
+        futures = [pool.submit(_judge_one, claim, evidence, j, usage, timeout, orders, tiebreak, contra) for j in judges]
         for f in futures:
             try:
                 results.append(f.result())
@@ -832,11 +852,18 @@ def judge(claim: Claim, evidence, chat, usage: Usage, timeout: float, orders: in
             "rejections": sorted(x for r in results for x in r["rejections"]), "reason": reason,
             "judges": len(judges), "judges_failed": len(failures), "judge_cites": [len(r["cites"]) for r in results],
             "first_ns": sorted(set().union(*(r["first_ns"] for r in results))), "second_ns": sorted(set().union(*(r["second_ns"] for r in results))),
-            "tiebroken_ns": sorted(set().union(*(r["tiebroken_ns"] for r in results)))}
+            "tiebroken_ns": sorted(set().union(*(r["tiebroken_ns"] for r in results))),
+            "contra_cites": sorted(set().union(*(r.get("contra_cites") or [] for r in results)))}
 
 
-def judge_prompt() -> Tuple[str, Dict[str, Any]]:
-    return (LIST_SYSTEM, LIST_SCHEMA) if JUDGE_OUTPUT == "list" else (LABEL_SYSTEM, LABEL_SCHEMA)
+def judge_prompt(contra: bool = False) -> Tuple[str, Dict[str, Any]]:
+    if JUDGE_OUTPUT == "list":
+        return LIST_SYSTEM, LIST_SCHEMA  # the list shape has no contradiction answer
+    return (LABEL_SYSTEM_CONTRA, LABEL_SCHEMA_CONTRA) if contra else (LABEL_SYSTEM, LABEL_SCHEMA)
+
+
+def contradicts_in(reply: Dict[str, Any]) -> set:
+    return {x.get("n") for x in (reply.get("labels") or []) if isinstance(x, dict) and x.get("label") == "contradicts"}
 
 
 def shows_in(reply: Dict[str, Any]) -> set:
@@ -860,8 +887,8 @@ def apply_rules(claim: Claim, by_n: Dict[int, Dict[str, Any]], agreed) -> Tuple[
 
 
 def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: float, orders: int = 2,
-               tiebreak: Optional[bool] = None) -> Dict[str, Any]:
-    system, schema = judge_prompt()
+               tiebreak: Optional[bool] = None, contra: bool = False) -> Dict[str, Any]:
+    system, schema = judge_prompt(contra)
     tiebreak = TIEBREAK if tiebreak is None else tiebreak
     when = f"{claim.date_from} to {claim.date_to}" if claim.date_from else "not stated"
     about = "someone other than the owner" if claim.subject == "someone_else" else "the owner"
@@ -877,8 +904,11 @@ def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: fl
     with ThreadPoolExecutor(max_workers=2 * len(shards)) as pool:  # every call in parallel: the judge takes one call's time
         forward = [pool.submit(chat, system, head + "\n".join(line(e) for e in s), schema, timeout, usage) for s in shards]
         backward = [pool.submit(chat, system, head + "\n".join(line(e) for e in reversed(s)), schema, timeout, usage) for s in shards] if orders > 1 else []
-        first = set().union(*(shows_in(f.result()) for f in forward))
-        second = set().union(*(shows_in(f.result()) for f in backward)) if orders > 1 else set(first)
+        replies_f, replies_b = [f.result() for f in forward], [f.result() for f in backward]
+        first = set().union(*(shows_in(x) for x in replies_f))
+        second = set().union(*(shows_in(x) for x in replies_b)) if orders > 1 else set(first)
+        first_c = set().union(*(contradicts_in(x) for x in replies_f))
+        second_c = set().union(*(contradicts_in(x) for x in replies_b)) if orders > 1 else set(first_c)
     shows = shows_in
     valid = lambda ns: {n for n in ns if isinstance(n, int) and 1 <= n <= len(evidence)}
     by_n = {e["n"]: e for e in evidence}
@@ -906,8 +936,10 @@ def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: fl
         reason = "judges_disagree"
     else:
         reason = "no_record_shows_it"
+    contra_cites = apply_rules(claim, by_n, sorted(valid(first_c & second_c) - agreed_set))[0] if contra else []
     return {"cites": cites, "agreed_ns": agreed, "agreed": len(agreed), "tiebroken": tiebroken, "rejections": sorted(r for ok, r in verdicts.values() if not ok),
-            "reason": reason, "first_ns": sorted(valid(first)), "second_ns": sorted(valid(second)), "tiebroken_ns": sorted(tiebroken_ns)}
+            "reason": reason, "first_ns": sorted(valid(first)), "second_ns": sorted(valid(second)), "tiebroken_ns": sorted(tiebroken_ns),
+            "contra_cites": contra_cites}
 
 
 CONSISTENCY_SYSTEM = """You check excerpts written by one person against one opinion that person stated. No single excerpt
@@ -1011,7 +1043,8 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
             if left() <= 1.0:
                 return {**r, "verdict": "unable", "reason": "deadline"}
             t = time.perf_counter()
-            verdict = await to_thread(judge, claim, evidence, judges or chat, usage, left(), effort["orders"], effort["tiebreak"])
+            contra = category in CONTRADICTION_CATEGORIES
+            verdict = await to_thread(judge, claim, evidence, judges or chat, usage, left(), effort["orders"], effort["tiebreak"], contra)
             r["timings_ms"]["judge"] = round((time.perf_counter() - t) * 1000, 1)
             r["stages"]["judge"] = {"agreed": verdict["agreed"], "tiebroken": verdict["tiebroken"], "rejections": verdict["rejections"],
                                     "judges": verdict.get("judges", 1), "judges_failed": verdict.get("judges_failed", 0), "orders": effort["orders"]}
@@ -1022,10 +1055,14 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
                 if together:
                     cited, how = set(together), "consistent_set"
                 r["stages"]["consistency"] = {"asked": True, "together": bool(together)}
-            r["evidence"] = [{**e, "cited": e["n"] in cited, "agreed": e["n"] in agreed} for e in evidence]
-            r["cited_roles"] = [e["role"] for e in evidence if e["n"] in cited]
+            against = set(verdict.get("contra_cites") or []) if not cited else set()
+            r["evidence"] = [{**e, "cited": e["n"] in cited or e["n"] in against, "agreed": e["n"] in agreed,
+                              **({"contradicts": True} if e["n"] in against else {})} for e in evidence]
+            r["cited_roles"] = [e["role"] for e in evidence if e["n"] in cited or e["n"] in against]
             if how:
                 r["support"] = how
+            if against:
+                return {**r, "verdict": "contradicted", "reason": None}
             return {**r, "verdict": "supported" if cited else "no_evidence", "reason": None if cited else verdict["reason"]}
 
         t = time.perf_counter()
@@ -1034,13 +1071,16 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
         out["timings_ms"]["judge"] = max(r["timings_ms"].get("judge", 0) for r in results)
         out["timings_ms"]["check"] = round((time.perf_counter() - t) * 1000, 1)
         out["claims"] = [{k: v for k, v in r.items() if k not in ("evidence", "stages", "timings_ms")} for r in results]
-        lead = next((r for r in results if r["verdict"] == "supported"), results[0])
+        lead = next((r for r in results if r["verdict"] == "supported"),
+                    next((r for r in results if r["verdict"] == "contradicted"), results[0]))
         out["stages"]["retrieve"] = lead["stages"].get("retrieve")
         if lead["stages"].get("judge"):
             out["stages"]["judge"] = lead["stages"]["judge"]
         out["evidence"], out["cited_roles"] = lead["evidence"], lead.get("cited_roles", [])
         if lead["verdict"] == "supported":
             return respond({**out, "verdict": "supported"}, started, usage)
+        if lead["verdict"] == "contradicted":  # only for a category in CONTRADICTION_CATEGORIES
+            return respond({**out, "verdict": "contradicted"}, started, usage)
         if all(r["verdict"] == "unable" for r in results):
             return respond(unable(lead["reason"], out), started, usage)
         return respond({**out, "verdict": "no_evidence", "reason": lead["reason"]}, started, usage)
