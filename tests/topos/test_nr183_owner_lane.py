@@ -636,6 +636,19 @@ async def test_a_reply_never_goes_to_a_newer_connection_with_the_lane_on(monkeyp
     assert node.client.inbound_shed_counts() == {("gone", SEARCH): 1}
 
 
+@pytest.mark.asyncio
+async def test_an_owners_read_whose_connection_closed_is_dropped_with_the_lane_on(monkeypatch):
+    node = Node(monkeypatch, limit=1, reserved=0)
+    await node.receive(owner_frame("hold-o"))
+    await node.receive(owner_frame("gone-read", "get_table_rows"))
+    await node.receive(owner_frame("gone-write", "upsert_home_chat_session"))
+    node.client._ws = Socket()                                               # the socket was replaced meanwhile
+    await node.settle()
+    assert "gone-read" not in node.handled and "gone-read" not in node.replies()
+    assert "gone-write" in node.handled                                      # a write is applied however late
+    assert node.client.inbound_shed_counts() == {("gone", "get_table_rows"): 1}
+
+
 # --- the switch off: as before ---------------------------------------------------------------------------------------
 
 def test_the_lane_is_on_by_default_and_off_is_one_environment_line(monkeypatch):

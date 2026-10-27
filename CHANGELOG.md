@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **A read whose control-plane connection closed is no longer run for nobody.** `[O]` When a handler slot comes free, a queued read (`INBOUND_GONE_READ_TYPES`: the database explorer's tables and rows, sources and install status, disk status, the owner's sharing status, catalog and counts, `signal_data_health`, `truth_weekly_stats`) whose socket closed while it waited is dropped, as the four share doors already were: the control plane failed it when the socket closed, and its reply could only go to that socket. Writes and protocol commands are still applied however late. Measured on 26-27 Oct on a laptop asleep with the lid shut: macOS woke it for ~45 s every ~15 min, 59 of 67 drops came 1-28 s after a wake, and 307 of the 360 replies sent to a dead socket were these reads, some 28 min after their socket died, holding slots while new requests were refused busy. The shed line gains a trailing `gone_read=` count. No migration.
+
 ## [1.5.28] — 2026-10-26
 
 ### Added
