@@ -9,6 +9,25 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Commitments read who an owner's direct message was sent to, on every derivation path.** `[E:derivation]` The
+  recipient label built for commitments on 6 Sep reached only the commitments lane; the ingest batch, the drip catch-up
+  and the enable-offer trial never passed it, so "I'll send it after lunch" had nobody to be promised to: the person
+  being texted is not named in the words, and a counterparty the record does not name is rejected by the grounding
+  guard. An owner-authored message in a conversation with exactly one other sender now carries that sender as its
+  recipient (the lane's existing rule); groups, other people's messages, AI chats, journals and transcripts are
+  unchanged, and a diarised voice ("Speaker 1") is never a DM partner. Only `template.RECIPIENT_LABEL_PACKS`
+  (commitments) read it: given the label, other packs bind the person being texted as the subject of facts that are
+  not about them (a thank-you read as a relationship event). The prompt, the parser's labels and the verifier's
+  addressing all go through `template.addressing_for`, the owner's backfill control included. No other person's words
+  are added to any prompt here (that is DR-62's change). `no-invalidation`: nothing already written is wrong; records
+  already read are not re-read.
+- **The fact parser takes `"person": ["<name>"]` as the name, and never takes "Speaker 2" as a person.** `[E:derivation]`
+  A one-person field written as a one-element array is unwrapped and checked like a string, where before the whole
+  assertion was rejected; two names in a one-person field are still refused. Diarisation labels (`Speaker 2`,
+  `SPEAKER_00`, `spk_1`, `Speaker A`) fail `person_field_ok`, so a transcript's name for an unidentified voice is never
+  stored as a person.
+
 ## [1.5.28] — 2026-10-26
 
 ### Added

@@ -91,6 +91,77 @@ def _row_to_record(row: Dict[str, Any], *,
             "source_id": str(row.get("source_id") or "")}
 
 
+def _attach_dm_recipients(conn, recs: List[Dict[str, Any]]) -> None:
+    """Give each owner-authored direct message the one other party it was sent to.
+
+    "Sure, I'll send it after lunch" is a promise to the person being texted, and their
+    name is nowhere in the words. Without the label the extraction model has no counterparty
+    to give, and a placeholder (`<recipient>`, `<him>`) is rejected by the grounding guard,
+    so the promise is lost. The label is who the message was sent to, from the record and
+    the identity bridge, never anything that person wrote.
+
+    The rule is the commitments lane's (`commitments._dm_recipients`): a conversation with
+    more than one other sender is a group and gets no recipient. Observed rows, AI chats,
+    journals and transcripts are untouched. A record that already carries a
+    `conversation_id` keeps it; the rest read the stored one by message id.
+
+    Attached to the record, read per pack: only `template.RECIPIENT_LABEL_PACKS` see it (a
+    pack outside it, given the label, binds the person being texted to facts not about them).
+    """
+    import sqlite3 as _sqlite3
+    dms = [r for r in recs if r.get("role") == "authored" and r.get("table") == "conversation_messages"]
+    if not dms:
+        return
+    unknown = sorted({str(r["record_id"]) for r in dms if not r.get("conversation_id")})
+    stored: Dict[str, str] = {}
+    for start in range(0, len(unknown), 400):
+        chunk = unknown[start:start + 400]
+        try:
+            stored.update((str(mid), str(conv or "")) for mid, conv in conn.execute(
+                f"SELECT message_id, conversation_id FROM conversation_messages"
+                f" WHERE message_id IN ({','.join('?' for _ in chunk)})", chunk).fetchall())
+        except _sqlite3.Error:
+            break
+    for r in dms:
+        if not r.get("conversation_id"):
+            r["conversation_id"] = stored.get(str(r["record_id"]), "")
+    try:
+        from ....features.derivation.commitments import _dm_recipients
+        who_by_conv = _dm_recipients(conn, sorted({r["conversation_id"] for r in dms if r["conversation_id"]}))
+    except Exception as exc:  # noqa: BLE001 — no recipient means today's prompt, never a failed batch
+        logger.debug("derivation: DM recipients unavailable (%s)", exc)
+        return
+    for r in dms:
+        who = who_by_conv.get(r["conversation_id"])
+        if who:
+            r["recipient"], r["recipient_entity_id"], r["recipient_key"] = who
+
+
+def _recipient_args(pack, rec: Dict[str, Any]) -> Dict[str, str]:
+    """`build_prompt`'s recipient arguments; empty strings for a record without one, or for
+    a pack that does not read the recipient (`template.RECIPIENT_LABEL_PACKS`)."""
+    from ....features.derivation.template import addressing_for
+    rec = addressing_for(pack, rec)
+    return {"recipient": str(rec.get("recipient") or ""),
+            "recipient_entity_id": str(rec.get("recipient_entity_id") or ""),
+            "recipient_key": str(rec.get("recipient_key") or "")}
+
+
+def _recipient_parse_args(pack, rec: Dict[str, Any]) -> Dict[str, Any]:
+    """The matching `parse_output` arguments: the labels the prompt issued, and the
+    recipient's name as the prompt spelled it. Not the stand-in for an unnamed partner —
+    "the person you are texting" exempted from the person checks would be stored as one."""
+    from ....features.derivation.commitments import UNNAMED_RECIPIENT
+    from ....features.derivation.template import addressing_for
+    rec = addressing_for(pack, rec)
+    labels = [label for label in (
+        f"id:{rec['recipient_entity_id']}" if rec.get("recipient_entity_id") else "",
+        f"key:{rec['recipient_key']}" if rec.get("recipient_key") else "") if label]
+    name = str(rec.get("recipient") or "").strip()
+    return {"runner_labels": labels,
+            "grounded_exempt": (name,) if labels and name and name != UNNAMED_RECIPIENT else ()}
+
+
 def _ledger_write(conn, *, stage, pack, rec, a, model, vmodel, written_id=None):
     """Training-data factory: EVERY judged assertion lands here, accepted or not
     (rejects are the hard negatives; quotes+record refs recover spans)."""
@@ -163,7 +234,7 @@ def run_derivation_batch(
     from ....features.derivation.registry import (bundled_pack_dir, enabled_packs,
                                                   mark_pack_run, seed_pack_registry)
     from ....features.derivation.packs import load_packs
-    from ....features.derivation.template import build_prompt, parse_output
+    from ....features.derivation.template import addressing_for, build_prompt, parse_output
     from ....features.derivation.verify import (build_verify_prompt, parse_verdict,
                                                 apply_verdict, verifier_model, label_note_for, lens_note_for)
     from ....features.derivation.writer import DerivationWriter
@@ -247,7 +318,7 @@ def run_derivation_batch(
                 verdict = parse_verdict(llm(vmodel, build_verify_prompt(
                     rec["text"], rec["role"], rec["date"],
                     a["predicate"], a["value"], a.get("about", "owner"),
-                    lens_note=lens_note_for(pack), label_note=label_note_for(rec)), n=250,
+                    lens_note=lens_note_for(pack), label_note=label_note_for(addressing_for(pack, rec))), n=250,
                     pack_id=pack.pack, phase="verification", mode=stage))
             except Exception:  # noqa: BLE001
                 verdict = None
@@ -260,14 +331,13 @@ def run_derivation_batch(
             return a
         return apply_verdict(a, last_verdict)
 
+    recs = [rec for rec in (_row_to_record(row, posture_for=posture_for) for row in rows) if rec is not None]
+    _attach_dm_recipients(conn, recs)
     written = 0
-    for row in rows:
+    for rec in recs:
         if cancel is not None and cancel.is_set():
             st["cancelled"] = True
             break
-        rec = _row_to_record(row, posture_for=posture_for)
-        if rec is None:
-            continue
         _rec_vec = None
         if _router_hybrid:
             from ....features.derivation.router import embed_record
@@ -287,13 +357,14 @@ def run_derivation_batch(
                     conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
                 continue
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]), pack_id=pack.pack, mode="ingest")
+                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec)),
+                          pack_id=pack.pack, mode="ingest")
                 _bump_yield(conn, pid, llm_calls=1)
             except Exception as exc:  # noqa: BLE001
                 st["llm_errors"] = st.get("llm_errors", 0) + 1
                 logger.debug("derivation llm error on %s: %s", key, exc)
                 continue
-            valid, rejects = parse_output(raw, pack, record_text=rec["text"])
+            valid, rejects = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec))
             st["parse_rejects"] = st.get("parse_rejects", 0) + rejects
             _bump_yield(conn, pid, assertions=len(valid))
             for a in valid:
@@ -417,11 +488,11 @@ def _iter_history(conn, limit=2000, posture_for=None):
     msg_rows = _rows(
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role,"
             f" CASE WHEN COALESCE(is_from_self,0)=1 THEN NULL ELSE sender_id END,"
-            f" is_from_self, sender_id, sender_type, source_id, dataset_id"
+            f" is_from_self, sender_id, sender_type, source_id, dataset_id, conversation_id"
             f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")
     if not msg_rows:
-        msg_rows = [tuple(r) + (None,) * 6 for r in _rows(
+        msg_rows = [tuple(r) + (None,) * 7 for r in _rows(
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role"
             f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")]
@@ -435,7 +506,7 @@ def _iter_history(conn, limit=2000, posture_for=None):
             speakers = resolve_peer_identities(conn, keys)
         except Exception:  # noqa: BLE001 — no speaker label means no outward fact, never a crash
             speakers = {}
-    for tbl, rid, text, at, stored, sender, is_self, sender_id, sender_type, source_id, dataset_id in msg_rows:
+    for tbl, rid, text, at, stored, sender, is_self, sender_id, sender_type, source_id, dataset_id, conv in msg_rows:
         _cid, eid, display = speakers.get(str(sender or ""), (None, None, None))
         role = _record_role_for({"actor_role": stored, "is_from_self": is_self, "sender_id": sender_id,
                                  "sender_type": sender_type, "source_id": source_id,
@@ -443,7 +514,11 @@ def _iter_history(conn, limit=2000, posture_for=None):
         out.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
                     "date": str(at or "")[:10], "role": role, "source_id": "",
                     "speaker": str(display or "") if eid else "",
-                    "speaker_entity_id": str(eid or "")})
+                    "speaker_entity_id": str(eid or ""),
+                    "conversation_id": str(conv or "")})
+    # The RECIPIENT of each owner-authored DM, for the same reason the speaker is carried:
+    # who the message was addressed to comes from the record, never from the text.
+    _attach_dm_recipients(conn, out)
     # Ambient captions are not taste/habit evidence. any_with_label catchup
     # must not mint owner-subject facts from overheard speech. A gated
     # overheard reader is the only path that may surface captions.
@@ -474,12 +549,13 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
                 continue
             budget -= 1
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]), pack_id=pack.pack, mode="catchup")
+                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec)),
+                          pack_id=pack.pack, mode="catchup")
                 _bump_yield(conn, pid, llm_calls=1, prefilter_hits=1)
             except Exception:  # noqa: BLE001
                 st["llm_errors"] = st.get("llm_errors", 0) + 1
                 continue
-            valid, _rej = parse_output(raw, pack, record_text=rec["text"])
+            valid, _rej = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec))
             _bump_yield(conn, pid, assertions=len(valid))
             for a in valid:
                 a = judge(pack, rec, a, "catchup")
@@ -578,16 +654,20 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
                 break
         if len(sample) < 5:
             continue
+        # The trial reads a record the way ingest will once the pack is on, or its accept
+        # rate measures a different prompt than the one the owner is offered.
+        _attach_dm_recipients(conn, sample)
         n_assert = n_acc = 0
         examples = []
         for rec in sample:
             if cancel is not None and cancel.is_set():
                 return
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]), pack_id=pack.pack, mode="trial")
+                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec)),
+                          pack_id=pack.pack, mode="trial")
             except Exception:  # noqa: BLE001
                 continue
-            valid, _rej = parse_output(raw, pack, record_text=rec["text"])
+            valid, _rej = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec))
             for a in valid:
                 a = judge(pack, rec, a, "trial")
                 n_assert += 1
