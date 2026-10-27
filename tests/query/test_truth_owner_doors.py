@@ -539,11 +539,13 @@ def test_a_bad_dismissal_or_evidence_answer_is_refused(node, week, call):
 
 def test_a_table_from_before_step_1_gains_the_evidence_column_and_reads_without_dismissals(node, week):
     node.conn.execute("DROP TABLE IF EXISTS truth_dismissals")
+    node.conn.execute("DROP TABLE IF EXISTS truth_skips")
     node.conn.execute("ALTER TABLE truth_labels DROP COLUMN evidence_ok")
     node.conn.commit()
     [card] = store.claim_cards(node.conn, 10, True)["cards"]  # a read creates nothing
     assert card["evidence_ok"] is None and card["relevance"] is None
     assert store.weekly_stats(node.conn, 1)["weeks"][0]["dismissed"] == 0
+    assert store.weekly_stats(node.conn, 1)["weeks"][0]["skipped"] == 0
     store.label_claim(node.conn, week.me, "true", evidence_ok=True)  # the first write adds what is missing
     assert node.conn.execute("SELECT evidence_ok FROM truth_labels").fetchone() == (1,)
     assert store._present(node.conn, "truth_dismissals")
@@ -557,3 +559,41 @@ def test_the_owner_dismisses_through_the_door(node, week):
     assert _as(owner, "truth_claim_label", {"check_id": week.me, "relevance": "dismissed"})["error"] == "invalid_truth_label"
     back = _as(owner, "truth_claim_label", {"check_id": week.me, "relevance": "relevant", "label": "true", "evidence_ok": True})
     assert back["status"] == "ok" and back["payload"]["label_id"] and _dismissals(node.conn) == []
+
+
+# --- skips are recorded (owner, 27 Oct 2026) --------------------------------------------------------------------------
+def _skips(conn):
+    return conn.execute("SELECT check_id, reason, evidence_opened FROM truth_skips ORDER BY skipped_at, skip_id").fetchall()
+
+
+def test_a_skip_is_logged_each_time_and_the_card_stays(node, week):
+    first = store.skip_claim(node.conn, week.me, "need_context", evidence_opened=True)
+    store.skip_claim(node.conn, week.me)  # skipped again, without saying why
+    assert first["ok"] is True and first["skip_id"]
+    assert sorted(_skips(node.conn), key=str) == sorted([(week.me, "need_context", 1), (week.me, None, None)], key=str)
+    assert [c["check_id"] for c in store.claim_cards(node.conn, 10, True)["cards"]] == [week.me]
+    assert node.conn.execute("SELECT COUNT(*) FROM truth_labels").fetchone()[0] == 0 and _objects(node.conn) == []
+    [entry] = store.weekly_stats(node.conn, 1)["weeks"]
+    assert entry["skipped"] == 1 and entry["to_confirm"] == 1  # a card, not a skip count; still waiting
+
+
+@pytest.mark.parametrize("reason, opened", [("bored", None), ("dont_know", "yes")])
+def test_a_bad_skip_is_refused(node, week, reason, opened):
+    with pytest.raises(store.TruthRequestError) as raised:
+        store.skip_claim(node.conn, week.me, reason, opened)
+    assert str(raised.value) == "invalid_truth_label"
+
+
+def test_a_removed_record_takes_its_skips_with_it(node, week):
+    store.skip_claim(node.conn, week.me, "not_now")
+    assert store.forget_records(node.conn, ["m-me"]) == 1
+    assert _skips(node.conn) == []
+
+
+def test_the_owner_skips_through_the_door(node, week):
+    owner = Principal(OWNER_APP, "uds")
+    out = _as(owner, "truth_claim_label", {"check_id": week.me, "relevance": "skipped", "skip_reason": "unclear_claim",
+                                           "evidence_opened": False})
+    assert out["status"] == "ok" and out["payload"]["skip_id"]
+    assert _skips(node.conn) == [(week.me, "unclear_claim", 0)]
+    assert _as(owner, "truth_claim_label", {"check_id": week.me, "relevance": "skipped", "skip_reason": "x"})["error"] == "invalid_truth_label"

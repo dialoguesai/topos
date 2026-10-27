@@ -46,6 +46,11 @@ LABELS = ("true", "partly", "false")
 #: the reason a kind of claim keeps surfacing can be found without reading notes.
 DISMISSALS_TABLE = "truth_dismissals"
 DISMISS_REASONS = ("someone_else", "not_a_claim", "trivial", "misread", "private", "other")
+#: A skip is recorded too (owner, 27 Oct 2026): the card stays on the list, and the weekly readout counts skips by reason
+#: to find where a card or a claim fails the owner. One row per skip (a card skipped three times is its own signal);
+#: ``reason`` is optional (NULL: skipped without saying why); ``evidence_opened``: whether "What it leaned on" was open.
+SKIPS_TABLE = "truth_skips"
+SKIP_REASONS = ("dont_know", "unclear_claim", "need_context", "not_now")
 #: Which cards the owner sees by default: their own claims (the lane checks only those from step 1 on; contacts'
 #: claims checked by earlier builds stay stored and appear with ``speakers: "all"``).
 CARD_SPEAKERS = ("owner", "all")
@@ -111,6 +116,14 @@ _DDL = (
         note TEXT,
         dismissed_at TEXT NOT NULL
     )""",
+    f"""CREATE TABLE IF NOT EXISTS {SKIPS_TABLE} (
+        skip_id TEXT PRIMARY KEY,
+        check_id TEXT NOT NULL,
+        reason TEXT CHECK (reason IS NULL OR reason IN ('dont_know', 'unclear_claim', 'need_context', 'not_now')),
+        evidence_opened INTEGER,
+        skipped_at TEXT NOT NULL
+    )""",
+    f"CREATE INDEX IF NOT EXISTS idx_{SKIPS_TABLE}_check ON {SKIPS_TABLE}(check_id)",
 )
 #: Columns added after 1.5.19 shipped the table: added in place, on first use, to a table an earlier build created
 #: (the table itself was created lazily, with no migration, so its columns are too). ``attempts`` counts the checks
@@ -152,7 +165,8 @@ def _missing_columns(conn: sqlite3.Connection) -> List[Tuple[str, str, str]]:
 def ensure_tables(conn: sqlite3.Connection) -> None:
     """Create the tables on first use, and add the later tables and columns to what an earlier build created. The
     probes are reads, so a node that has everything takes no write gate."""
-    if tables_present(conn) and _present(conn, DISMISSALS_TABLE) and not _missing_columns(conn):
+    if (tables_present(conn) and _present(conn, DISMISSALS_TABLE) and _present(conn, SKIPS_TABLE)
+            and not _missing_columns(conn)):
         return
     with with_db_write():
         for statement in _DDL:
@@ -550,6 +564,22 @@ def dismiss_claim(conn: sqlite3.Connection, check_id: Any, reason: Any, note: An
     return {"ok": True, "dismissal_id": dismissal_id}
 
 
+def skip_claim(conn: sqlite3.Connection, check_id: Any, reason: Any = None, evidence_opened: Any = None) -> Dict[str, Any]:
+    """The owner skipped a card, optionally saying why (:data:`SKIP_REASONS`). Appends one row; the card stays on the
+    list and nothing else changes."""
+    if (reason is not None and reason not in SKIP_REASONS) or evidence_opened not in (None, True, False):
+        raise TruthRequestError("invalid_truth_label")
+    check, _ = _claim_check(conn, check_id, None)
+    ensure_tables(conn)
+    skip_id = uuid.uuid4().hex
+    with with_db_write():
+        conn.execute(f"INSERT INTO {SKIPS_TABLE} (skip_id, check_id, reason, evidence_opened, skipped_at) VALUES (?, ?, ?, ?, ?)",
+                     (skip_id, check["check_id"], reason, None if evidence_opened is None else int(evidence_opened),
+                      now_utc().isoformat()))
+        commit_connection(conn)
+    return {"ok": True, "skip_id": skip_id}
+
+
 def _write_verified_claim(conn: sqlite3.Connection, key: str, payload: Dict[str, Any], confidence: float,
                           refs: List[Dict[str, Any]], valid_from: str, now: str) -> None:
     """Inside the caller's gate. Direct SQL, as FactStore writes facts: the memory dimension's definition lists the
@@ -597,8 +627,9 @@ def forget_records(conn: sqlite3.Connection, record_ids: Optional[Iterable[str]]
             chunk = gone[start:start + 500]
             marks = ",".join("?" for _ in chunk)
             conn.execute(f"DELETE FROM {LABELS_TABLE} WHERE check_id IN ({marks})", chunk)
-            if _present(conn, DISMISSALS_TABLE):
-                conn.execute(f"DELETE FROM {DISMISSALS_TABLE} WHERE check_id IN ({marks})", chunk)
+            for side_table in (DISMISSALS_TABLE, SKIPS_TABLE):
+                if _present(conn, side_table):
+                    conn.execute(f"DELETE FROM {side_table} WHERE check_id IN ({marks})", chunk)
             conn.execute(f"DELETE FROM {CHECKS_TABLE} WHERE check_id IN ({marks})", chunk)
             conn.execute(f"DELETE FROM signal_objects WHERE object_type = ? AND object_key IN ({marks})",
                          [OBJECT_TYPE, *(f"truth_check:{c}" for c in chunk)])
@@ -623,7 +654,7 @@ def _empty_week(week: str) -> Dict[str, Any]:
 
     return {"week": week, "checked": 0, "backed": 0, "nothing_found": 0, "unable": 0, "not_a_claim": 0,
             "rechecked": 0, "attempts_exhausted": 0,
-            "by_source": {s: 0 for s in SOURCES}, "by_category": {}, "labelled": 0, "dismissed": 0, "to_confirm": 0,
+            "by_source": {s: 0 for s in SOURCES}, "by_category": {}, "labelled": 0, "dismissed": 0, "skipped": 0, "to_confirm": 0,
             "agreement": {"backed_true": 0, "backed_false": 0, "nothing_true": 0}, "latency_ms_p50": None}
 
 
@@ -639,13 +670,15 @@ def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[dat
     if tables_present(conn):
         attempts = "COALESCE(c.attempts, 1)" if "attempts" in _columns(conn, CHECKS_TABLE) else "1"
         dismissed, join = _dismissal_join(conn)
+        skipped = (f"EXISTS (SELECT 1 FROM {SKIPS_TABLE} s WHERE s.check_id = c.check_id)"
+                   if _present(conn, SKIPS_TABLE) else "0")
         rows = conn.execute(
             f"SELECT c.week, c.source, c.category, c.verdict, c.latency_ms, c.model IS NOT NULL, "
-            f"c.claim_text IS NOT NULL, l.label, {attempts}, {dismissed}, c.speaker_kind FROM {CHECKS_TABLE} c "
+            f"c.claim_text IS NOT NULL, l.label, {attempts}, {dismissed}, c.speaker_kind, {skipped} FROM {CHECKS_TABLE} c "
             f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id{join} "
             f"WHERE c.week IN ({','.join('?' for _ in names)})", names).fetchall()
         latencies: Dict[str, List[float]] = {week: [] for week in names}
-        for week, source, category, verdict, latency, modelled, has_claim, label, tries, reason, speaker in rows:
+        for week, source, category, verdict, latency, modelled, has_claim, label, tries, reason, speaker, was_skipped in rows:
             entry = out[week]
             entry["checked"] += 1
             if tries > 1:
@@ -656,6 +689,7 @@ def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[dat
                    "not_checkable": "not_a_claim"}.get(verdict)
             if key:
                 entry[key] += 1
+            entry["skipped"] += int(bool(was_skipped))  # cards skipped at least once, whatever happened after
             if source in entry["by_source"]:
                 entry["by_source"][source] += 1
             if category:
