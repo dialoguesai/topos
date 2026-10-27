@@ -960,3 +960,66 @@ def test_labels_are_read_only_when_the_switch_is_on(monkeypatch):
     monkeypatch.setattr(v2, "LABELS_AS_EVIDENCE", True)
     out = go()
     assert seen == [1] and out["verdict"] == "supported" and out["evidence"][0]["source"] == "verified_claim"
+
+
+# --- evidence techniques: TESTIMONY, JOURNAL_CHANNEL, CONSISTENCY -------------------------------------------------------
+def test_testimony_lets_someone_in_the_owners_thread_attest_what_the_owner_did(monkeypatch):
+    did, view = claim(), claim(kind="opinion")
+    w = v2.window_of(did)
+    assert v2.accept("participated", v2._day("2026-10-06"), did, w, False) == (False, "role_not_allowed")
+    monkeypatch.setattr(v2, "TESTIMONY", True)
+    assert v2.accept("participated", v2._day("2026-10-06"), did, w, False) == (True, "accepted")
+    assert v2.accept("participated", v2._day("2026-10-06"), view, w, False) == (False, "opinion_not_authored")  # never a view
+    assert v2.accept("observed", v2._day("2026-10-06"), did, w, False) == (False, "role_not_allowed")  # a stranger's message
+
+
+def test_the_journal_channel_adds_unseen_entries_from_a_journal_only_search(monkeypatch):
+    from dataclasses import dataclass as _dc
+
+    @_dc(frozen=True)
+    class Manifest:
+        canonical_tables: tuple = ("conversation_messages", "journal_entries")
+        signal_objects: tuple = ("fact",)
+
+    asked = []
+
+    class Evidence:
+        def __init__(self, conn):
+            self.manifest = Manifest()
+
+        def gather(self, query, needles, now):
+            asked.append(tuple(self.manifest.canonical_tables))
+            return [rec(n, "authored") for n in (1, 2, 3, 4, 5)], {}
+
+    monkeypatch.setattr(v2, "NodeEvidence", Evidence)
+    found = [rec(1, "authored")]  # retrieval already had r1
+    got = v2.journal_records(None, "q", "", datetime(2026, 10, 8, tzinfo=timezone.utc), found)
+    assert asked == [("journal_entries",)] and [r["record_id"] for r in got] == ["r2", "r3", "r4"]
+
+
+def test_consistency_lets_several_own_words_together_back_an_opinion(monkeypatch):
+    class Together(FakeChat):
+        def __init__(self, together):
+            super().__init__(read_reply(type="opinion"), {})
+            self.together, self.asked = together, 0
+
+        def __call__(self, system, user, schema, timeout, usage):
+            if system == v2.CONSISTENCY_SYSTEM:
+                self.asked += 1
+                usage.add(10, 2)
+                return {"together": self.together}
+            return super().__call__(system, user, schema, timeout, usage)
+
+    records = [rec(1, "authored"), rec(2, "authored"), rec(3, "participated")]
+    off = Together(True)
+    assert run(records, off)["verdict"] == "no_evidence" and off.asked == 0
+    monkeypatch.setattr(v2, "CONSISTENCY", True)
+    yes = Together(True)
+    out = run(records, yes)
+    assert out["verdict"] == "supported" and yes.asked == 1
+    assert sorted(e["ref"] for e in out["evidence"] if e["cited"]) == ["journal_entries:r1", "journal_entries:r2"]
+    assert out["claims"][0]["support"] == "consistent_set"
+    no = Together(False)
+    assert run(records, no)["verdict"] == "no_evidence" and no.asked == 1
+    single = Together(True)
+    assert run([rec(1, "authored")], single)["verdict"] == "no_evidence"  # one record is not a set

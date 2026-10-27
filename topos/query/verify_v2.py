@@ -138,6 +138,21 @@ SAME_THREAD_HOURS = 12
 LABELS_AS_EVIDENCE = False
 LABEL_MATCH_WORDS = 2
 LABELS_SHOWN = 3
+#: Evidence techniques the owner named on 27 Oct 2026, each a switch, off until labelled weeks measure it
+#: (VERIFY_CLAIM_CATEGORIES.md; one per weekly round).
+#: TESTIMONY: what other people say about the owner. A message from someone else in the owner's own thread
+#: ("participated") that both judge orders say shows a non-opinion claim about the owner counts alone. Others can
+#: attest what the owner did, never what the owner thinks.
+TESTIMONY = False
+#: JOURNAL_CHANNEL: the owner's journal is their private, sincere record, so it is always consulted: a second search
+#: over journal entries alone, and up to JOURNAL_SHOWN of its records take places in the judged list ahead of the rest
+#: of retrieval's tail (not ahead of its head: putting primary records first was measured and dropped on 23 Oct).
+JOURNAL_CHANNEL = False
+JOURNAL_SHOWN = 3
+#: CONSISTENCY: for an opinion no single record shows, several of the owner's own records that together express the
+#: same position count: one more judge call over the owner-written excerpts (at least CONSISTENCY_MIN of them).
+CONSISTENCY = False
+CONSISTENCY_MIN = 2
 ROLE_RANK = {"authored": 0, "addressed": 1, "participated": 2, "observed": 3, "ambient": 4, "derived": 5}
 #: Embedding record types that name a source table when the retrieval item itself carries none.
 EMBEDDED_TABLES = {"conversation_message": "conversation_messages", "ai_chat_message": "ai_chat_messages",
@@ -479,7 +494,9 @@ def accept(role: str, record_day: Optional[date], claim: Claim, window, authored
         if role != "authored":
             return False, "opinion_not_authored"
     else:
-        if role in ("participated", "observed"):
+        if role == "participated" and TESTIMONY:
+            pass  # someone in the owner's thread says the owner did it: testimony
+        elif role in ("participated", "observed"):
             return False, "role_not_allowed"
         if role in ("addressed", "derived") and not authored_agreed:
             return False, f"{role}_without_authored"
@@ -721,6 +738,19 @@ def labelled_evidence(rows, claim: Claim, now: datetime, *, source_ref: Optional
     return [record for _, _, record in scored[:LABELS_SHOWN]]
 
 
+def journal_records(conn: sqlite3.Connection, query: str, needles: str, now: datetime, found) -> List[Dict[str, Any]]:
+    """JOURNAL_CHANNEL: a second search over the owner's journal alone; up to JOURNAL_SHOWN entries retrieval did not
+    already return."""
+    from dataclasses import replace as _replace
+
+    have = {(r["table"], r["record_id"]) for r in found}
+    evidence = NodeEvidence(conn)
+    evidence.manifest = _replace(evidence.manifest, signal_objects=[], canonical_tables=["journal_entries"])
+    records, _ = evidence.gather(query, needles, now)
+    out = [r for r in records if r["table"] == "journal_entries" and (r["table"], r["record_id"]) not in have]
+    return out[:JOURNAL_SHOWN]
+
+
 def owner_labels(conn: sqlite3.Connection) -> List[Tuple[Any, ...]]:
     """The open ``verified_claim`` rows (the owner's labels), newest label first; none on a node without them."""
     try:
@@ -880,6 +910,30 @@ def _judge_one(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: fl
             "reason": reason, "first_ns": sorted(valid(first)), "second_ns": sorted(valid(second)), "tiebroken_ns": sorted(tiebroken_ns)}
 
 
+CONSISTENCY_SYSTEM = """You check excerpts written by one person against one opinion that person stated. No single excerpt
+needs to state it. Answer whether the excerpts, taken together, express the same position about the same specific
+thing as the opinion. Related topics or a different position are not enough."""
+CONSISTENCY_SCHEMA = OutputSchema({"type": "object", "properties": {"together": {"type": "boolean"}}, "required": ["together"]},
+                                  plain_json=True, max_tokens=16)
+
+
+def consistent_set(claim: Claim, evidence, chat: Callable, usage: Usage, timeout: float) -> List[int]:
+    """CONSISTENCY: the numbers of the owner-written excerpts that together express the opinion, or [] (also when there
+    are fewer than CONSISTENCY_MIN in the claim's period, or the call fails)."""
+    window = window_of(claim)
+    own = [e for e in evidence if effective_role(e) == "authored" and e.get("via") not in ("fact", "derived")
+           and accept("authored", _day(e["date"]), claim, window, True)[0]]
+    if len(own) < CONSISTENCY_MIN or timeout <= 0.5:
+        return []
+    user = f"Opinion: {claim.text}\n\nExcerpts written by the person:\n" + "\n".join(
+        f"- {e['source']}, {e['date'] or 'undated'}: {e['snippet']}" for e in own)
+    try:
+        reply = chat(CONSISTENCY_SYSTEM, user, CONSISTENCY_SCHEMA, timeout, usage)
+    except ModelUnavailable:
+        return []
+    return [e["n"] for e in own] if isinstance(reply, dict) and reply.get("together") is True else []
+
+
 # --- orchestration --------------------------------------------------------------------------------------------------
 def unable(reason: str, out: Dict[str, Any]) -> Dict[str, Any]:
     return {**out, "verdict": "unable", "reason": reason}
@@ -936,6 +990,11 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
             t = time.perf_counter()
             def gather_all(conn):
                 found, counts = NodeEvidence(conn).gather(retrieval_query(claim), " ".join(claim.names), now)
+                if JOURNAL_CHANNEL:
+                    journal = journal_records(conn, retrieval_query(claim), " ".join(claim.names), now, found)
+                    counts["journal_channel"] = len(journal)
+                    keep = max(0, SHOWN - len(journal))
+                    found = found[:keep] + journal + found[keep:]
                 if LABELS_AS_EVIDENCE:
                     labels = labelled_evidence(owner_labels(conn), claim, now, source_ref=req.source_ref)
                     counts["owner_labels"] = len(labels)
@@ -957,8 +1016,16 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
             r["stages"]["judge"] = {"agreed": verdict["agreed"], "tiebroken": verdict["tiebroken"], "rejections": verdict["rejections"],
                                     "judges": verdict.get("judges", 1), "judges_failed": verdict.get("judges_failed", 0), "orders": effort["orders"]}
             cited, agreed = set(verdict["cites"]), set(verdict["agreed_ns"])
+            how = None
+            if not cited and CONSISTENCY and claim.kind == "opinion" and left() > 1.0:
+                together = await to_thread(consistent_set, claim, evidence, chat, usage, left())
+                if together:
+                    cited, how = set(together), "consistent_set"
+                r["stages"]["consistency"] = {"asked": True, "together": bool(together)}
             r["evidence"] = [{**e, "cited": e["n"] in cited, "agreed": e["n"] in agreed} for e in evidence]
             r["cited_roles"] = [e["role"] for e in evidence if e["n"] in cited]
+            if how:
+                r["support"] = how
             return {**r, "verdict": "supported" if cited else "no_evidence", "reason": None if cited else verdict["reason"]}
 
         t = time.perf_counter()
