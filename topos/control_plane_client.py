@@ -83,6 +83,21 @@ INBOUND_AGE_BOUND_SECONDS = {
     # control plane pushes again on every change and after every register.
     "put_away_config": 300.0,
 }
+#: Reads whose reply is all they do. One whose connection closed while it waited for a handler slot is dropped at
+#: dequeue, as the table above drops its types; it is never aged (its budgets are not this node's to guess). The
+#: control plane fails every request in flight on a socket the moment that socket closes
+#: (``EngineRelay.unregister_engine``), and a reply goes only to the socket its request came on, so the read would
+#: be done for nobody. On 27 Oct 2026 the owner's laptop slept with the lid shut and macOS woke it for ~45 s every
+#: ~15 min; each wake found the socket dead (59 of 67 drops came 1-28 s after a wake), and the reads queued before
+#: the sleep then held the slots for up to 28 min while new requests were refused busy. 307 of the 360 replies sent
+#: to a dead socket on 26-27 Oct were of these types. A type joins only when its handler writes nothing: consent
+#: writes and protocol commands are applied however late they are reached, and ``llm_integrations_storage`` writes.
+INBOUND_GONE_READ_TYPES = frozenset({
+    "list_database_tables", "get_table_rows", "list_jsonl_files",
+    "get_sources", "get_sources_overview", "get_source_install_status", "get_disk_status",
+    "permissions_v2_status", "permissions_v2_share_catalog", "permissions_v2_share_counts",
+    "signal_data_health", "truth_weekly_stats",
+})
 #: At most one line in this long about requests that were not handled.
 INBOUND_SHED_LOG_SECONDS = 60.0
 _SHED_FIELDS = (("search", "permissions_v2_message_search"), ("search_batch", "permissions_v2_message_search_batch"),
@@ -616,19 +631,20 @@ class ControlPlaneClient:
     async def _shed_at_dequeue(self, ws, data: Dict[str, Any], received: float, on_live_socket: bool) -> bool:
         """NR166 R3a, at the moment a handler slot is free: True when this request is not to be handled.
 
-        Only the types in ``INBOUND_AGE_BOUND_SECONDS``. One whose connection closed while it waited is dropped:
-        the control plane failed it when the socket closed, and its reply is never sent on a newer connection.
-        One older than its type's bound gets the busy reply, once. Anything else is handled as before.
+        Only the types in ``INBOUND_AGE_BOUND_SECONDS`` and ``INBOUND_GONE_READ_TYPES``. One whose connection closed
+        while it waited is dropped: the control plane failed it when the socket closed, and its reply is never sent
+        on a newer connection. One of the first table older than its type's bound gets the busy reply, once.
+        Anything else is handled as before.
         """
         msg_type = str(data.get("type") or "")
         bound = INBOUND_AGE_BOUND_SECONDS.get(msg_type)
-        if bound is None:
+        if bound is None and msg_type not in INBOUND_GONE_READ_TYPES:
             return False
         waited = time.monotonic() - received
         self._inbound_oldest = max(self._inbound_oldest, waited)
         if on_live_socket and ws is not self._ws:
             why = "gone"
-        elif waited > bound or self._past_respond_by(msg_type, data):
+        elif bound is not None and (waited > bound or self._past_respond_by(msg_type, data)):
             why = "aged"
             await self._send_busy_response(ws, data)
         else:
@@ -666,9 +682,10 @@ class ControlPlaneClient:
             return
         by_type = " ".join(f"{why}_{name}={counts.get((why, kind), 0)}"
                            for why in ("aged", "gone") for name, kind in _SHED_FIELDS)
-        logger.warning("control_plane_inbound_shed window_s=%d aged=%d gone=%d oldest_s=%.1f %s", round(window),
-                       sum(n for (why, _), n in counts.items() if why == "aged"),
-                       sum(n for (why, _), n in counts.items() if why == "gone"), oldest, by_type)
+        gone_read = sum(n for (why, kind), n in counts.items() if why == "gone" and kind in INBOUND_GONE_READ_TYPES)
+        logger.warning("control_plane_inbound_shed window_s=%d aged=%d gone=%d oldest_s=%.1f %s gone_read=%d",
+                       round(window), sum(n for (why, _), n in counts.items() if why == "aged"),
+                       sum(n for (why, _), n in counts.items() if why == "gone"), oldest, by_type, gone_read)
 
     async def _flush_presence_outbox(self) -> None:
         await self._drain_sync_outbox_into_presence()
