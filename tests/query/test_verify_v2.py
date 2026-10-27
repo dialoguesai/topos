@@ -811,3 +811,47 @@ def test_the_engine_sha16_is_the_digest_the_weekly_lock_captures():
     with open(v2.__file__, "rb") as source:
         assert v2.engine_sha16() == hashlib.sha256(source.read()).hexdigest()[:16]
     assert len(v2.engine_sha16()) == 16 and v2.engine_sha16() is v2.engine_sha16()
+
+
+# --- VERIFY_V2_LEAN_READ (tracker round r2) -----------------------------------------------------------------------------
+def _reader_schemas(monkeypatch, lean, **req):
+    monkeypatch.setattr(v2, "LEAN_READ", lean)
+    seen = []
+
+    class Schemas(TimedChat):
+        def __call__(self, system, user, schema, timeout, usage):
+            if "not_checkable_because" in schema.get("properties", {}):
+                seen.append(schema)
+            return super().__call__(system, user, schema, timeout, usage)
+
+    run([], Schemas(read_reply(type="not_checkable", not_checkable_because="too_vague")), **req)
+    return seen
+
+
+def test_lean_read_off_asks_every_effort_for_up_to_three_claims(monkeypatch):
+    for effort in ("low", "high"):
+        assert _reader_schemas(monkeypatch, False, effort=effort) == [v2.READ_SCHEMA]
+        assert _reader_schemas(monkeypatch, False, effort=effort)[0] is v2.READ_SCHEMA
+
+
+def test_lean_read_asks_for_no_more_claims_than_the_effort_checks(monkeypatch):
+    [low] = _reader_schemas(monkeypatch, True, effort="low")
+    [high] = _reader_schemas(monkeypatch, True, effort="high")
+    [others] = _reader_schemas(monkeypatch, True, effort="low", about_others=True)
+    assert low["properties"]["claims"]["maxItems"] == v2.EFFORTS["low"]["claims"] == 1
+    assert high is v2.READ_SCHEMA and v2.READ_SCHEMA["properties"]["claims"]["maxItems"] == 3  # never mutated
+    assert others["properties"]["claims"]["maxItems"] == 1
+    assert "not_about_the_owner" not in others["properties"]["not_checkable_because"]["enum"]
+    assert "not_about_the_owner" in low["properties"]["not_checkable_because"]["enum"]
+    # Only the claim count differs from the full schema.
+    assert {**low, "properties": {**low["properties"], "claims": None}} == {**v2.READ_SCHEMA, "properties": {**v2.READ_SCHEMA["properties"], "claims": None}}
+    assert low["properties"]["claims"]["items"] == v2.READ_SCHEMA["properties"]["claims"]["items"]
+
+
+def test_lean_read_keeps_the_answer_for_a_one_claim_reply(monkeypatch):
+    outs = []
+    for lean in (False, True):
+        monkeypatch.setattr(v2, "LEAN_READ", lean)
+        outs.append(run([], FakeChat(read_reply()), effort="low"))
+    strip = lambda o: {k: v for k, v in o.items() if k not in ("timings_ms",)}
+    assert strip(outs[0]) == strip(outs[1])
