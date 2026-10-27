@@ -288,7 +288,7 @@ def test_the_stored_row_has_the_designs_columns_and_cited_refs_without_text(node
                         "category", "claim_text", "verdict", "reason", "cited_refs_json", "effort", "model",
                         "latency_ms", "created_at", "attempts", "read_timeout_s", "checked_at", "engine_version",
                         "engine_sha16", "contradicted", "reading_json", "polarity", "claim_key", "said_at",
-                        "group_override", "owner_labels_shown"}
+                        "group_override", "owner_labels_shown", "due_at"}
     assert row["reading_json"] is None and row["polarity"] is None and row["claim_key"] is None  # the stub gave no reading
     assert row["said_at"] and datetime.fromisoformat(row["said_at"]).utcoffset() is not None and row["group_override"] is None
     assert row["attempts"] == 1 and row["read_timeout_s"] == lane.LOCAL_READ_TIMEOUT_S and row["checked_at"] == row["created_at"]
@@ -870,8 +870,8 @@ def test_a_table_the_1519_lane_created_gains_the_columns_and_its_timed_out_rows_
     job_id = lane.enqueue_truth_checks(node.conn)
     assert job_id
     columns = [r[1] for r in node.conn.execute("PRAGMA table_info(truth_checks)").fetchall()]
-    assert columns[-12:] == ["attempts", "read_timeout_s", "checked_at", "engine_version", "engine_sha16", "contradicted",
-                             "reading_json", "polarity", "claim_key", "said_at", "group_override", "owner_labels_shown"]
+    assert columns[-13:] == ["attempts", "read_timeout_s", "checked_at", "engine_version", "engine_sha16", "contradicted",
+                             "reading_json", "polarity", "claim_key", "said_at", "group_override", "owner_labels_shown", "due_at"]
     [row] = checks(node.conn)
     assert row["attempts"] == 1 and row["read_timeout_s"] is None and row["checked_at"] is None
     assert row["engine_version"] is None and row["engine_sha16"] is None  # 1.5.19's rows: unstamped
@@ -1091,3 +1091,77 @@ def test_a_recheck_runs_from_the_stored_reading_with_no_reader_call(node, monkey
     assert row["verdict"] == "no_evidence" and row["attempts"] == 2
     assert json.loads(row["reading_json"]) == reading and row["claim_key"] == "did|did_or_made|none|building finished garden shed" and row["polarity"] == 1
     assert row["claim_text"] == "The owner finished building the garden shed."
+
+
+# --- plans (lean v3 increment C, 27 Oct 2026) ------------------------------------------------------------------------------
+PLAN_READING = {"category": "plan", "claims": [{"type": "intention", "subject": "owner", "reported_speech": False,
+                                                "claim": "The owner will finish the shed roof by Wednesday.", "names": ["shed"],
+                                                "date_from": "2026-10-08", "date_to": "2026-10-08", "as_written": "", "polarity": "affirms"}]}
+PLAN_SAID = "2026-10-07T19:47:36-05:00"
+PLAN_READY = "2026-10-16T04:59:59+00:00"  # the end of 2026-10-08 at -05:00, plus seven days
+
+
+def _plan_row(conn, record_id="j-plan", *, verdict="unable", reason=f"waiting_until:{PLAN_READY}", label=None, thing="shed roof"):
+    add_journal(conn, record_id, f"I'll finish the {thing} by Wednesday.", at=PLAN_SAID)
+    conn.commit()
+    claim = {**PLAN_READING["claims"][0], "claim": f"The owner will finish the {thing} by Wednesday.", "names": [thing.split()[0]]}
+    reading = {"category": "plan", "claims": [claim]}
+    result = {"verdict": verdict, "reason": reason, "category": "plan", "claim": {"text": claim["claim"]},
+              "evidence": [], "timings_ms": {"total": 900.0}, "reading": reading,
+              **({"stages": {"retrieve": "waiting"}} if reason and reason.startswith("waiting_until:") else {})}
+    check_id = store.record_check(conn, lane.check_row({"table": "journal_entries", "record_id": record_id, "source": "journal", "owner": True},
+                                                       result, model=LOCAL[0], read_timeout_s=20.0, said_at=PLAN_SAID))
+    if label:
+        store.label_claim(conn, check_id, label)
+    return check_id
+
+
+def test_a_plan_row_waits_for_its_due_moment_and_is_counted_as_a_plan_not_as_unable(node):
+    check_id = _plan_row(node.conn)
+    [row] = checks(node.conn)
+    assert row["verdict"] == "unable" and row["reason"] == f"waiting_until:{PLAN_READY}" and row["due_at"] == "2026-10-09T04:59:59+00:00"
+    state = store.check_state(node.conn, "journal_entries", "j-plan")
+    before, after = datetime(2026, 10, 16, 4, 59, tzinfo=timezone.utc), datetime(2026, 10, 16, 5, 0, tzinfo=timezone.utc)
+    assert store.recheck_reason(state, LOCAL, now=before, cooldown_s=0) is None  # never before its moment, whatever changed
+    assert store.recheck_reason(state, ("local:another-model", "high", 8.0), now=before, cooldown_s=0) is None
+    assert store.recheck_reason(state, LOCAL, now=after, cooldown_s=lane.RECHECK_COOLDOWN_S) == "due"
+    assert lane.recheck_due(node.conn, ["journal"], LOCAL, 10, now=before) == []
+    [card] = store.claim_cards(node.conn, 10, True)["cards"]
+    assert card["check_id"] == check_id and card["kind"] == "intention" and card["plan"] == "waiting" and card["due_at"] == row["due_at"]
+    [entry] = store.weekly_stats(node.conn, 1)["weeks"]
+    assert entry["plans"] == {"waiting": 1, "kept": 0, "nothing_by_due": 0, "answered": 0}
+    assert entry["unable"] == 0 and entry["to_confirm"] == 0 and entry["checked"] == 1 and entry["by_source"]["journal"] == 1
+
+
+def test_a_due_plan_goes_first_and_is_checked_as_of_its_moment_from_the_stored_reading(node, monkeypatch):
+    _plan_row(node.conn)
+    add_journal(node.conn, "j-late", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    after = datetime(2026, 10, 16, 5, 0, tzinfo=timezone.utc)
+    _unable(node.conn, "j-late", checked_at=(after - timedelta(hours=7)).isoformat())  # an ordinary unable row, newer, due by cooldown
+    assert lane.recheck_due(node.conn, ["journal"], LOCAL, 10, now=after) == [["journal_entries", "j-plan"], ["journal_entries", "j-late"]]
+    turn_on(node.conn)
+    recorder = Recorder({"I'll finish the shed roof by Wednesday.": {**supported(claim=PLAN_READING["claims"][0]["claim"]), "category": "plan",
+                                                                        "reading": PLAN_READING}})
+    monkeypatch.setattr(lane, "_verify", recorder)
+    monkeypatch.setattr(store, "now_utc", lambda: after)  # the lane's clock, past the plan's moment
+    out = run_job({"records": [["journal_entries", "j-plan"]]})
+    assert out["checked"] == 1 and out["rechecked"] == 1
+    [request] = recorder.requests
+    assert request.as_of == PLAN_READY and request.reading == PLAN_READING and request.said_at == store.with_offset(PLAN_SAID)
+    row = next(c for c in checks(node.conn) if c["record_id"] == "j-plan")
+    assert row["verdict"] == "supported" and row["attempts"] == 2 and row["due_at"] == "2026-10-09T04:59:59+00:00"
+    [card] = [c for c in store.claim_cards(node.conn, 10, True)["cards"] if c["check_id"] == row["check_id"]]
+    assert card["plan"] == "kept"
+    [entry] = store.weekly_stats(node.conn, 1, when=datetime.now(timezone.utc))["weeks"]  # the rows' week is the real one
+    assert entry["plans"]["kept"] == 1 and entry["plans"]["waiting"] == 0 and entry["backed"] == 1
+
+
+def test_plans_the_owner_answered_or_that_came_to_nothing_are_counted_so(node):
+    _plan_row(node.conn, "j-kept", verdict="supported", reason=None, thing="shed roof")
+    _plan_row(node.conn, "j-nothing", verdict="no_evidence", reason="no_records", thing="garden fence")
+    _plan_row(node.conn, "j-said", verdict="no_evidence", reason="no_records", label="true", thing="back gate")
+    cards = {c["check_id"]: c["plan"] for c in store.claim_cards(node.conn, 10, False)["cards"]}
+    assert sorted(cards.values()) == ["answered", "kept", "nothing_by_due"]
+    [entry] = store.weekly_stats(node.conn, 1)["weeks"]
+    assert entry["plans"] == {"waiting": 0, "kept": 1, "nothing_by_due": 1, "answered": 1} and entry["labelled"] == 1

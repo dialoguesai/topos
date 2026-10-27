@@ -146,6 +146,21 @@ LEAN_READ = False
 #: which holds "no" and "not". Off: today's reader; polarity is NULL, every row is its own group, cards per check as
 #: in 1.5.28. Storing the reading and re-checking from it are not behind this switch.
 READ_POLARITY = False
+#: VERIFY_V2_READ_INTENTIONS (lean v3 increment C, 27 Oct 2026): a plan is a claim. The reader may answer a fourth
+#: type, "intention": something the speaker says they will do, with the time it is for ("by Friday", "tomorrow
+#: night"); one without any time stays not checkable (``plan_without_window``). An intention is not checked when it is
+#: said: the engine answers ``unable`` with reason ``waiting_until:<the end of its window + INTENTION_GRACE_S>`` and
+#: makes no retrieval or judge call; the lane checks it once that moment has passed, as of that moment, from the stored
+#: reading, with the period rule [said, due + grace] so a record dated after the plan was said can be cited (today
+#: ``now`` is both the reader's date and the evidence cutoff, so a plan said on the 26th can never see the 28th's
+#: record: plan confirmation is 0 by construction). Off: plans are refused as ``plan_or_intention``, as today; the
+#: refusal was a deliberate precision choice (1 of 4 plan "no" rows wrongly backed on the development rows), so this
+#: switch is pair-read on the plan rows before it becomes the default (ruling 23).
+READ_INTENTIONS = False
+INTENTION = "intention"
+#: How long after a plan's window closes the lane checks it: evidence of the thing done arrives late.
+INTENTION_GRACE_S = 7 * 24 * 3600
+assert not READ_INTENTIONS or READ_POLARITY, "READ_INTENTIONS needs READ_POLARITY: a plan groups by polarity like any claim"
 #: Calibrate step 1 (owner, 27 Oct 2026): three evidence rules found on the first claim cards. Module switches like the
 #: ones above, on; off restores 1.5.28's behaviour for paired readings.
 #: SPEAKER_SUBJECT: the reader's "owner" subject means the speaker, while the evidence roles are the node owner's. When
@@ -300,31 +315,42 @@ _SCOPE_WITH_OTHERS = ("Prefer an assertion about the speaker themself; take one 
 #: the pinned one.
 _POLARITY_LINE = ('"polarity": "affirms" when the claim states that something is so, was done or is held; "denies" when it\n'
                   'states that something is not so, was not done or is not held ("I never ...", "I don\'t ...", "it isn\'t ...").\n')
+#: The reader's fourth type (READ_INTENTIONS), spliced the same way: the bullet, and the refusal line without plans.
+_INTENTION_BULLET = ('- "intention": something the speaker says they will do, or that is to happen, with the time it is for ("by\n'
+                     '  Friday", "tomorrow night", "next week"): "date_from"/"date_to" are that window. A plan with no time at all\n'
+                     '  is "not_checkable".\n')
+_REFUSAL_WITH_PLANS = '- "not_checkable": nothing said asserts anything checkable: it is only a question, only a future plan or intention,\n'
+_REFUSAL_WITHOUT_PLANS = '- "not_checkable": nothing said asserts anything checkable: it is only a question, a plan with no time at all,\n'
 
 
-def read_system(about_others: bool = False, source_kind: str = "spoken", polarity: Optional[bool] = None) -> str:
+def read_system(about_others: bool = False, source_kind: str = "spoken", polarity: Optional[bool] = None,
+                intentions: Optional[bool] = None) -> str:
     """The reader's system prompt for a scope and a source kind: one string object per pair, and an unknown kind
-    reads as spoken. ``polarity`` (default: READ_POLARITY) adds the polarity field's line."""
+    reads as spoken. ``polarity`` (default: READ_POLARITY) adds the polarity field's line; ``intentions`` (default:
+    READ_INTENTIONS) adds the fourth type and takes plans out of the refusal."""
     return _read_system(bool(about_others), source_kind if source_kind in SOURCE_KINDS else "spoken",
-                        bool(READ_POLARITY) if polarity is None else bool(polarity))
+                        bool(READ_POLARITY) if polarity is None else bool(polarity),
+                        bool(READ_INTENTIONS) if intentions is None else bool(intentions))
 
 
 @lru_cache(maxsize=None)
-def _read_system(about_others: bool, source_kind: str, polarity: bool = False) -> str:
+def _read_system(about_others: bool, source_kind: str, polarity: bool = False, intentions: bool = False) -> str:
     system = _READ_TEMPLATE.format(scope=_SCOPE_WITH_OTHERS if about_others else _SCOPE_OWN, **_SOURCE_TEXT[source_kind])
     if polarity:
         system = system.replace('"reported_speech": true if', _POLARITY_LINE + '"reported_speech": true if')
+    if intentions:
+        system = system.replace(_REFUSAL_WITH_PLANS, _INTENTION_BULLET + _REFUSAL_WITHOUT_PLANS)
     return system
 
 
-READ_SYSTEM = read_system(False, "spoken", polarity=False)
-READ_SYSTEM_WITH_OTHERS = read_system(True, "spoken", polarity=False)
+READ_SYSTEM = read_system(False, "spoken", polarity=False, intentions=False)
+READ_SYSTEM_WITH_OTHERS = read_system(True, "spoken", polarity=False, intentions=False)
 
-def _read_schema(why_not, polarity: bool = False) -> Dict[str, Any]:
+def _read_schema(why_not, polarity: bool = False, intentions: bool = False) -> Dict[str, Any]:
     claim = {
         "type": "object",
         "properties": {
-            "type": {"type": "string", "enum": [k for k in KINDS if k != "not_checkable"]},
+            "type": {"type": "string", "enum": [k for k in KINDS if k != "not_checkable"] + ([INTENTION] if intentions else [])},
             "subject": {"type": "string", "enum": list(SUBJECTS)},
             "reported_speech": {"type": "boolean"},
             "claim": {"type": "string"},
@@ -354,23 +380,23 @@ READ_SCHEMA_WITH_OTHERS = _read_schema(w for w in WHY_NOT if w != "not_about_the
 
 
 @lru_cache(maxsize=None)
-def _lean_read_schema(about_others: bool, max_claims: int, polarity: bool = False) -> Dict[str, Any]:
-    schema = _read_schema((w for w in WHY_NOT if not about_others or w != "not_about_the_owner"), polarity)
+def _lean_read_schema(about_others: bool, max_claims: int, polarity: bool = False, intentions: bool = False) -> Dict[str, Any]:
+    schema = _read_schema((w for w in WHY_NOT if not about_others or w != "not_about_the_owner"), polarity, intentions)
     schema["properties"]["claims"]["maxItems"] = max_claims
     return schema
 
 
 def read_schema_for(req: "ClaimRequest") -> Dict[str, Any]:
     """The reader's output schema for a request: up to MAX_CLAIMS claims, or with LEAN_READ on, no more than its effort
-    checks; with READ_POLARITY on, each claim carries its polarity."""
-    polarity = bool(READ_POLARITY)
+    checks; with READ_POLARITY on, each claim carries its polarity; with READ_INTENTIONS on, a claim may be a plan."""
+    polarity, intentions = bool(READ_POLARITY), bool(READ_INTENTIONS)
     if LEAN_READ:
         levels = efforts()
         wanted = int((levels.get(req.effort) or levels["high"])["claims"])
         if 0 < wanted < MAX_CLAIMS:
-            return _lean_read_schema(bool(req.about_others), wanted, polarity)
-    if polarity:
-        return _lean_read_schema(bool(req.about_others), MAX_CLAIMS, True)
+            return _lean_read_schema(bool(req.about_others), wanted, polarity, intentions)
+    if polarity or intentions:
+        return _lean_read_schema(bool(req.about_others), MAX_CLAIMS, polarity, intentions)
     return READ_SCHEMA_WITH_OTHERS if req.about_others else READ_SCHEMA
 
 LABEL_SYSTEM = """You check excerpts from a person's own records against one claim. Each excerpt is numbered and shows its
@@ -454,6 +480,9 @@ class ClaimRequest:
     #: Records ("table:id") that must not be shown as evidence beyond the claim's own record. Only removes records,
     #: never adds or re-ranks; the engine adds the lane's other occurrences of the same claim itself.
     exclude_refs: List[str] = field(default_factory=list)
+    #: The evidence cutoff, when it is not the moment the statement was said: the lane's due check of a plan passes
+    #: the end of the plan's window plus the grace. ``said_at`` keeps the reader's date and the same-thread window.
+    as_of: Optional[str] = None
 
 
 @dataclass
@@ -584,6 +613,47 @@ def window_of(claim: Claim) -> Optional[Tuple[date, date]]:
     return (lo - timedelta(days=1), hi + timedelta(days=1)) if lo and hi else None
 
 
+def said_zone(said_at: Optional[str]):
+    """The zone the statement's own time was written in (its offset), or the node's local zone for a naive or missing
+    value: the zone a plan's "by Friday" is read in."""
+    try:
+        when = datetime.fromisoformat(str(said_at).replace("Z", "+00:00")) if said_at else None
+    except ValueError:
+        when = None
+    return when.tzinfo if when is not None and when.tzinfo is not None else datetime.now().astimezone().tzinfo
+
+
+def due_instant(claim: Claim, said_at: Optional[str]) -> Optional[datetime]:
+    """When a plan's window closes: the end (23:59:59) of its last day, in the zone the statement was said in, as an
+    aware UTC instant; None when the claim is not an intention or has no date."""
+    if claim.kind != INTENTION:
+        return None
+    day = _day(claim.date_to) or _day(claim.date_from)
+    if day is None:
+        return None
+    return datetime.combine(day, datetime.max.time().replace(microsecond=0), tzinfo=said_zone(said_at)).astimezone(timezone.utc)
+
+
+def due_at_for(reading: Any, said_at: Optional[str]) -> Optional[str]:
+    """The lane's ``due_at`` for a stored reading whose main claim is a plan: ``due_instant`` as ISO 8601 UTC; None
+    otherwise."""
+    claims = reading.get("claims") if isinstance(reading, dict) else None
+    if not isinstance(claims, list) or not claims:
+        return None
+    claim = _claim_from(claims[0], "")
+    due = due_instant(claim, said_at) if claim else None
+    return due.isoformat() if due else None
+
+
+def intention_period(claim: Claim, said: datetime, due: datetime) -> Claim:
+    """A plan, dated for the rules and the judge as the period a record may show it in: from the day it was said to
+    the end of its window plus the grace. ``window_of`` adds a day's slack either side, so the period starts the day
+    AFTER the plan was said: a record from the day it was said still counts ("tonight"), one from the day before
+    never shows the plan."""
+    return replace(claim, date_from=(said.astimezone().date() + timedelta(days=1)).isoformat(),
+                   date_to=(due + timedelta(seconds=INTENTION_GRACE_S)).astimezone().date().isoformat())
+
+
 def effective_role(e: Dict[str, Any]) -> str:
     """A derived item's counting role: the role its source refs resolve to, when the switch is on."""
     if GROUNDED_DERIVED and e.get("role") == "derived" and e.get("grounded_role") in ROLE_RANK and e["grounded_role"] != "derived":
@@ -633,7 +703,7 @@ def read_claim(req: ClaimRequest, chat: Callable, usage: Usage, timeout: float) 
 
 
 def _claim_from(item: Dict[str, Any], fallback: str) -> Optional[Claim]:
-    if not isinstance(item, dict) or item.get("type") not in KINDS or item.get("type") == "not_checkable":
+    if not isinstance(item, dict) or item.get("type") == "not_checkable" or (item.get("type") not in KINDS and item.get("type") != INTENTION):
         return None
     return Claim(kind=item["type"], subject=item.get("subject") if item.get("subject") in SUBJECTS else "owner",
                  reported_speech=item.get("reported_speech") is True, text=str(item.get("claim") or fallback)[:300],
@@ -656,11 +726,13 @@ def read_claims(req: ClaimRequest, chat: Callable, usage: Usage, timeout: float)
     if category == "world":
         return category, [], "not_about_the_owner"
     claims = [c for c in (_claim_from(x, req.statement) for x in (out.get("claims") or [])[:MAX_CLAIMS]) if c]
+    windowless = [c for c in claims if c.kind == INTENTION and not (c.date_from or c.date_to)]
+    claims = [c for c in claims if c not in windowless]  # a plan with no time can never come due
     if SPEAKER_SUBJECT and not req.speaker_is_owner:  # the speaker's "owner" is someone else to the node's rules
         claims = [replace(c, subject="someone_else") if c.subject == "owner" else c for c in claims]
     kept = [c for c in claims if c.subject != "someone_else" or req.about_others]  # the option holds even when the model strays
     if not kept:
-        return category, [], ("not_about_the_owner" if claims else (why or "too_vague"))
+        return category, [], ("not_about_the_owner" if claims else ("plan_without_window" if windowless else (why or "too_vague")))
     return category, kept, None
 
 
@@ -876,12 +948,17 @@ def owner_labels(conn: sqlite3.Connection) -> List[Tuple[Any, ...]]:
 
 
 def select_evidence(records, sentence: str, claim: Claim, now: datetime, *, source_ref: Optional[str] = None,
-                    conversation_id: Optional[str] = None, exclude_refs: Optional[Iterable[str]] = None):
-    """As of the conversation; not the claim's own exchange; not another utterance of the same claim (``exclude_refs``:
-    repetition is counted on the card, never credited as evidence); no quoting records; one per source record; first
-    SHOWN in retrieval order."""
+                    conversation_id: Optional[str] = None, exclude_refs: Optional[Iterable[str]] = None,
+                    said_at: Optional[datetime] = None):
+    """As of ``now`` (the conversation's moment, or a plan's due moment); not the claim's own exchange (the same thread
+    within SAME_THREAD_HOURS either side of ``said_at``, which defaults to ``now``: two-sided, so a due check that sees
+    past the statement still leaves out the exchange the plan was part of and still counts a reply two days later);
+    not another utterance of the same claim (``exclude_refs``: repetition is counted on the card, never credited as
+    evidence); no quoting records; one per source record; first SHOWN in retrieval order."""
+    said = said_at or now
     cutoff = (now + timedelta(days=1)).date()
-    thread_floor = now - timedelta(hours=SAME_THREAD_HOURS)
+    thread_floor = said - timedelta(hours=SAME_THREAD_HOURS)
+    thread_ceiling = said + timedelta(hours=SAME_THREAD_HOURS)
     grams = ngrams(sentence)
     excluded = {str(ref) for ref in (exclude_refs or ())}
     seen, kept, dropped = set(), [], {"as_of": 0, "quoting": 0, "own_record": 0, "same_thread": 0, "occurrence": 0}
@@ -902,7 +979,7 @@ def select_evidence(records, sentence: str, claim: Claim, now: datetime, *, sour
             dropped["as_of"] += 1
             continue
         if (SAME_THREAD_GUARD and conversation_id and r.get("conversation_id") == conversation_id
-                and (at is None or at > thread_floor)):
+                and (at is None or thread_floor <= at <= thread_ceiling)):
             dropped["same_thread"] += 1
             continue
         if grams and ngrams(r["text"]) & grams:
@@ -1122,10 +1199,21 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
         out["claim"] = as_dict(claims[0])
         if left() <= 1.0:
             return respond(unable("deadline", out), started, usage)
-        now = conversation_time(req.said_at)
+        said = conversation_time(req.said_at)  # the reader's date and the centre of the same-thread window
+        now = conversation_time(req.as_of) if req.as_of else said  # the evidence cutoff
 
         async def check(claim: Claim) -> Dict[str, Any]:
             r: Dict[str, Any] = {**as_dict(claim), "verdict": None, "reason": None, "evidence": [], "stages": {}, "timings_ms": {}}
+            if claim.kind == INTENTION:
+                due = due_instant(claim, req.said_at)
+                if due is None:
+                    return {**r, "verdict": "unable", "reason": "not_checkable:plan_without_window"}
+                ready_at = due + timedelta(seconds=INTENTION_GRACE_S)
+                if now < ready_at:  # a plan waits for its window and the grace: no retrieval, no judge
+                    r["stages"]["retrieve"] = "waiting"
+                    return {**r, "verdict": "unable", "reason": f"waiting_until:{ready_at.isoformat()}"}
+                claim = intention_period(claim, said, due)
+                r.update(as_dict(claim))
             t = time.perf_counter()
             def gather_all(conn):
                 found, counts = NodeEvidence(conn).gather(retrieval_query(claim), " ".join(claim.names), now)
@@ -1148,7 +1236,7 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
             excluded = list(req.exclude_refs or []) + list(stats.pop("excluded_refs", None) or [])
             stats["excluded_occurrences"] = len(excluded)
             evidence, dropped = select_evidence(records, req.statement, claim, now, source_ref=req.source_ref,
-                                                conversation_id=req.conversation_id, exclude_refs=excluded)
+                                                conversation_id=req.conversation_id, exclude_refs=excluded, said_at=said)
             r["timings_ms"]["retrieve"] = round((time.perf_counter() - t) * 1000, 1)
             r["stages"]["retrieve"] = {**stats, **{f"dropped_{k}": v for k, v in dropped.items()}, "shown": len(evidence)}
             if not evidence:

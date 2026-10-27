@@ -184,9 +184,10 @@ def test_cards_are_the_claims_newest_first_with_snippets_from_the_cited_records(
     assert cited["snippet"].startswith("Painted both shed doors a deep blue today.") and len(cited["snippet"]) == 400
     assert set(me) == {"check_id", "speaker", "speaker_is_owner", "source", "date", "said", "claim_text", "category",
                        "verdict", "cited", "latency_ms", "label", "note", "evidence_ok", "relevance", "dismiss_reason",
-                       "contradicted", "polarity", "kind", "check_ids", "restated"}
+                       "contradicted", "polarity", "kind", "check_ids", "restated", "due_at", "plan"}
     assert me["speaker_is_owner"] is True and them["speaker_is_owner"] is False
     assert me["polarity"] is None and me["kind"] is None and me["check_ids"] == []  # a row with no reading is its own group
+    assert me["due_at"] is None and me["plan"] is None  # not a plan
     assert me["restated"] == {"count": 1, "distinct_days": 1, "first": me["date"], "last": me["date"]}
     assert me["said"] and me["said"] != me["claim_text"]  # what was said, beside the claim taken from it
 

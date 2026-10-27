@@ -929,6 +929,93 @@ def test_the_reading_survives_a_deadline_right_after_the_read():
     assert out["reading"]["category"] == "did" and len(out["reading"]["claims"]) == 1 and out["claim"]["kind"] == "did_or_made"
 
 
+# --- VERIFY_V2_READ_INTENTIONS: plans (lean v3 increment C) -------------------------------------------------------------
+PLAN_SAID = "2026-10-07T19:47:36-05:00"
+
+
+def plan_reply(**over):
+    base = dict(type="intention", claim="The owner will finish the shed roof by Wednesday.", names=["shed"],
+                date_from="2026-10-08", date_to="2026-10-08", polarity="affirms", category="plan")
+    return read_reply(**{**base, **over})
+
+
+def test_read_intentions_is_a_fourth_type_behind_its_switch(monkeypatch):
+    assert v2.READ_INTENTIONS is False and v2.INTENTION == "intention" and v2.INTENTION not in v2.KINDS
+    assert v2.read_system(False, "spoken") == v2.READ_SYSTEM and "only a future plan or intention" in v2.READ_SYSTEM
+    assert "intention" not in v2.read_schema_for(v2.ClaimRequest(statement=SENTENCE))["properties"]["claims"]["items"]["properties"]["type"]["enum"]
+    monkeypatch.setattr(v2, "READ_POLARITY", True)
+    monkeypatch.setattr(v2, "READ_INTENTIONS", True)
+    system = v2.read_system(False, "spoken")
+    assert '"intention": something the speaker says they will do' in system and "only a future plan or intention" not in system
+    assert "a plan with no time at all" in system and v2._POLARITY_LINE in system
+    enum = v2.read_schema_for(v2.ClaimRequest(statement=SENTENCE))["properties"]["claims"]["items"]["properties"]["type"]["enum"]
+    assert enum == ["did_or_made", "setup", "opinion", "intention"]
+    # a plan with no time can never come due: the reader's reply is refused as plan_without_window
+    windowless = plan_reply(date_from="", date_to="")
+    chat = PolarityChat(windowless)
+    category, claims, why = v2.read_claims(v2.ClaimRequest(statement="I'll finish the shed roof.", said_at=PLAN_SAID), chat, Usage(), 5.0)
+    assert (category, claims, why) == ("plan", [], "plan_without_window")
+    _, claims, why = v2.read_claims(v2.ClaimRequest(statement="I'll finish the shed roof by Wednesday.", said_at=PLAN_SAID), PolarityChat(plan_reply()), Usage(), 5.0)
+    assert why is None and claims[0].kind == "intention" and claims[0].polarity == 1 and claims[0].date_to == "2026-10-08"
+    assert v2._claim_from(plan_reply()["claims"][0], "").kind == "intention"  # a stored plan is read back whatever the switch says
+
+
+def test_a_plans_due_moment_is_the_end_of_its_last_day_in_the_speakers_own_zone():
+    claim = v2._claim_from(plan_reply()["claims"][0], "")
+    due = v2.due_instant(claim, PLAN_SAID)
+    assert due == datetime(2026, 10, 9, 4, 59, 59, tzinfo=timezone.utc)  # 2026-10-08 23:59:59 at -05:00
+    assert v2.due_instant(v2.replace(claim, date_to="", date_from="2026-10-10"), PLAN_SAID) == datetime(2026, 10, 11, 4, 59, 59, tzinfo=timezone.utc)
+    assert v2.due_instant(v2.replace(claim, date_to="", date_from=""), PLAN_SAID) is None
+    assert v2.due_instant(v2.replace(claim, kind="did_or_made"), PLAN_SAID) is None
+    assert v2.due_at_for({"category": "plan", "claims": [v2.claim_dict(claim)]}, PLAN_SAID) == "2026-10-09T04:59:59+00:00"
+    assert v2.due_at_for({"category": "did", "claims": [v2.claim_dict(v2.replace(claim, kind="did_or_made"))]}, PLAN_SAID) is None
+    assert v2.said_zone("2026-10-07T19:47:36Z") == timezone.utc and v2.said_zone(None) is not None
+
+
+def test_a_plan_waits_until_its_window_and_the_grace_have_passed_then_is_checked_from_the_stored_reading():
+    """The R-11 fixture: a plan said day 0 in thread T, the record that shows it done on day +2 in the SAME thread, due
+    day +1, grace 7 days. Said: no retrieval, no judge, "waiting_until" the due moment. Checked as of that moment from
+    the stored reading: the record is cited (the same-thread window is two-sided around the statement, so a reply two
+    days later counts), one model call (the judge), and a record dated before the plan was said never shows it."""
+    done = {**rec(1, "authored", day="2026-10-09", table="conversation_messages", text="Shed roof finished and painted."), "conversation_id": "T"}
+    before = {**rec(2, "authored", day="2026-10-06", table="journal_entries", text="Shed roof finished last week."), "conversation_id": "J"}
+    request = dict(statement="I'll finish the shed roof by Wednesday.", conversation_id="T", source_ref="conversation_messages:own")  # run() says it at PLAN_SAID
+    chat = PolarityChat(plan_reply(), {1: "shows", 2: "shows"})
+
+    said = run([done], chat, **request)
+    assert said["verdict"] == "unable" and said["reason"] == "waiting_until:2026-10-16T04:59:59+00:00"
+    assert said["usage"]["model_calls"] == 1 and said["stages"]["retrieve"] == "waiting"  # the reader only; retrieval never ran
+    assert said["reading"]["claims"][0]["type"] == "intention" and said["claim"]["kind"] == "intention"
+    reading = said["reading"]
+
+    early = run([done], chat, reading=reading, as_of="2026-10-16T04:59:58+00:00", **request)
+    assert early["verdict"] == "unable" and early["reason"].startswith("waiting_until:") and early["usage"]["model_calls"] == 0
+
+    due = run([done, before], chat, reading=reading, as_of="2026-10-16T05:00:00+00:00", **request)
+    assert due["verdict"] == "supported" and due["usage"]["model_calls"] == 1  # the judge; no reader call
+    assert [e["ref"] for e in due["evidence"] if e["cited"]] == ["conversation_messages:r1"]
+    assert due["stages"]["retrieve"]["dropped_same_thread"] == 0 and due["stages"]["retrieve"]["dropped_as_of"] == 0
+    assert due["claims"][0]["period"]["from"] == "2026-10-08" and due["claims"][0]["period"]["to"] >= "2026-10-15"  # the rules' window starts a day earlier
+
+    silence = run([before], chat, reading=reading, as_of="2026-10-16T05:00:00+00:00", **request)
+    assert silence["verdict"] == "no_evidence" and silence["reason"] == "shows_failed_rules"  # a week-old record is outside the plan's period
+    assert silence["stages"]["judge"]["rejections"]
+
+
+def test_the_same_thread_window_is_two_sided_around_the_statement():
+    said = datetime(2026, 10, 7, 19, 47, tzinfo=timezone.utc)
+    now = said + timedelta(days=9)
+    same = lambda n, when: {**rec(n, "authored", table="conversation_messages", text=f"record {n}: the roof"), "event_at": when.isoformat(), "conversation_id": "T"}  # noqa: E731
+    records = [same(1, said + timedelta(days=2)), same(2, said + timedelta(hours=3)), same(3, said - timedelta(hours=3)),
+               same(4, said - timedelta(days=2)), {**same(5, said + timedelta(hours=1)), "conversation_id": "other"}]
+    shown, dropped = v2.select_evidence(records, "I'll fix the roof by Wednesday.", claim(date_from="", date_to=""), now, conversation_id="T", said_at=said)
+    assert [e["ref"] for e in shown] == ["conversation_messages:r1", "conversation_messages:r4", "conversation_messages:r5"]
+    assert dropped["same_thread"] == 2 and dropped["as_of"] == 0
+    # with no said_at the window is around now, as before: anything after now is out as of, and the thread's last 12 h too
+    shown, dropped = v2.select_evidence(records, "I'll fix the roof by Wednesday.", claim(date_from="", date_to=""), said, conversation_id="T")
+    assert [e["ref"] for e in shown] == ["conversation_messages:r4"] and dropped == {"as_of": 3, "quoting": 0, "own_record": 0, "same_thread": 1, "occurrence": 0}
+
+
 def test_one_time_rule_for_every_stored_time():
     """The engine and the store read a stored time by one rule (truth_checks.instant): an offset or Z is honoured, a
     naive time is the node's LOCAL time (the journal writes wall-clock times with no offset), a bare date is not an

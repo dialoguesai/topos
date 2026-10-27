@@ -196,7 +196,7 @@ def recheck_due(conn: Any, sources: List[str], signature: Any, limit: int, *,
         return []
     moment = now or datetime.now(timezone.utc)
     columns = state_columns(conn)
-    found: List[Tuple[str, str, str]] = []
+    found: List[Tuple[bool, str, str, str]] = []
     for table, id_column, _, extra, params in _chosen(sources):
         if not _present(conn, table):
             continue
@@ -205,10 +205,11 @@ def recheck_due(conn: Any, sources: List[str], signature: Any, limit: int, *,
             f"ON m.{id_column} = c.record_id WHERE c.record_table = ? AND c.verdict = 'unable' "
             f"AND m.content IS NOT NULL AND TRIM(m.content) != ''{extra}", (table, *params)).fetchall()
         for created, record_id, *state in rows:
-            if recheck_reason(state_of(state), signature, now=moment, cooldown_s=RECHECK_COOLDOWN_S):
-                found.append((str(created or ""), table, str(record_id)))
-    found.sort(key=lambda item: item[0], reverse=True)
-    return [[table, record_id] for _, table, record_id in found[:limit]]
+            why = recheck_reason(state_of(state), signature, now=moment, cooldown_s=RECHECK_COOLDOWN_S)
+            if why:
+                found.append((why == "due", str(created or ""), table, str(record_id)))
+    found.sort(key=lambda item: (item[0], item[1]), reverse=True)  # a plan past its due moment first, then newest check first
+    return [[table, record_id] for _, _, table, record_id in found[:limit]]
 
 
 def read_timeout_for(model: str) -> float:
@@ -323,7 +324,7 @@ def _prepare(conn: Any, table: str, record_id: str, sources: List[str], signatur
         return None
     if OWNER_CLAIMS_ONLY and not record["owner"]:
         return None
-    reading = None
+    reading, as_of = None, None
     if state is not None and state.get("reading_json"):  # a re-check runs from what the reader made of the row once
         try:
             stored = json.loads(str(state["reading_json"]))
@@ -331,6 +332,12 @@ def _prepare(conn: Any, table: str, record_id: str, sources: List[str], signatur
                 reading = {"category": stored.get("category") or state.get("category"), "claims": stored["claims"]}
         except ValueError:
             reading = None
+    if state is not None and state.get("due_at"):  # a plan is checked as of the end of its window plus the grace
+        from ..query.truth_checks import instant
+        from ..query.verify_v2 import INTENTION_GRACE_S
+
+        due = instant(state["due_at"])
+        as_of = (due + timedelta(seconds=INTENTION_GRACE_S)).isoformat() if due else None
     request = ClaimRequest(
         statement=record["text"][:STATEMENT_CHARS],
         context=previous_turns(conn, record, CONTEXT_TURNS, names),
@@ -345,6 +352,7 @@ def _prepare(conn: Any, table: str, record_id: str, sources: List[str], signatur
         source_ref=f"{table}:{record_id}",
         conversation_id=record.get("conversation_id"),
         reading=reading,
+        as_of=as_of,
     )
     record.pop("row", None)
     return record, request, (state["attempts"] + 1 if state else 1)
@@ -379,7 +387,7 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
     answer's ``reading`` (what the reader made of the row), the row also carries it, the main claim's polarity and
     polarity-blind key, the record's own time (``said_at``) and how many owner labels the check was shown."""
     from ..query.truth_checks import VERDICTS
-    from ..query.verify_v2 import VERSION, engine_sha16, reading_key
+    from ..query.verify_v2 import VERSION, due_at_for, engine_sha16, reading_key
 
     verdict, reason = result.get("verdict"), result.get("reason")
     contradicted = verdict == "contradicted"  # stored as no_evidence + the flag (truth_checks._ADDED_COLUMNS)
@@ -411,7 +419,8 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
         "engine_version": str(result.get("version") or VERSION)[:80], "engine_sha16": engine_sha16() or None,
         "contradicted": contradicted,
         "reading_json": json.dumps(reading) if reading else None, "polarity": polarity, "claim_key": claim_key,
-        "said_at": said_at, "owner_labels_shown": int(shown or 0) if retrieve is not None else None,
+        "said_at": said_at, "owner_labels_shown": int(shown or 0) if isinstance(retrieve, dict) else None,
+        "due_at": due_at_for(reading, said_at) if reading else None,
     }
 
 

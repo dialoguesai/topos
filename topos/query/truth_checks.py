@@ -164,11 +164,14 @@ _DDL = (
 #: read joins the source table for it; ``group_override`` is set to the row's own check_id by the owner's "Not the same"
 #: (a split: the row is its own group from then on; nothing else changes); ``owner_labels_shown`` is how many of the
 #: owner's labels the check was shown as evidence (``verify_v2.LABELS_AS_EVIDENCE``), so the weekly readout scores
-#: accuracy only on rows the owner's own judgement did not back.
+#: accuracy only on rows the owner's own judgement did not back. Increment C adds ``due_at``: when a plan's window
+#: closes (``verify_v2.due_at_for``), for the main claim of a reading whose type is ``intention``; the row waits as
+#: ``unable`` / ``waiting_until:<due + grace>`` and is checked once that moment has passed, as of that moment.
 _ADDED_COLUMNS = (("attempts", "INTEGER NOT NULL DEFAULT 1"), ("read_timeout_s", "REAL"), ("checked_at", "TEXT"),
                   ("engine_version", "TEXT"), ("engine_sha16", "TEXT"), ("contradicted", "INTEGER"),
                   ("reading_json", "TEXT"), ("polarity", "INTEGER"), ("claim_key", "TEXT"), ("said_at", "TEXT"),
-                  ("group_override", "TEXT"), ("owner_labels_shown", "INTEGER"))
+                  ("group_override", "TEXT"), ("owner_labels_shown", "INTEGER"), ("due_at", "TEXT"))
+WAITING = "waiting_until:"  # the reason prefix of a plan's placeholder row
 #: Added to ``truth_labels`` by step 1: whether the owner says the cited evidence shows the claim (1 / 0; NULL when not
 #: asked: the card was not "backed", or the owner did not answer).
 _ADDED_LABEL_COLUMNS = (("evidence_ok", "INTEGER"),)
@@ -434,8 +437,8 @@ def record_check(conn: sqlite3.Connection, check: Dict[str, Any]) -> Optional[st
             f"INSERT OR IGNORE INTO {CHECKS_TABLE} (check_id, record_table, record_id, conversation_id, source, "
             "speaker_kind, week, category, claim_text, verdict, reason, cited_refs_json, effort, model, latency_ms, "
             "created_at, attempts, read_timeout_s, checked_at, engine_version, engine_sha16, contradicted, "
-            "reading_json, polarity, claim_key, said_at, owner_labels_shown) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "reading_json, polarity, claim_key, said_at, owner_labels_shown, due_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (check_id, check["record_table"], check["record_id"], check.get("conversation_id"), check["source"],
              check["speaker_kind"], iso_week(created), check.get("category"), check.get("claim_text"),
              check["verdict"], check.get("reason"), json.dumps(check.get("cited_refs") or []), check.get("effort"),
@@ -447,14 +450,14 @@ def record_check(conn: sqlite3.Connection, check: Dict[str, Any]) -> Optional[st
     return check_id if cursor.rowcount else None
 
 
-def _reading_columns(check: Dict[str, Any]) -> Tuple[Optional[str], Optional[int], Optional[str], Optional[str], Optional[int]]:
-    """``(reading_json, polarity, claim_key, said_at, owner_labels_shown)`` of a check row as the lane built it."""
+def _reading_columns(check: Dict[str, Any]) -> Tuple[Optional[str], Optional[int], Optional[str], Optional[str], Optional[int], Optional[str]]:
+    """``(reading_json, polarity, claim_key, said_at, owner_labels_shown, due_at)`` of a check row as the lane built it."""
     reading = check.get("reading_json")
     polarity = check.get("polarity")
     shown = check.get("owner_labels_shown")
     return (str(reading) if reading else None, int(polarity) if polarity in (1, -1) else None,
             str(check["claim_key"]) if check.get("claim_key") else None, str(check["said_at"]) if check.get("said_at") else None,
-            int(shown) if shown is not None else None)
+            int(shown) if shown is not None else None, str(check["due_at"]) if check.get("due_at") else None)
 
 
 # --- re-checks of unable rows -----------------------------------------------------------------------------------------
@@ -472,11 +475,11 @@ def state_columns(conn: sqlite3.Connection) -> str:
                 if _present(conn, LABELS_TABLE) else "0")
     return (f"c.check_id, c.verdict, c.model, c.effort, {col('read_timeout_s', 'NULL')}, "
             f"COALESCE({col('attempts', 'NULL')}, 1), COALESCE({col('checked_at', 'NULL')}, c.created_at), {labelled}, "
-            f"{col('reading_json', 'NULL')}, c.category")
+            f"{col('reading_json', 'NULL')}, c.category, c.reason, {col('due_at', 'NULL')}")
 
 
 _STATE_KEYS = ("check_id", "verdict", "model", "effort", "read_timeout_s", "attempts", "checked_at", "labelled",
-               "reading_json", "category")
+               "reading_json", "category", "reason", "due_at")
 
 
 def state_of(found: Iterable[Any]) -> Dict[str, Any]:
@@ -506,6 +509,10 @@ def recheck_reason(state: Optional[Dict[str, Any]], signature: Signature, *, now
         return None
     if int(state.get("attempts") or 1) >= MAX_ATTEMPTS:
         return None
+    reason = str(state.get("reason") or "")
+    if reason.startswith(WAITING):  # a plan's placeholder: checked once its window and the grace have passed, never before
+        ready_at = instant(reason[len(WAITING):])
+        return "due" if ready_at is not None and (now or now_utc()) >= ready_at else None
     model, effort, read_timeout = signature
     if (state.get("model") or None) != (model or None):
         return "model"
@@ -537,18 +544,18 @@ def recheck(conn: sqlite3.Connection, check: Dict[str, Any], attempt: int) -> Op
             (check["record_table"], check["record_id"], attempt - 1)).fetchone()
         if found is None:
             return None
-        reading_json, polarity, claim_key, said_at, shown = _reading_columns(check)
+        reading_json, polarity, claim_key, said_at, shown, due_at = _reading_columns(check)
         conn.execute(
             f"UPDATE {CHECKS_TABLE} SET conversation_id=?, source=?, speaker_kind=?, category=?, claim_text=?, "
             "verdict=?, reason=?, cited_refs_json=?, effort=?, model=?, latency_ms=?, attempts=?, read_timeout_s=?, "
             "checked_at=?, engine_version=?, engine_sha16=?, contradicted=?, reading_json=COALESCE(?, reading_json), "
             "polarity=COALESCE(?, polarity), claim_key=COALESCE(?, claim_key), said_at=COALESCE(?, said_at), "
-            "owner_labels_shown=? WHERE check_id=?",
+            "owner_labels_shown=?, due_at=COALESCE(?, due_at) WHERE check_id=?",
             (check.get("conversation_id"), check["source"], check["speaker_kind"], check.get("category"),
              check.get("claim_text"), check["verdict"], check.get("reason"), json.dumps(check.get("cited_refs") or []),
              check.get("effort"), check.get("model"), check.get("latency_ms"), attempt, check.get("read_timeout_s"),
              now_utc().isoformat(), check.get("engine_version"), check.get("engine_sha16"),
-             1 if check.get("contradicted") else None, reading_json, polarity, claim_key, said_at, shown, found[0]),
+             1 if check.get("contradicted") else None, reading_json, polarity, claim_key, said_at, shown, due_at, found[0]),
         )
         commit_connection(conn)
     return str(found[0])
@@ -842,7 +849,9 @@ def _empty_week(week: str) -> Dict[str, Any]:
             "agreement": {"backed_true": 0, "backed_false": 0, "nothing_true": 0}, "latency_ms_p50": None,
             # increment B: the owner's repeated statements as groups (claim_key + polarity), counts only
             "groups": 0, "grouped": 0, "restated_distribution": {}, "distinct_days_distribution": {},
-            "opposite_polarity_pairs": 0, "splits": 0}
+            "opposite_polarity_pairs": 0, "splits": 0,
+            # increment C: the owner's plans; a waiting placeholder is counted here and never as unable or to confirm
+            "plans": {"waiting": 0, "kept": 0, "nothing_by_due": 0, "answered": 0}}
 
 
 def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[datetime] = None) -> Dict[str, Any]:
@@ -859,18 +868,31 @@ def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[dat
         dismissed, join = _dismissal_join(conn)
         skipped = (f"EXISTS (SELECT 1 FROM {SKIPS_TABLE} s WHERE s.check_id = c.check_id)"
                    if _present(conn, SKIPS_TABLE) else "0")
-        against = "COALESCE(c.contradicted, 0)" if "contradicted" in _columns(conn, CHECKS_TABLE) else "0"
+        have = set(_columns(conn, CHECKS_TABLE))
+        against = "COALESCE(c.contradicted, 0)" if "contradicted" in have else "0"
+        kind = "json_extract(c.reading_json, '$.claims[0].type')" if "reading_json" in have else "NULL"
         rows = conn.execute(
             f"SELECT c.week, c.source, c.category, c.verdict, c.latency_ms, c.model IS NOT NULL, "
-            f"c.claim_text IS NOT NULL, l.label, {attempts}, {dismissed}, c.speaker_kind, {skipped}, {against} FROM {CHECKS_TABLE} c "
-            f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id{join} "
+            f"c.claim_text IS NOT NULL, l.label, {attempts}, {dismissed}, c.speaker_kind, {skipped}, {against}, c.reason, {kind} "
+            f"FROM {CHECKS_TABLE} c LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id{join} "
             f"WHERE c.week IN ({','.join('?' for _ in names)})", names).fetchall()
         latencies: Dict[str, List[float]] = {week: [] for week in names}
-        for week, source, category, verdict, latency, modelled, has_claim, label, tries, reason, speaker, was_skipped, was_against in rows:
+        for (week, source, category, verdict, latency, modelled, has_claim, label, tries, reason, speaker, was_skipped, was_against,
+             why, kind_of) in rows:
             entry = out[week]
             entry["checked"] += 1
             if tries > 1:
                 entry["rechecked"] += 1
+            waiting = str(why or "").startswith(WAITING)
+            if kind_of == "intention" or waiting:
+                plan = ("waiting" if waiting else "answered" if label else "kept" if verdict == "supported" else "nothing_by_due")
+                entry["plans"][plan] += 1
+            if waiting:  # a plan not yet due is neither unable nor a card to confirm; no model answered it
+                if source in entry["by_source"]:
+                    entry["by_source"][source] += 1
+                if category:
+                    entry["by_category"][category] = entry["by_category"].get(category, 0) + 1
+                continue
             if verdict == "unable" and tries >= MAX_ATTEMPTS:
                 entry["attempts_exhausted"] += 1
             key = {"supported": "backed", "no_evidence": "nothing_found", "unable": "unable",
@@ -1001,7 +1023,7 @@ def claim_cards(conn: sqlite3.Connection, limit: int = 20, unlabelled_only: bool
         f"SELECT c.check_id, c.record_table, c.record_id, c.source, c.category, c.claim_text, c.verdict, "
         f"c.cited_refs_json, c.latency_ms, l.label, l.note, {evidence_ok}, {dismissed}, {col('contradicted')}, "
         f"COALESCE({col('group_override')}, {col('claim_key')}), {col('polarity')}, {col('reading_json')}, "
-        f"COALESCE({col('said_at')}, c.created_at) FROM {CHECKS_TABLE} c "
+        f"c.reason, {col('due_at')}, COALESCE({col('said_at')}, c.created_at) FROM {CHECKS_TABLE} c "
         f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id{join} "
         f"WHERE c.claim_text IS NOT NULL AND c.verdict != 'not_checkable'{where}").fetchall()
     # Newest utterance first (the record's own time; the check's time for a row stored without one), read by the one
@@ -1013,7 +1035,7 @@ def claim_cards(conn: sqlite3.Connection, limit: int = 20, unlabelled_only: bool
     cards: List[Dict[str, Any]] = []
     faces: Dict[Any, Dict[str, Any]] = {}  # group -> its card, once one row of it has a live record
     for (check_id, table, record_id, source, category, claim_text, verdict, refs_json, latency, label, note, ok,
-         reason, against, key, polarity, reading_json, _when) in rows:
+         reason, against, key, polarity, reading_json, why, due_at, _when) in rows:
         group = (str(key), int(polarity)) if key is not None and polarity is not None else ("row", check_id)
         face = faces.get(group)
         if face is not None:
@@ -1043,6 +1065,11 @@ def claim_cards(conn: sqlite3.Connection, limit: int = 20, unlabelled_only: bool
             "polarity": int(polarity) if polarity is not None else None, "kind": kind, "check_ids": [],
             "restated": ({"count": info["count"], "distinct_days": info["distinct_days"], "first": info["first"], "last": info["last"]}
                          if info else {"count": 1, "distinct_days": 1, "first": said_at, "last": said_at}),
+            # a plan: when its window closes, and where it stands (computed at read, never stored): waiting for its
+            # due moment; kept (the due check showed it); answered (the owner said); or nothing found by then
+            "due_at": due_at,
+            "plan": (("waiting" if str(why or "").startswith(WAITING) else "answered" if label else
+                      "kept" if verdict == "supported" else "nothing_by_due") if (kind == "intention" or str(why or "").startswith(WAITING)) else None),
         }
         faces[group] = card
         cards.append(card)
