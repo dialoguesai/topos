@@ -27,6 +27,16 @@ def node(tmp_path, tmp_path_factory, monkeypatch):
     conn.close()
 
 
+SHIPPED_OWNER_CLAIMS_ONLY = lane.OWNER_CLAIMS_ONLY  # read before any fixture changes it
+
+
+@pytest.fixture(autouse=True)
+def every_speaker(monkeypatch):
+    """Most tests here describe the lane's machinery with contacts' rows as fixtures, so they run with the step 1
+    owner-only rule off; the tests under "Calibrate step 1" turn it back on."""
+    monkeypatch.setattr(lane, "OWNER_CLAIMS_ONLY", False)
+
+
 def turn_on(conn, **over):
     return cfg.save(conn, {"enabled": True, **over})
 
@@ -882,3 +892,39 @@ def test_a_recheck_that_lost_a_race_stores_nothing(node):
     assert store.recheck(node.conn, row, 3) is None  # no longer unable
     with pytest.raises(store.TruthRequestError):
         store.recheck(node.conn, row, 4)
+
+
+# --- Calibrate step 1: the owner's own claims only --------------------------------------------------------------------
+def test_owner_claims_only_is_the_default():
+    assert SHIPPED_OWNER_CLAIMS_ONLY is True
+
+
+def test_with_owner_claims_only_a_contacts_message_is_never_queued_or_checked(node, monkeypatch):
+    monkeypatch.setattr(lane, "OWNER_CLAIMS_ONLY", True)
+    add_message(node.conn, "m-contact", "I finished building the garden shed this morning.")
+    add_message(node.conn, "m-owner", "I finished painting the garden shed this morning.", from_self=True, at=ago(minutes=5))
+    add_journal(node.conn, "j1", "I bought new hinges for the shed doors today.", at=ago(hours=1))
+    node.conn.commit()
+    turn_on(node.conn)
+    assert sorted(r for _, r in lane.owed(node.conn, list(cfg.SOURCES), 10)) == ["j1", "m-owner"]
+    recorder = Recorder()
+    monkeypatch.setattr(lane, "_verify", recorder)
+    out = run_job({"records": [["conversation_messages", "m-contact"], ["conversation_messages", "m-owner"]]})
+    assert out["skipped"] == 1 and out["checked"] == 1 and [r.statement for r in recorder.requests] == [
+        "I finished painting the garden shed this morning."]
+
+
+def test_the_request_names_its_record_its_thread_and_whether_the_owner_spoke(node, monkeypatch):
+    monkeypatch.setattr(lane, "OWNER_CLAIMS_ONLY", True)
+    add_message(node.conn, "m-owner", "I finished painting the garden shed this morning.", from_self=True,
+                conversation_id="thread-9")
+    add_journal(node.conn, "j1", "I bought new hinges for the shed doors today.", at=ago(hours=1))
+    node.conn.commit()
+    turn_on(node.conn)
+    recorder = Recorder()
+    monkeypatch.setattr(lane, "_verify", recorder)
+    run_job({"records": [["conversation_messages", "m-owner"], ["journal_entries", "j1"]]})
+    message, journal = recorder.requests
+    assert (message.speaker_is_owner, message.source_ref, message.conversation_id) == (
+        True, "conversation_messages:m-owner", "thread-9")
+    assert (journal.speaker_is_owner, journal.source_ref, journal.conversation_id) == (True, "journal_entries:j1", None)

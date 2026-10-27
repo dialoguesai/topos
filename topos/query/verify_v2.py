@@ -35,7 +35,7 @@ import re
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -116,6 +116,20 @@ GROUNDED_VECTOR = False
 #: against the lane's 20 s cap (27 Oct 2026). Generation is greedy and left to right, so the first claim is written the
 #: same way either way; the grammar only closes the list after it. Off: the reader is asked for up to three, as before.
 LEAN_READ = False
+#: Calibrate step 1 (owner, 27 Oct 2026): three evidence rules found on the first claim cards. Module switches like the
+#: ones above, on; off restores 1.5.28's behaviour for paired readings.
+#: SPEAKER_SUBJECT: the reader's "owner" subject means the speaker, while the evidence roles are the node owner's. When
+#: the speaker is someone else (a contact's message), that subject is ``someone_else`` to the rules, so the owner's own
+#: words can no longer count as the speaker's first-person record (a contact's plan was "backed" by the owner's reply).
+SPEAKER_SUBJECT = True
+#: STRICT_AS_OF: evidence is what was recorded at or before the moment the claim was made (a date-only record: by its
+#: day). Before, anything up to the next day counted, so a reply minutes later could back the claim it answered.
+STRICT_AS_OF = True
+#: SAME_THREAD_GUARD: the claim's own record never counts, and a record from the claim's own conversation counts only
+#: when it is at least SAME_THREAD_HOURS older than the claim: the exchange a claim is part of is its context, not
+#: evidence for it. An older message in the same thread (last week's) still counts.
+SAME_THREAD_GUARD = True
+SAME_THREAD_HOURS = 12
 ROLE_RANK = {"authored": 0, "addressed": 1, "participated": 2, "observed": 3, "ambient": 4, "derived": 5}
 #: Embedding record types that name a source table when the retrieval item itself carries none.
 EMBEDDED_TABLES = {"conversation_message": "conversation_messages", "ai_chat_message": "ai_chat_messages",
@@ -339,6 +353,13 @@ class ClaimRequest:
     #: a local 9B on a busy machine needs longer, and a caller that can wait (the inbound lane) says so here.
     read_timeout_s: float = READ_TIMEOUT_S
     source_kind: str = "spoken"  # one of SOURCE_KINDS: how the reader is told what it is reading
+    #: Whether the speaker is the node's owner (the Fun Camera's own speech, the owner's messages and journal) or
+    #: someone else (a contact's message). See SPEAKER_SUBJECT.
+    speaker_is_owner: bool = True
+    #: The claim's own record ("table:id") and conversation, when it came from one (the inbound lane). See
+    #: SAME_THREAD_GUARD.
+    source_ref: Optional[str] = None
+    conversation_id: Optional[str] = None
 
 
 @dataclass
@@ -359,6 +380,19 @@ def _day(value: Any) -> Optional[date]:
         return date.fromisoformat(str(value)[:10])
     except ValueError:
         return None
+
+
+def _instant(value: Any) -> Optional[datetime]:
+    """A stored time as an aware UTC instant (a naive time is the node's local time, as ``truth_checks.with_offset``
+    reads it); None for a date-only or unreadable value."""
+    text = str(value or "").strip()
+    if len(text) <= 10:
+        return None
+    try:
+        t = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return t.astimezone(timezone.utc)
 
 
 def conversation_time(said_at: Optional[str]) -> datetime:
@@ -487,6 +521,8 @@ def read_claims(req: ClaimRequest, chat: Callable, usage: Usage, timeout: float)
     if category == "world":
         return category, [], "not_about_the_owner"
     claims = [c for c in (_claim_from(x, req.statement) for x in (out.get("claims") or [])[:MAX_CLAIMS]) if c]
+    if SPEAKER_SUBJECT and not req.speaker_is_owner:  # the speaker's "owner" is someone else to the node's rules
+        claims = [replace(c, subject="someone_else") if c.subject == "owner" else c for c in claims]
     kept = [c for c in claims if c.subject != "someone_else" or req.about_others]  # the option holds even when the model strays
     if not kept:
         return category, [], ("not_about_the_owner" if claims else (why or "too_vague"))
@@ -547,7 +583,7 @@ class NodeEvidence:
                 context = ""
         return {"table": table, "record_id": str(rid), "event_at": str(row.get(SOURCE_ROWS[table][1]) or ""),
                 "role": self.roles.record_role(row, table=table), "lanes": list(lanes), "lane": lane, "text": str(text or ""),
-                "context": context}
+                "context": context, "conversation_id": str(row.get("conversation_id") or "")}
 
     def _grounding(self, item) -> Optional[str]:
         """The strongest role among the records an item's refs resolve to (a signal object's source refs, or the
@@ -643,19 +679,30 @@ class NodeEvidence:
         return records, stats
 
 
-def select_evidence(records, sentence: str, claim: Claim, now: datetime):
-    """As of the conversation; no quoting records; one per source record; first SHOWN in retrieval order."""
+def select_evidence(records, sentence: str, claim: Claim, now: datetime, *, source_ref: Optional[str] = None,
+                    conversation_id: Optional[str] = None):
+    """As of the conversation; not the claim's own exchange; no quoting records; one per source record; first SHOWN in
+    retrieval order."""
     cutoff = (now + timedelta(days=1)).date()
+    thread_floor = now - timedelta(hours=SAME_THREAD_HOURS)
     grams = ngrams(sentence)
-    seen, kept, dropped = set(), [], {"as_of": 0, "quoting": 0}
+    seen, kept, dropped = set(), [], {"as_of": 0, "quoting": 0, "own_record": 0, "same_thread": 0}
     for r in records:
         key = (r["table"], r["record_id"])
         if key in seen:
             continue
         seen.add(key)
-        d = _day(r["event_at"])
-        if d and d > cutoff:
+        if SAME_THREAD_GUARD and source_ref and f"{r['table']}:{r['record_id']}" == source_ref:
+            dropped["own_record"] += 1
+            continue
+        d, at = _day(r["event_at"]), _instant(r["event_at"])
+        late = ((at > now) if at else bool(d and d > now.date())) if STRICT_AS_OF else bool(d and d > cutoff)
+        if late:
             dropped["as_of"] += 1
+            continue
+        if (SAME_THREAD_GUARD and conversation_id and r.get("conversation_id") == conversation_id
+                and (at is None or at > thread_floor)):
+            dropped["same_thread"] += 1
             continue
         if grams and ngrams(r["text"]) & grams:
             dropped["quoting"] += 1
@@ -835,7 +882,8 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
             r: Dict[str, Any] = {**as_dict(claim), "verdict": None, "reason": None, "evidence": [], "stages": {}, "timings_ms": {}}
             t = time.perf_counter()
             records, stats = await gather_in_worker(lambda conn: NodeEvidence(conn).gather(retrieval_query(claim), " ".join(claim.names), now))
-            evidence, dropped = select_evidence(records, req.statement, claim, now)
+            evidence, dropped = select_evidence(records, req.statement, claim, now, source_ref=req.source_ref,
+                                                conversation_id=req.conversation_id)
             r["timings_ms"]["retrieve"] = round((time.perf_counter() - t) * 1000, 1)
             r["stages"]["retrieve"] = {**stats, **{f"dropped_{k}": v for k, v in dropped.items()}, "shown": len(evidence)}
             if not evidence:

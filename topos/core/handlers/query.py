@@ -364,7 +364,8 @@ async def handle_truth_claim_cards(message: Dict[str, Any]) -> Optional[Dict[str
     from .common import run_db_read
 
     try:
-        result = await run_db_read(claim_cards, payload.get("limit", 20), payload.get("unlabelled_only", True))
+        result = await run_db_read(claim_cards, payload.get("limit", 20), payload.get("unlabelled_only", True),
+                                   payload.get("speakers", "owner"))
         return {"id": req_id, "status": "ok", "payload": result}
     except TruthRequestError as exc:
         return _truth_error(req_id, str(exc))
@@ -375,8 +376,10 @@ async def handle_truth_claim_cards(message: Dict[str, Any]) -> Optional[Dict[str
 
 @handles("truth_claim_label")
 async def handle_truth_claim_label(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``{"check_id", "label": "true"|"partly"|"false", "note"?}`` -> ``{"ok": true, "label_id"}``. A second submit
-    for the same check replaces the label and its owner-only ``verified_claim`` object."""
+    """``{"check_id", "label": "true"|"partly"|"false", "note"?, "evidence_ok"?}`` -> ``{"ok": true, "label_id"}``, or
+    ``{"check_id", "relevance": "dismissed", "dismiss_reason", "note"?}`` -> ``{"ok": true, "dismissal_id"}``. A second
+    submit for the same check replaces the first (and a label replaces a dismissal, and the reverse); a label writes
+    the owner-only ``verified_claim`` object, a dismissal removes it."""
     req_id = message.get("id")
     if not req_id:
         return None
@@ -386,11 +389,18 @@ async def handle_truth_claim_label(message: Dict[str, Any]) -> Optional[Dict[str
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
     if payload is None:
         return _truth_error(req_id, "invalid_truth_label")
-    from ...query.truth_checks import TruthRequestError, label_claim
+    from ...query.truth_checks import TruthRequestError, dismiss_claim, label_claim
     from .common import run_db_write
 
     try:
-        result = await run_db_write(label_claim, payload.get("check_id"), payload.get("label"), payload.get("note"))
+        if payload.get("relevance") == "dismissed":
+            result = await run_db_write(dismiss_claim, payload.get("check_id"), payload.get("dismiss_reason"),
+                                        payload.get("note"))
+        elif payload.get("relevance") not in (None, "relevant"):
+            return _truth_error(req_id, "invalid_truth_label")
+        else:
+            result = await run_db_write(label_claim, payload.get("check_id"), payload.get("label"), payload.get("note"),
+                                        payload.get("evidence_ok"))
         return {"id": req_id, "status": "ok", "payload": result}
     except TruthRequestError as exc:
         return _truth_error(req_id, str(exc))

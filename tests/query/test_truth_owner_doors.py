@@ -119,8 +119,11 @@ def test_weekly_stats_are_counts_only(node, week):
     result = store.weekly_stats(node.conn, 2)
     this, last = result["weeks"]
     assert this["week"] == store.iso_week() and last["week"] == store.iso_week(datetime.now(timezone.utc) - timedelta(days=7))
-    assert {k: this[k] for k in ("checked", "backed", "nothing_found", "unable", "not_a_claim", "labelled", "to_confirm")} == \
-        {"checked": 3, "backed": 1, "nothing_found": 1, "unable": 0, "not_a_claim": 1, "labelled": 1, "to_confirm": 1}
+    # The contact's claim is not "to confirm": the cards show the owner's own claims by default (step 1).
+    assert {k: this[k] for k in ("checked", "backed", "nothing_found", "unable", "not_a_claim", "labelled", "dismissed",
+                                 "to_confirm")} == \
+        {"checked": 3, "backed": 1, "nothing_found": 1, "unable": 0, "not_a_claim": 1, "labelled": 1, "dismissed": 0,
+         "to_confirm": 0}
     assert this["by_source"] == {"imessage": 3, "signal": 0, "transcripts": 0, "journal": 0}
     assert this["by_category"] == {"did": 1, "people": 1}
     assert this["agreement"] == {"backed_true": 0, "backed_false": 1, "nothing_true": 0}
@@ -168,7 +171,8 @@ def test_weekly_stats_count_rows_checked_again_and_rows_out_of_attempts(node, we
 
 # --- the cards --------------------------------------------------------------------------------------------------------
 def test_cards_are_the_claims_newest_first_with_snippets_from_the_cited_records(node, week):
-    cards = store.claim_cards(node.conn, 10, True)["cards"]
+    assert [c["check_id"] for c in store.claim_cards(node.conn, 10, True)["cards"]] == [week.me]  # the owner's, by default
+    cards = store.claim_cards(node.conn, 10, True, "all")["cards"]
     assert [c["check_id"] for c in cards] == [week.them, week.me]  # the not-a-claim row is no card
     them, me = cards
     assert them["speaker"] == "Robin Example" and me["speaker"] == "you"
@@ -178,14 +182,16 @@ def test_cards_are_the_claims_newest_first_with_snippets_from_the_cited_records(
     [cited] = me["cited"]
     assert cited["source"] == "journal" and cited["role"] == "authored" and cited["date"] == "2026-10-22"
     assert cited["snippet"].startswith("Painted both shed doors a deep blue today.") and len(cited["snippet"]) == 400
-    assert set(me) == {"check_id", "speaker", "source", "date", "claim_text", "category", "verdict", "cited",
-                       "latency_ms", "label", "note"}
+    assert set(me) == {"check_id", "speaker", "speaker_is_owner", "source", "date", "said", "claim_text", "category",
+                       "verdict", "cited", "latency_ms", "label", "note", "evidence_ok", "relevance", "dismiss_reason"}
+    assert me["speaker_is_owner"] is True and them["speaker_is_owner"] is False
+    assert me["said"] and me["said"] != me["claim_text"]  # what was said, beside the claim taken from it
 
 
 def test_a_labelled_claim_leaves_the_unlabelled_cards(node, week):
     store.label_claim(node.conn, week.them, "partly", "roof yes, gutters no")
-    assert [c["check_id"] for c in store.claim_cards(node.conn, 10, True)["cards"]] == [week.me]
-    everything = store.claim_cards(node.conn, 10, False)["cards"]
+    assert [c["check_id"] for c in store.claim_cards(node.conn, 10, True, "all")["cards"]] == [week.me]
+    everything = store.claim_cards(node.conn, 10, False, "all")["cards"]
     assert [(c["check_id"], c["label"]) for c in everything] == [(week.them, "partly"), (week.me, None)]
 
 
@@ -261,8 +267,9 @@ def test_the_owner_reads_stats_and_cards_and_labels_through_the_doors(node, week
     assert stats["status"] == "ok" and stats["payload"]["enabled"] is False
     assert stats["payload"]["weeks"][0]["checked"] == 3
     assert _as(owner, "truth_weekly_stats", {"weeks": 9})["error"] == "invalid_truth_request"
-    cards = _as(owner, "truth_claim_cards", {"limit": 50, "unlabelled_only": True})["payload"]["cards"]
+    cards = _as(owner, "truth_claim_cards", {"limit": 50, "unlabelled_only": True, "speakers": "all"})["payload"]["cards"]
     assert [c["check_id"] for c in cards] == [week.them, week.me]
+    assert _as(owner, "truth_claim_cards", {"speakers": "contacts"})["error"] == "invalid_truth_request"
     assert _as(owner, "truth_claim_cards", {"limit": 51})["error"] == "invalid_truth_request"
     labelled = _as(owner, "truth_claim_label", {"check_id": week.me, "label": "true", "note": "yes"})
     assert labelled["status"] == "ok" and labelled["payload"]["ok"] is True and labelled["payload"]["label_id"]
@@ -488,3 +495,65 @@ def test_a_source_scrub_removes_the_checks_whose_records_are_gone(node, week):
     assert [r[0] for r in node.conn.execute("SELECT record_id FROM truth_checks")] == ["m-me"]
     assert node.conn.execute("SELECT COUNT(*) FROM truth_labels").fetchone()[0] == 0 and _objects(node.conn) == []
     assert store.forget_records(node.conn) == 0
+
+
+# --- Calibrate step 1: dismissal and the evidence question ------------------------------------------------------------
+def _dismissals(conn):
+    return conn.execute("SELECT check_id, reason, note FROM truth_dismissals").fetchall()
+
+
+def test_a_dismissal_takes_the_card_out_and_writes_no_verified_claim(node, week):
+    out = store.dismiss_claim(node.conn, week.me, "trivial", "  not worth it ")
+    assert out["ok"] is True and out["dismissal_id"]
+    assert _dismissals(node.conn) == [(week.me, "trivial", "not worth it")] and _objects(node.conn) == []
+    assert store.claim_cards(node.conn, 10, True)["cards"] == []
+    [card] = store.claim_cards(node.conn, 10, False)["cards"]
+    assert (card["relevance"], card["dismiss_reason"], card["label"]) == ("dismissed", "trivial", None)
+    [entry] = store.weekly_stats(node.conn, 1)["weeks"]
+    assert entry["dismissed"] == 1 and entry["labelled"] == 0 and entry["to_confirm"] == 0
+
+
+def test_a_label_and_a_dismissal_replace_each_other(node, week):
+    store.label_claim(node.conn, week.me, "true")
+    assert len(_objects(node.conn)) == 1
+    first = store.dismiss_claim(node.conn, week.me, "misread")
+    assert node.conn.execute("SELECT COUNT(*) FROM truth_labels").fetchone()[0] == 0 and _objects(node.conn) == []
+    again = store.dismiss_claim(node.conn, week.me, "other", "changed my mind")
+    assert again["dismissal_id"] == first["dismissal_id"] and _dismissals(node.conn) == [(week.me, "other", "changed my mind")]
+    store.label_claim(node.conn, week.me, "partly", evidence_ok=False)
+    assert _dismissals(node.conn) == [] and len(_objects(node.conn)) == 1
+    [card] = store.claim_cards(node.conn, 10, False)["cards"]
+    assert (card["relevance"], card["label"], card["evidence_ok"]) == ("relevant", "partly", False)
+
+
+@pytest.mark.parametrize("call", [
+    lambda c, w: store.dismiss_claim(c, w.me, "boring"),
+    lambda c, w: store.dismiss_claim(c, w.me, None),
+    lambda c, w: store.label_claim(c, w.me, "true", evidence_ok="yes"),
+])
+def test_a_bad_dismissal_or_evidence_answer_is_refused(node, week, call):
+    with pytest.raises(store.TruthRequestError) as raised:
+        call(node.conn, week)
+    assert str(raised.value) == "invalid_truth_label"
+
+
+def test_a_table_from_before_step_1_gains_the_evidence_column_and_reads_without_dismissals(node, week):
+    node.conn.execute("DROP TABLE IF EXISTS truth_dismissals")
+    node.conn.execute("ALTER TABLE truth_labels DROP COLUMN evidence_ok")
+    node.conn.commit()
+    [card] = store.claim_cards(node.conn, 10, True)["cards"]  # a read creates nothing
+    assert card["evidence_ok"] is None and card["relevance"] is None
+    assert store.weekly_stats(node.conn, 1)["weeks"][0]["dismissed"] == 0
+    store.label_claim(node.conn, week.me, "true", evidence_ok=True)  # the first write adds what is missing
+    assert node.conn.execute("SELECT evidence_ok FROM truth_labels").fetchone() == (1,)
+    assert store._present(node.conn, "truth_dismissals")
+
+
+def test_the_owner_dismisses_through_the_door(node, week):
+    owner = Principal(OWNER_APP, "uds")
+    out = _as(owner, "truth_claim_label", {"check_id": week.me, "relevance": "dismissed", "dismiss_reason": "someone_else"})
+    assert out["status"] == "ok" and out["payload"]["dismissal_id"]
+    assert _as(owner, "truth_claim_label", {"check_id": week.me, "relevance": "maybe"})["error"] == "invalid_truth_label"
+    assert _as(owner, "truth_claim_label", {"check_id": week.me, "relevance": "dismissed"})["error"] == "invalid_truth_label"
+    back = _as(owner, "truth_claim_label", {"check_id": week.me, "relevance": "relevant", "label": "true", "evidence_ok": True})
+    assert back["status"] == "ok" and back["payload"]["label_id"] and _dismissals(node.conn) == []

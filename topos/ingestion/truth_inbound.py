@@ -74,6 +74,14 @@ SOURCE_KINDS = {"imessage": "message", "signal": "message", "transcripts": "tran
 RECHECK_COOLDOWN_S = 6 * 3600
 CONTEXT_TURNS = 6
 PAUSE_S = 600
+#: Calibrate step 1 (owner, 27 Oct 2026): "claims are mine; other people's messages are evidence, not claims". On, the
+#: lane checks only the owner's own rows (their messages, their transcript turns, their journal); a contact's message is
+#: never queued or re-checked, and stays readable as evidence. Off: every row of the chosen sources, as in 1.5.28 (in
+#: the lane's first week 685 of its 804 iMessage checks were contacts' messages, which the owner could not label).
+OWNER_CLAIMS_ONLY = True
+_OWNER_ROWS = {"conversation_messages": " AND (m.is_from_self = 1 OR LOWER(COALESCE(m.sender_id, '')) = 'self')",
+               "transcript_segments": " AND m.is_from_self = 1"}
+
 #: VERIFY_V2_WARM_LOCAL (verify_claim tracker round r2; off unless ``TOPOS_VERIFY_V2_WARM_LOCAL=1``). The node's Ollama
 #: holds one model at a time and the derivation lane swaps its 9B extractor and 27B verifier all day (the owner's
 #: node, 27 Oct 2026: the 9B loaded 37 times and the 27B 12 times in one day; a cold 9B load took 76 s, a warm reader
@@ -149,6 +157,9 @@ def _chosen(sources: List[str]) -> List[Tuple[str, str, str, str, tuple]]:
         out.append(("journal_entries", "entry_id", "entry_at", "", ()))
     if "transcripts" in sources:
         out.append(("transcript_segments", "segment_id", "event_at", " AND COALESCE(m.actor_role, 'ambient') != 'ambient'", ()))
+    if OWNER_CLAIMS_ONLY:  # a cheap pre-filter; _prepare still applies the full owner rule (truth_checks._owner_row)
+        out = [(table, id_column, time_column, extra + _OWNER_ROWS.get(table, ""), params)
+               for table, id_column, time_column, extra, params in out]
     return out
 
 
@@ -309,6 +320,8 @@ def _prepare(conn: Any, table: str, record_id: str, sources: List[str], signatur
     record = load_record(conn, table, record_id, names)
     if record is None or record["source"] not in sources or not record["text"].strip():
         return None
+    if OWNER_CLAIMS_ONLY and not record["owner"]:
+        return None
     request = ClaimRequest(
         statement=record["text"][:STATEMENT_CHARS],
         context=previous_turns(conn, record, CONTEXT_TURNS, names),
@@ -319,6 +332,9 @@ def _prepare(conn: Any, table: str, record_id: str, sources: List[str], signatur
         deadline_s=DEADLINE_S,
         read_timeout_s=signature[2],
         source_kind=SOURCE_KINDS.get(record["source"], "message"),
+        speaker_is_owner=bool(record["owner"]),
+        source_ref=f"{table}:{record_id}",
+        conversation_id=record.get("conversation_id"),
     )
     record.pop("row", None)
     return record, request, (state["attempts"] + 1 if state else 1)

@@ -40,6 +40,15 @@ TABLES = (CHECKS_TABLE, LABELS_TABLE)
 
 VERDICTS = ("supported", "no_evidence", "unable", "not_checkable")
 LABELS = ("true", "partly", "false")
+#: Calibrate step 1 (owner, 27 Oct 2026): a card can be dismissed as not worth checking, with one reason from this
+#: closed list, instead of being labelled. Kept apart from the labels (a dismissed claim is not true, partly or false:
+#: it should not have been a claim), never a ``verified_claim`` object, and counted by reason in the weekly readout so
+#: the reason a kind of claim keeps surfacing can be found without reading notes.
+DISMISSALS_TABLE = "truth_dismissals"
+DISMISS_REASONS = ("someone_else", "not_a_claim", "trivial", "misread", "private", "other")
+#: Which cards the owner sees by default: their own claims (the lane checks only those from step 1 on; contacts'
+#: claims checked by earlier builds stay stored and appear with ``speakers: "all"``).
+CARD_SPEAKERS = ("owner", "all")
 LABEL_CONFIDENCE = {"true": 1.0, "partly": 0.5, "false": 0.0}
 OBJECT_TYPE = "verified_claim"
 OBJECT_DIMENSION = "memory"
@@ -95,6 +104,13 @@ _DDL = (
         note TEXT,
         labelled_at TEXT NOT NULL
     )""",
+    f"""CREATE TABLE IF NOT EXISTS {DISMISSALS_TABLE} (
+        dismissal_id TEXT PRIMARY KEY,
+        check_id TEXT NOT NULL UNIQUE,
+        reason TEXT NOT NULL CHECK (reason IN ('someone_else', 'not_a_claim', 'trivial', 'misread', 'private', 'other')),
+        note TEXT,
+        dismissed_at TEXT NOT NULL
+    )""",
 )
 #: Columns added after 1.5.19 shipped the table: added in place, on first use, to a table an earlier build created
 #: (the table itself was created lazily, with no migration, so its columns are too). ``attempts`` counts the checks
@@ -105,6 +121,9 @@ _DDL = (
 #: before the stamp), so the weekly eval tells builds apart by stamp rather than by time.
 _ADDED_COLUMNS = (("attempts", "INTEGER NOT NULL DEFAULT 1"), ("read_timeout_s", "REAL"), ("checked_at", "TEXT"),
                   ("engine_version", "TEXT"), ("engine_sha16", "TEXT"))
+#: Added to ``truth_labels`` by step 1: whether the owner says the cited evidence shows the claim (1 / 0; NULL when not
+#: asked: the card was not "backed", or the owner did not answer).
+_ADDED_LABEL_COLUMNS = (("evidence_ok", "INTEGER"),)
 #: An ``unable`` row is checked again at most until it has had this many checks in all.
 MAX_ATTEMPTS = 3
 
@@ -122,21 +141,24 @@ def tables_present(conn: sqlite3.Connection) -> bool:
     return all(_present(conn, t) for t in TABLES)
 
 
-def _missing_columns(conn: sqlite3.Connection) -> List[Tuple[str, str]]:
-    have = set(_columns(conn, CHECKS_TABLE))
-    return [(name, decl) for name, decl in _ADDED_COLUMNS if name not in have]
+def _missing_columns(conn: sqlite3.Connection) -> List[Tuple[str, str, str]]:
+    out = []
+    for table, added in ((CHECKS_TABLE, _ADDED_COLUMNS), (LABELS_TABLE, _ADDED_LABEL_COLUMNS)):
+        have = set(_columns(conn, table))
+        out += [(table, name, decl) for name, decl in added if name not in have]
+    return out
 
 
 def ensure_tables(conn: sqlite3.Connection) -> None:
-    """Create both tables on first use, and add the later columns to a table an earlier build created. The probes are
-    reads, so a node that has everything takes no write gate."""
-    if tables_present(conn) and not _missing_columns(conn):
+    """Create the tables on first use, and add the later tables and columns to what an earlier build created. The
+    probes are reads, so a node that has everything takes no write gate."""
+    if tables_present(conn) and _present(conn, DISMISSALS_TABLE) and not _missing_columns(conn):
         return
     with with_db_write():
         for statement in _DDL:
             conn.execute(statement)
-        for name, decl in _missing_columns(conn):
-            conn.execute(f"ALTER TABLE {CHECKS_TABLE} ADD COLUMN {name} {decl}")
+        for table, name, decl in _missing_columns(conn):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
         commit_connection(conn)
 
 
@@ -452,10 +474,9 @@ def recheck(conn: sqlite3.Connection, check: Dict[str, Any], attempt: int) -> Op
     return str(found[0])
 
 
-def label_claim(conn: sqlite3.Connection, check_id: Any, label: Any, note: Any = None) -> Dict[str, Any]:
-    """The owner's label of one claim, and its ``verified_claim`` object, in one gated commit. A second submit
-    replaces both (the label keeps its id)."""
-    if not isinstance(check_id, str) or not check_id.strip() or len(check_id) > 64 or label not in LABELS:
+def _claim_check(conn: sqlite3.Connection, check_id: Any, note: Any) -> Tuple[Dict[str, Any], Optional[str]]:
+    """The labelable check a label or a dismissal names, and its cleaned note; refuses with a fixed code."""
+    if not isinstance(check_id, str) or not check_id.strip() or len(check_id) > 64:
         raise TruthRequestError("invalid_truth_label")
     if note is not None and not isinstance(note, str):
         raise TruthRequestError("invalid_truth_label")
@@ -471,6 +492,18 @@ def label_claim(conn: sqlite3.Connection, check_id: Any, label: Any, note: Any =
                       "created_at"), found))
     if not check["claim_text"] or check["verdict"] == "not_checkable":
         raise TruthRequestError("not_a_claim")
+    return check, note
+
+
+def label_claim(conn: sqlite3.Connection, check_id: Any, label: Any, note: Any = None,
+                evidence_ok: Any = None) -> Dict[str, Any]:
+    """The owner's label of one claim, and its ``verified_claim`` object, in one gated commit. A second submit
+    replaces both (the label keeps its id); a label replaces a dismissal of the same claim. ``evidence_ok``: whether
+    the cited evidence shows the claim (a backed card's second question), or None."""
+    if label not in LABELS or evidence_ok not in (None, True, False):
+        raise TruthRequestError("invalid_truth_label")
+    check, note = _claim_check(conn, check_id, note)
+    ensure_tables(conn)
     record = load_record(conn, check["record_table"], check["record_id"])
     valid_from = (with_offset(record["at"]) if record else None) or check["created_at"]
     now = now_utc().isoformat()
@@ -482,13 +515,39 @@ def label_claim(conn: sqlite3.Connection, check_id: Any, label: Any, note: Any =
         existing = conn.execute(f"SELECT label_id FROM {LABELS_TABLE} WHERE check_id=?", (check["check_id"],)).fetchone()
         label_id = str(existing[0]) if existing else uuid.uuid4().hex
         conn.execute(
-            f"INSERT INTO {LABELS_TABLE} (label_id, check_id, label, note, labelled_at) VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(check_id) DO UPDATE SET label=excluded.label, note=excluded.note, labelled_at=excluded.labelled_at",
-            (label_id, check["check_id"], label, note, now),
+            f"INSERT INTO {LABELS_TABLE} (label_id, check_id, label, note, labelled_at, evidence_ok) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(check_id) DO UPDATE SET label=excluded.label, note=excluded.note, labelled_at=excluded.labelled_at, "
+            "evidence_ok=excluded.evidence_ok",
+            (label_id, check["check_id"], label, note, now, None if evidence_ok is None else int(evidence_ok)),
         )
+        conn.execute(f"DELETE FROM {DISMISSALS_TABLE} WHERE check_id=?", (check["check_id"],))
         _write_verified_claim(conn, key, payload, LABEL_CONFIDENCE[label], refs, valid_from, now)
         commit_connection(conn)
     return {"ok": True, "label_id": label_id}
+
+
+def dismiss_claim(conn: sqlite3.Connection, check_id: Any, reason: Any, note: Any = None) -> Dict[str, Any]:
+    """The owner says a card should not have been a claim at all, with one reason from :data:`DISMISS_REASONS`. Replaces
+    a label of the same claim and removes its ``verified_claim`` object (a dismissed claim is no judgement of the
+    owner's); a second dismissal replaces the first (it keeps its id)."""
+    if reason not in DISMISS_REASONS:
+        raise TruthRequestError("invalid_truth_label")
+    check, note = _claim_check(conn, check_id, note)
+    ensure_tables(conn)
+    now = now_utc().isoformat()
+    with with_db_write():
+        existing = conn.execute(f"SELECT dismissal_id FROM {DISMISSALS_TABLE} WHERE check_id=?", (check["check_id"],)).fetchone()
+        dismissal_id = str(existing[0]) if existing else uuid.uuid4().hex
+        conn.execute(
+            f"INSERT INTO {DISMISSALS_TABLE} (dismissal_id, check_id, reason, note, dismissed_at) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(check_id) DO UPDATE SET reason=excluded.reason, note=excluded.note, dismissed_at=excluded.dismissed_at",
+            (dismissal_id, check["check_id"], reason, note, now),
+        )
+        conn.execute(f"DELETE FROM {LABELS_TABLE} WHERE check_id=?", (check["check_id"],))
+        conn.execute("DELETE FROM signal_objects WHERE object_type=? AND object_key=?",
+                     (OBJECT_TYPE, f"truth_check:{check['check_id']}"))
+        commit_connection(conn)
+    return {"ok": True, "dismissal_id": dismissal_id}
 
 
 def _write_verified_claim(conn: sqlite3.Connection, key: str, payload: Dict[str, Any], confidence: float,
@@ -538,6 +597,8 @@ def forget_records(conn: sqlite3.Connection, record_ids: Optional[Iterable[str]]
             chunk = gone[start:start + 500]
             marks = ",".join("?" for _ in chunk)
             conn.execute(f"DELETE FROM {LABELS_TABLE} WHERE check_id IN ({marks})", chunk)
+            if _present(conn, DISMISSALS_TABLE):
+                conn.execute(f"DELETE FROM {DISMISSALS_TABLE} WHERE check_id IN ({marks})", chunk)
             conn.execute(f"DELETE FROM {CHECKS_TABLE} WHERE check_id IN ({marks})", chunk)
             conn.execute(f"DELETE FROM signal_objects WHERE object_type = ? AND object_key IN ({marks})",
                          [OBJECT_TYPE, *(f"truth_check:{c}" for c in chunk)])
@@ -562,7 +623,7 @@ def _empty_week(week: str) -> Dict[str, Any]:
 
     return {"week": week, "checked": 0, "backed": 0, "nothing_found": 0, "unable": 0, "not_a_claim": 0,
             "rechecked": 0, "attempts_exhausted": 0,
-            "by_source": {s: 0 for s in SOURCES}, "by_category": {}, "labelled": 0, "to_confirm": 0,
+            "by_source": {s: 0 for s in SOURCES}, "by_category": {}, "labelled": 0, "dismissed": 0, "to_confirm": 0,
             "agreement": {"backed_true": 0, "backed_false": 0, "nothing_true": 0}, "latency_ms_p50": None}
 
 
@@ -577,13 +638,14 @@ def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[dat
     out = {week: _empty_week(week) for week in names}
     if tables_present(conn):
         attempts = "COALESCE(c.attempts, 1)" if "attempts" in _columns(conn, CHECKS_TABLE) else "1"
+        dismissed, join = _dismissal_join(conn)
         rows = conn.execute(
             f"SELECT c.week, c.source, c.category, c.verdict, c.latency_ms, c.model IS NOT NULL, "
-            f"c.claim_text IS NOT NULL, l.label, {attempts} FROM {CHECKS_TABLE} c "
-            f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id "
+            f"c.claim_text IS NOT NULL, l.label, {attempts}, {dismissed}, c.speaker_kind FROM {CHECKS_TABLE} c "
+            f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id{join} "
             f"WHERE c.week IN ({','.join('?' for _ in names)})", names).fetchall()
         latencies: Dict[str, List[float]] = {week: [] for week in names}
-        for week, source, category, verdict, latency, modelled, has_claim, label, tries in rows:
+        for week, source, category, verdict, latency, modelled, has_claim, label, tries, reason, speaker in rows:
             entry = out[week]
             entry["checked"] += 1
             if tries > 1:
@@ -604,7 +666,9 @@ def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[dat
                     entry["agreement"]["backed_" + label] += 1
                 elif verdict == "no_evidence" and label == "true":
                     entry["agreement"]["nothing_true"] += 1
-            elif has_claim and verdict != "not_checkable":
+            elif reason:
+                entry["dismissed"] += 1
+            elif has_claim and verdict != "not_checkable" and speaker == "owner":  # what the cards show by default
                 entry["to_confirm"] += 1
             if modelled and latency is not None:
                 latencies[week].append(float(latency))
@@ -614,30 +678,50 @@ def weekly_stats(conn: sqlite3.Connection, weeks: int = 1, *, when: Optional[dat
     return {"weeks": [out[week] for week in names]}
 
 
-def claim_cards(conn: sqlite3.Connection, limit: int = 20, unlabelled_only: bool = True) -> Dict[str, Any]:
+def _dismissal_join(conn: sqlite3.Connection) -> Tuple[str, str]:
+    """The dismissal reason column and its join, or NULL on a node whose tables predate dismissals (a read never
+    creates a table)."""
+    if _present(conn, DISMISSALS_TABLE):
+        return "d.reason", f" LEFT JOIN {DISMISSALS_TABLE} d ON d.check_id = c.check_id"
+    return "NULL", ""
+
+
+def claim_cards(conn: sqlite3.Connection, limit: int = 20, unlabelled_only: bool = True,
+                speakers: str = "owner") -> Dict[str, Any]:
     """The claims the lane found, newest check first, for the owner to label in the app. A card whose record is gone
-    is skipped; a cited record that is gone is left out of its card."""
-    if type(limit) is not int or not 1 <= limit <= MAX_CARDS or type(unlabelled_only) is not bool:
+    is skipped; a cited record that is gone is left out of its card. ``unlabelled_only``: neither labelled nor
+    dismissed. ``speakers``: ``owner`` (the default: the owner's own claims) or ``all``. Each card carries what was
+    said (``said``: the record's own text) beside the claim the reader took from it (``claim_text``)."""
+    if (type(limit) is not int or not 1 <= limit <= MAX_CARDS or type(unlabelled_only) is not bool
+            or speakers not in CARD_SPEAKERS):
         raise TruthRequestError("invalid_truth_request")
     if not tables_present(conn):
         return {"cards": []}
-    where = " AND l.check_id IS NULL" if unlabelled_only else ""
+    dismissed, join = _dismissal_join(conn)
+    evidence_ok = "l.evidence_ok" if "evidence_ok" in _columns(conn, LABELS_TABLE) else "NULL"
+    where = f" AND l.check_id IS NULL AND {dismissed} IS NULL" if unlabelled_only else ""
+    if speakers == "owner":
+        where += " AND c.speaker_kind = 'owner'"
     rows = conn.execute(
         f"SELECT c.check_id, c.record_table, c.record_id, c.source, c.category, c.claim_text, c.verdict, "
-        f"c.cited_refs_json, c.latency_ms, l.label, l.note FROM {CHECKS_TABLE} c "
-        f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id "
+        f"c.cited_refs_json, c.latency_ms, l.label, l.note, {evidence_ok}, {dismissed} FROM {CHECKS_TABLE} c "
+        f"LEFT JOIN {LABELS_TABLE} l ON l.check_id = c.check_id{join} "
         f"WHERE c.claim_text IS NOT NULL AND c.verdict != 'not_checkable'{where} "
         f"ORDER BY c.created_at DESC, c.check_id DESC LIMIT ?", (limit * 3,)).fetchall()
     names: Dict[str, Optional[str]] = {}
     cards = []
-    for check_id, table, record_id, source, category, claim_text, verdict, refs_json, latency, label, note in rows:
+    for (check_id, table, record_id, source, category, claim_text, verdict, refs_json, latency, label, note, ok,
+         reason) in rows:
         record = load_record(conn, table, record_id, names)
         if record is None:
             continue
         cards.append({
-            "check_id": check_id, "speaker": speaker_for_card(record), "source": source,
-            "date": with_offset(record["at"]), "claim_text": claim_text, "category": category, "verdict": verdict,
-            "cited": list(_cited(conn, refs_json)), "latency_ms": latency, "label": label, "note": note,
+            "check_id": check_id, "speaker": speaker_for_card(record), "speaker_is_owner": bool(record["owner"]),
+            "source": source, "date": with_offset(record["at"]),
+            "said": " ".join(record["text"].split())[:STATEMENT_CHARS], "claim_text": claim_text, "category": category,
+            "verdict": verdict, "cited": list(_cited(conn, refs_json)), "latency_ms": latency, "label": label,
+            "note": note, "evidence_ok": None if ok is None else bool(ok),
+            "relevance": "dismissed" if reason else ("relevant" if label else None), "dismiss_reason": reason,
         })
         if len(cards) >= limit:
             break

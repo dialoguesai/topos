@@ -4,7 +4,7 @@ Synthetic only: a fake model, a fake retrieval, no database, no network.
 """
 import asyncio
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -101,7 +101,8 @@ def test_select_evidence_as_of_quote_and_dedupe():
     records = [rec(1, "authored", day="2026-10-20"), rec(2, "authored"), rec(2, "authored"),
                rec(3, "authored", text="note: i changed it so the pinwheel sidebar looks better today")]
     shown, dropped = v2.select_evidence(records, SENTENCE, claim(), now)
-    assert [e["ref"] for e in shown] == ["journal_entries:r2"] and dropped == {"as_of": 1, "quoting": 1}
+    assert [e["ref"] for e in shown] == ["journal_entries:r2"]
+    assert dropped == {"as_of": 1, "quoting": 1, "own_record": 0, "same_thread": 0}
 
 
 def test_supported_with_role_and_both_calls_agreeing(monkeypatch):
@@ -855,3 +856,51 @@ def test_lean_read_keeps_the_answer_for_a_one_claim_reply(monkeypatch):
         outs.append(run([], FakeChat(read_reply()), effort="low"))
     strip = lambda o: {k: v for k, v in o.items() if k not in ("timings_ms",)}
     assert strip(outs[0]) == strip(outs[1])
+
+
+# --- Calibrate step 1: speaker subject, strict as-of, same thread -----------------------------------------------------
+NOW = datetime(2026, 10, 26, 1, 49, tzinfo=timezone.utc)
+
+
+def at(minutes=0, hours=0, table="conversation_messages", n=1, conversation="c1"):
+    when = NOW + timedelta(minutes=minutes, hours=hours)
+    return {"table": table, "record_id": f"m{n}", "event_at": when.isoformat(), "role": "authored", "lanes": ["canonical"],
+            "lane": "summaries", "text": f"record {n}: pinwheel sidebar restyle", "conversation_id": conversation}
+
+
+def refs(records, **kw):
+    shown, dropped = v2.select_evidence(records, SENTENCE, claim(), NOW, **kw)
+    return [e["ref"].split(":")[1] for e in shown], dropped
+
+
+def test_strict_as_of_drops_a_record_made_after_the_claim_even_the_same_day(monkeypatch):
+    later, earlier = at(minutes=3, n=1, conversation="other"), at(minutes=-3, n=2, conversation="other")
+    day_only = {**at(n=3, conversation="other"), "event_at": "2026-10-26"}
+    next_day = {**at(n=4, conversation="other"), "event_at": "2026-10-27"}
+    assert refs([later, earlier, day_only, next_day]) == (["m2", "m3"], {"as_of": 2, "quoting": 0, "own_record": 0, "same_thread": 0})
+    monkeypatch.setattr(v2, "STRICT_AS_OF", False)  # 1.5.28: anything up to the next day counted
+    assert refs([later, earlier, day_only, next_day])[0] == ["m1", "m2", "m3", "m4"]
+
+
+def test_the_claims_own_exchange_is_context_not_evidence(monkeypatch):
+    records = [at(minutes=-1, n=1), at(hours=-11, n=2), at(hours=-13, n=3), at(minutes=-1, n=4, conversation="c2"),
+               at(minutes=-5, n=5)]
+    got, dropped = refs(records, source_ref="conversation_messages:m5", conversation_id="c1")
+    assert got == ["m3", "m4"] and dropped["same_thread"] == 2 and dropped["own_record"] == 1
+    # Without a conversation (spoken, journal) nothing is dropped for its thread.
+    assert refs(records)[0] == ["m1", "m2", "m3", "m4", "m5"]
+    monkeypatch.setattr(v2, "SAME_THREAD_GUARD", False)
+    assert refs(records, source_ref="conversation_messages:m5", conversation_id="c1")[0] == ["m1", "m2", "m3", "m4", "m5"]
+
+
+def test_a_contacts_first_person_claim_is_someone_else_to_the_evidence_rules(monkeypatch):
+    def subjects(**req):
+        request = v2.ClaimRequest(statement=SENTENCE, said_at="2026-10-07T19:47:36-05:00", **req)
+        _, claims, _ = v2.read_claims(request, FakeChat(read_reply()), Usage(), 5.0)
+        return [c.subject for c in claims]
+
+    assert subjects(speaker="a contact", speaker_is_owner=False, about_others=True) == ["someone_else"]
+    assert subjects() == ["owner"]  # the owner's own speech is unchanged
+    assert subjects(speaker="a contact", speaker_is_owner=False, about_others=False) == []  # and still out of scope
+    monkeypatch.setattr(v2, "SPEAKER_SUBJECT", False)
+    assert subjects(speaker="a contact", speaker_is_owner=False, about_others=True) == ["owner"]
