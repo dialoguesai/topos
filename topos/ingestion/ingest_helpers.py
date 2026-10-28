@@ -364,6 +364,18 @@ async def _run_ui_payload_enrichment_inner(enrichment_ctx: dict) -> dict:
     if not canonical_records:
         return {"status": "ok", "enrichment_jobs_run": 0}
 
+    # The models the canonical jobs load (NER, embeddings) start coming up on the engine's
+    # loader thread now, from the local cache when it holds them, so the first batch finds
+    # them resident or waits for THIS load (`_engine_runner.warm_model_for`) rather than
+    # starting its own inside a pool worker. On the owner's node (28 Oct 2026, raw import
+    # batches) that load went to the Hub with every file on disk and held the slot 20 s.
+    try:
+        from ..enrichment.jobs.canonical._engine_runner import warm_models_for_jobs
+        from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
+
+        warm_models_for_jobs(effective_canonical_enrichment_jobs(source))
+    except Exception as exc:  # noqa: BLE001 — a warm that cannot start costs the batch nothing
+        logger.debug("model warm for %s not started: %s", source_id, exc)
     # No tables_manager passed: run_post_canonical_pipeline builds one on a
     # worker thread (its constructor ensures DDL under the write gate, which
     # must never be taken on the event-loop thread).

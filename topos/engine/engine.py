@@ -326,6 +326,11 @@ class Engine:
             return False
         return False
 
+    def inference_config(self, task: ProcessingTask) -> Dict[str, Any]:
+        """The subtype and model ``run`` would hand the adapter for ``task`` — for a caller
+        that brings the model up ahead of the run (`enrichment.jobs.canonical._engine_runner`)."""
+        return self._build_inference_config(task)
+
     def _build_inference_config(self, task: ProcessingTask) -> Dict[str, Any]:
         """Build config dict for adapter.run_inference: subtype and model."""
         model = task.model_request.model
