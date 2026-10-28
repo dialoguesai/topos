@@ -9,6 +9,10 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **verify_claim: the reader asks for no more claims than the effort checks, off by default.** `[E:verify]` With `verify_v2.LEAN_READ` on, the reader's output schema allows as many claims as the request's effort checks (one at effort low, the inbound truth lane's effort; three at high, unchanged). The reader was asked for up to three claims of eight fields each and the engine kept the first at effort low: on the owner's node a lane row's reader wrote 343 tokens for three claims and took 21.5 s against the lane's 20 s cap. Generation is greedy and left to right, so the main claim is written the same way; only the list closes sooner. Off: unchanged.
+- **Truth lane: load the local model before a check, off by default.** `[O]` With `TOPOS_VERIFY_V2_WARM_LOCAL=1`, the owner's inbound truth lane checks that its local model is loaded (`/api/ps`) before each model check and, when it is not, loads it (an empty `/api/generate`, kept 10 min) with up to 120 s, outside the row's 30 s deadline and 20 s reader cap. A load that does not finish defers the rest of the batch and stores nothing, so a model swap no longer spends one of a row's three checks. On the owner's node Ollama swaps the derivation 27B and the lane's 9B all day (a cold 9B load took 76 s, a warm reader call 9–13 s), and every row stored `unable` in the lane's first week had used all three checks. Batch counts gain `warmed`, `warm_failed` and `warm_s` while the switch is on. Off: unchanged. The hosted side is never touched. No migration.
+
 ### Fixed
 - **Commitments read who an owner's direct message was sent to, on every derivation path.** `[E:derivation]` The
   recipient label built for commitments on 6 Sep reached only the commitments lane; the ingest batch, the drip catch-up

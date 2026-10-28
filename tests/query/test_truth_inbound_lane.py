@@ -432,6 +432,152 @@ def test_an_unreachable_local_model_pauses_instead_of_marking_rows_unable(node, 
     assert checks(node.conn) == []
 
 
+# --- VERIFY_V2_WARM_LOCAL (tracker round r2) ---------------------------------------------------------------------------
+class WarmChat:
+    """A local chat stand-in: says whether its model is loaded and records each load."""
+
+    name, model = "local", "qwen3.5:9b-mlx"
+
+    def __init__(self, loaded=False, load_fails=False, ps_fails=False):
+        self.loaded, self.load_fails, self.ps_fails = loaded, load_fails, ps_fails
+        self.ps_calls, self.loads = 0, []
+
+    def resident(self):
+        self.ps_calls += 1
+        if self.ps_fails:
+            raise RuntimeError("no answer")
+        return self.loaded
+
+    def warm(self, timeout):
+        self.loads.append(timeout)
+        if self.load_fails:
+            raise RuntimeError("load timed out")
+        self.loaded = True
+
+
+def _two_journal_rows(conn):
+    add_journal(conn, "j1", "I finished building the garden shed this morning.")
+    add_journal(conn, "j2", "I bought new hinges for the shed doors today.", at=ago(hours=3))
+    conn.commit()
+
+
+def test_warm_local_loads_a_cold_model_before_the_check_outside_its_caps(node, monkeypatch):
+    _two_journal_rows(node.conn)
+    turn_on(node.conn)
+    monkeypatch.setenv(lane.WARM_LOCAL_ENV, "1")
+    chat, recorder = WarmChat(loaded=False), Recorder()
+    monkeypatch.setattr(lane, "_chat_for", lambda model: chat)
+    monkeypatch.setattr(lane, "_verify", recorder)
+    out = run_job({"records": [["journal_entries", "j1"], ["journal_entries", "j2"]]})
+    # One load, before the first check, with the lane's own load cap (not the row's deadline or reader cap).
+    assert chat.loads == [lane.WARM_TIMEOUT_S] and out["warmed"] == 1 and out["warm_failed"] == 0
+    assert out["checked"] == 2 and len(recorder.requests) == 2 and chat.ps_calls == 2
+    assert all(r.deadline_s == lane.DEADLINE_S and r.read_timeout_s == lane.LOCAL_READ_TIMEOUT_S for r in recorder.requests)
+    assert [row["attempts"] for row in checks(node.conn)] == [1, 1]
+
+
+def test_warm_local_does_not_load_a_model_that_is_already_loaded(node, monkeypatch):
+    _two_journal_rows(node.conn)
+    turn_on(node.conn)
+    monkeypatch.setenv(lane.WARM_LOCAL_ENV, "1")
+    chat = WarmChat(loaded=True)
+    monkeypatch.setattr(lane, "_chat_for", lambda model: chat)
+    monkeypatch.setattr(lane, "_verify", Recorder())
+    out = run_job({"records": [["journal_entries", "j1"], ["journal_entries", "j2"]]})
+    assert chat.loads == [] and out["warmed"] == 0 and out["warm_s"] == 0.0 and out["checked"] == 2
+
+
+def test_warm_local_loads_anyway_when_the_server_cannot_say(node, monkeypatch):
+    _two_journal_rows(node.conn)
+    turn_on(node.conn)
+    monkeypatch.setenv(lane.WARM_LOCAL_ENV, "1")
+    chat = WarmChat(ps_fails=True)
+    monkeypatch.setattr(lane, "_chat_for", lambda model: chat)
+    monkeypatch.setattr(lane, "_verify", Recorder())
+    assert run_job({"records": [["journal_entries", "j1"]]})["checked"] == 1 and len(chat.loads) == 1
+
+
+def test_a_failed_load_defers_the_batch_stores_nothing_and_spends_no_attempt(node, monkeypatch):
+    _two_journal_rows(node.conn)
+    turn_on(node.conn)
+    monkeypatch.setenv(lane.WARM_LOCAL_ENV, "1")
+    chat, recorder = WarmChat(load_fails=True), Recorder()
+    monkeypatch.setattr(lane, "_chat_for", lambda model: chat)
+    monkeypatch.setattr(lane, "_verify", recorder)
+    out = run_job({"records": [["journal_entries", "j1"], ["journal_entries", "j2"]]})
+    assert out["warm_failed"] == 1 and out["deferred"] == 2 and out["checked"] == 0 and out["paused"] is False
+    assert recorder.requests == [] and checks(node.conn) == []
+    assert cfg.paused_until(node.conn) is None
+    # Still owed: the next sweep queues both rows again.
+    assert sorted(r for _, r in lane.owed(node.conn, ["journal"], 10)) == ["j1", "j2"]
+
+
+def test_warm_local_off_never_asks_the_server_and_keeps_the_jobs_counts(node, monkeypatch):
+    _two_journal_rows(node.conn)
+    turn_on(node.conn)
+    monkeypatch.delenv(lane.WARM_LOCAL_ENV, raising=False)
+    chat = WarmChat(loaded=False)
+    monkeypatch.setattr(lane, "_chat_for", lambda model: chat)
+    monkeypatch.setattr(lane, "_verify", Recorder())
+    out = run_job({"records": [["journal_entries", "j1"]]})
+    assert chat.ps_calls == 0 and chat.loads == []
+    assert set(out) == {"status", "checked", "not_checkable_by_gate", "skipped", "deferred", "paused", "rechecked"}
+
+
+def test_warm_local_never_touches_the_hosted_side(node, monkeypatch):
+    _two_journal_rows(node.conn)
+    turn_on(node.conn, model="hosted")
+    monkeypatch.setenv(lane.WARM_LOCAL_ENV, "1")
+    chat = WarmChat(loaded=False)
+    monkeypatch.setattr(lane, "_chat_for", lambda model: chat)
+    monkeypatch.setattr(lane, "_verify", Recorder())
+    out = run_job({"records": [["journal_entries", "j1"]]})
+    assert chat.ps_calls == 0 and chat.loads == [] and "warmed" not in out and out["checked"] == 1
+
+
+def test_the_local_chat_reads_loaded_models_and_loads_with_an_empty_generate(monkeypatch):
+    from topos.query import verify_v2_models as models
+
+    class Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return json.dumps(self.body).encode()
+
+    seen = []
+
+    def urlopen(request, timeout):
+        url = request if isinstance(request, str) else request.full_url
+        seen.append((url, None if isinstance(request, str) else json.loads(request.data)))
+        if url.endswith("/api/ps"):
+            return Resp({"models": [{"name": "qwen3.5:9b-mlx", "model": "qwen3.5:9b-mlx"}, {"name": "llama3.2:latest"}]})
+        return Resp({"done": True})
+
+    monkeypatch.setattr(models.urllib.request, "urlopen", urlopen)
+    base = "http://127.0.0.1:11434"
+    assert models.LocalChat("qwen3.5:9b-mlx", base).resident() is True
+    assert models.LocalChat("llama3.2", base).resident() is True  # an untagged name means :latest
+    assert models.LocalChat("smtek/Qwen3.8-27B:IQ2_M", base).resident() is False
+    models.LocalChat("qwen3.5:9b-mlx", base).warm(120.0)
+    assert seen[-1] == (base + "/api/generate", {"model": "qwen3.5:9b-mlx", "keep_alive": "10m"})
+
+    def down(request, timeout):
+        raise models.urllib.error.URLError("refused")
+
+    monkeypatch.setattr(models.urllib.request, "urlopen", down)
+    with pytest.raises(models.ModelUnavailable):
+        models.LocalChat("qwen3.5:9b-mlx", base).resident()
+    with pytest.raises(models.ModelUnavailable):
+        models.LocalChat("qwen3.5:9b-mlx", base).warm(1.0)
+
+
 def test_a_deadline_is_stored_as_unable(node, monkeypatch):
     add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
     node.conn.commit()
