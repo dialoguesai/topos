@@ -95,6 +95,12 @@ ROOT_NAME = "message-search"
 # after it: a build begun before a grant changed can never overwrite the build that follows the change. Never taken by
 # a caller that holds the write gate (a build takes the gate inside it).
 BUILD_SLOT = threading.Lock()
+#: Pacing (core/owner_requests.py): every this many candidates or members, and before every passage embedding, a
+#: build yields while one of the owner's own frames is being handled. Only on the ungated read snapshot: the freeze
+#: and the publish hold the gate, and `pace` never waits while the thread holds it. A module constant, not an
+#: attribute of the service: the grant census (scripts/permissions_v2/grant_census.py) runs `_members` with a
+#: namespace standing in for the service.
+PACE_EVERY = 32
 _TOKEN = re.compile(r"\w{2,}")
 STOPWORDS = frozenset("""
 a an and are as at be but by for from has have i if in into is it its me my of on or our so that the their them
@@ -1354,7 +1360,7 @@ class SearchIndexService:
                           if direct else [row[0] for row in conn.execute(
                 "SELECT object_id FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL ORDER BY object_id")])
             for number, fact_id in enumerate(candidates):
-                if number % self.PACE_EVERY == 0:
+                if number % PACE_EVERY == 0:
                     owner_requests.pace()   # between batches of the walk, on the ungated snapshot (never under the gate)
                 if fact_id in frozen.opt_outs:
                     continue
@@ -1420,7 +1426,7 @@ class SearchIndexService:
                 from .canonical import digest
                 originals=list(members.values())
                 for number,(table,record_id) in enumerate(candidates(conn,[e['identity'] for e in originals],policy.search.result_types)):
-                    if number % self.PACE_EVERY == 0:
+                    if number % PACE_EVERY == 0:
                         owner_requests.pace()
                     try:
                         projected=qualify_projection(self.resolver,conn,snapshot_floor,frozen,None,table,record_id,policy,
@@ -1520,10 +1526,6 @@ class SearchIndexService:
     # wall time on the ungated read snapshot, and its vectors add about 14 ms to the gated
     # publish. It was 32, which left members of an ordinary grant without vectors on every build.
     EMBEDDINGS_PER_BUILD = 1024
-    #: Pacing (core/owner_requests.py): every this many candidates or members, and before every passage embedding,
-    #: the build yields while one of the owner's own frames is being handled. Only on the ungated read snapshot:
-    #: the freeze and the publish hold the gate, and `pace` never waits while this thread holds it.
-    PACE_EVERY = 32
 
     def _members(self, conn, key, grant_id, members, model, *, frozen=None):
         built = []
@@ -1531,7 +1533,7 @@ class SearchIndexService:
         has_embeddings = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_embeddings'").fetchone() is not None
         for number, entry in enumerate(members.values()):
-            if number % self.PACE_EVERY == 0:
+            if number % PACE_EVERY == 0:
                 owner_requests.pace()
             identity, row = entry["identity"], entry["row"]
             opaque = opaque_record_id(key, grant_id=grant_id, table=identity.table, source_id=identity.source_id,
