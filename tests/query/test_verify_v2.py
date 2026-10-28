@@ -3,8 +3,9 @@
 Synthetic only: a fake model, a fake retrieval, no database, no network.
 """
 import asyncio
+import os
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -101,7 +102,10 @@ def test_select_evidence_as_of_quote_and_dedupe():
     records = [rec(1, "authored", day="2026-10-20"), rec(2, "authored"), rec(2, "authored"),
                rec(3, "authored", text="note: i changed it so the pinwheel sidebar looks better today")]
     shown, dropped = v2.select_evidence(records, SENTENCE, claim(), now)
-    assert [e["ref"] for e in shown] == ["journal_entries:r2"] and dropped == {"as_of": 1, "quoting": 1}
+    assert [e["ref"] for e in shown] == ["journal_entries:r2"]
+    assert dropped == {"as_of": 1, "quoting": 1, "own_record": 0, "same_thread": 0, "occurrence": 0}
+    shown, dropped = v2.select_evidence(records, SENTENCE, claim(), now, exclude_refs=["journal_entries:r2"])
+    assert shown == [] and dropped["occurrence"] == 1  # an excluded ref only removes; nothing is added or re-ranked
 
 
 def test_supported_with_role_and_both_calls_agreeing(monkeypatch):
@@ -805,12 +809,251 @@ def test_the_reader_schema_is_the_same_for_every_source_kind():
 
 
 def test_the_engine_sha16_is_the_digest_the_weekly_lock_captures():
-    """The lock (eval/weekly_lock.py) takes sha256(verify_v2.py)[:16] of the installed file; rows carry the same."""
+    """The lock (eval/weekly_lock.py) hashes the same four-file manifest of the installed package; rows carry the same.
+    The recipe is pinned here byte for byte (path, NUL, bytes, NUL, in manifest order) because the lock tool copies
+    it rather than importing it."""
     import hashlib
+    from pathlib import Path
 
-    with open(v2.__file__, "rb") as source:
-        assert v2.engine_sha16() == hashlib.sha256(source.read()).hexdigest()[:16]
+    root = Path(v2.__file__).resolve().parents[1]
+    assert v2.ENGINE_MANIFEST == ("query/verify_v2.py", "query/verify_v2_models.py", "query/truth_checks.py", "ingestion/truth_inbound.py")
+    digest = hashlib.sha256()
+    for relative in v2.ENGINE_MANIFEST:
+        digest.update(relative.encode() + b"\0" + root.joinpath(*relative.split("/")).read_bytes() + b"\0")
+    assert v2.engine_sha16() == digest.hexdigest()[:16] == v2.manifest_sha16(str(root))
     assert len(v2.engine_sha16()) == 16 and v2.engine_sha16() is v2.engine_sha16()
+    with open(v2.__file__, "rb") as source:  # no longer the one-file digest: a companion's change moves the stamp
+        assert v2.engine_sha16() != hashlib.sha256(source.read()).hexdigest()[:16]
+    assert v2.manifest_sha16("/nonexistent") == ""
+
+
+# --- VERIFY_V2_READ_POLARITY and the stored reading (lean v3 increment B) ------------------------------------------------
+#: Twenty propositions as the reader words them for a statement and for its negation alike ("I use Pinwheel every day"
+#: and "I never use Pinwheel" both read as the first), with the names the reader gives; polarity is the only difference.
+NEGATION_PAIRS = [
+    ("The owner uses Pinwheel every day.", ["Pinwheel"]), ("The owner finished the Pinwheel sidebar.", ["Pinwheel", "sidebar"]),
+    ("The owner drinks coffee in the morning.", ["coffee"]), ("The owner runs on Sundays.", ["running"]),
+    ("The owner likes the new keyboard.", ["keyboard"]), ("The owner read the Orbit paper.", ["Orbit"]),
+    ("The owner pushed the Orbit fix.", ["Orbit"]), ("The owner owns a Fender bass.", ["Fender"]),
+    ("The owner uses tabs in Python.", ["Python", "tabs"]), ("The owner speaks French at home.", ["French"]),
+    ("The owner called Robin on Monday.", ["Robin"]), ("The owner backs up the Vault nightly.", ["Vault"]),
+    ("The owner eats cilantro.", ["cilantro"]), ("The owner pays for Orbit.", ["Orbit"]),
+    ("The owner finished the shed roof.", ["shed"]), ("The owner keeps a journal.", ["journal"]),
+    ("The owner uses Signal with Robin.", ["Signal", "Robin"]), ("The owner watered the Monstera.", ["Monstera"]),
+    ("The owner merged the Pinwheel branch.", ["Pinwheel"]), ("The owner likes vinyl records.", ["vinyl"]),
+]
+
+
+def _read_claim(text, names, polarity):
+    return v2.Claim(kind="did_or_made", subject="owner", reported_speech=False, text=text, names=names, date_from="", date_to="",
+                    polarity=polarity)
+
+
+def test_the_claim_key_is_polarity_blind_and_the_pair_groups_apart():
+    """Twenty propositions, each read once affirmed and once denied: the pair shares one key and differs in polarity, so
+    (key, polarity) makes forty groups and zero shared ones. Different claims about one named thing keep different
+    keys; negation words never enter the key; a bare number is not a name."""
+    groups, keys = set(), set()
+    for text, names in NEGATION_PAIRS:
+        key_yes = v2.claim_key("did", _read_claim(text, names, 1))
+        key_no = v2.claim_key("did", _read_claim(text, names, -1))
+        assert key_yes == key_no, text
+        keys.add(key_yes)
+        groups.add((key_yes, 1))
+        groups.add((key_no, -1))
+    assert len(keys) == 20 and len(groups) == 40  # three Orbit claims and three Pinwheel claims stay apart
+    assert v2.claim_key("did", _read_claim("The owner uses Pinwheel every day.", ["Pinwheel"], 1)) == "did|did_or_made|none|day every pinwheel"
+    # no names: the first three distinctive words, minus negation cues, lowercased; the key never sees the negation
+    assert v2.claim_key("did", _read_claim("I never pushed the fix.", [], -1)) == v2.claim_key("did", _read_claim("I pushed the fix.", [], 1))
+    assert v2.claim_key("did", _read_claim("I never pushed the fix.", [], -1)) == "did|did_or_made|none|fix pushed"
+    # cardinal-blind, sorted, lowercased; the window class is part of the key
+    five, eight = _read_claim("My team has 5 people.", ["Team", "5"], 1), _read_claim("My team has 8 people.", ["5", "team"], 1)
+    assert v2.claim_key("count", five) == v2.claim_key("count", eight) == "count|did_or_made|none|people team"
+    dated = v2.Claim(kind="did_or_made", subject="owner", reported_speech=False, text="x", names=["Orbit"], date_from="2026-10-06", date_to="2026-10-06")
+    assert v2.window_class(dated) == "day" and v2.window_class(v2.replace(dated, date_to="2026-10-08")) == "range"
+    assert v2.window_class(v2.replace(dated, date_to="")) == "open" and v2.claim_key("did", dated) == "did|did_or_made|day|orbit"
+    assert v2.reading_key({"category": "did", "claims": [v2.claim_dict(dated)]}) == ("did|did_or_made|day|orbit", None)
+    assert v2.reading_key({"claims": []}) == (None, None) and v2.reading_key(None) == (None, None)
+
+
+def test_read_polarity_adds_one_field_behind_its_switch(monkeypatch):
+    req = v2.ClaimRequest(statement=SENTENCE)
+    assert v2.read_schema_for(req) is v2.READ_SCHEMA and "polarity" not in v2.READ_SCHEMA["properties"]["claims"]["items"]["properties"]
+    assert v2.read_system(False, "spoken") == v2.READ_SYSTEM and '"polarity"' not in v2.READ_SYSTEM
+    monkeypatch.setattr(v2, "READ_POLARITY", True)
+    schema = v2.read_schema_for(req)
+    assert schema["properties"]["claims"]["items"]["properties"]["polarity"] == {"type": "string", "enum": ["affirms", "denies"]}
+    assert "polarity" in schema["properties"]["claims"]["items"]["required"] and schema["properties"]["claims"]["maxItems"] == v2.MAX_CLAIMS
+    system = v2.read_system(False, "spoken")
+    assert system != v2.READ_SYSTEM and '"polarity": "affirms"' in system and system.replace(v2._POLARITY_LINE, "") == v2.READ_SYSTEM
+    monkeypatch.setattr(v2, "LEAN_READ", True)
+    lean = v2.read_schema_for(v2.ClaimRequest(statement=SENTENCE, effort="low"))
+    assert lean["properties"]["claims"]["maxItems"] == 1 and "polarity" in lean["properties"]["claims"]["items"]["required"]
+    assert v2._claim_from({**read_reply()["claims"][0], "polarity": "denies"}, "").polarity == -1
+    assert v2._claim_from({**read_reply()["claims"][0], "polarity": "affirms"}, "").polarity == 1
+    assert v2._claim_from(read_reply()["claims"][0], "").polarity is None
+
+
+class PolarityChat(FakeChat):
+    """FakeChat that recognises the reader's prompt with the polarity line on."""
+
+    def __call__(self, system, user, schema, timeout, usage):
+        if system.startswith("You prepare"):
+            usage.add(10, 2)
+            return self.read
+        return super().__call__(system, user, schema, timeout, usage)
+
+
+def test_the_answer_carries_the_reading_and_a_stored_reading_makes_no_reader_call(monkeypatch):
+    monkeypatch.setattr(v2, "READ_POLARITY", True)
+    out = run([rec(1, "authored")], PolarityChat(read_reply(polarity="denies"), {1: "shows"}))
+    assert out["verdict"] == "supported" and out["claim"]["polarity"] == -1 and out["usage"]["model_calls"] == 2
+    reading = out["reading"]
+    assert reading["category"] == "did" and [c["polarity"] for c in reading["claims"]] == ["denies"]
+    assert set(reading["claims"][0]) == {"type", "subject", "reported_speech", "claim", "names", "date_from", "date_to", "as_written", "polarity"}
+
+    class NoReader(FakeChat):
+        def __call__(self, system, user, schema, timeout, usage):
+            assert not system.startswith("You prepare"), "a stored reading must make no reader call"
+            return super().__call__(system, user, schema, timeout, usage)
+
+    again = run([rec(1, "authored")], NoReader(None, {1: "shows"}), reading=reading)
+    assert again["verdict"] == "supported" and again["usage"]["model_calls"] == 1 and again["stages"]["read"] == {"claims": 1, "stored": True}
+    assert again["reading"] == reading and again["claim"]["polarity"] == -1 and again["claim"]["kind"] == "did_or_made"
+
+
+def test_the_reading_survives_a_deadline_right_after_the_read():
+    """The lane stores the reading off any answer, so a deadline that lands after the read still leaves nothing to
+    read twice."""
+    out = run([rec(1, "authored")], FakeChat(read_reply(), {1: "shows"}, delay=0.35), deadline_s=1.2)
+    assert out["verdict"] == "unable" and out["reason"] == "deadline"
+    assert out["reading"]["category"] == "did" and len(out["reading"]["claims"]) == 1 and out["claim"]["kind"] == "did_or_made"
+
+
+# --- VERIFY_V2_READ_INTENTIONS: plans (lean v3 increment C) -------------------------------------------------------------
+PLAN_SAID = "2026-10-07T19:47:36-05:00"
+
+
+def plan_reply(**over):
+    base = dict(type="intention", claim="The owner will finish the shed roof by Wednesday.", names=["shed"],
+                date_from="2026-10-08", date_to="2026-10-08", polarity="affirms", category="plan")
+    return read_reply(**{**base, **over})
+
+
+def test_read_intentions_is_a_fourth_type_behind_its_switch(monkeypatch):
+    assert v2.READ_INTENTIONS is False and v2.INTENTION == "intention" and v2.INTENTION not in v2.KINDS
+    assert v2.read_system(False, "spoken") == v2.READ_SYSTEM and "only a future plan or intention" in v2.READ_SYSTEM
+    assert "intention" not in v2.read_schema_for(v2.ClaimRequest(statement=SENTENCE))["properties"]["claims"]["items"]["properties"]["type"]["enum"]
+    monkeypatch.setattr(v2, "READ_POLARITY", True)
+    monkeypatch.setattr(v2, "READ_INTENTIONS", True)
+    system = v2.read_system(False, "spoken")
+    assert '"intention": something the speaker says they will do' in system and "only a future plan or intention" not in system
+    assert "a plan with no time at all" in system and v2._POLARITY_LINE in system
+    enum = v2.read_schema_for(v2.ClaimRequest(statement=SENTENCE))["properties"]["claims"]["items"]["properties"]["type"]["enum"]
+    assert enum == ["did_or_made", "setup", "opinion", "intention"]
+    # a plan with no time can never come due: the reader's reply is refused as plan_without_window
+    windowless = plan_reply(date_from="", date_to="")
+    chat = PolarityChat(windowless)
+    category, claims, why = v2.read_claims(v2.ClaimRequest(statement="I'll finish the shed roof.", said_at=PLAN_SAID), chat, Usage(), 5.0)
+    assert (category, claims, why) == ("plan", [], "plan_without_window")
+    _, claims, why = v2.read_claims(v2.ClaimRequest(statement="I'll finish the shed roof by Wednesday.", said_at=PLAN_SAID), PolarityChat(plan_reply()), Usage(), 5.0)
+    assert why is None and claims[0].kind == "intention" and claims[0].polarity == 1 and claims[0].date_to == "2026-10-08"
+    assert v2._claim_from(plan_reply()["claims"][0], "").kind == "intention"  # a stored plan is read back whatever the switch says
+
+
+def test_a_plans_due_moment_is_the_end_of_its_last_day_in_the_speakers_own_zone():
+    claim = v2._claim_from(plan_reply()["claims"][0], "")
+    due = v2.due_instant(claim, PLAN_SAID)
+    assert due == datetime(2026, 10, 9, 4, 59, 59, tzinfo=timezone.utc)  # 2026-10-08 23:59:59 at -05:00
+    assert v2.due_instant(v2.replace(claim, date_to="", date_from="2026-10-10"), PLAN_SAID) == datetime(2026, 10, 11, 4, 59, 59, tzinfo=timezone.utc)
+    assert v2.due_instant(v2.replace(claim, date_to="", date_from=""), PLAN_SAID) is None
+    assert v2.due_instant(v2.replace(claim, kind="did_or_made"), PLAN_SAID) is None
+    assert v2.due_at_for({"category": "plan", "claims": [v2.claim_dict(claim)]}, PLAN_SAID) == "2026-10-09T04:59:59+00:00"
+    assert v2.due_at_for({"category": "did", "claims": [v2.claim_dict(v2.replace(claim, kind="did_or_made"))]}, PLAN_SAID) is None
+    assert v2.said_zone("2026-10-07T19:47:36Z") == timezone.utc and v2.said_zone(None) is not None
+
+
+@pytest.fixture
+def node_zone():
+    """The zone the plan fixtures were written in (their said time is -05:00). Plan days and due moments are read in
+    the node's LOCAL zone (``truth_checks.with_offset`` gives ``said_at`` the node's offset; ``intention_period`` takes
+    the said day locally), so a test that pins a due instant pins that zone too, instead of inheriting the host's:
+    on 27 Oct 2026 the two plan tests passed on the owner's Mac and failed on CI, which runs in UTC."""
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Chicago"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+def test_a_plan_waits_until_its_window_and_the_grace_have_passed_then_is_checked_from_the_stored_reading(node_zone):
+    """The R-11 fixture: a plan said day 0 in thread T, the record that shows it done on day +2 in the SAME thread, due
+    day +1, grace 7 days. Said: no retrieval, no judge, "waiting_until" the due moment. Checked as of that moment from
+    the stored reading: the record is cited (the same-thread window is two-sided around the statement, so a reply two
+    days later counts), one model call (the judge), and a record dated before the plan was said never shows it."""
+    done = {**rec(1, "authored", day="2026-10-09", table="conversation_messages", text="Shed roof finished and painted."), "conversation_id": "T"}
+    before = {**rec(2, "authored", day="2026-10-06", table="journal_entries", text="Shed roof finished last week."), "conversation_id": "J"}
+    request = dict(statement="I'll finish the shed roof by Wednesday.", conversation_id="T", source_ref="conversation_messages:own")  # run() says it at PLAN_SAID
+    chat = PolarityChat(plan_reply(), {1: "shows", 2: "shows"})
+
+    said = run([done], chat, **request)
+    assert said["verdict"] == "unable" and said["reason"] == "waiting_until:2026-10-16T04:59:59+00:00"
+    assert said["usage"]["model_calls"] == 1 and said["stages"]["retrieve"] == "waiting"  # the reader only; retrieval never ran
+    assert said["reading"]["claims"][0]["type"] == "intention" and said["claim"]["kind"] == "intention"
+    reading = said["reading"]
+
+    early = run([done], chat, reading=reading, as_of="2026-10-16T04:59:58+00:00", **request)
+    assert early["verdict"] == "unable" and early["reason"].startswith("waiting_until:") and early["usage"]["model_calls"] == 0
+
+    due = run([done, before], chat, reading=reading, as_of="2026-10-16T05:00:00+00:00", **request)
+    assert due["verdict"] == "supported" and due["usage"]["model_calls"] == 1  # the judge; no reader call
+    assert [e["ref"] for e in due["evidence"] if e["cited"]] == ["conversation_messages:r1"]
+    assert due["stages"]["retrieve"]["dropped_same_thread"] == 0 and due["stages"]["retrieve"]["dropped_as_of"] == 0
+    assert due["claims"][0]["period"]["from"] == "2026-10-08" and due["claims"][0]["period"]["to"] >= "2026-10-15"  # the rules' window starts a day earlier
+
+    silence = run([before], chat, reading=reading, as_of="2026-10-16T05:00:00+00:00", **request)
+    assert silence["verdict"] == "no_evidence" and silence["reason"] == "shows_failed_rules"  # a week-old record is outside the plan's period
+    assert silence["stages"]["judge"]["rejections"]
+
+
+def test_the_same_thread_window_is_two_sided_around_the_statement():
+    said = datetime(2026, 10, 7, 19, 47, tzinfo=timezone.utc)
+    now = said + timedelta(days=9)
+    same = lambda n, when: {**rec(n, "authored", table="conversation_messages", text=f"record {n}: the roof"), "event_at": when.isoformat(), "conversation_id": "T"}  # noqa: E731
+    records = [same(1, said + timedelta(days=2)), same(2, said + timedelta(hours=3)), same(3, said - timedelta(hours=3)),
+               same(4, said - timedelta(days=2)), {**same(5, said + timedelta(hours=1)), "conversation_id": "other"}]
+    shown, dropped = v2.select_evidence(records, "I'll fix the roof by Wednesday.", claim(date_from="", date_to=""), now, conversation_id="T", said_at=said)
+    assert [e["ref"] for e in shown] == ["conversation_messages:r1", "conversation_messages:r4", "conversation_messages:r5"]
+    assert dropped["same_thread"] == 2 and dropped["as_of"] == 0
+    # with no said_at the window is around now, as before: anything after now is out as of, and the thread's last 12 h too
+    shown, dropped = v2.select_evidence(records, "I'll fix the roof by Wednesday.", claim(date_from="", date_to=""), said, conversation_id="T")
+    assert [e["ref"] for e in shown] == ["conversation_messages:r4"] and dropped == {"as_of": 3, "quoting": 0, "own_record": 0, "same_thread": 1, "occurrence": 0}
+
+
+def test_one_time_rule_for_every_stored_time():
+    """The engine and the store read a stored time by one rule (truth_checks.instant): an offset or Z is honoured, a
+    naive time is the node's LOCAL time (the journal writes wall-clock times with no offset), a bare date is not an
+    instant. Until 27 Oct 2026 the store read naive as UTC and the engine as local."""
+    from topos.query import truth_checks as store
+
+    local_noon = datetime(2026, 10, 22, 12, 0).astimezone(timezone.utc)  # what the node's own zone makes of it
+    for value, expected in [("2026-10-22T12:00:00", local_noon), ("2026-10-22T12:00:00Z", datetime(2026, 10, 22, 12, tzinfo=timezone.utc)),
+                            ("2026-10-22T12:00:00-05:00", datetime(2026, 10, 22, 17, tzinfo=timezone.utc)),
+                            ("2026-10-22T12:00:00+00:00", datetime(2026, 10, 22, 12, tzinfo=timezone.utc)),
+                            ("2026-10-22", None), ("", None), (None, None), ("not a time", None)]:
+        assert store.instant(value) == expected, value
+        assert v2._instant(value) == expected, value
+        assert store._aware(value) == expected, value  # the old name reflection.py reads
+    assert v2.conversation_time("2026-10-22T12:00:00-05:00") == datetime(2026, 10, 22, 17, tzinfo=timezone.utc)
+    assert v2.conversation_time("2026-10-22T12:00:00") == local_noon
+    assert abs((v2.conversation_time(None) - datetime.now(timezone.utc)).total_seconds()) < 5
+    assert store.with_offset("2026-10-22T12:00:00Z") == datetime(2026, 10, 22, 12, tzinfo=timezone.utc).astimezone().isoformat()
 
 
 # --- VERIFY_V2_LEAN_READ (tracker round r2) -----------------------------------------------------------------------------
@@ -855,3 +1098,204 @@ def test_lean_read_keeps_the_answer_for_a_one_claim_reply(monkeypatch):
         outs.append(run([], FakeChat(read_reply()), effort="low"))
     strip = lambda o: {k: v for k, v in o.items() if k not in ("timings_ms",)}
     assert strip(outs[0]) == strip(outs[1])
+
+
+# --- Calibrate step 1: speaker subject, strict as-of, same thread -----------------------------------------------------
+NOW = datetime(2026, 10, 26, 1, 49, tzinfo=timezone.utc)
+
+
+def at(minutes=0, hours=0, table="conversation_messages", n=1, conversation="c1"):
+    when = NOW + timedelta(minutes=minutes, hours=hours)
+    return {"table": table, "record_id": f"m{n}", "event_at": when.isoformat(), "role": "authored", "lanes": ["canonical"],
+            "lane": "summaries", "text": f"record {n}: pinwheel sidebar restyle", "conversation_id": conversation}
+
+
+def refs(records, **kw):
+    shown, dropped = v2.select_evidence(records, SENTENCE, claim(), NOW, **kw)
+    return [e["ref"].split(":")[1] for e in shown], dropped
+
+
+def test_strict_as_of_drops_a_record_made_after_the_claim_even_the_same_day(monkeypatch):
+    later, earlier = at(minutes=3, n=1, conversation="other"), at(minutes=-3, n=2, conversation="other")
+    day_only = {**at(n=3, conversation="other"), "event_at": "2026-10-26"}
+    next_day = {**at(n=4, conversation="other"), "event_at": "2026-10-27"}
+    assert refs([later, earlier, day_only, next_day]) == (["m2", "m3"], {"as_of": 2, "quoting": 0, "own_record": 0, "same_thread": 0, "occurrence": 0})
+    monkeypatch.setattr(v2, "STRICT_AS_OF", False)  # 1.5.28: anything up to the next day counted
+    assert refs([later, earlier, day_only, next_day])[0] == ["m1", "m2", "m3", "m4"]
+
+
+def test_the_claims_own_exchange_is_context_not_evidence(monkeypatch):
+    records = [at(minutes=-1, n=1), at(hours=-11, n=2), at(hours=-13, n=3), at(minutes=-1, n=4, conversation="c2"),
+               at(minutes=-5, n=5)]
+    got, dropped = refs(records, source_ref="conversation_messages:m5", conversation_id="c1")
+    assert got == ["m3", "m4"] and dropped["same_thread"] == 2 and dropped["own_record"] == 1
+    # Without a conversation (spoken, journal) nothing is dropped for its thread.
+    assert refs(records)[0] == ["m1", "m2", "m3", "m4", "m5"]
+    monkeypatch.setattr(v2, "SAME_THREAD_GUARD", False)
+    assert refs(records, source_ref="conversation_messages:m5", conversation_id="c1")[0] == ["m1", "m2", "m3", "m4", "m5"]
+
+
+def test_a_contacts_first_person_claim_is_someone_else_to_the_evidence_rules(monkeypatch):
+    def subjects(**req):
+        request = v2.ClaimRequest(statement=SENTENCE, said_at="2026-10-07T19:47:36-05:00", **req)
+        _, claims, _ = v2.read_claims(request, FakeChat(read_reply()), Usage(), 5.0)
+        return [c.subject for c in claims]
+
+    assert subjects(speaker="a contact", speaker_is_owner=False, about_others=True) == ["someone_else"]
+    assert subjects() == ["owner"]  # the owner's own speech is unchanged
+    assert subjects(speaker="a contact", speaker_is_owner=False, about_others=False) == []  # and still out of scope
+    monkeypatch.setattr(v2, "SPEAKER_SUBJECT", False)
+    assert subjects(speaker="a contact", speaker_is_owner=False, about_others=True) == ["owner"]
+
+
+# --- LABELS_AS_EVIDENCE --------------------------------------------------------------------------------------------------
+def _label_row(n, label, text, refs=(), at="2026-10-07T10:00:00+00:00", said="2026-10-06T09:00:00+00:00"):
+    import json as _json
+    return (f"vc{n}", _json.dumps({"claim": text, "label": label}), _json.dumps(list(refs)), at, said)
+
+
+LATER = datetime(2026, 10, 8, 0, 47, tzinfo=timezone.utc)
+
+
+def test_an_earlier_label_sharing_the_claims_words_is_the_owners_own_evidence():
+    c = claim(text="The owner restyled the pinwheel sidebar.", names=["pinwheel"])
+    rows = [_label_row(1, "true", "I restyled the pinwheel sidebar last month."),
+            _label_row(2, "false", "The pinwheel sidebar was never restyled by me."),
+            _label_row(3, "true", "I walked the dog."),                          # nothing shared
+            _label_row(4, "maybe", "The pinwheel sidebar restyle happened."),     # not a label value
+            _label_row(5, "true", "Pinwheel sidebar restyled.", refs=[{"table": "conversation_messages", "record_id": "m9"}])]
+    got = v2.labelled_evidence(rows, c, LATER, source_ref="conversation_messages:m9")
+    assert [r["record_id"] for r in got] == ["vc1", "vc2"]
+    assert got[0]["role"] == "authored" and got[0]["text"].startswith("The owner confirmed this is true: ")
+    assert got[1]["text"].startswith("The owner said this is false: ")
+    assert all(r["table"] == "verified_claim" and r["event_at"] == "2026-10-06T09:00:00+00:00" for r in got)
+
+
+def test_a_label_made_after_the_claim_never_counts():
+    c = claim()
+    assert v2.labelled_evidence([_label_row(1, "true", "I restyled the pinwheel sidebar.", at="2026-10-09T10:00:00+00:00")], c, LATER) == []
+    assert len(v2.labelled_evidence([_label_row(1, "true", "I restyled the pinwheel sidebar.")], c, LATER)) == 1
+
+
+def test_labels_are_read_only_when_the_switch_is_on(monkeypatch):
+    seen = []
+
+    class Gather:
+        def __init__(self, conn):
+            pass
+
+        def gather(self, *args):
+            return [], {"candidates": 0}
+
+    monkeypatch.setattr(v2, "NodeEvidence", Gather)
+    monkeypatch.setattr(v2, "owner_labels", lambda conn: seen.append(1) or [_label_row(1, "true", "I restyled the pinwheel sidebar.")])
+
+    async def gather_in_worker(fn):
+        return fn(None)
+
+    def go():
+        request = v2.ClaimRequest(statement=SENTENCE, said_at="2026-10-07T19:47:36-05:00")
+        return asyncio.run(v2.verify_owner_claim(request, chat=FakeChat(read_reply(), {1: "shows"}), gather_in_worker=gather_in_worker,
+                                                 to_thread=asyncio.to_thread))
+
+    assert go()["verdict"] == "no_evidence" and seen == []
+    monkeypatch.setattr(v2, "LABELS_AS_EVIDENCE", True)
+    out = go()
+    assert seen == [1] and out["verdict"] == "supported" and out["evidence"][0]["source"] == "verified_claim"
+
+
+# --- evidence techniques: TESTIMONY, JOURNAL_CHANNEL, CONSISTENCY -------------------------------------------------------
+def test_testimony_lets_someone_in_the_owners_thread_attest_what_the_owner_did(monkeypatch):
+    did, view = claim(), claim(kind="opinion")
+    w = v2.window_of(did)
+    assert v2.accept("participated", v2._day("2026-10-06"), did, w, False) == (False, "role_not_allowed")
+    monkeypatch.setattr(v2, "TESTIMONY", True)
+    assert v2.accept("participated", v2._day("2026-10-06"), did, w, False) == (True, "accepted")
+    assert v2.accept("participated", v2._day("2026-10-06"), view, w, False) == (False, "opinion_not_authored")  # never a view
+    assert v2.accept("observed", v2._day("2026-10-06"), did, w, False) == (False, "role_not_allowed")  # a stranger's message
+
+
+def test_the_journal_channel_adds_unseen_entries_from_a_journal_only_search(monkeypatch):
+    from dataclasses import dataclass as _dc
+
+    @_dc(frozen=True)
+    class Manifest:
+        canonical_tables: tuple = ("conversation_messages", "journal_entries")
+        signal_objects: tuple = ("fact",)
+
+    asked = []
+
+    class Evidence:
+        def __init__(self, conn):
+            self.manifest = Manifest()
+
+        def gather(self, query, needles, now):
+            asked.append(tuple(self.manifest.canonical_tables))
+            return [rec(n, "authored") for n in (1, 2, 3, 4, 5)], {}
+
+    monkeypatch.setattr(v2, "NodeEvidence", Evidence)
+    found = [rec(1, "authored")]  # retrieval already had r1
+    got = v2.journal_records(None, "q", "", datetime(2026, 10, 8, tzinfo=timezone.utc), found)
+    assert asked == [("journal_entries",)] and [r["record_id"] for r in got] == ["r2", "r3", "r4"]
+
+
+def test_consistency_lets_several_own_words_together_back_an_opinion(monkeypatch):
+    class Together(FakeChat):
+        def __init__(self, together):
+            super().__init__(read_reply(type="opinion"), {})
+            self.together, self.asked = together, 0
+
+        def __call__(self, system, user, schema, timeout, usage):
+            if system == v2.CONSISTENCY_SYSTEM:
+                self.asked += 1
+                usage.add(10, 2)
+                return {"together": self.together}
+            return super().__call__(system, user, schema, timeout, usage)
+
+    records = [rec(1, "authored"), rec(2, "authored"), rec(3, "participated")]
+    off = Together(True)
+    assert run(records, off)["verdict"] == "no_evidence" and off.asked == 0
+    monkeypatch.setattr(v2, "CONSISTENCY", True)
+    yes = Together(True)
+    out = run(records, yes)
+    assert out["verdict"] == "supported" and yes.asked == 1
+    assert sorted(e["ref"] for e in out["evidence"] if e["cited"]) == ["journal_entries:r1", "journal_entries:r2"]
+    assert out["claims"][0]["support"] == "consistent_set"
+    no = Together(False)
+    assert run(records, no)["verdict"] == "no_evidence" and no.asked == 1
+    single = Together(True)
+    assert run([rec(1, "authored")], single)["verdict"] == "no_evidence"  # one record is not a set
+
+
+# --- contradictions, per category -------------------------------------------------------------------------------------
+class ContraChat(FakeChat):
+    """Labels from {n: label}; asked with the contradiction prompt only when the category is opted in."""
+
+    def __init__(self, labels):
+        super().__init__(read_reply(), labels)
+        self.systems = []
+
+    def __call__(self, system, user, schema, timeout, usage):
+        if system not in (v2.READ_SYSTEM, v2.READ_SYSTEM_WITH_OTHERS):
+            self.systems.append(system)
+        return super().__call__(system, user, schema, timeout, usage)
+
+
+def test_contradictions_are_asked_for_only_in_an_opted_in_category(monkeypatch):
+    chat = ContraChat({1: "contradicts"})
+    out = run([rec(1, "authored")], chat)
+    assert out["verdict"] == "no_evidence" and all(s == v2.LABEL_SYSTEM for s in chat.systems)
+    monkeypatch.setattr(v2, "CONTRADICTION_CATEGORIES", frozenset({"did"}))
+    chat = ContraChat({1: "contradicts"})
+    out = run([rec(1, "authored")], chat)
+    assert out["verdict"] == "contradicted" and all(s == v2.LABEL_SYSTEM_CONTRA for s in chat.systems)
+    assert [e["ref"] for e in out["evidence"] if e.get("contradicts")] == ["journal_entries:r1"]
+
+
+def test_support_wins_over_contradiction_and_the_rules_still_apply(monkeypatch):
+    monkeypatch.setattr(v2, "CONTRADICTION_CATEGORIES", frozenset({"did"}))
+    assert run([rec(1, "authored"), rec(2, "authored")], ContraChat({1: "contradicts", 2: "shows"}))["verdict"] == "supported"
+    # someone else's message cannot contradict the owner's own claim, as it cannot back it
+    assert run([rec(1, "observed")], ContraChat({1: "contradicts"}))["verdict"] == "no_evidence"
+    # out of the claim's period: no contradiction
+    assert run([rec(1, "authored", day="2026-09-01")], ContraChat({1: "contradicts"}))["verdict"] == "no_evidence"

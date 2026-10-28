@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -25,6 +27,16 @@ def node(tmp_path, tmp_path_factory, monkeypatch):
     conn = connect(path)
     yield SimpleNamespace(path=path, conn=conn)
     conn.close()
+
+
+SHIPPED_OWNER_CLAIMS_ONLY = lane.OWNER_CLAIMS_ONLY  # read before any fixture changes it
+
+
+@pytest.fixture(autouse=True)
+def every_speaker(monkeypatch):
+    """Most tests here describe the lane's machinery with contacts' rows as fixtures, so they run with the step 1
+    owner-only rule off; the tests under "Calibrate step 1" turn it back on."""
+    monkeypatch.setattr(lane, "OWNER_CLAIMS_ONLY", False)
 
 
 def turn_on(conn, **over):
@@ -277,7 +289,10 @@ def test_the_stored_row_has_the_designs_columns_and_cited_refs_without_text(node
     assert set(row) == {"check_id", "record_table", "record_id", "conversation_id", "source", "speaker_kind", "week",
                         "category", "claim_text", "verdict", "reason", "cited_refs_json", "effort", "model",
                         "latency_ms", "created_at", "attempts", "read_timeout_s", "checked_at", "engine_version",
-                        "engine_sha16"}
+                        "engine_sha16", "contradicted", "reading_json", "polarity", "claim_key", "said_at",
+                        "group_override", "owner_labels_shown", "due_at"}
+    assert row["reading_json"] is None and row["polarity"] is None and row["claim_key"] is None  # the stub gave no reading
+    assert row["said_at"] and datetime.fromisoformat(row["said_at"]).utcoffset() is not None and row["group_override"] is None
     assert row["attempts"] == 1 and row["read_timeout_s"] == lane.LOCAL_READ_TIMEOUT_S and row["checked_at"] == row["created_at"]
     assert (row["engine_version"], row["engine_sha16"]) == ENGINE  # the stub answered without a version: VERSION
     assert row["verdict"] == "supported" and row["claim_text"] == "The owner finished the garden shed."
@@ -675,15 +690,13 @@ def test_each_source_tells_the_reader_its_kind(node, monkeypatch):
 
 # --- re-checks of unable rows -----------------------------------------------------------------------------------------
 def _engine():
-    import hashlib
-
     from topos.query import verify_v2
 
-    with open(verify_v2.__file__, "rb") as source:
-        return verify_v2.VERSION, hashlib.sha256(source.read()).hexdigest()[:16]
+    return verify_v2.VERSION, verify_v2.engine_sha16()
 
 
-#: The stamp every row this build stores carries: the engine's VERSION and the sha16 of verify_v2.py.
+#: The stamp every row this build stores carries: the engine's VERSION and the manifest digest of its four files
+#: (verify_v2.ENGINE_MANIFEST; tests/query/test_verify_v2.py pins the recipe).
 ENGINE = _engine()
 
 
@@ -859,7 +872,8 @@ def test_a_table_the_1519_lane_created_gains_the_columns_and_its_timed_out_rows_
     job_id = lane.enqueue_truth_checks(node.conn)
     assert job_id
     columns = [r[1] for r in node.conn.execute("PRAGMA table_info(truth_checks)").fetchall()]
-    assert columns[-5:] == ["attempts", "read_timeout_s", "checked_at", "engine_version", "engine_sha16"]
+    assert columns[-13:] == ["attempts", "read_timeout_s", "checked_at", "engine_version", "engine_sha16", "contradicted",
+                             "reading_json", "polarity", "claim_key", "said_at", "group_override", "owner_labels_shown", "due_at"]
     [row] = checks(node.conn)
     assert row["attempts"] == 1 and row["read_timeout_s"] is None and row["checked_at"] is None
     assert row["engine_version"] is None and row["engine_sha16"] is None  # 1.5.19's rows: unstamped
@@ -882,3 +896,293 @@ def test_a_recheck_that_lost_a_race_stores_nothing(node):
     assert store.recheck(node.conn, row, 3) is None  # no longer unable
     with pytest.raises(store.TruthRequestError):
         store.recheck(node.conn, row, 4)
+
+
+# --- Calibrate step 1: the owner's own claims only --------------------------------------------------------------------
+def test_owner_claims_only_is_the_default():
+    assert SHIPPED_OWNER_CLAIMS_ONLY is True
+
+
+def test_with_owner_claims_only_a_contacts_message_is_never_queued_or_checked(node, monkeypatch):
+    monkeypatch.setattr(lane, "OWNER_CLAIMS_ONLY", True)
+    add_message(node.conn, "m-contact", "I finished building the garden shed this morning.")
+    add_message(node.conn, "m-owner", "I finished painting the garden shed this morning.", from_self=True, at=ago(minutes=5))
+    add_journal(node.conn, "j1", "I bought new hinges for the shed doors today.", at=ago(hours=1))
+    node.conn.commit()
+    turn_on(node.conn)
+    assert sorted(r for _, r in lane.owed(node.conn, list(cfg.SOURCES), 10)) == ["j1", "m-owner"]
+    recorder = Recorder()
+    monkeypatch.setattr(lane, "_verify", recorder)
+    out = run_job({"records": [["conversation_messages", "m-contact"], ["conversation_messages", "m-owner"]]})
+    assert out["skipped"] == 1 and out["checked"] == 1 and [r.statement for r in recorder.requests] == [
+        "I finished painting the garden shed this morning."]
+
+
+def test_the_request_names_its_record_its_thread_and_whether_the_owner_spoke(node, monkeypatch):
+    monkeypatch.setattr(lane, "OWNER_CLAIMS_ONLY", True)
+    add_message(node.conn, "m-owner", "I finished painting the garden shed this morning.", from_self=True,
+                conversation_id="thread-9")
+    add_journal(node.conn, "j1", "I bought new hinges for the shed doors today.", at=ago(hours=1))
+    node.conn.commit()
+    turn_on(node.conn)
+    recorder = Recorder()
+    monkeypatch.setattr(lane, "_verify", recorder)
+    run_job({"records": [["conversation_messages", "m-owner"], ["journal_entries", "j1"]]})
+    message, journal = recorder.requests
+    assert (message.speaker_is_owner, message.source_ref, message.conversation_id) == (
+        True, "conversation_messages:m-owner", "thread-9")
+    assert (journal.speaker_is_owner, journal.source_ref, journal.conversation_id) == (True, "journal_entries:j1", None)
+
+
+# --- the lane's denominator (owner, 27 Oct 2026) ----------------------------------------------------------------------
+def _daily(conn):
+    return {r[0]: dict(zip(store.LANE_COUNTS, r[1:])) for r in conn.execute(
+        f"SELECT source, {', '.join(store.LANE_COUNTS)} FROM truth_lane_daily ORDER BY source")}
+
+
+def test_each_batch_adds_what_it_did_to_the_days_counts_by_source(node, monkeypatch):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    add_journal(node.conn, "j2", "Yeah.", at=ago(hours=2))  # the gate refuses a fragment
+    add_message(node.conn, "m1", "I painted the shed doors blue this afternoon.", from_self=True, at=ago(hours=3))
+    node.conn.commit()
+    turn_on(node.conn)
+    monkeypatch.setattr(lane, "_verify", Recorder())
+    run_job({"records": [["journal_entries", "j1"], ["journal_entries", "j2"], ["conversation_messages", "m1"],
+                         ["journal_entries", "gone"]]})
+    daily = _daily(node.conn)
+    assert daily["journal"] == {"queued": 2, "gated": 1, "checked": 1, "deferred": 0, "skipped": 0, "paused": 0}
+    assert daily["imessage"]["checked"] == 1 and daily["unresolved"]["skipped"] == 1
+    run_job({"records": [["journal_entries", "j1"]]})  # already checked: skipped, and the day's row grows
+    assert _daily(node.conn)["unresolved"]["skipped"] == 2
+    [week] = store.weekly_stats(node.conn, 1)["weeks"]
+    assert week["lane"] == {"queued": 3, "gated": 1, "checked": 2, "deferred": 0, "skipped": 2, "paused": 0}
+
+
+def test_a_pause_is_counted_with_what_it_deferred(node, monkeypatch):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    add_journal(node.conn, "j2", "I bought new hinges for the shed doors today.", at=ago(hours=3))
+    node.conn.commit()
+    turn_on(node.conn, model="hosted")
+    monkeypatch.setattr(lane, "_verify", Recorder({"I finished building the garden shed this morning.": _hosted_402()}))
+    monkeypatch.setattr(lane, "_chat_for", lambda model: SimpleNamespace(name=model, model="test"))
+    run_job({"records": [["journal_entries", "j1"], ["journal_entries", "j2"]]})
+    assert _daily(node.conn)["journal"]["paused"] == 1 and _daily(node.conn)["journal"]["deferred"] == 2
+
+
+def test_the_sources_last_sync_is_a_category_never_the_error_text(node):
+    from topos.pipeline.job_store import ensure_pipeline_jobs_schema
+
+    ensure_pipeline_jobs_schema(node.conn)
+    rows = [("j-ok", "done", "2026-10-26 08:01:02", '{"status": "ok"}'),
+            ("j-bad", "failed", "2026-10-27 14:32:13", '{"error": "Cannot copy chat.db: [Errno 1] Operation not permitted: /x. Full Disk Access may be required."}')]
+    for job_id, status, at, detail in rows:
+        node.conn.execute("INSERT INTO pipeline_jobs (job_id, kind, status, payload_json, detail_json, created_at, updated_at) "
+                          "VALUES (?, 'local_sync', ?, '{\"source_id\": \"imessage\"}', ?, ?, ?)", (job_id, status, detail, at, at))
+    node.conn.commit()
+    health = store.weekly_stats(node.conn, 1)["sources"]
+    assert health == {"imessage": {"last_sync_at": "2026-10-27 14:32:13", "last_sync_ok": False, "last_ok_at": "2026-10-26 08:01:02",
+                                   "failure": "full_disk_access"}}
+    assert "chat.db" not in json.dumps(health)
+
+
+def test_a_contradiction_is_stored_as_nothing_found_with_its_flag(node, monkeypatch):
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    turn_on(node.conn)
+    against = {"verdict": "contradicted", "reason": None, "category": "did", "claim": {"text": "The owner built a shed."},
+               "evidence": [{"n": 1, "ref": "journal_entries:j-old", "source": "journal_entries", "date": "2026-10-01",
+                             "role": "authored", "snippet": "x", "cited": True, "contradicts": True}], "timings_ms": {"total": 900.0}}
+    monkeypatch.setattr(lane, "_verify", Recorder({"I finished building the garden shed this morning.": against}))
+    run_job({"records": [["journal_entries", "j1"]]})
+    [row] = checks(node.conn)
+    assert (row["verdict"], row["reason"], row["contradicted"]) == ("no_evidence", "contradicted", 1)
+    assert json.loads(row["cited_refs_json"])[0]["record_id"] == "j-old"
+    [card] = store.claim_cards(node.conn, 10, True)["cards"]
+    assert card["contradicted"] is True and store.weekly_stats(node.conn, 1)["weeks"][0]["contradicted"] == 1
+
+
+# --- the engine writes no answer row (lean v3 increment A, 27 Oct 2026) -------------------------------------------------
+def test_a_full_lane_run_with_no_owner_answer_writes_no_label_dismissal_skip_or_object(node, monkeypatch):
+    """First checks, then a re-check of the unable row: the lane writes truth_checks and truth_lane_daily only. The
+    owner's three answer tables and signal_objects are byte-identical across the re-check and signal_objects across
+    both runs, and an answered verdict is never rewritten (only an ``unable`` row is checked again)."""
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    add_journal(node.conn, "j2", "I painted both shed doors a deep blue today.")
+    node.conn.commit()
+    turn_on(node.conn)
+    objects_before = node.conn.execute("SELECT * FROM signal_objects ORDER BY object_id").fetchall()
+    late = {"verdict": "unable", "reason": "deadline", "claim": {"text": "The owner painted the shed doors."}, "evidence": [],
+            "timings_ms": {"total": 31000.0}}
+    monkeypatch.setattr(lane, "_verify", Recorder({"I painted both shed doors a deep blue today.": late}))
+    assert run_job({"records": [["journal_entries", "j1"], ["journal_entries", "j2"]]})["checked"] == 2
+    first = {c["record_id"]: (c["verdict"], c["cited_refs_json"]) for c in checks(node.conn)}
+    assert first["j1"][0] == "supported" and first["j2"][0] == "unable"
+
+    def answers():
+        return [node.conn.execute(f"SELECT * FROM {t} ORDER BY 1").fetchall()
+                for t in ("truth_labels", "truth_dismissals", "truth_skips", "signal_objects")]
+
+    after_first = answers()
+    assert after_first[:3] == [[], [], []] and after_first[3] == objects_before
+    node.conn.execute("UPDATE truth_checks SET checked_at=? WHERE record_id='j2'", (_hours_ago(7),))
+    node.conn.commit()
+    monkeypatch.setattr(lane, "_verify", Recorder())  # the re-check answers supported
+    out = run_job({"records": [["journal_entries", "j2"]]})
+    assert out["checked"] == 1 and out["rechecked"] == 1
+    after = {c["record_id"]: (c["verdict"], c["cited_refs_json"]) for c in checks(node.conn)}
+    assert after["j1"] == first["j1"] and after["j2"][0] == "supported"
+    assert answers() == after_first
+    assert node.conn.execute("SELECT COUNT(*) FROM truth_checks").fetchone()[0] == 2
+
+
+# --- the stored reading (lean v3 increment B, 27 Oct 2026) ----------------------------------------------------------------
+def test_the_row_stores_the_reading_its_polarity_key_and_time(node, monkeypatch):
+    add_journal(node.conn, "j1", "I never use tabs in Python.", at="2026-10-22T09:30:00")
+    node.conn.commit()
+    turn_on(node.conn)
+    reading = {"category": "state", "claims": [{"type": "setup", "subject": "owner", "reported_speech": False,
+                                                "claim": "The owner uses tabs in Python.", "names": ["Python", "tabs"],
+                                                "date_from": "", "date_to": "", "as_written": "", "polarity": "denies"}]}
+    answer = {**supported(claim="The owner uses tabs in Python."), "category": "state", "reading": reading,
+              "stages": {"retrieve": {"owner_labels": 0, "candidates": 3}}}
+    monkeypatch.setattr(lane, "_verify", Recorder({"I never use tabs in Python.": answer}))
+    run_job({"records": [["journal_entries", "j1"]]})
+    [row] = checks(node.conn)
+    assert json.loads(row["reading_json"]) == reading and row["polarity"] == -1
+    assert row["claim_key"] == "state|setup|none|python tabs" and row["owner_labels_shown"] == 0
+    assert row["said_at"] == store.with_offset("2026-10-22T09:30:00")  # the record's own time, local, with its offset
+    state = store.check_state(node.conn, "journal_entries", "j1")
+    assert json.loads(state["reading_json"]) == reading and state["category"] == "state"
+
+
+def test_a_recheck_runs_from_the_stored_reading_with_no_reader_call(node, monkeypatch):
+    """An unable row that already carries its reading is checked again through the real engine: retrieval and the
+    judge only. The chat is never called for a read (here never at all: no records, so no judge either), the reading
+    survives the in-place rewrite, and the row is answered."""
+    from topos.query import verify_v2
+
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    _unable(node.conn, checked_at=_hours_ago(7))
+    reading = {"category": "did", "claims": [{"type": "did_or_made", "subject": "owner", "reported_speech": False,
+                                              "claim": "The owner finished building the garden shed.", "names": ["shed"],
+                                              "date_from": "", "date_to": "", "as_written": "", "polarity": "affirms"}]}
+    node.conn.execute("UPDATE truth_checks SET reading_json=?, claim_key=?, polarity=1 WHERE record_id='j1'",
+                      (json.dumps(reading), "did|did_or_made|none|building finished garden shed"))
+    node.conn.commit()
+    turn_on(node.conn)
+
+    class NoModel:
+        name, model = "local", "stand-in"
+
+        def __call__(self, system, user, schema, timeout, usage):
+            raise AssertionError("a re-check from a stored reading makes no reader call")
+
+    class NoRecords:
+        def __init__(self, conn):
+            pass
+
+        def gather(self, query, needles, now):
+            return [], {"candidates": 0}
+
+    monkeypatch.setattr(lane, "_chat_for", lambda m: NoModel())
+    monkeypatch.setattr(verify_v2, "NodeEvidence", NoRecords)
+    out = run_job({"records": [["journal_entries", "j1"]]})
+    assert out["checked"] == 1 and out["rechecked"] == 1
+    [row] = checks(node.conn)
+    assert row["verdict"] == "no_evidence" and row["attempts"] == 2
+    assert json.loads(row["reading_json"]) == reading and row["claim_key"] == "did|did_or_made|none|building finished garden shed" and row["polarity"] == 1
+    assert row["claim_text"] == "The owner finished building the garden shed."
+
+
+# --- plans (lean v3 increment C, 27 Oct 2026) ------------------------------------------------------------------------------
+PLAN_READING = {"category": "plan", "claims": [{"type": "intention", "subject": "owner", "reported_speech": False,
+                                                "claim": "The owner will finish the shed roof by Wednesday.", "names": ["shed"],
+                                                "date_from": "2026-10-08", "date_to": "2026-10-08", "as_written": "", "polarity": "affirms"}]}
+PLAN_SAID = "2026-10-07T19:47:36-05:00"
+PLAN_READY = "2026-10-16T04:59:59+00:00"  # the end of 2026-10-08 at -05:00, plus seven days
+
+
+def _plan_row(conn, record_id="j-plan", *, verdict="unable", reason=f"waiting_until:{PLAN_READY}", label=None, thing="shed roof"):
+    add_journal(conn, record_id, f"I'll finish the {thing} by Wednesday.", at=PLAN_SAID)
+    conn.commit()
+    claim = {**PLAN_READING["claims"][0], "claim": f"The owner will finish the {thing} by Wednesday.", "names": [thing.split()[0]]}
+    reading = {"category": "plan", "claims": [claim]}
+    result = {"verdict": verdict, "reason": reason, "category": "plan", "claim": {"text": claim["claim"]},
+              "evidence": [], "timings_ms": {"total": 900.0}, "reading": reading,
+              **({"stages": {"retrieve": "waiting"}} if reason and reason.startswith("waiting_until:") else {})}
+    check_id = store.record_check(conn, lane.check_row({"table": "journal_entries", "record_id": record_id, "source": "journal", "owner": True},
+                                                       result, model=LOCAL[0], read_timeout_s=20.0, said_at=PLAN_SAID))
+    if label:
+        store.label_claim(conn, check_id, label)
+    return check_id
+
+
+def test_a_plan_row_waits_for_its_due_moment_and_is_counted_as_a_plan_not_as_unable(node):
+    check_id = _plan_row(node.conn)
+    [row] = checks(node.conn)
+    assert row["verdict"] == "unable" and row["reason"] == f"waiting_until:{PLAN_READY}" and row["due_at"] == "2026-10-09T04:59:59+00:00"
+    state = store.check_state(node.conn, "journal_entries", "j-plan")
+    before, after = datetime(2026, 10, 16, 4, 59, tzinfo=timezone.utc), datetime(2026, 10, 16, 5, 0, tzinfo=timezone.utc)
+    assert store.recheck_reason(state, LOCAL, now=before, cooldown_s=0) is None  # never before its moment, whatever changed
+    assert store.recheck_reason(state, ("local:another-model", "high", 8.0), now=before, cooldown_s=0) is None
+    assert store.recheck_reason(state, LOCAL, now=after, cooldown_s=lane.RECHECK_COOLDOWN_S) == "due"
+    assert lane.recheck_due(node.conn, ["journal"], LOCAL, 10, now=before) == []
+    [card] = store.claim_cards(node.conn, 10, True)["cards"]
+    assert card["check_id"] == check_id and card["kind"] == "intention" and card["plan"] == "waiting" and card["due_at"] == row["due_at"]
+    [entry] = store.weekly_stats(node.conn, 1)["weeks"]
+    assert entry["plans"] == {"waiting": 1, "kept": 0, "nothing_by_due": 0, "answered": 0}
+    assert entry["unable"] == 0 and entry["to_confirm"] == 0 and entry["checked"] == 1 and entry["by_source"]["journal"] == 1
+
+
+@pytest.fixture
+def node_zone():
+    """The zone the plan fixtures were written in (their said time is -05:00). Plan days and due moments are read in
+    the node's LOCAL zone (``truth_checks.with_offset`` gives ``said_at`` the node's offset; ``intention_period`` takes
+    the said day locally), so a test that pins a due instant pins that zone too, instead of inheriting the host's:
+    on 27 Oct 2026 the two plan tests passed on the owner's Mac and failed on CI, which runs in UTC."""
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Chicago"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+def test_a_due_plan_goes_first_and_is_checked_as_of_its_moment_from_the_stored_reading(node, monkeypatch, node_zone):
+    _plan_row(node.conn)
+    add_journal(node.conn, "j-late", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    after = datetime(2026, 10, 16, 5, 0, tzinfo=timezone.utc)
+    _unable(node.conn, "j-late", checked_at=(after - timedelta(hours=7)).isoformat())  # an ordinary unable row, newer, due by cooldown
+    assert lane.recheck_due(node.conn, ["journal"], LOCAL, 10, now=after) == [["journal_entries", "j-plan"], ["journal_entries", "j-late"]]
+    turn_on(node.conn)
+    recorder = Recorder({"I'll finish the shed roof by Wednesday.": {**supported(claim=PLAN_READING["claims"][0]["claim"]), "category": "plan",
+                                                                        "reading": PLAN_READING}})
+    monkeypatch.setattr(lane, "_verify", recorder)
+    monkeypatch.setattr(store, "now_utc", lambda: after)  # the lane's clock, past the plan's moment
+    out = run_job({"records": [["journal_entries", "j-plan"]]})
+    assert out["checked"] == 1 and out["rechecked"] == 1
+    [request] = recorder.requests
+    assert request.as_of == PLAN_READY and request.reading == PLAN_READING and request.said_at == store.with_offset(PLAN_SAID)
+    row = next(c for c in checks(node.conn) if c["record_id"] == "j-plan")
+    assert row["verdict"] == "supported" and row["attempts"] == 2 and row["due_at"] == "2026-10-09T04:59:59+00:00"
+    [card] = [c for c in store.claim_cards(node.conn, 10, True)["cards"] if c["check_id"] == row["check_id"]]
+    assert card["plan"] == "kept"
+    [entry] = store.weekly_stats(node.conn, 1, when=datetime.now(timezone.utc))["weeks"]  # the rows' week is the real one
+    assert entry["plans"]["kept"] == 1 and entry["plans"]["waiting"] == 0 and entry["backed"] == 1
+
+
+def test_plans_the_owner_answered_or_that_came_to_nothing_are_counted_so(node):
+    _plan_row(node.conn, "j-kept", verdict="supported", reason=None, thing="shed roof")
+    _plan_row(node.conn, "j-nothing", verdict="no_evidence", reason="no_records", thing="garden fence")
+    _plan_row(node.conn, "j-said", verdict="no_evidence", reason="no_records", label="true", thing="back gate")
+    cards = {c["check_id"]: c["plan"] for c in store.claim_cards(node.conn, 10, False)["cards"]}
+    assert sorted(cards.values()) == ["answered", "kept", "nothing_by_due"]
+    [entry] = store.weekly_stats(node.conn, 1)["weeks"]
+    assert entry["plans"] == {"waiting": 0, "kept": 1, "nothing_by_due": 1, "answered": 1} and entry["labelled"] == 1
