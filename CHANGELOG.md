@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.31] — 2026-10-28
+
 ### Added
 - **`GET /v1/messenger-analytics/rating-candidates` (`messenger_rating_candidates`): the calibration screen's ratings card without the person graph.** `[O]` The card wants a handful of people the owner messages most who are named and not yet rated on four domains, plus how many such people there are, and it read the whole person graph for that: 2,806 nodes, 7.9–10 s warm on a copy of the owner's database (28 Oct 2026), on the app's event loop. The door answers from the dyad stats, the contact and entity spine, the owner's overlay and the disposition facts alone, runs the graph's own read-time duplicate fold on those rows so a messaged contact takes the same entity the graph gives them, and serves the same `PersonNode` fields the card reads: measured on the same copy, 59–66 ms for 25 rows, the same 157 candidates in the same order as the graph's filter. Off the loop from its first day. `limit` 1–200, default 25; `unrated_count` is the whole count. No migration.
 - **`read_person_graph` can skip structure and the heard-about rail.** `[O]` `include_structure` (communities, centrality and the context-affinity layer) and `include_heard_about` (the luck rail's resolver) are on by default, so every caller gets what it got; off, the read answers in 1.5 s instead of 10 s on the owner's copy and says `skipped` under `structure`, `context_coverage` and `heard_about` rather than reporting zeros. HTTP: `structure=false`, `heard_about=false`; relay payload: `include_structure`, `include_heard_about`. The provenance read, which wants one node, turns both off.
