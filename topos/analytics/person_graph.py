@@ -96,30 +96,37 @@ def resolve_owner_identity(conn: Any) -> Dict[str, Any]:
             " WHERE entity_type='person'").fetchall()
     except sqlite3.Error:
         people = []
+    # The owner's own contact cards and every contact's identifiers, read once. This loop
+    # asked for them per entity — 1,982 contact lookups and as many identifier reads on
+    # the owner's node, 32 ms of a read that is otherwise 60 — and every graph read, the
+    # naming queue and the rating door start here.
+    try:
+        self_contacts = {str(r[0]) for r in conn.execute(
+            "SELECT contact_id FROM contacts WHERE is_self=1").fetchall() if r and r[0]}
+    except sqlite3.Error:
+        self_contacts = set()
+    phones_by_contact: Dict[str, Set[str]] = {}
+    if known["phones"]:
+        try:
+            for cid, ident in conn.execute(
+                    "SELECT contact_id, identifier FROM contact_identifiers"):
+                digits = _digits10(ident)
+                if cid and digits:
+                    phones_by_contact.setdefault(str(cid), set()).add(digits)
+        except sqlite3.Error:
+            phones_by_contact = {}
     for eid, name, contact_id in people:
         eid = str(eid)
         if eid in ids:
             continue
         why = None
-        if contact_id:
-            try:
-                if conn.execute("SELECT 1 FROM contacts WHERE contact_id=? AND is_self=1",
-                                (contact_id,)).fetchone():
-                    why = "your own contact card"
-            except sqlite3.Error:
-                pass
+        if contact_id and str(contact_id) in self_contacts:
+            why = "your own contact card"
         if not why and _normalized_name(name) and _normalized_name(name) in known["names"]:
             why = "the name you gave this node"
-        if not why and contact_id and known["phones"]:
-            try:
-                for (ident,) in conn.execute(
-                        "SELECT identifier FROM contact_identifiers WHERE contact_id=?",
-                        (contact_id,)):
-                    if _digits10(ident) in known["phones"]:
-                        why = "your own phone number"
-                        break
-            except sqlite3.Error:
-                pass
+        if not why and contact_id and known["phones"] \
+                and phones_by_contact.get(str(contact_id), set()) & set(known["phones"]):
+            why = "your own phone number"
         if why:
             ids.add(eid)
             rows.append((eid, name))

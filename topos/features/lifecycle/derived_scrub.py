@@ -964,7 +964,9 @@ def purge_derived_for_source(
 
 def _forget_truth_checks(conn: sqlite3.Connection, record_ids: Optional[Set[str]]) -> Any:
     """The inbound truth lane's checks of removed records, their labels and verified_claim objects
-    (query/truth_checks.forget_records). Never fails the scrub it rides on."""
+    (query/truth_checks.forget_records). Never fails the scrub it rides on. This flow knows record ids, not their
+    tables, so the store removes a check only when its record is gone from the check's own table: a colliding id in
+    another checked table keeps its check."""
     try:
         from ...query.truth_checks import forget_records
 

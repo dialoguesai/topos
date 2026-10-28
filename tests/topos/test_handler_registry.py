@@ -156,6 +156,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "messenger_person_provenance",
     "messenger_person_rate",
     "messenger_person_undo",
+    "messenger_rating_candidates",
     "messenger_relationship_signals",
     "messenger_relationships",
     "migrate_browser_plugin_app_id",

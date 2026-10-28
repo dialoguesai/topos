@@ -307,12 +307,30 @@ def read_luck_surface(conn: Any, *, dataset_id: str,
 def read_person_graph(conn: Any, *, dataset_id: str,
                       include_automated: bool = False,
                       include_third_party: bool = False,
-                      include_dismissed: bool = False) -> Dict[str, Any]:
+                      include_dismissed: bool = False,
+                      include_structure: bool = True,
+                      include_heard_about: bool = True) -> Dict[str, Any]:
     """The person-centric graph: one node per person, evidence-gated, owner first.
 
     Computed at read like the bench and the luck surface — 441 nodes in ~6ms on the live
     corpus, which is a page load. Storing it would mean a graph that quietly describes last
     month's relationships.
+
+    Two parts are optional, on by default so every caller that asked before gets what it
+    got:
+
+    * `include_structure` — communities, degree and betweenness, and the context-affinity
+      layer the clustering takes as its second input (`shared_context_affinity`,
+      `structural_metrics`).
+    * `include_heard_about` — what of the owner's own work each person has heard about,
+      through the luck rail's resolver (`attach_heard_about`).
+
+    Measured on a copy of the owner's database (2,893 nodes, 28 Oct 2026): the whole read
+    10.2 s warm, of which structure 3.4 s, context affinity 1.4 s and heard-about 4.1 s. A
+    caller that wants one node, or the nodes alone (provenance, the reading lane), turns
+    both off and pays the rest. Off, a node carries no `community_id`, `centrality_*`,
+    `brokerage_meaningful`, `reach` or `heard_about`, and the answer says so under
+    `structure`, `context_coverage` and `heard_about` rather than reporting zeros.
     """
     from .dataset_resolution import resolve_messaging_dataset
     from .person_graph import (attach_closeness, attach_coactivity, attach_fact_closeness,
@@ -368,7 +386,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # What of the owner's OWN work this person has heard about — the owner's DMs to them
     # that name a body of work, through the luck rail's resolver. Per person here, per
     # work item there; same events, so the two screens agree.
-    heard_stats = attach_heard_about(conn, dataset_id, nodes)
+    heard_stats = (attach_heard_about(conn, dataset_id, nodes) if include_heard_about
+                   else {"attached": 0, "events": 0, "skipped": True})
     # The owner's informant ratings — stated facts about this person, labelled as such.
     disposition_stats = person_disposition_facts(conn, nodes)
     # The commitment ledger, owner's half: what the owner promised this person, in the
@@ -403,21 +422,27 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # layer: people who share a subject are pulled together in the grouping even when the
     # messaging record never connected them. It is still never drawn and never counted as a
     # tie — see structural_metrics for where the two layers separate.
-    context = shared_context_affinity(conn, dataset_id, nodes)
-    structure = structural_metrics(conn, dataset_id, nodes,
-                                   context_pairs=context.get("pairs") or [],
-                                   include_third_party=include_third_party)
-    for n in nodes:
-        nid = str(n["node_id"])
-        n["community_id"] = structure["communities"].get(nid)
-        n["centrality_degree"] = structure["degree"].get(nid, 0.0)
-        n["centrality_betweenness"] = structure["betweenness"].get(nid, 0.0)
-        n["brokerage_meaningful"] = bool(structure.get("brokerage_meaningful", {}).get(nid))
-        reach = (structure.get("reach") or {}).get(nid)
-        if reach:
-            # `meaningful` carries the same component-size rule as brokerage: a cut-off
-            # claim inside a four-person corner is arithmetic, a leaf count is a fact.
-            n["reach"] = {**reach, "meaningful": bool(n["brokerage_meaningful"])}
+    if include_structure:
+        context = shared_context_affinity(conn, dataset_id, nodes)
+        structure = structural_metrics(conn, dataset_id, nodes,
+                                       context_pairs=context.get("pairs") or [],
+                                       include_third_party=include_third_party)
+        for n in nodes:
+            nid = str(n["node_id"])
+            n["community_id"] = structure["communities"].get(nid)
+            n["centrality_degree"] = structure["degree"].get(nid, 0.0)
+            n["centrality_betweenness"] = structure["betweenness"].get(nid, 0.0)
+            n["brokerage_meaningful"] = bool(structure.get("brokerage_meaningful", {}).get(nid))
+            reach = (structure.get("reach") or {}).get(nid)
+            if reach:
+                # `meaningful` carries the same component-size rule as brokerage: a cut-off
+                # claim inside a four-person corner is arithmetic, a leaf count is a fact.
+                n["reach"] = {**reach, "meaningful": bool(n["brokerage_meaningful"])}
+    else:
+        # Not computed, and said so: a zero here would read as "no community, no reach".
+        skipped = {"skipped": True, "reason": "structure not requested"}
+        context = {"pairs": [], "coverage": dict(skipped)}
+        structure = {"coverage": dict(skipped)}
     # People who turn up in the same subjects. A pull on the LAYOUT only: not an edge, not a
     # community, nothing that changes a colour or a count. The graph places people by their
     # relationship to the owner and to each other through messages, and neither of those
@@ -515,12 +540,34 @@ def read_naming_queue(conn: Any, *, dataset_id: str, limit: int = 25) -> Dict[st
     return out
 
 
+def read_rating_candidates(conn: Any, *, dataset_id: str, limit: int = 25) -> Dict[str, Any]:
+    """The calibration screen's ratings card: the people the owner can rate, busiest first,
+    and how many there are. From the dyad stats, the identity spine, the overlay and the
+    disposition facts alone — never the whole graph (`analytics/rating_candidates`)."""
+    from .dataset_resolution import resolve_messaging_dataset
+    from .rating_candidates import CANDIDATE_BASIS, RATED_DOMAINS, rating_candidates
+
+    for table, reason in (("entities", "entity extraction has not run on this node yet"),
+                          ("messenger_dyad_stats", "messaging analytics have not run on this node yet")):
+        if _table_missing(conn, table):
+            return {"dataset_id": dataset_id, "limit": int(limit), "candidates": [],
+                    "unrated_count": 0, "candidate_basis": CANDIDATE_BASIS,
+                    "rated_domains": list(RATED_DOMAINS), "coverage": {"reason": reason}}
+    dataset_id, dataset_resolved = resolve_messaging_dataset(conn, dataset_id)
+    out = rating_candidates(conn, dataset_id, limit=limit)
+    out["dataset_resolved_by_engine"] = dataset_resolved
+    return out
+
+
 def read_person_provenance(conn: Any, *, dataset_id: str, node_id: str,
                            limit: int = 20) -> Dict[str, Any]:
     """C-6 — "why is this person here?" Without it, band/merge/dismiss are guesses."""
     from .person_graph import person_provenance
 
-    graph = read_person_graph(conn, dataset_id=dataset_id, include_dismissed=True)
+    # One node is wanted; the structure and the heard-about rail (7.5 of the graph's 10 s
+    # on the owner's node) say nothing a provenance answer reads.
+    graph = read_person_graph(conn, dataset_id=dataset_id, include_dismissed=True,
+                              include_structure=False, include_heard_about=False)
     node = next((n for n in graph.get("nodes", []) if str(n.get("node_id")) == str(node_id)),
                 None)
     if node is None:

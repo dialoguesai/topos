@@ -47,7 +47,9 @@ a stopped Ollama never marks a week of rows ``unable``.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -73,6 +75,49 @@ SOURCE_KINDS = {"imessage": "message", "signal": "message", "transcripts": "tran
 RECHECK_COOLDOWN_S = 6 * 3600
 CONTEXT_TURNS = 6
 PAUSE_S = 600
+#: Calibrate step 1 (owner, 27 Oct 2026): "claims are mine; other people's messages are evidence, not claims". On, the
+#: lane checks only the owner's own rows (their messages, their transcript turns, their journal); a contact's message is
+#: never queued or re-checked, and stays readable as evidence. Off: every row of the chosen sources, as in 1.5.28 (in
+#: the lane's first week 685 of its 804 iMessage checks were contacts' messages, which the owner could not label).
+OWNER_CLAIMS_ONLY = True
+_OWNER_ROWS = {"conversation_messages": " AND (m.is_from_self = 1 OR LOWER(COALESCE(m.sender_id, '')) = 'self')",
+               "transcript_segments": " AND m.is_from_self = 1"}
+
+#: VERIFY_V2_WARM_LOCAL (verify_claim tracker round r2; off unless ``TOPOS_VERIFY_V2_WARM_LOCAL=1``). The node's Ollama
+#: holds one model at a time and the derivation lane swaps its 9B extractor and 27B verifier all day (the owner's
+#: node, 27 Oct 2026: the 9B loaded 37 times and the 27B 12 times in one day; a cold 9B load took 76 s, a warm reader
+#: call 9-13 s). A check that lands on a swap spends its 20 s reader cap waiting for the load and is stored ``unable``;
+#: after three such checks the row is never checked again (91 of 91 ``unable`` rows in the lane's first week). With
+#: the switch on, a local check first makes sure the lane's model is loaded, outside the row's deadline and reader cap;
+#: a load that does not finish defers the rest of the batch and stores nothing, so no attempt is spent on a swap.
+WARM_LOCAL_ENV = "TOPOS_VERIFY_V2_WARM_LOCAL"
+#: The longest a load may take before the batch is deferred (a cold 9B behind a 27B unload took 76 s).
+WARM_TIMEOUT_S = 120.0
+
+
+def warm_local_on() -> bool:
+    return os.environ.get(WARM_LOCAL_ENV, "").strip() == "1"
+
+
+def ensure_warm(chat: Any) -> Tuple[bool, float]:
+    """(ready, seconds spent loading). A chat with no ``resident``/``warm`` (the hosted one) is always ready. When the
+    server cannot say whether the model is loaded, it is loaded anyway: the load call is cheap on a loaded model."""
+    resident, warm = getattr(chat, "resident", None), getattr(chat, "warm", None)
+    if resident is None or warm is None:
+        return True, 0.0
+    try:
+        if resident():
+            return True, 0.0
+    except Exception:  # noqa: BLE001 — an unanswered /api/ps is not a reason to skip the load
+        pass
+    started = time.monotonic()
+    try:
+        warm(WARM_TIMEOUT_S)
+    except Exception:  # noqa: BLE001 — ModelUnavailable or anything else: the row waits for the next batch
+        return False, time.monotonic() - started
+    return True, time.monotonic() - started
+
+
 #: ``model_unavailable:<cause>`` causes that pause the lane instead of storing an ``unable`` row.
 HOSTED_PAUSE_CAUSES = frozenset({"http_402", "insufficient_credits", "no_hosted_key"})
 LOCAL_PAUSE_CAUSES = frozenset({"URLError"})
@@ -113,6 +158,9 @@ def _chosen(sources: List[str]) -> List[Tuple[str, str, str, str, tuple]]:
         out.append(("journal_entries", "entry_id", "entry_at", "", ()))
     if "transcripts" in sources:
         out.append(("transcript_segments", "segment_id", "event_at", " AND COALESCE(m.actor_role, 'ambient') != 'ambient'", ()))
+    if OWNER_CLAIMS_ONLY:  # a cheap pre-filter; _prepare still applies the full owner rule (truth_checks._owner_row)
+        out = [(table, id_column, time_column, extra + _OWNER_ROWS.get(table, ""), params)
+               for table, id_column, time_column, extra, params in out]
     return out
 
 
@@ -148,7 +196,7 @@ def recheck_due(conn: Any, sources: List[str], signature: Any, limit: int, *,
         return []
     moment = now or datetime.now(timezone.utc)
     columns = state_columns(conn)
-    found: List[Tuple[str, str, str]] = []
+    found: List[Tuple[bool, str, str, str]] = []
     for table, id_column, _, extra, params in _chosen(sources):
         if not _present(conn, table):
             continue
@@ -157,10 +205,11 @@ def recheck_due(conn: Any, sources: List[str], signature: Any, limit: int, *,
             f"ON m.{id_column} = c.record_id WHERE c.record_table = ? AND c.verdict = 'unable' "
             f"AND m.content IS NOT NULL AND TRIM(m.content) != ''{extra}", (table, *params)).fetchall()
         for created, record_id, *state in rows:
-            if recheck_reason(state_of(state), signature, now=moment, cooldown_s=RECHECK_COOLDOWN_S):
-                found.append((str(created or ""), table, str(record_id)))
-    found.sort(key=lambda item: item[0], reverse=True)
-    return [[table, record_id] for _, table, record_id in found[:limit]]
+            why = recheck_reason(state_of(state), signature, now=moment, cooldown_s=RECHECK_COOLDOWN_S)
+            if why:
+                found.append((why == "due", str(created or ""), table, str(record_id)))
+    found.sort(key=lambda item: (item[0], item[1]), reverse=True)  # a plan past its due moment first, then newest check first
+    return [[table, record_id] for _, _, table, record_id in found[:limit]]
 
 
 def read_timeout_for(model: str) -> float:
@@ -273,6 +322,22 @@ def _prepare(conn: Any, table: str, record_id: str, sources: List[str], signatur
     record = load_record(conn, table, record_id, names)
     if record is None or record["source"] not in sources or not record["text"].strip():
         return None
+    if OWNER_CLAIMS_ONLY and not record["owner"]:
+        return None
+    reading, as_of = None, None
+    if state is not None and state.get("reading_json"):  # a re-check runs from what the reader made of the row once
+        try:
+            stored = json.loads(str(state["reading_json"]))
+            if isinstance(stored, dict) and stored.get("claims"):
+                reading = {"category": stored.get("category") or state.get("category"), "claims": stored["claims"]}
+        except ValueError:
+            reading = None
+    if state is not None and state.get("due_at"):  # a plan is checked as of the end of its window plus the grace
+        from ..query.truth_checks import instant
+        from ..query.verify_v2 import INTENTION_GRACE_S
+
+        due = instant(state["due_at"])
+        as_of = (due + timedelta(seconds=INTENTION_GRACE_S)).isoformat() if due else None
     request = ClaimRequest(
         statement=record["text"][:STATEMENT_CHARS],
         context=previous_turns(conn, record, CONTEXT_TURNS, names),
@@ -283,6 +348,11 @@ def _prepare(conn: Any, table: str, record_id: str, sources: List[str], signatur
         deadline_s=DEADLINE_S,
         read_timeout_s=signature[2],
         source_kind=SOURCE_KINDS.get(record["source"], "message"),
+        speaker_is_owner=bool(record["owner"]),
+        source_ref=f"{table}:{record_id}",
+        conversation_id=record.get("conversation_id"),
+        reading=reading,
+        as_of=as_of,
     )
     record.pop("row", None)
     return record, request, (state["attempts"] + 1 if state else 1)
@@ -310,14 +380,19 @@ def pause_cause(result: Dict[str, Any], hosted: bool) -> Optional[str]:
 
 
 def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional[str],
-              read_timeout_s: Optional[float] = None) -> Dict[str, Any]:
+              read_timeout_s: Optional[float] = None, said_at: Optional[str] = None) -> Dict[str, Any]:
     """The ``truth_checks`` row for one verify_claim v2 answer: verdict, the reader's main claim, cited refs only,
     stamped with the engine build (the answer's ``version``, else ``VERSION``: a row the engine's gate refused got no
-    answer, but the gate is the engine's own; and the sha16 of ``verify_v2.py``)."""
+    answer, but the gate is the engine's own; and ``engine_sha16()``, one digest over the engine's four files). With the
+    answer's ``reading`` (what the reader made of the row), the row also carries it, the main claim's polarity and
+    polarity-blind key, the record's own time (``said_at``) and how many owner labels the check was shown."""
     from ..query.truth_checks import VERDICTS
-    from ..query.verify_v2 import VERSION, engine_sha16
+    from ..query.verify_v2 import VERSION, due_at_for, engine_sha16, reading_key
 
     verdict, reason = result.get("verdict"), result.get("reason")
+    contradicted = verdict == "contradicted"  # stored as no_evidence + the flag (truth_checks._ADDED_COLUMNS)
+    if contradicted:
+        verdict, reason = "no_evidence", "contradicted"
     if verdict == "unable" and str(reason or "").startswith("not_checkable:"):
         verdict = "not_checkable"
     if verdict not in VERDICTS:
@@ -331,6 +406,10 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
         if table and record_id:
             cited.append({"table": table, "record_id": record_id, "role": item.get("role"), "date": item.get("date")})
     latency = (result.get("timings_ms") or {}).get("total")
+    reading = result.get("reading") if isinstance(result.get("reading"), dict) and result["reading"].get("claims") else None
+    claim_key, polarity = reading_key(reading) if reading else (None, None)
+    retrieve = (result.get("stages") or {}).get("retrieve") if isinstance(result.get("stages"), dict) else None
+    shown = retrieve.get("owner_labels") if isinstance(retrieve, dict) else None
     return {
         "record_table": record["table"], "record_id": record["record_id"], "conversation_id": record.get("conversation_id"),
         "source": record["source"], "speaker_kind": "owner" if record["owner"] else "contact",
@@ -338,6 +417,10 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
         "verdict": verdict, "reason": str(reason)[:120] if reason else None, "cited_refs": cited, "effort": EFFORT,
         "model": model, "latency_ms": latency, "read_timeout_s": read_timeout_s,
         "engine_version": str(result.get("version") or VERSION)[:80], "engine_sha16": engine_sha16() or None,
+        "contradicted": contradicted,
+        "reading_json": json.dumps(reading) if reading else None, "polarity": polarity, "claim_key": claim_key,
+        "said_at": said_at, "owner_labels_shown": int(shown or 0) if isinstance(retrieve, dict) else None,
+        "due_at": due_at_for(reading, said_at) if reading else None,
     }
 
 
@@ -413,34 +496,75 @@ async def execute_truth_check(payload: Dict[str, Any], *, pacer: Optional[Pacer]
     signature = signature_for(chat, settings["model"])
     started = time.monotonic()
     counts = {"checked": 0, "not_checkable_by_gate": 0, "skipped": 0, "deferred": 0, "paused": False, "rechecked": 0}
+    daily: Dict[str, Dict[str, int]] = {}  # the lane's denominator, by source (truth_checks.LANE_DAILY_TABLE)
+
+    def tally(source: str, key: str, n: int = 1) -> None:
+        daily.setdefault(source, {}).setdefault(key, 0)
+        daily[source][key] += n
+    try:
+        return await _run_batch(records, settings, chat, pace, signature, started, counts, tally, hosted, gate)
+    finally:
+        try:
+            await asyncio.to_thread(_db, _count_lane, daily)
+        except Exception:  # noqa: BLE001 — the denominator never fails a batch
+            logger.warning("truth lane daily counts not stored", exc_info=True)
+
+
+def _count_lane(conn: Any, daily: Dict[str, Dict[str, int]]) -> None:
+    from ..query.truth_checks import count_lane
+
+    count_lane(conn, daily)
+
+
+async def _run_batch(records, settings, chat, pace, signature, started, counts, tally, hosted, gate) -> Dict[str, Any]:
+    warming = not hosted and warm_local_on()
+    if warming:
+        counts.update({"warmed": 0, "warm_failed": 0, "warm_s": 0.0})
     for index, (table, record_id) in enumerate(records):
         if time.monotonic() - started >= JOB_BUDGET_S:
             counts["deferred"] = len(records) - index
+            tally("unresolved", "deferred", len(records) - index)
             break
         prepared = await asyncio.to_thread(_db, _prepare, table, record_id, settings["sources"], signature)
         if prepared is None:
             counts["skipped"] += 1
+            tally("unresolved", "skipped")
             continue
         record, request, attempt = prepared
+        tally(record["source"], "queued")
         refused = gate(request.statement)
         if refused:
             # The engine's own gate, asked first: a refused row is stored without a model call or a pacing slot.
             row = check_row(record, {"verdict": "unable", "reason": f"not_checkable:{refused}",
-                                     "timings_ms": {"total": 0.0}}, model=None)
+                                     "timings_ms": {"total": 0.0}}, model=None, said_at=request.said_at)
             await asyncio.to_thread(_db, _store, row, attempt)
             counts["not_checkable_by_gate"] += 1
             counts["rechecked"] += int(attempt > 1)
+            tally(record["source"], "gated")
             continue
         await pace.wait(settings["rate_per_minute"])
+        if warming:
+            ready, spent = await asyncio.to_thread(ensure_warm, chat)
+            if spent:
+                counts["warmed"] += int(ready)
+                counts["warm_s"] = round(counts["warm_s"] + spent, 1)
+            if not ready:
+                counts["warm_failed"] += 1
+                counts["deferred"] = len(records) - index
+                tally(record["source"], "deferred", len(records) - index)
+                break
         result = await _verify(request, chat)
         cause = pause_cause(result, hosted)
         if cause:
             await asyncio.to_thread(_db, _pause, cause)
             counts["paused"] = True
             counts["deferred"] = len(records) - index
+            tally(record["source"], "paused")
+            tally(record["source"], "deferred", len(records) - index)
             break
-        row = check_row(record, result, model=_model_label(chat), read_timeout_s=request.read_timeout_s)
+        row = check_row(record, result, model=_model_label(chat), read_timeout_s=request.read_timeout_s, said_at=request.said_at)
         await asyncio.to_thread(_db, _store, row, attempt)
+        tally(record["source"], "checked")
         counts["checked"] += 1
         counts["rechecked"] += int(attempt > 1)
     return {"status": "ok", **counts}
