@@ -488,12 +488,46 @@ async def handle_messenger_analytics_periods(message: Dict[str, Any]) -> Optiona
 # never serve different fields than the local API. A contract test calls both transports on
 # one fixture and asserts byte-equal payloads.
 
+@handles("messenger_rating_candidates", off_loop=True)
+async def handle_rating_candidates(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The calibration screen's ratings card: the people the owner can rate, busiest first.
+
+    Delegates to `relationship_reads.read_rating_candidates`, as the HTTP route does. Off
+    the loop from the start: the card used to read the whole person graph through
+    `handle_relationship_reads`, on the app's loop, and the 22.6 s stall of 28 Oct 2026
+    (`loop_lag_end`, frames inside that read) held every other owner frame behind it.
+    """
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+
+    from ...analytics import relationship_reads as reads
+
+    try:
+        result = reads.read_rating_candidates(
+            conn, dataset_id=(payload.get("dataset_id") or "").strip(),
+            limit=min(max(int(payload.get("limit") or 25), 1), 200))
+    except Exception as exc:  # noqa: BLE001 — a read must answer, never hang the relay
+        return {"id": req_id, "status": "error", "error": str(exc)[:200]}
+    return {"id": req_id, "status": "ok", "payload": {"status": "ok", **result}}
+
+
+# Off the loop (NR166 R3b) since 28 Oct 2026. None of these reads awaits, and on the loop
+# the person graph (10 s on the owner's node) stalled every other request: the node's log
+# that day has a 22.6 s `loop_lag_end` on the app loop whose frames sit in
+# `read_person_graph` under this handler, with the calibration catalog and the truth cards
+# queued behind it. The dispatcher runs the body in a worker thread on that thread's own
+# connection; the writes (curate, rate, undo) take the write gate there, where it belongs.
 @handles("messenger_relationships", "messenger_relationship_signals",
          "messenger_directed_edges", "messenger_bench", "messenger_luck_surface",
          "messenger_person_graph", "messenger_naming_queue",
          "messenger_person_provenance", "messenger_person_curate",
          "messenger_person_undo", "messenger_curation_history",
-         "messenger_person_rate")
+         "messenger_person_rate", off_loop=True)
 async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -537,7 +571,9 @@ async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[st
                 result = reads.read_person_graph(
                     conn, dataset_id=dataset_id,
                     include_automated=bool(payload.get("include_automated", False)),
-                    include_third_party=bool(payload.get("include_third_party", False)))
+                    include_third_party=bool(payload.get("include_third_party", False)),
+                    include_structure=bool(payload.get("include_structure", True)),
+                    include_heard_about=bool(payload.get("include_heard_about", True)))
             elif msg_type == "messenger_person_provenance":
                 result = reads.read_person_provenance(
                     conn, dataset_id=dataset_id,
