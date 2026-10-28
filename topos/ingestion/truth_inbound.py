@@ -48,6 +48,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -73,6 +74,41 @@ SOURCE_KINDS = {"imessage": "message", "signal": "message", "transcripts": "tran
 RECHECK_COOLDOWN_S = 6 * 3600
 CONTEXT_TURNS = 6
 PAUSE_S = 600
+#: VERIFY_V2_WARM_LOCAL (verify_claim tracker round r2; off unless ``TOPOS_VERIFY_V2_WARM_LOCAL=1``). The node's Ollama
+#: holds one model at a time and the derivation lane swaps its 9B extractor and 27B verifier all day (the owner's
+#: node, 27 Oct 2026: the 9B loaded 37 times and the 27B 12 times in one day; a cold 9B load took 76 s, a warm reader
+#: call 9-13 s). A check that lands on a swap spends its 20 s reader cap waiting for the load and is stored ``unable``;
+#: after three such checks the row is never checked again (91 of 91 ``unable`` rows in the lane's first week). With
+#: the switch on, a local check first makes sure the lane's model is loaded, outside the row's deadline and reader cap;
+#: a load that does not finish defers the rest of the batch and stores nothing, so no attempt is spent on a swap.
+WARM_LOCAL_ENV = "TOPOS_VERIFY_V2_WARM_LOCAL"
+#: The longest a load may take before the batch is deferred (a cold 9B behind a 27B unload took 76 s).
+WARM_TIMEOUT_S = 120.0
+
+
+def warm_local_on() -> bool:
+    return os.environ.get(WARM_LOCAL_ENV, "").strip() == "1"
+
+
+def ensure_warm(chat: Any) -> Tuple[bool, float]:
+    """(ready, seconds spent loading). A chat with no ``resident``/``warm`` (the hosted one) is always ready. When the
+    server cannot say whether the model is loaded, it is loaded anyway: the load call is cheap on a loaded model."""
+    resident, warm = getattr(chat, "resident", None), getattr(chat, "warm", None)
+    if resident is None or warm is None:
+        return True, 0.0
+    try:
+        if resident():
+            return True, 0.0
+    except Exception:  # noqa: BLE001 — an unanswered /api/ps is not a reason to skip the load
+        pass
+    started = time.monotonic()
+    try:
+        warm(WARM_TIMEOUT_S)
+    except Exception:  # noqa: BLE001 — ModelUnavailable or anything else: the row waits for the next batch
+        return False, time.monotonic() - started
+    return True, time.monotonic() - started
+
+
 #: ``model_unavailable:<cause>`` causes that pause the lane instead of storing an ``unable`` row.
 HOSTED_PAUSE_CAUSES = frozenset({"http_402", "insufficient_credits", "no_hosted_key"})
 LOCAL_PAUSE_CAUSES = frozenset({"URLError"})
@@ -413,6 +449,9 @@ async def execute_truth_check(payload: Dict[str, Any], *, pacer: Optional[Pacer]
     signature = signature_for(chat, settings["model"])
     started = time.monotonic()
     counts = {"checked": 0, "not_checkable_by_gate": 0, "skipped": 0, "deferred": 0, "paused": False, "rechecked": 0}
+    warming = not hosted and warm_local_on()
+    if warming:
+        counts.update({"warmed": 0, "warm_failed": 0, "warm_s": 0.0})
     for index, (table, record_id) in enumerate(records):
         if time.monotonic() - started >= JOB_BUDGET_S:
             counts["deferred"] = len(records) - index
@@ -432,6 +471,15 @@ async def execute_truth_check(payload: Dict[str, Any], *, pacer: Optional[Pacer]
             counts["rechecked"] += int(attempt > 1)
             continue
         await pace.wait(settings["rate_per_minute"])
+        if warming:
+            ready, spent = await asyncio.to_thread(ensure_warm, chat)
+            if spent:
+                counts["warmed"] += int(ready)
+                counts["warm_s"] = round(counts["warm_s"] + spent, 1)
+            if not ready:
+                counts["warm_failed"] += 1
+                counts["deferred"] = len(records) - index
+                break
         result = await _verify(request, chat)
         cause = pause_cause(result, hosted)
         if cause:

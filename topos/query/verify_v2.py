@@ -110,6 +110,12 @@ GROUNDED_DERIVED = True
 #: owner's development rows it added true and false support at the same rate (yes 9 -> 12 of 28, no 5 -> 9 of 27),
 #: the judge agreeing on loosely matched chunks either way. Facts and goals with source refs ground regardless.
 GROUNDED_VECTOR = False
+#: VERIFY_V2_LEAN_READ (verify_claim tracker round r2): the reader's schema allows only as many claims as the request's
+#: effort checks. At effort low (the inbound lane) one claim is checked, but the reader was still asked for up to three,
+#: each with eight fields: on the owner's node a spent row's reader wrote 343 tokens for three claims and took 21.5 s
+#: against the lane's 20 s cap (27 Oct 2026). Generation is greedy and left to right, so the first claim is written the
+#: same way either way; the grammar only closes the list after it. Off: the reader is asked for up to three, as before.
+LEAN_READ = False
 ROLE_RANK = {"authored": 0, "addressed": 1, "participated": 2, "observed": 3, "ambient": 4, "derived": 5}
 #: Embedding record types that name a source table when the retrieval item itself carries none.
 EMBEDDED_TABLES = {"conversation_message": "conversation_messages", "ai_chat_message": "ai_chat_messages",
@@ -260,6 +266,24 @@ def _read_schema(why_not) -> Dict[str, Any]:
 
 READ_SCHEMA = _read_schema(WHY_NOT)
 READ_SCHEMA_WITH_OTHERS = _read_schema(w for w in WHY_NOT if w != "not_about_the_owner")
+
+
+@lru_cache(maxsize=None)
+def _lean_read_schema(about_others: bool, max_claims: int) -> Dict[str, Any]:
+    schema = _read_schema(w for w in WHY_NOT if not about_others or w != "not_about_the_owner")
+    schema["properties"]["claims"]["maxItems"] = max_claims
+    return schema
+
+
+def read_schema_for(req: "ClaimRequest") -> Dict[str, Any]:
+    """The reader's output schema for a request: up to MAX_CLAIMS claims, or with LEAN_READ on, no more than its effort
+    checks."""
+    if LEAN_READ:
+        levels = efforts()
+        wanted = int((levels.get(req.effort) or levels["high"])["claims"])
+        if 0 < wanted < MAX_CLAIMS:
+            return _lean_read_schema(bool(req.about_others), wanted)
+    return READ_SCHEMA_WITH_OTHERS if req.about_others else READ_SCHEMA
 
 LABEL_SYSTEM = """You check excerpts from a person's own records against one claim. Each excerpt is numbered and shows its
 source, its date (UTC) and who stands behind it. Label EVERY excerpt:
@@ -455,8 +479,7 @@ def read_claims(req: ClaimRequest, chat: Callable, usage: Usage, timeout: float)
     user = (f"Conversation date: {conversation_time(req.said_at).date().isoformat()}\nSaid by: {req.speaker}\n\n"
             f"Earlier turns:\n{turns}\n\nWhat was said: {req.statement.strip()}")
     system = read_system(bool(req.about_others), req.source_kind)
-    schema = READ_SCHEMA_WITH_OTHERS if req.about_others else READ_SCHEMA
-    out = chat(system, user, schema, timeout, usage)
+    out = chat(system, user, read_schema_for(req), timeout, usage)
     category = out.get("category") if out.get("category") in CATEGORIES else "did"
     why = out.get("not_checkable_because") if out.get("not_checkable_because") in WHY_NOT else None
     if category == "meta":
