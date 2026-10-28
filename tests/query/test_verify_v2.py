@@ -3,6 +3,7 @@
 Synthetic only: a fake model, a fake retrieval, no database, no network.
 """
 import asyncio
+import os
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -972,7 +973,26 @@ def test_a_plans_due_moment_is_the_end_of_its_last_day_in_the_speakers_own_zone(
     assert v2.said_zone("2026-10-07T19:47:36Z") == timezone.utc and v2.said_zone(None) is not None
 
 
-def test_a_plan_waits_until_its_window_and_the_grace_have_passed_then_is_checked_from_the_stored_reading():
+@pytest.fixture
+def node_zone():
+    """The zone the plan fixtures were written in (their said time is -05:00). Plan days and due moments are read in
+    the node's LOCAL zone (``truth_checks.with_offset`` gives ``said_at`` the node's offset; ``intention_period`` takes
+    the said day locally), so a test that pins a due instant pins that zone too, instead of inheriting the host's:
+    on 27 Oct 2026 the two plan tests passed on the owner's Mac and failed on CI, which runs in UTC."""
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Chicago"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+def test_a_plan_waits_until_its_window_and_the_grace_have_passed_then_is_checked_from_the_stored_reading(node_zone):
     """The R-11 fixture: a plan said day 0 in thread T, the record that shows it done on day +2 in the SAME thread, due
     day +1, grace 7 days. Said: no retrieval, no judge, "waiting_until" the due moment. Checked as of that moment from
     the stored reading: the record is cited (the same-thread window is two-sided around the statement, so a reply two

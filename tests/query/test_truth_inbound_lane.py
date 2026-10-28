@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -1133,7 +1135,26 @@ def test_a_plan_row_waits_for_its_due_moment_and_is_counted_as_a_plan_not_as_una
     assert entry["unable"] == 0 and entry["to_confirm"] == 0 and entry["checked"] == 1 and entry["by_source"]["journal"] == 1
 
 
-def test_a_due_plan_goes_first_and_is_checked_as_of_its_moment_from_the_stored_reading(node, monkeypatch):
+@pytest.fixture
+def node_zone():
+    """The zone the plan fixtures were written in (their said time is -05:00). Plan days and due moments are read in
+    the node's LOCAL zone (``truth_checks.with_offset`` gives ``said_at`` the node's offset; ``intention_period`` takes
+    the said day locally), so a test that pins a due instant pins that zone too, instead of inheriting the host's:
+    on 27 Oct 2026 the two plan tests passed on the owner's Mac and failed on CI, which runs in UTC."""
+    old = os.environ.get("TZ")
+    os.environ["TZ"] = "America/Chicago"
+    time.tzset()
+    try:
+        yield
+    finally:
+        if old is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = old
+        time.tzset()
+
+
+def test_a_due_plan_goes_first_and_is_checked_as_of_its_moment_from_the_stored_reading(node, monkeypatch, node_zone):
     _plan_row(node.conn)
     add_journal(node.conn, "j-late", "I finished building the garden shed this morning.")
     node.conn.commit()
