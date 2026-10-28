@@ -110,8 +110,14 @@ async def run_db_read(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
     built from the connection (a ``BlackholeGuard``, a store) must build it
     inside ``fn`` too — one constructed on the loop thread carries the loop
     thread's handle in with it.
+
+    Inside an owner request (``core.owner_requests``: the owner's ``signal_*``, ``truth_*`` and ``calibration_*``
+    doors and ``get_device_info``) the worker is the owner executor's, which no rebuild, embedding job or
+    derivation batch ever uses; anywhere else it is the default pool's, as before.
     """
-    return await asyncio.to_thread(_in_worker(fn, args, kwargs))
+    from .. import owner_requests
+
+    return await owner_requests.run_off_loop(_in_worker(fn, args, kwargs))
 
 
 async def run_db_write(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
@@ -125,9 +131,11 @@ async def run_db_write(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
     write.
 
     Same connection rule as :func:`run_db_read` — resolved INSIDE the worker,
-    never threaded through by the caller.
+    never threaded through by the caller; the same executor rule too.
     """
-    return await asyncio.to_thread(_in_worker(fn, args, kwargs))
+    from .. import owner_requests
+
+    return await owner_requests.run_off_loop(_in_worker(fn, args, kwargs))
 
 
 def _resource_owner_for_mcp_log(conn: Any) -> Optional[str]:

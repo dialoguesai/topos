@@ -180,6 +180,7 @@ from typing import Callable, Literal, get_args
 
 from pydantic import model_serializer
 
+from ..core import owner_requests
 from . import switches
 from .canonical import PolicyError
 from .contract import Hash, Identifier, Number, StrictModel
@@ -1029,6 +1030,7 @@ class RefreshLoop:
             entry = due[grant_id]
             answer_gate.hold_background_start(
                 only_if=lambda: self._policy_hash(grant_id, int(self.clock())) is not None)
+            owner_requests.pace()   # between shares: an owner frame in hand goes first (core/owner_requests.py)
             with self._lock:
                 causes |= entry["causes"]
                 entry["running"] = True

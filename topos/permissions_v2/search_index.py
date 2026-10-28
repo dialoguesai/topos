@@ -73,6 +73,7 @@ _log = logging.getLogger(__name__)
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from topos.core import owner_requests
 from topos.disclosure.content_policy import is_record_nsfw
 from topos.principal import OWNER_APP, current_principal
 from topos.storage.db.write_gate import with_db_write
@@ -1352,7 +1353,9 @@ class SearchIndexService:
                                    if isinstance(review, review_types)}.values())
                           if direct else [row[0] for row in conn.execute(
                 "SELECT object_id FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL ORDER BY object_id")])
-            for fact_id in candidates:
+            for number, fact_id in enumerate(candidates):
+                if number % self.PACE_EVERY == 0:
+                    owner_requests.pace()   # between batches of the walk, on the ungated snapshot (never under the gate)
                 if fact_id in frozen.opt_outs:
                     continue
                 try:
@@ -1416,7 +1419,9 @@ class SearchIndexService:
                 from .knowledge_projections import candidates, qualify_projection
                 from .canonical import digest
                 originals=list(members.values())
-                for table,record_id in candidates(conn,[e['identity'] for e in originals],policy.search.result_types):
+                for number,(table,record_id) in enumerate(candidates(conn,[e['identity'] for e in originals],policy.search.result_types)):
+                    if number % self.PACE_EVERY == 0:
+                        owner_requests.pace()
                     try:
                         projected=qualify_projection(self.resolver,conn,snapshot_floor,frozen,None,table,record_id,policy,
                             (now-policy.search.window.max_age_seconds)*1000000,now*1000000)
@@ -1515,13 +1520,19 @@ class SearchIndexService:
     # wall time on the ungated read snapshot, and its vectors add about 14 ms to the gated
     # publish. It was 32, which left members of an ordinary grant without vectors on every build.
     EMBEDDINGS_PER_BUILD = 1024
+    #: Pacing (core/owner_requests.py): every this many candidates or members, and before every passage embedding,
+    #: the build yields while one of the owner's own frames is being handled. Only on the ungated read snapshot:
+    #: the freeze and the publish hold the gate, and `pace` never waits while this thread holds it.
+    PACE_EVERY = 32
 
     def _members(self, conn, key, grant_id, members, model, *, frozen=None):
         built = []
         remaining_embeddings = self.EMBEDDINGS_PER_BUILD
         has_embeddings = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_embeddings'").fetchone() is not None
-        for entry in members.values():
+        for number, entry in enumerate(members.values()):
+            if number % self.PACE_EVERY == 0:
+                owner_requests.pace()
             identity, row = entry["identity"], entry["row"]
             opaque = opaque_record_id(key, grant_id=grant_id, table=identity.table, source_id=identity.source_id,
                                       dataset_id=identity.dataset_id, record_id=identity.record_id)
@@ -1560,6 +1571,7 @@ class SearchIndexService:
                 content = rank_text
                 if isinstance(content, str) and len(content.encode("utf-8")) <= 65536:
                     remaining_embeddings -= 1
+                    owner_requests.pace()   # 8-18 ms of CPU each: the owner's frame goes first
                     try:
                         candidate = self.passage_embedder(content, model)
                         if (isinstance(candidate, (list, tuple)) and 0 < len(candidate) <= 4096
