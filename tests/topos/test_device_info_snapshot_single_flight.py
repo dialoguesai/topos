@@ -128,10 +128,38 @@ async def test_a_first_walk_that_outlasts_the_wait_answers_without_numbers_and_t
     walk = SlowWalk(seconds=0.5)
     snapshot = local_mod.StorageSnapshot(walk, ttl_s=60.0, first_wait_s=0.1)
     started = time.monotonic()
-    assert await asyncio.to_thread(snapshot.get, tmp_path / "database.db") == (None, None)
+    assert await snapshot.wait(tmp_path / "database.db") == (None, None)       # the coroutine's wait
     assert time.monotonic() - started < 0.45
+    assert snapshot.in_flight                                                  # the walk goes on
     await asyncio.to_thread(_wait_until, lambda: not snapshot.in_flight, 5.0)
     assert snapshot.get(tmp_path / "database.db")[0] == 4096 and walk.calls == 1
+    walk.calls = 0
+    snapshot = local_mod.StorageSnapshot(walk, ttl_s=60.0, first_wait_s=0.1)
+    assert await asyncio.to_thread(snapshot.get, tmp_path / "database.db") == (None, None)   # the plain caller's
+    await asyncio.to_thread(_wait_until, lambda: not snapshot.in_flight, 5.0)
+    assert snapshot.latest(tmp_path / "database.db")[0] == 4096 and walk.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_twenty_cold_readers_hold_no_thread_while_they_wait_for_the_first_walk(device):
+    """The first read after a start awaits the walk's future. With the loop's default pool reduced to one parked
+    worker, twenty cold reads still all answer when the one walk ends: none of them queued for a thread."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    service, snapshot, walk, _clock = device
+    pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="parked")
+    asyncio.get_running_loop().set_default_executor(pool)
+    release = threading.Event()
+    parked = asyncio.create_task(asyncio.to_thread(release.wait, 30))
+    try:
+        started = time.monotonic()
+        infos = await asyncio.gather(*[service.get_device_info() for _ in range(20)])
+        assert time.monotonic() - started < 1.0
+        assert walk.calls == 1 and {info.database_size_bytes for info in infos} == {4096}
+    finally:
+        release.set()
+        await parked
+        pool.shutdown(wait=True)
 
 
 def test_the_ttl_outlasts_the_control_planes_poll():

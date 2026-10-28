@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import sqlite3
 import threading
@@ -106,9 +107,12 @@ class StorageSnapshot:
       thread of this object's own (never the loop's default pool), and no second walk of the same file starts while
       it runs;
     - every caller with a value, that first caller included, is answered at once from the last value, stale or
-      not: the refresh runs behind the caller, not on it;
+      not (``latest``): the refresh runs behind the caller, not on it;
     - only a caller with no value at all (the first read after a start) waits for the walk in flight, at most
-      ``first_wait_s``, and is answered with no numbers past that;
+      ``first_wait_s``, and is answered with no numbers past that. A coroutine waits with ``wait``, which awaits
+      the walk's future and holds no thread: twenty cold readers at once cost twenty awaits, not twenty workers
+      (a thread each, measured on a copy of the owner's database, served twelve of them past a 60 s budget);
+      a plain caller waits with ``get``;
     - a walk that raises leaves the last value where it was (the next read past the TTL tries again).
 
     ``walks`` counts the refreshes started; ``in_flight`` says whether one runs now. Both are for diagnosis and
@@ -124,6 +128,7 @@ class StorageSnapshot:
         self._cond = threading.Condition()
         self._value: Optional[Tuple[float, str, Optional[int], Optional[Dict[str, Any]]]] = None
         self._in_flight: Optional[str] = None
+        self._done: Optional[concurrent.futures.Future] = None   # the walk in flight, resolved when it ends
         self.walks = 0
 
     def _has(self, key: str) -> bool:
@@ -134,40 +139,74 @@ class StorageSnapshot:
         with self._cond:
             return self._in_flight is not None
 
-    def get(self, db_path: Path) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
-        """The last snapshot of ``db_path``; a refresh starts behind the caller when it is older than the TTL."""
+    def latest(self, db_path: Path) -> Optional[Tuple[Optional[int], Optional[Dict[str, Any]]]]:
+        """The last snapshot of ``db_path`` at once, or None when there is none yet. A refresh starts behind the
+        caller when the value is missing or older than the TTL and none runs; never blocks."""
         key = str(db_path)
         with self._cond:
             value = self._value if self._has(key) else None
             fresh = value is not None and (self.clock() - value[0]) < self.ttl_s
             if not fresh and self._in_flight != key:
                 self._start(key, db_path)
-            if value is not None:
-                return value[2], value[3]
+            return (value[2], value[3]) if value is not None else None
+
+    def get(self, db_path: Path) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+        """``latest``, or, with no value yet, the walk in flight waited for on this thread (``first_wait_s``)."""
+        value = self.latest(db_path)
+        if value is not None:
+            return value
+        key = str(db_path)
+        with self._cond:
             self._cond.wait_for(lambda: self._in_flight != key or self._has(key), self.first_wait_s)
-            value = self._value if self._has(key) else None
-            return (value[2], value[3]) if value is not None else (None, None)
+            return self._latest_or_empty(key)
+
+    async def wait(self, db_path: Path) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+        """``latest``, or, with no value yet, the walk in flight awaited (``first_wait_s``) with no thread held."""
+        value = self.latest(db_path)
+        if value is not None:
+            return value
+        key = str(db_path)
+        with self._cond:
+            done = self._done if self._in_flight == key else None
+        if done is not None:
+            try:
+                # Shielded: a timeout here must not cancel the walk's own future under its thread.
+                await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(done)), self.first_wait_s)
+            except (asyncio.TimeoutError, TimeoutError):
+                pass
+        with self._cond:
+            return self._latest_or_empty(key)
+
+    def _latest_or_empty(self, key: str) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+        """With the condition held."""
+        value = self._value if self._has(key) else None
+        return (value[2], value[3]) if value is not None else (None, None)
 
     def _start(self, key: str, db_path: Path) -> None:
         """With the condition held: one refresh, on its own thread."""
         self._in_flight = key
+        self._done = concurrent.futures.Future()
         self.walks += 1
-        threading.Thread(target=self._walk, args=(key, db_path), name="storage-snapshot", daemon=True).start()
+        threading.Thread(target=self._walk, args=(key, db_path, self._done), name="storage-snapshot",
+                         daemon=True).start()
 
-    def _walk(self, key: str, db_path: Path) -> None:
+    def _walk(self, key: str, db_path: Path, done: "concurrent.futures.Future") -> None:
         size = breakdown = None
-        done = False
+        finished = False
         try:
             size, breakdown = self._compute(db_path)
-            done = True
+            finished = True
         except Exception:  # noqa: BLE001 -- the last value stands; the next read past the TTL tries again
             logger.warning("storage snapshot walk failed", exc_info=True)
         finally:
             with self._cond:
-                if done or not self._has(key):
+                if finished or not self._has(key):
                     self._value = (self.clock(), key, size, breakdown)
                 self._in_flight = None
+                self._done = None
                 self._cond.notify_all()
+            if not done.done():
+                done.set_result(None)
 
 
 _storage_snapshot = StorageSnapshot(_compute_storage_snapshot)
@@ -267,12 +306,11 @@ class LocalDeviceService:
             if db_path is not None:
                 # dbstat + a raw-file walk on the event-loop handle stalled
                 # /healthcheck (2026-09-04 tray flicker). Own connection, off
-                # the loop; the walk is single-flight and refreshes behind the
-                # caller (StorageSnapshot), so this hop reads a value and waits
-                # only for the very first walk after a start.
-                database_size_bytes, storage_breakdown = await asyncio.to_thread(
-                    _cached_storage_snapshot, db_path
-                )
+                # the loop, on the snapshot's own thread, single-flight and
+                # refreshed behind the caller (StorageSnapshot): this reads the
+                # last value and holds no thread, and only the very first read
+                # after a start awaits the walk in flight, bounded.
+                database_size_bytes, storage_breakdown = await _storage_snapshot.wait(db_path)
 
         upgrade_fields: Dict[str, Any] = {
             "upgrade_baseline": None,
