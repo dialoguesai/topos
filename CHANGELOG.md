@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.30] — 2026-10-28
+
 ### Fixed
 - **`get_device_info` no longer walks `dbstat` on every poll.** `[O]` The control plane polls `get_device_info` every 60 s and the storage snapshot behind it was cached for 60 s, so every poll found the cache expired and walked `dbstat` over the whole file (2.85 GB, 696,303 pages on the owner's node, 28 Oct 2026): the frame was answered from its stale snapshot once a minute on the minute, a 6 s `sample` across one stall held 55 `statNext` frames, and any owner frame landing in that window waited past the control plane's relay budget ("Couldn't reach the Topos engine"). On 27 Oct six walks had run at once, one per concurrent poll. Now the walk is single-flight (`services.local.StorageSnapshot`): one refresh at a time, on a thread of its own, never the loop's default pool; every caller is answered at once from the last value and the refresh runs behind it; only the first read after a start waits for a walk, at most 20 s; a failed walk keeps the last value; the TTL is 15 minutes (storage totals do not change by the minute). Measured on a copy of the owner's database at the poll's cadence: see the pull request. No migration.
 
