@@ -175,6 +175,17 @@ STRICT_AS_OF = True
 #: evidence for it. An older message in the same thread (last week's) still counts.
 SAME_THREAD_GUARD = True
 SAME_THREAD_HOURS = 12
+#: Two dates (owner, 29 Oct 2026: a claim is measured against the date it was said). A claim has the moment it was
+#: said, which is the evidence cutoff (STRICT_AS_OF), and the time it is about, which only its own words can give.
+#: SAID_LOCAL_DAY: the reader is told the day in the zone the statement was said in. Before, it was told the UTC day,
+#: so a sentence said after 19:00 Central was dated the next day, while record days are the stored local day.
+SAID_LOCAL_DAY = False
+#: DATED_BY_WORDS: a claim keeps the reader's period only when the statement, or the turn just before it, names a time
+#: (``names_a_time``). Otherwise it is checked as of when it was said: no period, so every record up to that moment
+#: counts, and a date the reader wrote into the claim is taken out. A plan keeps its window. Measured 29 Oct on the
+#: Luke transcript: the local 9B pinned 30 of 34 answerable development sentences to the conversation day (the hosted
+#: 70B on 23 Oct, 2 to 5), and the period rule then refused the older records that showed them.
+DATED_BY_WORDS = False
 #: LABELS_AS_EVIDENCE (owner, 27 Oct 2026: "labels never feed back"): the owner's earlier labels (``verified_claim``
 #: objects the Calibrate cards write) are evidence for a later claim that shares at least LABEL_MATCH_WORDS of its
 #: distinctive words or names, as the owner's own judgement (role ``authored``; dated by when the labelled claim was made,
@@ -623,6 +634,54 @@ def said_zone(said_at: Optional[str]):
     return when.tzinfo if when is not None and when.tzinfo is not None else datetime.now().astimezone().tzinfo
 
 
+def said_day(said_at: Optional[str]) -> date:
+    """The conversation's date as the reader is told it: the day in the zone it was said in (SAID_LOCAL_DAY), else
+    the UTC day."""
+    when = conversation_time(said_at)
+    return when.astimezone(said_zone(said_at)).date() if SAID_LOCAL_DAY else when.date()
+
+
+_MONTHS = "january|february|march|april|june|july|august|september|october|november|december"
+_WEEKDAYS = "monday|tuesday|wednesday|thursday|friday|saturday|sunday"
+_SPANS = "night|morning|afternoon|evening|week|weekend|month|year|summer|winter|spring|fall|autumn|semester|quarter|season"
+_COUNTS = "a|an|one|two|three|four|five|six|seven|eight|nine|ten|few|couple|several|\\d+"
+#: Words that say when ("yesterday", "last summer", "in 2019", "two weeks ago", a weekday or month). "Now",
+#: "currently" and "recently" are not among them: they mean as of when it was said, which is no period at all.
+_NAMES_A_TIME = re.compile(
+    rf"\b(?:today|tonight|yesterday|tomorrow|{_MONTHS}|(?:{_WEEKDAYS})s?"
+    rf"|(?:this|last|next|past|previous|coming)\s+(?:{_SPANS}|{_WEEKDAYS})"
+    rf"|(?:last|past|next|previous|coming)\s+(?:few|couple(?:\s+of)?|several|\d+|two|three|four|five|six|seven|eight|nine|ten)\s+(?:days|weeks|months|years)"
+    rf"|(?:{_COUNTS})\s+(?:of\s+)?(?:hours?|days?|weeks?|months?|years?)\s+ago"
+    rf"|(?:in|last|next|this|early|late|mid)[\s-]+may|may\s+\d|(?:19|20)\d\d|\d{{1,2}}/\d{{1,2}}|\d{{1,2}}(?:st|nd|rd|th)"
+    rf"|the\s+other\s+day|earlier\s+today|over\s+the\s+weekend|back\s+(?:in|then|when)|when\s+(?:i|we)\s+(?:was|were))\b",
+    re.I)
+#: A date the reader wrote into a claim's text ("... on 2026-10-07", "between October 1 and October 3, 2026").
+_ONE_DATE = rf"(?:\d{{4}}-\d{{2}}-\d{{2}}|(?:{_MONTHS}|may)\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?)"
+_READER_DATE = re.compile(rf"\s*\b(?:(?:on|in|during|between|from|since|by|as\s+of)\s+)?{_ONE_DATE}"
+                          rf"(?:\s*(?:to|and|through|until|-)\s*{_ONE_DATE})?", re.I)
+
+
+def names_a_time(*texts: str) -> bool:
+    """Whether any of the texts says when (DATED_BY_WORDS)."""
+    return any(_NAMES_A_TIME.search(t or "") for t in texts)
+
+
+def _without_dates(text: str) -> str:
+    return re.sub(r"\s+([.,;!?])", r"\1", _READER_DATE.sub("", text or "")).strip()
+
+
+def dated_by_words(claims: List[Claim], req: ClaimRequest) -> Tuple[List[Claim], int]:
+    """DATED_BY_WORDS: the claims, each checked as of when it was said unless the statement or the turn just before it
+    names a time, and how many lost the reader's period."""
+    last_turn = str((req.context[-1] if req.context else {}).get("text") or "")
+    if not DATED_BY_WORDS or names_a_time(req.statement, last_turn):
+        return claims, 0
+    out = [c if c.kind == INTENTION or not (c.date_from or c.date_to) else
+           replace(c, date_from="", date_to="", text=_without_dates(c.text) or c.text, as_written=_without_dates(c.as_written))
+           for c in claims]
+    return out, sum(a is not b for a, b in zip(out, claims))
+
+
 def due_instant(claim: Claim, said_at: Optional[str]) -> Optional[datetime]:
     """When a plan's window closes: the end (23:59:59) of its last day, in the zone the statement was said in, as an
     aware UTC instant; None when the claim is not an intention or has no date."""
@@ -715,7 +774,7 @@ def read_claims(req: ClaimRequest, chat: Callable, usage: Usage, timeout: float)
     """One model call: the turn's category and its checkable claims (main one first). Empty claims carry a reason."""
     turns = "\n".join((f"{t['speaker']}: " if t.get("speaker") else "- ") + str(t.get("text") or "")
                       for t in req.context[-6:]) or "(none)"
-    user = (f"Conversation date: {conversation_time(req.said_at).date().isoformat()}\nSaid by: {req.speaker}\n\n"
+    user = (f"Conversation date: {said_day(req.said_at).isoformat()}\nSaid by: {req.speaker}\n\n"
             f"Earlier turns:\n{turns}\n\nWhat was said: {req.statement.strip()}")
     system = read_system(bool(req.about_others), req.source_kind)
     out = chat(system, user, read_schema_for(req), timeout, usage)
@@ -1192,8 +1251,8 @@ async def verify_owner_claim(req: ClaimRequest, *, chat, gather_in_worker, to_th
         if not claims:
             out["stages"]["read"] = f"not_checkable:{why}"
             return respond(unable(f"not_checkable:{why}", out), started, usage)
-        claims = claims[:effort["claims"]]
-        out["stages"]["read"] = {"claims": len(claims), **({"stored": True} if stored else {})}
+        claims, undated = dated_by_words(claims[:effort["claims"]], req)  # after the stored reading: it keeps the reader's dates
+        out["stages"]["read"] = {"claims": len(claims), **({"stored": True} if stored else {}), **({"as_of_said": undated} if undated else {})}
         as_dict = lambda c: {"kind": c.kind, "subject": c.subject, "reported_speech": c.reported_speech, "text": c.text,
                              "polarity": c.polarity, "period": {"from": c.date_from, "to": c.date_to}}
         out["claim"] = as_dict(claims[0])

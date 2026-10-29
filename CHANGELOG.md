@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **verify_claim: a claim is read on the day it was said, and dated only when its words name a time; both off by default.** `[E:verify]` Two module switches in `verify_v2`. `SAID_LOCAL_DAY`: the reader's `Conversation date:` is the day in the zone the claim was said in (`said_zone`), not the UTC day; 122 of the 123 rows below were said in the evening, so the reader had been told the next day. `DATED_BY_WORDS`: a claim keeps the reader's period only when the statement, or the turn just before it, names a time (`names_a_time`: today, yesterday, a weekday, a month, "last week", "three days ago", a year, a date); otherwise its period is cleared and the reader's date is taken out of its text, so it is checked as of when it was said, under the same evidence cutoff (`STRICT_AS_OF`). A plan (`intention`) keeps its window. Applied after the reading is stored, so a stored reading and the lane's `claim_key` keep the reader's dates; `stages.read.as_of_said` counts the claims cleared. Why: the local reader (qwen3.5:9b-mlx) gave a one-day period on the conversation day to 30 of 34 development yes rows whose words name no time (the hosted 70B, 2 to 5 of 34), and the period rule then refused the records, weeks older, that showed the claim. Measured 29 Oct 2026 on a copy of the owner's database, the 123 labelled rows of one recorded call, local model, both switches off then both on: yes rows backed, from 1 of 50 to 17 of 50; no rows wrongly backed, from 2 of 65 to 10 of 65 (the hosted 70B on 23 Oct: 20 of 50 and 14 of 65). 13 of the 17 yes gains and 7 of the 8 no gains are rows whose claim was cleared; with both on, 5 of the 10 wrong supports and 6 of the 17 right ones rest only on records more than 30 days older than the claim. The two switches were measured together, not apart. Off: unchanged.
+
 ## [1.5.31] — 2026-10-28
 
 ### Added
