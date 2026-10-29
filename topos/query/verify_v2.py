@@ -178,14 +178,15 @@ SAME_THREAD_HOURS = 12
 #: Two dates (owner, 29 Oct 2026: a claim is measured against the date it was said). A claim has the moment it was
 #: said, which is the evidence cutoff (STRICT_AS_OF), and the time it is about, which only its own words can give.
 #: SAID_LOCAL_DAY: the reader is told the day in the zone the statement was said in. Before, it was told the UTC day,
-#: so a sentence said after 19:00 Central was dated the next day, while record days are the stored local day.
-SAID_LOCAL_DAY = False
+#: so an evening sentence said west of UTC was dated the next day, while record days are the stored local day.
+SAID_LOCAL_DAY = True
 #: DATED_BY_WORDS: a claim keeps the reader's period only when the statement, or the turn just before it, names a time
 #: (``names_a_time``). Otherwise it is checked as of when it was said: no period, so every record up to that moment
-#: counts, and a date the reader wrote into the claim is taken out. A plan keeps its window. Measured 29 Oct on the
-#: Luke transcript: the local 9B pinned 30 of 34 answerable development sentences to the conversation day (the hosted
-#: 70B on 23 Oct, 2 to 5), and the period rule then refused the older records that showed them.
-DATED_BY_WORDS = False
+#: counts, and a date the reader wrote into the claim is taken out. A plan keeps its window. Measured 29 Oct on one
+#: labelled call: the local 9B pinned 30 of 34 answerable development sentences to the conversation day (the hosted
+#: 70B on 23 Oct, 2 to 5), and the period rule then refused the older records that showed them. Both switches on, 123
+#: rows, local model: yes rows backed from 1 to 17 of 50, no rows wrongly backed from 2 to 10 of 65.
+DATED_BY_WORDS = True
 #: LABELS_AS_EVIDENCE (owner, 27 Oct 2026: "labels never feed back"): the owner's earlier labels (``verified_claim``
 #: objects the Calibrate cards write) are evidence for a later claim that shares at least LABEL_MATCH_WORDS of its
 #: distinctive words or names, as the owner's own judgement (role ``authored``; dated by when the labelled claim was made,

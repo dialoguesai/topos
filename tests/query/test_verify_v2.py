@@ -918,7 +918,9 @@ def test_the_answer_carries_the_reading_and_a_stored_reading_makes_no_reader_cal
             return super().__call__(system, user, schema, timeout, usage)
 
     again = run([rec(1, "authored")], NoReader(None, {1: "shows"}), reading=reading)
-    assert again["verdict"] == "supported" and again["usage"]["model_calls"] == 1 and again["stages"]["read"] == {"claims": 1, "stored": True}
+    # The sentence names no time, so the stored reading's period is cleared on the re-check too (DATED_BY_WORDS).
+    assert again["verdict"] == "supported" and again["usage"]["model_calls"] == 1
+    assert again["stages"]["read"] == {"claims": 1, "stored": True, "as_of_said": 1}
     assert again["reading"] == reading and again["claim"]["polarity"] == -1 and again["claim"]["kind"] == "did_or_made"
 
 
@@ -1297,8 +1299,11 @@ def test_support_wins_over_contradiction_and_the_rules_still_apply(monkeypatch):
     assert run([rec(1, "authored"), rec(2, "authored")], ContraChat({1: "contradicts", 2: "shows"}))["verdict"] == "supported"
     # someone else's message cannot contradict the owner's own claim, as it cannot back it
     assert run([rec(1, "observed")], ContraChat({1: "contradicts"}))["verdict"] == "no_evidence"
-    # out of the claim's period: no contradiction
-    assert run([rec(1, "authored", day="2026-09-01")], ContraChat({1: "contradicts"}))["verdict"] == "no_evidence"
+    # out of the claim's period: no contradiction (the words name a time, so the reader's period stands)
+    yesterday = "I restyled the pinwheel sidebar yesterday."
+    assert run([rec(1, "authored", day="2026-09-01")], ContraChat({1: "contradicts"}), statement=yesterday)["verdict"] == "no_evidence"
+    # With no time in the words the claim has no period (DATED_BY_WORDS), so the same older record contradicts it.
+    assert run([rec(1, "authored", day="2026-09-01")], ContraChat({1: "contradicts"}))["verdict"] == "contradicted"
 
 
 # --- Two dates: SAID_LOCAL_DAY, DATED_BY_WORDS ---------------------------------------------------------------------------
