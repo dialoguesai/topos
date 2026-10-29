@@ -47,7 +47,7 @@ async def _record_query_request(message: Dict[str, Any], payload: Dict[str, Any]
         logger.debug("query: audit record failed", exc_info=True)
 
 
-def _verify_claim_usage(conn: Any, source: str, cls: Optional[str], client_id: str) -> None:
+def _verify_claim_usage(conn: Any, source: str, cls: Optional[str], client_id: str, outcome: Optional[str]) -> None:
     """The CP truth door (owner auth × its app allowlist) and the owner class ask with the owner's own credential, so
     their row is the owner's own use ("You" on the Daily overview); an enrolled local client's row is that client's."""
     from ...principal import CP_RELAY, OWNER_APP
@@ -55,10 +55,10 @@ def _verify_claim_usage(conn: Any, source: str, cls: Optional[str], client_id: s
 
     owner = _resource_owner_for_mcp_log(conn) if cls in (CP_RELAY, OWNER_APP) else None
     record_mcp_request(conn, "verify_claim", source=source, requester_id=owner or client_id or None,
-                       resource_owner_user_id=owner)
+                       resource_owner_user_id=owner, verification_outcome=outcome)
 
 
-async def _record_verify_claim(caller_app_id: str, unnamed: str = "unknown") -> None:
+async def _record_verify_claim(caller_app_id: str, result: Dict[str, Any], unnamed: str = "unknown") -> None:
     """One request-log row per answered verify_claim, so the owner's Daily overview names the apps that used the truth
     door: its usage panels read only ``mcp_request_log``, and before this the door wrote nothing there. The source is
     the app the call names (on the relay the CP has checked it against its TRUTH_APP_ALLOWLIST; on the local door the
@@ -71,7 +71,9 @@ async def _record_verify_claim(caller_app_id: str, unnamed: str = "unknown") -> 
         principal = current_principal()
         client_id = str(getattr(principal, "client_id", "") or "")
         source = caller_app_id[:100] or client_id or unnamed
-        await run_db_write(_verify_claim_usage, source, getattr(principal, "cls", None), client_id)
+        from ...dashboard.verification import verification_outcome
+
+        await run_db_write(_verify_claim_usage, source, getattr(principal, "cls", None), client_id, verification_outcome(result))
     except Exception:  # noqa: BLE001
         logger.debug("verify_claim: usage record failed", exc_info=True)
 
@@ -149,7 +151,7 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
             logger.info("truth verify_claim audit: %s", audit)
         if "error" in result:
             return {"id": req_id, "status": "error", "error": str(result["error"])}
-        await _record_verify_claim(caller_app_id)
+        await _record_verify_claim(caller_app_id, result)
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         _log_query_failure("verify_claim", req_id, exc)
@@ -245,7 +247,7 @@ async def handle_verify_claim_owner(message: Dict[str, Any]) -> Optional[Dict[st
     except Exception as exc:  # noqa: BLE001
         logger.warning("owner claim check failed: %s", type(exc).__name__)
         return {"id": req_id, "status": "error", "error": "verification_unavailable"}
-    await _record_verify_claim(caller_app_id.strip(), unnamed="owner-door")
+    await _record_verify_claim(caller_app_id.strip(), result, unnamed="owner-door")
     return {"id": req_id, "status": "ok", "payload": result}
 
 
