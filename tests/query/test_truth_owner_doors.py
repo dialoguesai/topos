@@ -272,9 +272,11 @@ def test_the_owner_reads_and_changes_the_settings_and_turning_on_queues_a_batch(
     assert got["status"] == "ok" and got["payload"] == {**cfg.defaults(), "paused_until": None}
     changed = _as(owner, "truth_inbound_settings", {"set": {"enabled": True, "sources": ["journal"], "rate_per_minute": 3}})
     assert changed["payload"] == {"enabled": True, "sources": ["journal"], "model": "local", "rate_per_minute": 3,
-                                  "paused_until": None}
+                                  "window_days": 7, "paused_until": None}
+    widened = _as(owner, "truth_inbound_settings", {"set": {"window_days": 365}})
+    assert widened["payload"]["window_days"] == 365 and widened["payload"]["rate_per_minute"] == 3
     assert node.conn.execute("SELECT COUNT(*) FROM pipeline_jobs WHERE kind=?", (lane.KIND,)).fetchone()[0] == 1
-    for bad in ({"set": {"model": "gpt"}}, {"set": "on"}, {"get": True, "drop": 1}, "get"):
+    for bad in ({"set": {"model": "gpt"}}, {"set": {"window_days": 0}}, {"set": "on"}, {"get": True, "drop": 1}, "get"):
         assert _as(owner, "truth_inbound_settings", bad) == {"id": "r1", "status": "error", "error": "invalid_truth_settings"}
 
 
@@ -837,3 +839,69 @@ def test_the_lane_row_carries_how_many_owner_labels_the_check_was_shown(node):
     unread = _said(node.conn, "m-u", "I fixed the Orbit build.", claim="The owner fixed the Orbit build.", names=["Orbit"], polarity=1, hours_ago=3)
     rows = dict(node.conn.execute("SELECT check_id, owner_labels_shown FROM truth_checks").fetchall())
     assert rows[shown] == 2 and rows[none] == 0 and rows[unread] is None
+
+
+# --- verify_claim usage on the Daily overview ---------------------------------------------------------------------
+CHECK = {"statement": "I have never played chess", "mode": "fun", "caller_app_id": "truth-mirror"}
+
+
+@pytest.fixture
+def answering(node, monkeypatch):
+    """verify_claim answers without reading anything, and the node is linked to an owner id."""
+    monkeypatch.setattr("topos.query.verify.verify_claim",
+                        lambda conn, **kw: {"stance": "unknown", "_audit": {"mode": kw["mode"]}})
+    from topos.core.state import set_engine_config_value
+
+    set_engine_config_value(node.conn, "user_id", "owner-1")
+    return node
+
+
+def _usage(conn):
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='mcp_request_log'").fetchone():
+        return []
+    return [tuple(row) for row in conn.execute(
+        "SELECT tool_name, source, requester_id, access_context, verified_cls, verified_client_id FROM mcp_request_log "
+        "ORDER BY id")]
+
+
+def test_an_answered_verify_claim_is_one_request_log_row_the_daily_overview_names(answering):
+    from topos.dashboard.measurements import daily_measurements
+
+    out = _as(Principal(CP_RELAY, "cp_relay"), "verify_claim", CHECK)
+    assert out["status"] == "ok" and "_audit" not in out["payload"]
+    assert _usage(answering.conn) == [("verify_claim", "truth-mirror", "owner-1", "owner_self", "cp_relay", None)]
+
+    today = datetime.now(timezone.utc).date()
+    report = daily_measurements(answering.conn, today.isoformat(), (today + timedelta(days=1)).isoformat())
+    day = report["callers"]["buckets"][0]
+    assert day["callers"] == [{"source": "truth-mirror", "access_context": "owner_self", "count": 1}]
+    assert [(call["tool"], call["source"]) for call in day["calls"]] == [("verify_claim", "truth-mirror")]
+
+
+def test_the_owner_class_is_the_owners_own_use(answering):
+    assert _as(Principal(OWNER_APP, "uds"), "verify_claim", CHECK)["status"] == "ok"
+    assert _usage(answering.conn) == [("verify_claim", "truth-mirror", "owner-1", "owner_self", "owner_app", None)]
+
+
+def test_an_allowlisted_local_client_is_recorded_as_itself_beside_the_app_it_names(answering, monkeypatch):
+    monkeypatch.setenv("TOPOS_TRUTH_CLIENT_ALLOWLIST", "fun-cam-dev")
+    assert _as(Principal(THIRD_PARTY, "local_http", client_id="fun-cam-dev"), "verify_claim", CHECK)["status"] == "ok"
+    assert _usage(answering.conn) == [("verify_claim", "truth-mirror", "fun-cam-dev", "other", "third_party",
+                                       "fun-cam-dev")]
+
+
+def test_a_refused_or_failed_verify_claim_writes_no_usage_row(answering, monkeypatch):
+    refused = _as(Principal(THIRD_PARTY, "cp_relay"), "verify_claim", CHECK)
+    assert refused["error"] == "owner_mode_required"
+    monkeypatch.setattr("topos.query.verify.verify_claim", lambda conn, **kw: {"error": "caller_app_id required"})
+    assert _as(Principal(CP_RELAY, "cp_relay"), "verify_claim", CHECK)["status"] == "error"
+    assert _usage(answering.conn) == []
+
+
+def test_a_usage_row_that_cannot_be_written_never_fails_the_answer(answering, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("topos.core.handlers.common.record_mcp_request", broken)
+    assert _as(Principal(CP_RELAY, "cp_relay"), "verify_claim", CHECK)["status"] == "ok"
+    assert _usage(answering.conn) == []

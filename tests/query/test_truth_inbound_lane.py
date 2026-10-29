@@ -83,9 +83,9 @@ def checks(conn):
 
 
 # --- settings ---------------------------------------------------------------------------------------------------------
-def test_settings_default_off_with_every_source_the_local_model_and_six_a_minute(node):
+def test_settings_default_off_with_every_source_the_local_model_six_a_minute_and_a_week(node):
     assert cfg.load(node.conn) == {"enabled": False, "sources": ["imessage", "signal", "transcripts", "journal"],
-                                   "model": "local", "rate_per_minute": 6}
+                                   "model": "local", "rate_per_minute": 6, "window_days": 7}
     assert cfg.public_view(node.conn)["paused_until"] is None
 
 
@@ -94,13 +94,17 @@ def test_settings_persist_in_engine_config_and_merge_a_partial_change(node):
     stored = json.loads(node.conn.execute("SELECT value FROM engine_config WHERE key='truth_inbound'").fetchone()[0])
     assert stored["enabled"] is True and stored["sources"] == ["imessage", "signal"]
     assert cfg.save(node.conn, {"rate_per_minute": 12}) == {"enabled": True, "sources": ["imessage", "signal"],
-                                                            "model": "local", "rate_per_minute": 12}
+                                                            "model": "local", "rate_per_minute": 12, "window_days": 7}
+    assert cfg.save(node.conn, {"window_days": 365})["window_days"] == 365
+    assert cfg.load(node.conn)["rate_per_minute"] == 12
 
 
 @pytest.mark.parametrize("patch", [{}, {"enabled": "yes"}, {"enabled": 1}, {"sources": ["imessage", "email"]},
                                    {"sources": ["signal", "signal"]}, {"sources": "signal"}, {"model": "gpt"},
                                    {"rate_per_minute": 0}, {"rate_per_minute": 61}, {"rate_per_minute": True},
-                                   {"rate_per_minute": "6"}, {"enabled": True, "other": 1}, None, ["enabled"]])
+                                   {"rate_per_minute": "6"}, {"window_days": 0}, {"window_days": 3651},
+                                   {"window_days": True}, {"window_days": "30"}, {"window_days": 30.0},
+                                   {"enabled": True, "other": 1}, None, ["enabled"]])
 def test_a_malformed_change_is_refused_and_stores_nothing(node, patch):
     with pytest.raises(cfg.InvalidTruthSettings) as raised:
         cfg.save(node.conn, patch)
@@ -109,7 +113,8 @@ def test_a_malformed_change_is_refused_and_stores_nothing(node, patch):
 
 
 def test_a_damaged_stored_value_never_switches_the_lane_on_or_widens_it():
-    assert cfg.normalize({"enabled": "true", "sources": ["imessage", "email"], "model": "x", "rate_per_minute": 600}) == cfg.defaults()
+    assert cfg.normalize({"enabled": "true", "sources": ["imessage", "email"], "model": "x", "rate_per_minute": 600,
+                          "window_days": 99999}) == cfg.defaults()
     assert cfg.normalize("not a mapping") == cfg.defaults()
 
 
@@ -186,6 +191,50 @@ def test_a_checked_row_is_not_owed_again(node):
     store.record_check(node.conn, lane.check_row({"table": "journal_entries", "record_id": "j1", "source": "journal",
                                                   "owner": True}, supported(), model="local:test"))
     assert lane.owed(node.conn, ["journal"], 10) == []
+
+
+def test_a_row_older_than_the_window_is_owed_once_the_owner_widens_it_and_goes_after_newer_rows(node):
+    add_journal(node.conn, "j-old", "I sold the old canoe at the spring market.", at=ago(days=40))
+    add_journal(node.conn, "j-new", "I finished building the garden shed this morning.", at=ago(hours=2))
+    node.conn.commit()
+    turn_on(node.conn, sources=["journal"])
+    assert lane.owed(node.conn, ["journal"], 10) == [["journal_entries", "j-new"]]  # the shipped week
+    store.record_check(node.conn, lane.check_row({"table": "journal_entries", "record_id": "j-new", "source": "journal",
+                                                  "owner": True}, supported(), model="local:test"))
+    assert lane.enqueue_truth_checks(node.conn) is None  # nothing left inside the week; the older row waits
+
+    cfg.save(node.conn, {"window_days": 60})
+    job_id = lane.enqueue_truth_checks(node.conn)
+    payload = json.loads(node.conn.execute("SELECT payload_json FROM pipeline_jobs WHERE job_id=?", (job_id,)).fetchone()[0])
+    assert payload == {"records": [["journal_entries", "j-old"]]}
+    assert lane.owed(node.conn, ["journal"], 10, window_days=30) == []  # 40 days back is outside a 30-day window
+
+
+def test_a_wider_window_keeps_new_rows_first(node):
+    add_journal(node.conn, "j-year", "I ran my first half marathon in the rain.", at=ago(days=300))
+    add_journal(node.conn, "j-month", "I sold the old canoe at the spring market.", at=ago(days=20))
+    add_journal(node.conn, "j-today", "I finished building the garden shed this morning.", at=ago(hours=2))
+    node.conn.commit()
+    assert lane.owed(node.conn, ["journal"], 10, window_days=365) == [
+        ["journal_entries", "j-today"], ["journal_entries", "j-month"], ["journal_entries", "j-year"]]
+    assert lane.owed(node.conn, ["journal"], 2, window_days=365) == [["journal_entries", "j-today"], ["journal_entries", "j-month"]]
+
+
+def test_what_is_owed_is_read_before_the_write_gate_is_taken(node, monkeypatch):
+    from topos.storage.db.write_gate import describe_gate_holder
+
+    add_journal(node.conn, "j1", "I finished building the garden shed this morning.")
+    node.conn.commit()
+    turn_on(node.conn, sources=["journal"], window_days=3650)
+    seen, real_owed = [], lane.owed
+
+    def watched(*args, **kwargs):
+        seen.append((describe_gate_holder(), kwargs.get("window_days")))
+        return real_owed(*args, **kwargs)
+
+    monkeypatch.setattr(lane, "owed", watched)
+    assert lane.enqueue_truth_checks(node.conn)
+    assert seen == [("not held", 3650)]
 
 
 def test_a_paused_hosted_lane_queues_nothing_until_the_pause_ends(node):
