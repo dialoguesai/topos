@@ -4,7 +4,7 @@ from topos.dashboard.verification import verification_outcome
 
 @pytest.mark.parametrize("verdict,expected", [
     ("supported", "true"), ("contradicted", "false"), ("no_evidence", "unanswerable"),
-    ("unable", "unanswerable"), ("future_verdict", None), (None, None), ({}, None),
+    ("unable", None), ("future_verdict", None), (None, None), ({}, None),
 ])
 def test_owner_verdict(verdict, expected):
     assert verification_outcome({"verdict": verdict}) == expected

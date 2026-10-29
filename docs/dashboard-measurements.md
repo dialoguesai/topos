@@ -37,8 +37,9 @@ idempotent write-time schema upgrade. The same usage row stores the outcome; the
 is no second event or claim/evidence text. Historical rows are never guessed or
 backfilled. Read-only dashboard requests do not migrate the schema.
 
-Owner verdicts map `supported` → true, `contradicted` → false, and `no_evidence` /
-`unable` → unanswerable. The older lane response maps non-conflicting support or
+Owner verdicts map `supported` → true, `contradicted` → false, and `no_evidence` →
+unanswerable. `unable` (the deadline passed or the model failed) records no outcome:
+the call still counts, under unavailable, because a timeout says nothing about the claim. The older lane response maps non-conflicting support or
 contradiction to true/false; no evidence, explicit abstention, or conflicting lanes
 is unanswerable. Unknown/malformed schemas remain unavailable. This reporting
 adapter does not modify the answer, evidence selection, or verifier behavior.

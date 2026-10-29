@@ -1,7 +1,10 @@
 """Content-free classification of completed verification responses for usage charts.
 
 This adapter records the verdict already returned; it does not change verification.
-Unknown response schemas remain unrecorded rather than becoming unanswerable.
+Unknown response schemas remain unrecorded rather than becoming unanswerable. So does
+``unable`` (the deadline passed or the model failed): it says nothing about the claim,
+so it is shown as unavailable, not as a claim the data could not answer (owner,
+29 Oct 2026).
 """
 from collections.abc import Mapping
 
@@ -12,8 +15,8 @@ def verification_outcome(result):
     if not isinstance(result, Mapping) or "error" in result:
         return None
     if "verdict" in result:
-        return {"supported": "true", "contradicted": "false", "no_evidence": "unanswerable",
-                "unable": "unanswerable"}.get(result["verdict"]) if isinstance(result["verdict"], str) else None
+        return {"supported": "true", "contradicted": "false",
+                "no_evidence": "unanswerable"}.get(result["verdict"]) if isinstance(result["verdict"], str) else None
     lanes = result.get("lanes")
     if not isinstance(lanes, Mapping) or not lanes:
         return None
