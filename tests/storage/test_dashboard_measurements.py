@@ -364,3 +364,31 @@ def test_fact_receipt_erasure_and_coverage_roll_back_together_across_chunks(db):
     db.rollback()
     assert db.execute("SELECT count(*) FROM dashboard_measurement_items").fetchone()[0] == before
     assert count(db, "new_facts") == 130
+
+
+def test_verification_outcomes_upgrade_legacy_log_and_reconcile_counts(db):
+    from topos.core.state import record_mcp_request
+    db.executescript("""CREATE TABLE mcp_request_log(id INTEGER PRIMARY KEY, tool_name TEXT, requested_at TEXT);
+        INSERT INTO mcp_request_log VALUES(1, 'verify_claim', '2026-10-26T12:00:00Z');""")
+    for outcome in ("true", "false", "unanswerable", "invalid"):
+        record_mcp_request(db, "verify_claim", source="dev-transcripts", verification_outcome=outcome)
+    record_mcp_request(db, "query_scope", verification_outcome="true")
+    db.execute("UPDATE mcp_request_log SET requested_at='2026-10-27T12:00:00Z' WHERE id > 1")
+    db.commit()
+    result = daily_measurements(db, "2026-10-25", "2026-10-30", now=datetime(2026, 10, 29, tzinfo=timezone.utc))
+    metric = result["verify_claim"]
+    assert metric["population"] == "answered_verify_claim_calls"
+    assert metric["buckets"][0]["count"] is None
+    assert metric["buckets"][1]["outcomes"] == {"true": 0, "false": 0, "unanswerable": 0, "unavailable": 1}
+    assert metric["buckets"][2]["count"] == 4
+    assert metric["buckets"][2]["outcomes"] == {"true": 1, "false": 1, "unanswerable": 1, "unavailable": 1}
+    assert metric["buckets"][3]["count"] == 0
+    assert db.execute("SELECT verification_outcome FROM mcp_request_log WHERE tool_name='query_scope'").fetchone()[0] is None
+
+
+def test_legacy_outcome_read_does_not_migrate_database(db):
+    db.executescript("""CREATE TABLE mcp_request_log(tool_name TEXT, requested_at TEXT);
+        INSERT INTO mcp_request_log VALUES('verify_claim', '2026-10-27T12:00:00Z');""")
+    result = daily_measurements(db, "2026-10-27", "2026-10-28", now=datetime(2026, 10, 29, tzinfo=timezone.utc))
+    assert result["verify_claim"]["buckets"][0]["outcomes"]["unavailable"] == 1
+    assert "verification_outcome" not in {r[1] for r in db.execute("PRAGMA table_info(mcp_request_log)")}
