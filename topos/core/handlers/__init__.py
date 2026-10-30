@@ -479,10 +479,6 @@ OWNER_DOOR_OPEN_TYPES = frozenset({
     # writes by a field is a change) and truth_claim_label (it writes the owner's label, the week's truth set, which
     # an agent must never edit). Both are dangerous on the socket by subtraction.
     "truth_weekly_stats", "truth_claim_cards",
-    # The reflection doors' two reads (owner class only at the truth door): the candidates built from the enabled
-    # packs' facts, and the conversation composed from them. Neither writes (freshness is the client's exclude
-    # list). NOT here: reflection_label (the owner's label, which an agent must never edit): dangerous by subtraction.
-    "reflection_invitations", "reflection_conversation",
     # The owner-agent reflection read (GRANT_DECISIONS G2, DR-61): the enabled reflection packs' facts, filtered for an
     # agent; it writes nothing. The owner's app and Moments (an enrolled app) only, decided in its handler.
     "reflection_facts",

@@ -6,7 +6,7 @@ import json
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Mapping, Optional
 
 from ..storage.db.write_gate import begin_immediate, commit_connection, sqlite_retry_busy, with_db_write
 from . import job_secrets
@@ -531,6 +531,35 @@ def withhold_persisted_secrets(conn: sqlite3.Connection) -> int:
         if rewritten:
             commit_connection(conn)
     return rewritten
+
+
+def close_retired_jobs(conn: sqlite3.Connection, retired: Mapping[str, str]) -> int:
+    """Close the queued or running rows of kinds this node no longer runs. Returns rows closed.
+
+    ``retired`` maps a kind to the reason written into the row's ``detail_json`` (``{"retired": reason}``). A row
+    of a kind with no executor is never claimed, so without this it stays 'queued' for good; it is marked 'done',
+    not 'failed', because nothing went wrong: the work was retired. Finished rows are left as they are.
+    """
+    kinds = [str(k) for k in (retired or {}) if k]
+    if not kinds:
+        return 0
+    ensure_pipeline_jobs_schema(conn)
+    closed = 0
+    with with_db_write():
+        for kind in kinds:
+            cursor = conn.execute(
+                """
+                UPDATE pipeline_jobs
+                SET status='done', finished_at=datetime('now'), updated_at=datetime('now'),
+                    detail_json=?, lease_owner=NULL, lease_expires_at=NULL
+                WHERE kind=? AND status IN ('queued', 'running')
+                """,
+                (json.dumps({"retired": str(retired[kind])}), kind),
+            )
+            closed += int(cursor.rowcount or 0)
+        if closed:
+            commit_connection(conn)
+    return closed
 
 
 def recover_stale_jobs(conn: sqlite3.Connection) -> int:

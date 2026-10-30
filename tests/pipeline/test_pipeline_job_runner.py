@@ -424,6 +424,43 @@ async def test_unknown_kind_parks_queued_instead_of_failing(
     assert get_job(conn, "jm1")["status"] == "queued"
 
 
+def test_a_leftover_retired_job_is_closed_at_startup_not_left_queued(conn: sqlite3.Connection) -> None:
+    """GRANT_DECISIONS G6 retired the reflection sweep; an installed node can still hold its rows from before the
+    upgrade. With no executor a queued one would sit 'queued' for good (see the unknown-kind test above), so the
+    startup recovery closes queued and leased ones as done, with the reason, and leaves finished ones alone."""
+    import json
+
+    from topos.pipeline.job_runner import RETIRED_KINDS
+    from topos.pipeline.job_store import complete_job
+
+    assert "reflection_sweep" in RETIRED_KINDS
+    assert not set(RETIRED_KINDS) & set(EXECUTORS)
+    enqueue_job(conn, kind="reflection_sweep", payload={"reason": "due"}, job_id="rs-queued")
+    enqueue_job(conn, kind="reflection_sweep", payload={"reason": "due"}, job_id="rs-leased")
+    enqueue_job(conn, kind="reflection_sweep", payload={"reason": "due"}, job_id="rs-old")
+    complete_job(conn, "rs-old", detail={"candidates": 3})
+    # A lease still live when the old node stopped: no lane of this node would ever renew or finish it.
+    conn.execute("UPDATE pipeline_jobs SET status='running', lease_owner='old-node', "
+                 "lease_expires_at='2999-01-01T00:00:00+00:00' WHERE job_id='rs-leased'")
+    enqueue_job(conn, kind="file_ingestion", payload={"job_id": "keep"}, job_id="keep")
+    conn.commit()
+
+    recover_pipeline_jobs(conn)
+
+    for job_id in ("rs-queued", "rs-leased"):
+        job = get_job(conn, job_id)
+        assert job["status"] == "done" and job["lease_owner"] is None
+        assert json.loads(conn.execute("SELECT detail_json FROM pipeline_jobs WHERE job_id=?",
+                                       (job_id,)).fetchone()[0]) == {"retired": RETIRED_KINDS["reflection_sweep"]}
+    assert json.loads(conn.execute("SELECT detail_json FROM pipeline_jobs WHERE job_id='rs-old'").fetchone()[0]) \
+        == {"candidates": 3}
+    assert get_job(conn, "keep")["status"] == "queued"
+    # A second start finds nothing left to close.
+    from topos.pipeline.job_store import close_retired_jobs
+
+    assert close_retired_jobs(conn, RETIRED_KINDS) == 0
+
+
 def test_requeue_job_returns_claim_to_queue(conn: sqlite3.Connection) -> None:
     enqueue_job(conn, kind="file_ingestion", payload={}, job_id="jr1")
     claimed = claim_next_job(conn, lease_owner="worker-a")

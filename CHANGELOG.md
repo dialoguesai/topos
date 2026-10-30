@@ -9,6 +9,19 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Removed
+- **The 1.5.23 reflection build is retired (GRANT_DECISIONS G6).** `[P]` `[O]` Since 1.5.25 the Moments app reads
+  `reflection_facts` and finds, composes and labels conversations itself, so the node's own reflection logic goes:
+  the `reflection_invitations`, `reflection_conversation` and `reflection_label` types and their `/api/local/` routes
+  (now refused as unknown types), the `reflection_sweep` job on the catch-up lane, and `query/reflection.py` with its
+  stance templates. `reflection_facts`, the `moments.joy` and `moments.tension` packs, and every owner-only guard on
+  `reflection_candidates`, `reflection_labels` and `reflection_label` objects stay: installed nodes still hold those
+  rows, and dropping them is the owner's call. A queued or leased `reflection_sweep` row left from before the upgrade
+  is closed at startup as done with a `retired` reason (`job_runner.RETIRED_KINDS`) instead of waiting for good.
+
+### Data impact
+- No migration; no table is dropped. Leftover `reflection_sweep` jobs are closed once at startup.
+
 ## [1.5.31] — 2026-10-28
 
 ### Added
