@@ -47,6 +47,37 @@ async def _record_query_request(message: Dict[str, Any], payload: Dict[str, Any]
         logger.debug("query: audit record failed", exc_info=True)
 
 
+def _verify_claim_usage(conn: Any, source: str, cls: Optional[str], client_id: str, outcome: Optional[str]) -> None:
+    """The CP truth door (owner auth × its app allowlist) and the owner class ask with the owner's own credential, so
+    their row is the owner's own use ("You" on the Daily overview); an enrolled local client's row is that client's."""
+    from ...principal import CP_RELAY, OWNER_APP
+    from .common import _resource_owner_for_mcp_log, record_mcp_request
+
+    owner = _resource_owner_for_mcp_log(conn) if cls in (CP_RELAY, OWNER_APP) else None
+    record_mcp_request(conn, "verify_claim", source=source, requester_id=owner or client_id or None,
+                       resource_owner_user_id=owner, verification_outcome=outcome)
+
+
+async def _record_verify_claim(caller_app_id: str, result: Dict[str, Any], unnamed: str = "unknown") -> None:
+    """One request-log row per answered verify_claim, so the owner's Daily overview names the apps that used the truth
+    door: its usage panels read only ``mcp_request_log``, and before this the door wrote nothing there. The source is
+    the app the call names (on the relay the CP has checked it against its TRUTH_APP_ALLOWLIST; on the local door the
+    channel-verified client id is stored beside it), else ``unnamed``. Both doors write tool ``verify_claim``, so the
+    Home card's verify_claim count has both. Off the loop, on the worker's own connection; never fails the answer."""
+    try:
+        from ...principal import current_principal
+        from .common import run_db_write
+
+        principal = current_principal()
+        client_id = str(getattr(principal, "client_id", "") or "")
+        source = caller_app_id[:100] or client_id or unnamed
+        from ...dashboard.verification import verification_outcome
+
+        await run_db_write(_verify_claim_usage, source, getattr(principal, "cls", None), client_id, verification_outcome(result))
+    except Exception:  # noqa: BLE001
+        logger.debug("verify_claim: usage record failed", exc_info=True)
+
+
 def _log_query_failure(
     msg_type: str,
     req_id: Any,
@@ -120,6 +151,7 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
             logger.info("truth verify_claim audit: %s", audit)
         if "error" in result:
             return {"id": req_id, "status": "error", "error": str(result["error"])}
+        await _record_verify_claim(caller_app_id, result)
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         _log_query_failure("verify_claim", req_id, exc)
@@ -179,6 +211,11 @@ async def handle_verify_claim_owner(message: Dict[str, Any]) -> Optional[Dict[st
     Owner class only: the truth door admits an unlisted truth type for OWNER_APP alone, so neither the control-plane
     relay nor an enrolled client reaches this. Model stages run in threads, retrieval on a DB worker's own
     connection, all under one deadline; a timeout answers "unable", never a guess.
+
+    Each answer (``unable`` included) is one request-log row, tool ``verify_claim``, source the optional
+    ``caller_app_id`` the caller names (owner, 29 Oct 2026: test runs of the labelled transcripts should show on the
+    Home card as what they are, e.g. ``dev-transcripts``), else ``owner-door``. Like the public door's, the name is
+    caller-asserted and gates nothing.
     """
     import asyncio
 
@@ -189,7 +226,8 @@ async def handle_verify_claim_owner(message: Dict[str, Any]) -> Optional[Dict[st
     if refused:
         return refused
     request = _owner_claim_request(message.get("payload"))
-    if request is None:
+    caller_app_id = (message.get("payload") or {}).get("caller_app_id", "") if request is not None else None
+    if request is None or not isinstance(caller_app_id, str):
         return {"id": req_id, "status": "error", "error": "invalid_truth_request"}
     from ...config.verify_claim_model import device_pick
     from ...query.verify_v2 import VERSION, verify_owner_claim
@@ -209,6 +247,7 @@ async def handle_verify_claim_owner(message: Dict[str, Any]) -> Optional[Dict[st
     except Exception as exc:  # noqa: BLE001
         logger.warning("owner claim check failed: %s", type(exc).__name__)
         return {"id": req_id, "status": "error", "error": "verification_unavailable"}
+    await _record_verify_claim(caller_app_id.strip(), result, unnamed="owner-door")
     return {"id": req_id, "status": "ok", "payload": result}
 
 
@@ -288,8 +327,8 @@ def _truth_error(req_id: Any, code: str) -> Dict[str, Any]:
 
 @handles("truth_inbound_settings")
 async def handle_truth_inbound_settings(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``{"get": true}`` or ``{"set": {enabled?, sources?, model?, rate_per_minute?}}`` -> the settings (plus
-    ``paused_until``). Turning the lane on queues its first batch on the catch-up lane at once."""
+    """``{"get": true}`` or ``{"set": {enabled?, sources?, model?, rate_per_minute?, window_days?}}`` -> the settings
+    (plus ``paused_until``). Turning the lane on queues its first batch on the catch-up lane at once."""
     req_id = message.get("id")
     if not req_id:
         return None
