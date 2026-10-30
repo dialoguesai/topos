@@ -950,3 +950,34 @@ def test_an_owner_door_check_refused_invalid_or_failed_writes_no_row(owner_door)
     owner_door.verdict["raise"] = True
     assert _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", OWNER_CHECK)["error"] == "verification_unavailable"
     assert _usage(owner_door.node.conn) == []
+
+
+@pytest.mark.parametrize("verdict,expected", [("supported", "true"), ("contradicted", "false"),
+                                              ("no_evidence", "unanswerable"), ("unable", None)])
+def test_owner_verification_records_only_outcome_on_same_usage_row(owner_door, verdict, expected):
+    owner_door.verdict.update(verdict=verdict)
+    out = _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", {**OWNER_CHECK, "caller_app_id": "dev-transcripts"})
+    assert out["payload"]["verdict"] == verdict
+    rows = owner_door.node.conn.execute("SELECT source, verification_outcome FROM mcp_request_log").fetchall()
+    assert [tuple(r) for r in rows] == [("dev-transcripts", expected)]
+
+
+def test_app_verification_records_lane_result_on_same_usage_row(answering, monkeypatch):
+    monkeypatch.setattr("topos.query.verify.verify_claim", lambda conn, **kw: {
+        "lanes": {"work": {"stance": "supports"}, "social": {"stance": "no_evidence"}}})
+    assert _as(Principal(CP_RELAY, "cp_relay"), "verify_claim", CHECK)["status"] == "ok"
+    assert [r[0] for r in answering.conn.execute("SELECT verification_outcome FROM mcp_request_log")] == ["true"]
+
+
+def test_a_timed_out_owner_check_counts_as_a_call_with_its_outcome_unavailable(owner_door):
+    """Owner, 29 Oct 2026: ``unable`` (deadline, model down) says nothing about the claim, so the Home card shows it as
+    unavailable, never as a claim the data could not answer; the call itself still counts."""
+    from topos.dashboard.measurements import daily_measurements
+
+    owner_door.verdict.update(verdict="unable", reason="deadline")
+    assert _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", {**OWNER_CHECK, "caller_app_id": "dev-transcripts"})["status"] == "ok"
+    owner_door.verdict.update(verdict="no_evidence", reason="no_record_shows_it")
+    assert _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", {**OWNER_CHECK, "caller_app_id": "dev-transcripts"})["status"] == "ok"
+    today = datetime.now(timezone.utc).date()
+    day = daily_measurements(owner_door.node.conn, today.isoformat(), (today + timedelta(days=1)).isoformat())["verify_claim"]["buckets"][0]
+    assert day["count"] == 2 and day["outcomes"] == {"true": 0, "false": 0, "unanswerable": 1, "unavailable": 1}
