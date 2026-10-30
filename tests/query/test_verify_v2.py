@@ -918,7 +918,9 @@ def test_the_answer_carries_the_reading_and_a_stored_reading_makes_no_reader_cal
             return super().__call__(system, user, schema, timeout, usage)
 
     again = run([rec(1, "authored")], NoReader(None, {1: "shows"}), reading=reading)
-    assert again["verdict"] == "supported" and again["usage"]["model_calls"] == 1 and again["stages"]["read"] == {"claims": 1, "stored": True}
+    # The sentence names no time, so the stored reading's period is cleared on the re-check too (DATED_BY_WORDS).
+    assert again["verdict"] == "supported" and again["usage"]["model_calls"] == 1
+    assert again["stages"]["read"] == {"claims": 1, "stored": True, "as_of_said": 1}
     assert again["reading"] == reading and again["claim"]["polarity"] == -1 and again["claim"]["kind"] == "did_or_made"
 
 
@@ -1297,5 +1299,93 @@ def test_support_wins_over_contradiction_and_the_rules_still_apply(monkeypatch):
     assert run([rec(1, "authored"), rec(2, "authored")], ContraChat({1: "contradicts", 2: "shows"}))["verdict"] == "supported"
     # someone else's message cannot contradict the owner's own claim, as it cannot back it
     assert run([rec(1, "observed")], ContraChat({1: "contradicts"}))["verdict"] == "no_evidence"
-    # out of the claim's period: no contradiction
-    assert run([rec(1, "authored", day="2026-09-01")], ContraChat({1: "contradicts"}))["verdict"] == "no_evidence"
+    # out of the claim's period: no contradiction (the words name a time, so the reader's period stands)
+    yesterday = "I restyled the pinwheel sidebar yesterday."
+    assert run([rec(1, "authored", day="2026-09-01")], ContraChat({1: "contradicts"}), statement=yesterday)["verdict"] == "no_evidence"
+    # With no time in the words the claim has no period (DATED_BY_WORDS), so the same older record contradicts it.
+    assert run([rec(1, "authored", day="2026-09-01")], ContraChat({1: "contradicts"}))["verdict"] == "contradicted"
+
+
+# --- Two dates: SAID_LOCAL_DAY, DATED_BY_WORDS ---------------------------------------------------------------------------
+class SeenChat(FakeChat):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.users = []
+
+    def __call__(self, system, user, schema, timeout, usage):
+        self.users.append(user)
+        return super().__call__(system, user, schema, timeout, usage)
+
+
+def test_the_reader_is_told_the_day_in_the_zone_it_was_said(monkeypatch):
+    def told(said_at):
+        chat = SeenChat(read_reply())
+        v2.read_claims(v2.ClaimRequest(statement=SENTENCE, said_at=said_at), chat, Usage(), 5.0)
+        return chat.users[0].splitlines()[0]
+
+    monkeypatch.setattr(v2, "SAID_LOCAL_DAY", True)
+    assert told("2026-10-07T19:47:36-05:00") == "Conversation date: 2026-10-07"  # 00:47 on the 8th in UTC
+    assert told("2026-10-07T08:00:00-05:00") == "Conversation date: 2026-10-07"
+    assert told("2026-10-08T01:00:00+09:00") == "Conversation date: 2026-10-08"  # the 7th in UTC
+    monkeypatch.setattr(v2, "SAID_LOCAL_DAY", False)  # 1.5.31: the UTC day
+    assert told("2026-10-07T19:47:36-05:00") == "Conversation date: 2026-10-08"
+
+
+@pytest.mark.parametrize("text, says_when", [
+    ("I restyled the pinwheel sidebar yesterday.", True),
+    ("Last summer I rebuilt the shed.", True),
+    ("I moved to the coast in 2019.", True),
+    ("We shipped it two weeks ago.", True),
+    ("I went climbing on Tuesday.", True),
+    ("I started that in early May.", True),
+    ("I did that over the weekend.", True),
+    ("When I was in college I rowed.", True),
+    ("I restyled the pinwheel sidebar.", False),
+    ("I'm currently working on the pinwheel sidebar.", False),
+    ("I may have restyled it.", False),
+    ("I think the sidebar looks better now.", False),
+])
+def test_names_a_time(text, says_when):
+    assert v2.names_a_time(text) is says_when
+
+
+@pytest.mark.parametrize("text, kept", [
+    ("The owner restyled the pinwheel sidebar on 2026-10-07.", "The owner restyled the pinwheel sidebar."),
+    ("The owner ran between October 1 and October 3, 2026.", "The owner ran."),
+    ("I restyled it as of May 4.", "I restyled it."),
+    ("The owner uses the pinwheel sidebar.", "The owner uses the pinwheel sidebar."),
+])
+def test_a_date_the_reader_wrote_into_the_claim_is_taken_out(text, kept):
+    assert v2._without_dates(text) == kept
+
+
+def test_a_claim_whose_words_name_no_time_is_checked_as_of_when_it_was_said(monkeypatch):
+    monkeypatch.setattr(v2, "DATED_BY_WORDS", True)
+    weeks_old = [rec(1, "authored", day="2026-08-28")]  # the reader pinned the claim to the day it was said
+    reply = read_reply(claim="The owner restyled the pinwheel sidebar on 2026-10-07.", date_from="2026-10-07",
+                       date_to="2026-10-07", as_written="I restyled the pinwheel sidebar on October 7, 2026.")
+    out = run(weeks_old, FakeChat(reply, {1: "shows"}))
+    assert out["verdict"] == "supported" and out["stages"]["read"]["as_of_said"] == 1
+    assert out["claim"]["period"] == {"from": "", "to": ""} and out["claim"]["text"] == "The owner restyled the pinwheel sidebar."
+    assert out["reading"]["claims"][0]["date_from"] == "2026-10-07"  # the stored reading keeps the reader's dates
+    # As of when it was said: a record made after that moment still never counts (STRICT_AS_OF).
+    assert run([rec(1, "authored", day="2026-10-20")], FakeChat(reply, {1: "shows"}))["verdict"] == "no_evidence"
+    monkeypatch.setattr(v2, "DATED_BY_WORDS", False)  # 1.5.31: the reader's day is the claim's period
+    out = run(weeks_old, FakeChat(reply, {1: "shows"}))
+    assert out["verdict"] == "no_evidence" and out["reason"] == "shows_failed_rules" and "as_of_said" not in out["stages"]["read"]
+
+
+def test_a_time_in_the_words_or_the_turn_before_keeps_the_readers_period(monkeypatch):
+    monkeypatch.setattr(v2, "DATED_BY_WORDS", True)
+    weeks_old = [rec(1, "authored", day="2026-08-28")]
+    out = run(weeks_old, FakeChat(read_reply(), {1: "shows"}), statement="I restyled the pinwheel sidebar yesterday.")
+    assert out["verdict"] == "no_evidence" and out["claim"]["period"] == {"from": "2026-10-06", "to": "2026-10-06"}
+    out = run(weeks_old, FakeChat(read_reply(), {1: "shows"}), context=[{"speaker": "", "text": "What did you do yesterday?"}])
+    assert out["verdict"] == "no_evidence" and "as_of_said" not in out["stages"]["read"]
+
+
+def test_a_plan_keeps_its_window(monkeypatch):
+    monkeypatch.setattr(v2, "DATED_BY_WORDS", True)
+    plan, did = claim(kind=v2.INTENTION, date_from="2026-10-09", date_to="2026-10-09"), claim()
+    got, undated = v2.dated_by_words([plan, did], v2.ClaimRequest(statement=SENTENCE))
+    assert got[0] is plan and (got[1].date_from, got[1].date_to) == ("", "") and undated == 1
