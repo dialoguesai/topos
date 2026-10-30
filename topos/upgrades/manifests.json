@@ -1322,6 +1322,12 @@
       "notes": []
     },
     {
+      "version": "1.5.32",
+      "summary": "The truth lane checks back as far as the owner sets (window_days, for backfill); every answered verify_claim, from either door, writes one request-log row with its outcome for the Home card; and a claim is read on the day it was said and dated only by its words (both switches on).",
+      "steps": [],
+      "notes": []
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
