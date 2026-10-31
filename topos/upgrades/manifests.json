@@ -1334,6 +1334,12 @@
       "notes": []
     },
     {
+      "version": "1.5.34",
+      "summary": "verify_claim: fun mode is optional and a request naming no mode has none (DR-64); Off-limits now applies to the facts it reads. No derived data changes.",
+      "steps": [],
+      "notes": []
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
