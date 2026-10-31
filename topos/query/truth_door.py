@@ -1,7 +1,7 @@
 """Truth door — who may call verify_claim, truth_prompts and truth_seed_fact.
 
-The fun-mode aperture (verify_modes.py) bounds WHAT these three types can touch;
-this module bounds WHO may ask. The answer comes from the channel-verified
+The modes (verify_modes.py) and the disclosure rules bound WHAT these three types
+can touch; this module bounds WHO may ask. The answer comes from the channel-verified
 principal (topos/principal.py), never from the payload: ``caller_app_id`` is
 whatever the caller sent, so it names an app for the audit line and gates
 nothing.
@@ -9,7 +9,7 @@ nothing.
 - truth_seed_fact WRITES an owner-stated fact (``asserted_by="owner"``), so only
   the owner class may author one: OWNER_APP, which exists on the 0600 owner
   socket and under a verified relay stamp — never behind a bearer on TCP.
-- verify_claim and truth_prompts READ the owner's fun facts. Besides the owner
+- verify_claim and truth_prompts READ the owner's facts. Besides the owner
   class they admit:
     * CP_RELAY — the CP truth door (``/v1/truth/*``) checks an owner credential
       and its TRUTH_APP_ALLOWLIST before relaying, and relays unstamped. That is

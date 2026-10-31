@@ -148,7 +148,8 @@ def _truth_door_refusal(req_id: Any, msg_type: str) -> Optional[Dict[str, Any]]:
 
 @handles("verify_claim")
 async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Mode-gated truthfulness check (PLAN_TRUTHFULNESS_PLUGIN.md).
+    """Truthfulness check over the owner's facts (PLAN_TRUTHFULNESS_PLUGIN.md). Fun mode only when the caller names
+    it; a request with no mode has none (DR-64).
 
     Deliberately NOT reachable from the /mcp gateway — the control plane
     forwards it only from the app-gated /v1/truth/verify-claim route. Who may
@@ -164,15 +165,18 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
     payload = message.get("payload") or {}
     caller_app_id = str(payload.get("caller_app_id") or "").strip()
     statement = str(payload.get("statement") or "")
-    mode = str(payload.get("mode") or "fun")
     try:
+        from ...features.lifecycle.blackhole_guard import guard_from_message
         from ...query.verify import verify_claim
+        from ...query.verify_modes import DEFAULT_MODE
 
+        conn = hub.get_db_connection()
         result = verify_claim(
-            hub.get_db_connection(),
+            conn,
             statement=statement,
-            mode=mode,
+            mode=str(payload.get("mode") or DEFAULT_MODE),
             caller_app_id=caller_app_id,
+            guard=guard_from_message(conn, message),
         )
         audit = result.pop("_audit", None)
         if audit:

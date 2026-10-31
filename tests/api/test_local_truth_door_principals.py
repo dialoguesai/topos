@@ -210,6 +210,21 @@ def test_owner_socket_reaches_all_three_without_a_bearer(conn, owner_socket):
     assert _seeded(conn) == [("favorite_food", "grilled cheese", "owner")]
 
 
+@pytest.mark.parametrize(("extra", "expected"), [({}, None), ({"mode": "fun"}, "fun")])
+def test_the_local_door_forwards_a_mode_only_when_named(owner_socket, monkeypatch, extra, expected):
+    seen = {}
+
+    async def forward(message, **_):
+        seen.update(message["payload"])
+        return {"status": "ok", "payload": {}}
+
+    monkeypatch.setattr("topos.api.local_mcp.handle_control_plane_request", forward)
+    response = owner_socket.post("/api/local/verify_claim", json={"statement": "I was at the office", "app_id": "app", **extra})
+    assert response.status_code == 200
+    assert seen.get("mode") == expected
+
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("msg_type", ["verify_claim", "truth_prompts"])
 async def test_cp_truth_door_relay_still_reaches_the_reads(conn, msg_type):

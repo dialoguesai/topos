@@ -1,8 +1,11 @@
-"""verify_claim — mode-gated truthfulness check of a statement against the
-owner's fact store (PLAN_TRUTHFULNESS_PLUGIN.md §3.1).
+"""verify_claim — truthfulness check of a statement against the owner's fact
+store (PLAN_TRUTHFULNESS_PLUGIN.md §3.1). Fun mode is optional (DR-64).
 
 Containment contract (owner directive 2026-07-27):
-  * The mode's aperture is applied BEFORE retrieval and before any model call.
+  * A mode's aperture, when it has one, is applied BEFORE retrieval and before
+    any model call.
+  * A fact the disclosure rules withhold (owner_only, a calibration label, an
+    Off-limits person or record) is never evidence, in any mode.
   * An out-of-aperture claim short-circuits to the same neutral response as a
     claim with no evidence — refusal is indistinguishable from ignorance.
   * The response NEVER carries evidence text or record ids — lane stances,
@@ -24,7 +27,8 @@ import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..features.facts.store import FactStore
-from .verify_modes import VerifyMode, categorize, get_mode, registered_mode_names
+from ..features.lifecycle.blackhole_guard import BlackholeGuard
+from .verify_modes import DEFAULT_MODE, VerifyMode, categorize, get_mode, registered_mode_names
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +154,16 @@ def _lane_for_fact(fact: Dict[str, Any]) -> str:
     return "attributed"  # assistant / contact:<id>
 
 
+def _off_limits(guard: BlackholeGuard, fact: Dict[str, Any], text: str) -> bool:
+    """True when the fact touches an Off-limits person or record, by id or by name in what would reach the judge."""
+    payload = fact.get("payload") or {}
+    if any(guard.blocks_entity_id(payload.get(key)) for key in ("subject_entity_id", "object_entity_id")):
+        return True
+    if any(isinstance(ref, dict) and guard.blocks_record_id(ref.get("record_id")) for ref in fact.get("source_refs") or []):
+        return True
+    return guard.text_mentions_blackholed(text)
+
+
 def _llm_enabled() -> bool:
     """Tri-state TOPOS_TRUTH_LLM: off / on / auto (auto = inert under pytest,
     the TOPOS_FACTS_LLM convention — evals stay deterministic and offline)."""
@@ -259,12 +273,14 @@ def verify_claim(
     conn: sqlite3.Connection,
     *,
     statement: str,
-    mode: str = "fun",
+    mode: str = DEFAULT_MODE,
     caller_app_id: str = "",
+    guard: Optional[BlackholeGuard] = None,
 ) -> Dict[str, Any]:
-    """Check ``statement`` against the owner's facts under ``mode``'s aperture.
+    """Check ``statement`` against the owner's facts under ``mode``.
 
     Returns a caller-safe response plus an ``_audit`` key the handler pops.
+    With no ``guard`` every Off-limits entry is withheld, as for a caller the node cannot place.
     """
     resolved = get_mode(mode)
     if resolved is None:
@@ -299,12 +315,16 @@ def verify_claim(
     if not statement:
         return _neutral("empty_statement")
 
-    category, fun_safe = categorize(statement)
+    category: Optional[str] = None
+    if resolved.topic_gate:
+        category, fun_safe = categorize(statement)
+        if not fun_safe or category not in resolved.allowed_categories:
+            audit["category"] = category
+            return _neutral("out_of_aperture")
     audit["category"] = category
-    if not fun_safe or category not in resolved.allowed_categories:
-        return _neutral("out_of_aperture")
 
-    # --- Evidence (facts only in v1; aperture applied per fact) -----------------------
+    # --- Evidence (facts only in v1; a mode's aperture applied per fact) --------------
+    guard = guard if guard is not None else BlackholeGuard(conn)
     audit["retrieval_touched"] = True
     store = FactStore(conn)
     tokens = _content_tokens(statement)
@@ -328,14 +348,18 @@ def verify_claim(
         predicate = str(payload.get("predicate") or "")
         if predicate.startswith("calibration_"):
             continue  # calibration labels require explicit signed truth-pack consent
-        fact_blob = f"{predicate.replace('_', ' ')} {payload.get('object_value') or ''}"
-        fact_category, fact_safe = categorize(fact_blob)
-        if not fact_safe or fact_category not in resolved.allowed_categories:
+        if resolved.topic_gate:
+            fact_blob = f"{predicate.replace('_', ' ')} {payload.get('object_value') or ''}"
+            fact_category, fact_safe = categorize(fact_blob)
+            if not fact_safe or fact_category not in resolved.allowed_categories:
+                continue
+        text = FactStore.render(fact)
+        if _off_limits(guard, fact, text):
             continue
         lane = _lane_for_fact(fact)
         if lane in lane_entries:
             lane_entries[lane].append({
-                "text": FactStore.render(fact),
+                "text": text,
                 "value": str(payload.get("object_value") or ""),
                 "hinted": predicate.lower() in hinted_predicates,
             })
