@@ -772,61 +772,74 @@ async def handle_control_plane_request(
     # None inherits the ambient principal (nested dispatch inside a handler must
     # not erase the channel's stamp); entry points always pass theirs explicitly.
     from ...principal import current_principal
+    from .. import owner_requests
 
     token = set_principal(principal if principal is not None else current_principal())
     try:
-        # The owner's coding agent: a positive list, checked before every other gate (CONTRACTS §1.2).
-        refusal = _owner_agent_refusal(message, msg_type)
-        if refusal is not None:
-            return refusal
-        # Signal APIs are the owner's inspection/curation surface, not a grant
-        # transport. The HTTP dispatcher must not let a shared key sidestep the
-        # owner-only proxy and invoke their unfiltered readers or mutations.
-        if msg_type.startswith("signal_"):
-            from ...principal import OWNER_APP
-
-            if getattr(current_principal(), "cls", None) != OWNER_APP:
-                return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
-        from .registry import OWNER_ONLY_MESSAGE_TYPES
-        from ...principal import OWNER_APP
-
-        if msg_type in OWNER_ONLY_MESSAGE_TYPES and getattr(current_principal(), "cls", None) != OWNER_APP:
-            return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
-        # A dangerous change on the real owner socket needs the app, the web app, a confirmation or the dev
-        # proxy (CONTRACTS §1.6). After the class gates, so their refusals and precedence are what they were.
-        refusal = dangerous_door_refusal(message, msg_type)
-        if refusal is not None:
-            return refusal
-        # The legacy inspection floor (fix/legacy-inspection-gate 33afaefd) replaces
-        # the lineage's black-hole-conditional block: row tools refuse every
-        # non-owner principal unconditionally, metadata tools refuse third parties.
-        from .registry import OFF_LOOP_MESSAGE_TYPES
-
-        if msg_type in OFF_LOOP_MESSAGE_TYPES:
-            # NR166 R3b: this handler never awaits, so on the loop its queries would stall every other request.
-            # It runs in a worker thread, on that thread's own connection, and the inspection floor's check
-            # (an Off-limits read) goes with it. to_thread carries the principal set above.
-            import asyncio
-
-            refused, response = await asyncio.to_thread(_refused_or_handled, handler, message, msg_type)
-            if refused:
-                return response
-        else:
-            refusal = _legacy_inspection_refusal(message, msg_type)
-            if refusal is not None:
-                return refusal
-            response = await handler(message)
-        from ...features.lifecycle.off_limits_view import is_routine_lane
-
-        if is_routine_lane():
-            # The routine lane's one filter on the way out. Off the event loop: it reads the database (a thread
-            # gets its own connection, and the request's principal goes with the copied context).
-            import asyncio
-
-            response = await asyncio.to_thread(_withhold_what_is_carried, message, msg_type, response)
-        return response
+        # The owner's request path (core/owner_requests.py): a frame of its types is counted pending while it is
+        # handled, and its blocking steps take the owner executor instead of the default pool, so an index rebuild
+        # or a derive storm holding that pool cannot queue the owner's screens. Any other type: unchanged.
+        with owner_requests.owner_request(msg_type):
+            return await _dispatch(message, msg_type, handler)
     finally:
         reset_principal(token)
+
+
+async def _dispatch(message: Dict[str, Any], msg_type: str, handler: Any) -> Optional[Dict[str, Any]]:
+    """``handle_control_plane_request``'s gates and the handler, with the principal set and the owner-request mark
+    (when the type is one) in place."""
+    from ...principal import current_principal
+    from .. import owner_requests
+
+    # The owner's coding agent: a positive list, checked before every other gate (CONTRACTS §1.2).
+    refusal = _owner_agent_refusal(message, msg_type)
+    if refusal is not None:
+        return refusal
+    # Signal APIs are the owner's inspection/curation surface, not a grant
+    # transport. The HTTP dispatcher must not let a shared key sidestep the
+    # owner-only proxy and invoke their unfiltered readers or mutations.
+    if msg_type.startswith("signal_"):
+        from ...principal import OWNER_APP
+
+        if getattr(current_principal(), "cls", None) != OWNER_APP:
+            return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
+    from .registry import OWNER_ONLY_MESSAGE_TYPES
+    from ...principal import OWNER_APP
+
+    if msg_type in OWNER_ONLY_MESSAGE_TYPES and getattr(current_principal(), "cls", None) != OWNER_APP:
+        return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
+    # A dangerous change on the real owner socket needs the app, the web app, a confirmation or the dev
+    # proxy (CONTRACTS §1.6). After the class gates, so their refusals and precedence are what they were.
+    refusal = dangerous_door_refusal(message, msg_type)
+    if refusal is not None:
+        return refusal
+    # The legacy inspection floor (fix/legacy-inspection-gate 33afaefd) replaces
+    # the lineage's black-hole-conditional block: row tools refuse every
+    # non-owner principal unconditionally, metadata tools refuse third parties.
+    from .registry import OFF_LOOP_MESSAGE_TYPES
+
+    if msg_type in OFF_LOOP_MESSAGE_TYPES:
+        # NR166 R3b: this handler never awaits, so on the loop its queries would stall every other request.
+        # It runs in a worker thread, on that thread's own connection, and the inspection floor's check
+        # (an Off-limits read) goes with it. The principal set above goes with it too. An owner request's
+        # worker is the owner executor's (core/owner_requests.py); any other's the default pool's, as before.
+        refused, response = await owner_requests.run_off_loop(_refused_or_handled, handler, message, msg_type)
+        if refused:
+            return response
+    else:
+        refusal = _legacy_inspection_refusal(message, msg_type)
+        if refusal is not None:
+            return refusal
+        response = await handler(message)
+    from ...features.lifecycle.off_limits_view import is_routine_lane
+
+    if is_routine_lane():
+        # The routine lane's one filter on the way out. Off the event loop: it reads the database (a thread
+        # gets its own connection, and the request's principal goes with the copied context).
+        import asyncio
+
+        response = await asyncio.to_thread(_withhold_what_is_carried, message, msg_type, response)
+    return response
 
 
 #: When the node last said in its log that a stamp did not verify, for each cause (``_note_unverified_stamp``).
