@@ -1,6 +1,8 @@
 """Scoped query orchestration message handlers."""
 from __future__ import annotations
 
+import asyncio
+
 import topos.core.handlers as hub
 
 from .common import (
@@ -78,6 +80,33 @@ async def _record_verify_claim(caller_app_id: str, result: Dict[str, Any], unnam
         logger.debug("verify_claim: usage record failed", exc_info=True)
 
 
+#: The newest usage row still on its way, so the next waits its turn. A held write gate then ties up one worker thread,
+#: not one per answer: reads share those threads.
+_last_usage_write: Optional["asyncio.Task[None]"] = None
+
+
+def _record_verify_claim_after_answer(caller_app_id: str, result: Dict[str, Any], unnamed: str = "unknown") -> None:
+    """Write the usage row behind the answer, one at a time, in answer order. The row takes the write gate, which the
+    node's other writers held for 13-21 s on 30 Oct 2026, and a caller waiting for it got a 30 s check back at up to
+    59 s. Nothing in the answer depends on the row. Held in ``state.background_tasks``, so shutdown cancels it: a row
+    still waiting then is one call missing from the Home card."""
+    global _last_usage_write
+    from ...core import state
+
+    previous = _last_usage_write
+
+    async def write() -> None:
+        # Only this loop's task can be waited on: the client loop runs handlers when there is no app loop.
+        if previous is not None and not previous.done() and previous.get_loop() is asyncio.get_running_loop():
+            await asyncio.wait([previous])
+        await _record_verify_claim(caller_app_id, result, unnamed)
+
+    task = asyncio.create_task(write(), name="verify_claim_usage")
+    state.background_tasks.add(task)
+    task.add_done_callback(state.background_tasks.discard)
+    _last_usage_write = task
+
+
 def _log_query_failure(
     msg_type: str,
     req_id: Any,
@@ -151,7 +180,7 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
             logger.info("truth verify_claim audit: %s", audit)
         if "error" in result:
             return {"id": req_id, "status": "error", "error": str(result["error"])}
-        await _record_verify_claim(caller_app_id, result)
+        _record_verify_claim_after_answer(caller_app_id, result)
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         _log_query_failure("verify_claim", req_id, exc)
@@ -217,8 +246,6 @@ async def handle_verify_claim_owner(message: Dict[str, Any]) -> Optional[Dict[st
     Home card as what they are, e.g. ``dev-transcripts``), else ``owner-door``. Like the public door's, the name is
     caller-asserted and gates nothing.
     """
-    import asyncio
-
     req_id = message.get("id")
     if not req_id:
         return None
@@ -247,7 +274,7 @@ async def handle_verify_claim_owner(message: Dict[str, Any]) -> Optional[Dict[st
     except Exception as exc:  # noqa: BLE001
         logger.warning("owner claim check failed: %s", type(exc).__name__)
         return {"id": req_id, "status": "error", "error": "verification_unavailable"}
-    await _record_verify_claim(caller_app_id.strip(), result, unnamed="owner-door")
+    _record_verify_claim_after_answer(caller_app_id.strip(), result, unnamed="owner-door")
     return {"id": req_id, "status": "ok", "payload": result}
 
 

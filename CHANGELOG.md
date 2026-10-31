@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **A verify_claim answer no longer waits for its usage row.** `[O]` Since 1.5.32 both doors wrote the `mcp_request_log` row before answering, and that row takes the write gate: on the owner's node it waited 13-21 s behind other writers, so 30 s checks came back at up to 59 s. The row is now written behind the answer, one at a time and in answer order, so a held gate ties up one worker thread. A row still waiting at shutdown is lost: one call missing from the Home card.
+
 ## [1.5.32] — 2026-10-30
 
 ### Added
