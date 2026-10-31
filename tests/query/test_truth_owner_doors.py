@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -245,10 +246,24 @@ def _handler(msg_type):
     return HANDLERS[msg_type]
 
 
+async def _usage_written():
+    """An answer leaves its usage row still being written: wait for it, in the loop that started it."""
+    from topos.core import state
+
+    pending = [task for task in state.background_tasks if task.get_name() == "verify_claim_usage"]
+    if pending:
+        await asyncio.wait(pending)
+
+
 def _as(principal, msg_type, payload):
+    async def answered():
+        out = await _handler(msg_type)({"id": "r1", "type": msg_type, "payload": payload})
+        await _usage_written()
+        return out
+
     token = set_principal(principal)
     try:
-        return asyncio.run(_handler(msg_type)({"id": "r1", "type": msg_type, "payload": payload}))
+        return asyncio.run(answered())
     finally:
         reset_principal(token)
 
@@ -941,6 +956,67 @@ def test_an_owner_door_check_is_a_verify_claim_row_under_the_name_the_caller_giv
         ("verify_claim", "owner-door", "owner-1", "owner_self", "owner_app", None),
         ("verify_claim", "dev-transcripts", "owner-1", "owner_self", "owner_app", None),
     ]
+
+
+@pytest.fixture
+def held_usage_row(owner_door, monkeypatch):
+    """Every usage row stands at a write gate another writer holds, until the test lets go."""
+    from topos.core.handlers import query
+
+    gate, reached, write = threading.Event(), [], query._verify_claim_usage
+
+    def held(conn, source, *args):
+        reached.append(source)
+        assert gate.wait(10)
+        write(conn, source, *args)
+
+    monkeypatch.setattr(query, "_verify_claim_usage", held)
+    yield SimpleNamespace(node=owner_door.node, gate=gate, reached=reached)
+    gate.set()
+
+
+@pytest.mark.parametrize("msg_type,payload", [("verify_claim", CHECK), ("verify_claim_owner", OWNER_CHECK)])
+def test_the_answer_does_not_wait_for_its_usage_row(held_usage_row, msg_type, payload):
+    """30 Oct 2026: the row waited 13-21 s on the write gate before the answer left, so 30 s checks came back at up to
+    59 s. The answer leaves first. The row still names who asked once the door has moved on to the next request."""
+    async def asked():
+        try:
+            token = set_principal(Principal(OWNER_APP, "uds"))
+            try:
+                out = await asyncio.wait_for(_handler(msg_type)({"id": "r1", "type": msg_type, "payload": payload}), 5)
+            finally:
+                reset_principal(token)
+            assert _usage(held_usage_row.node.conn) == []
+        finally:
+            held_usage_row.gate.set()
+        await _usage_written()
+        return out
+
+    assert asyncio.run(asked())["status"] == "ok"
+    assert [row[4] for row in _usage(held_usage_row.node.conn)] == ["owner_app"]
+
+
+def test_usage_rows_go_one_at_a_time_in_answer_order(held_usage_row):
+    """A held gate ties up one worker thread however many answers go out: reads share those threads."""
+    async def asked():
+        token = set_principal(Principal(OWNER_APP, "uds"))
+        try:
+            for name in ("first", "second"):
+                await _handler("verify_claim_owner")({"id": name, "type": "verify_claim_owner",
+                                                      "payload": {**OWNER_CHECK, "caller_app_id": name}})
+        finally:
+            reset_principal(token)
+        for _ in range(200):
+            if held_usage_row.reached:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        assert held_usage_row.reached == ["first"]
+        held_usage_row.gate.set()
+        await _usage_written()
+
+    asyncio.run(asked())
+    assert [row[1] for row in _usage(held_usage_row.node.conn)] == ["first", "second"]
 
 
 def test_an_owner_door_check_refused_invalid_or_failed_writes_no_row(owner_door):
