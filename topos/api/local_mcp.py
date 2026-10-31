@@ -56,17 +56,16 @@ async def local_verify_claim(
     or an enrolled client the owner lists in TOPOS_TRUTH_CLIENT_ALLOWLIST; any
     bearer on TCP otherwise gets 403 owner_mode_required — the owner key there
     is a third party too. Mirrors the CP door: `app_id` is mandatory and `mode`
-    is pinned to fun, so this route cannot reach a mode the registry doesn't
-    ship. Body: {"statement": "...", "app_id": "truth-mirror"}."""
+    is optional, with no fun mode unless the caller names it (DR-64). Body:
+    {"statement": "...", "app_id": "truth-mirror", "mode": "fun"}."""
     statement = str(body.get("statement") or "").strip()
     app_id = str(body.get("app_id") or "").strip()
     if not statement or not app_id:
         return {"status": "error", "error": "statement and app_id required"}
-    msg = {
-        "id": str(uuid.uuid4()),
-        "type": "verify_claim",
-        "payload": {"statement": statement, "mode": "fun", "caller_app_id": app_id},
-    }
+    payload = {"statement": statement, "caller_app_id": app_id}
+    if body.get("mode"):
+        payload["mode"] = str(body["mode"])
+    msg = {"id": str(uuid.uuid4()), "type": "verify_claim", "payload": payload}
     out = await handle_control_plane_request(msg, principal=principal)
     if out.get("status") == "error":
         return {"status": "error", "error": out.get("error", "unknown")}

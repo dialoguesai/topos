@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+
+- `[P]` **`verify_claim`: fun mode is now optional, and a request that names no mode has none** (owner, 31 Oct 2026;
+  DISCLOSURE_RULES DR-64). The new default mode, `standard`, has no topic gate: no claim or fact is refused for lacking
+  a fun word or for a sensitive word, on the node's handler, the local door and the control plane's door. A caller that
+  wants the old aperture sends `"mode": "fun"`. What is still never evidence, in either mode: `owner_only` facts,
+  `calibration_` labels and anything Off-limits. The reply is still stances only, and `category` is null under `standard`.
+  `truth_prompts` and `truth_seed_fact` stay on `fun`, because what they produce is shown to the other person on a call.
+
+### Fixed
+
+- `[P]` **`verify_claim` now applies Off-limits to the facts it reads.** It read the fact store with no guard, so a fact
+  about a protected person could back a stance. Fun mode's narrow topics made that rare; it now holds in every mode.
+
 ## [1.5.33] — 2026-10-31
 
 ### Fixed

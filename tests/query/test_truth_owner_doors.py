@@ -879,6 +879,21 @@ def _usage(conn):
         "ORDER BY id")]
 
 
+@pytest.mark.parametrize(("payload", "mode"), [({}, "standard"), ({"mode": "fun"}, "fun")])
+def test_verify_claim_has_no_fun_mode_unless_the_request_names_it(node, monkeypatch, payload, mode):
+    seen = {}
+
+    def answer(conn, **kw):
+        seen.update(kw)
+        return {"stance": "unknown"}
+
+    monkeypatch.setattr("topos.query.verify.verify_claim", answer)
+    out = _as(Principal(CP_RELAY, "cp_relay"), "verify_claim", {"statement": "I was at the office", "caller_app_id": "app", **payload})
+    assert out["status"] == "ok"
+    assert seen["mode"] == mode
+    assert seen["guard"].view is not None  # the relay reads the request's own Off-limits view, never none
+
+
 def test_an_answered_verify_claim_is_one_request_log_row_the_daily_overview_names(answering):
     from topos.dashboard.measurements import daily_measurements
 
