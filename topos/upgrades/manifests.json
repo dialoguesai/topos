@@ -1328,6 +1328,12 @@
       "notes": []
     },
     {
+      "version": "1.5.33",
+      "summary": "A verify_claim answer no longer waits for its usage row: both doors write the row behind the answer, one at a time, so a held write gate cannot push a 30 s check past its deadline.",
+      "steps": [],
+      "notes": []
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
