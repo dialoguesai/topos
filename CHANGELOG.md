@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.34] — 2026-10-31
+
 ### Changed
 
 - `[P]` **`verify_claim`: fun mode is now optional, and a request that names no mode has none** (owner, 31 Oct 2026;
