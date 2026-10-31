@@ -95,13 +95,23 @@ _KIN_WHITELIST = {
     "stepmom", "stepmother", "stepfather", "mother-in-law", "father-in-law",
 }
 
+#: A transcript's name for a voice it could not identify: "Speaker 2", "SPEAKER_00", "spk_1",
+#: "Speaker A". Never a person: written into a person field it would pass as a name, and a
+#: moment would read as "with Speaker 2".
+_DIARISATION_LABEL = re.compile(r"^(?:speaker|spk)(?:[\s_#-]*\d+|[\s_#-]+[a-z])$")
+
+
+def is_diarisation_label(value: Any) -> bool:
+    return isinstance(value, str) and bool(_DIARISATION_LABEL.match(" ".join(value.strip().lower().split())))
+
+
 def person_field_ok(name) -> bool:
     if not isinstance(name, str) or not name.strip():
         return False
     n = " ".join(name.strip().lower().split())
     if n in _KIN_WHITELIST:
         return True
-    if n in _PERSON_BLOCKLIST:
+    if n in _PERSON_BLOCKLIST or is_diarisation_label(n):
         return False
     if len(name) > 40 or len(n.split()) > 4:
         return False
@@ -337,6 +347,27 @@ Respond with ONLY this JSON, nothing else:
 _JSON_RE = re.compile(r"\{.*\}", re.S)
 
 
+#: Packs that read who an owner-authored direct message was sent to. Decided per pack:
+#:   obligations.commitments  a promise's counterparty is usually the person being texted,
+#:                            and their name is not in the words
+#:   relationships.social     NOT: given the label it binds the person being texted as the
+#:                            subject of a relationship event ("Thank you!!" -> reconnected)
+#:   moments.*                NOT: the pack takes people only from the words, so the label
+#:                            adds nothing
+#: A pack joins this set only once the label is shown to help it.
+RECIPIENT_LABEL_PACKS = frozenset({"obligations.commitments"})
+_RECIPIENT_KEYS = ("recipient", "recipient_entity_id", "recipient_key")
+
+
+def addressing_for(pack: Any, rec: Dict[str, Any]) -> Dict[str, Any]:
+    """The record as this pack reads it: an owner DM's recipient stays only for a pack in
+    RECIPIENT_LABEL_PACKS. Every runner reads the record through this before building the
+    prompt, the parser's labels and the verifier's addressing, so the three agree."""
+    if str(getattr(pack, "pack", "") or "") in RECIPIENT_LABEL_PACKS:
+        return rec
+    return {k: v for k, v in rec.items() if k not in _RECIPIENT_KEYS}
+
+
 #: Person-field values the RUNNER issued rather than the model invented: the record's own
 #: sender or recipient, as an entity id or a messenger key. They can only come from the
 #: prompt's label line, so the grounding guard (which stops names the text never contains)
@@ -446,6 +477,16 @@ def parse_output(raw: str, pack: Pack, record_text: str = None,
                         val.pop(pf, None)
                     continue
                 pv = val.get(pf)
+                # A ONE-person field written in the plural fields' shape: "person": ["<name>"].
+                # Rejected whole before, which cost correct facts (a gratitude, its person
+                # right). One name is the name and an empty array is no one; two names in a
+                # one-person field are still refused below.
+                if isinstance(pv, list) and len(pv) <= 1:
+                    pv = pv[0] if pv else None
+                    if pv is None:
+                        val.pop(pf, None)
+                    else:
+                        val[pf] = pv
                 if isinstance(pv, str) and pv.startswith("NEW:"):
                     # A5 discovery escape hatch: strip the marker, flag the assertion
                     val[pf] = pv[4:].strip()

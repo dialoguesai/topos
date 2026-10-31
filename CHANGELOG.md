@@ -51,6 +51,25 @@ The machine-readable twin of each release is
 - **verify_claim: the reader asks for no more claims than the effort checks, off by default.** `[E:verify]` With `verify_v2.LEAN_READ` on, the reader's output schema allows as many claims as the request's effort checks (one at effort low, the inbound truth lane's effort; three at high, unchanged). The reader was asked for up to three claims of eight fields each and the engine kept the first at effort low: on the owner's node a lane row's reader wrote 343 tokens for three claims and took 21.5 s against the lane's 20 s cap. Generation is greedy and left to right, so the main claim is written the same way; only the list closes sooner. Off: unchanged.
 - **Truth lane: load the local model before a check, off by default.** `[O]` With `TOPOS_VERIFY_V2_WARM_LOCAL=1`, the owner's inbound truth lane checks that its local model is loaded (`/api/ps`) before each model check and, when it is not, loads it (an empty `/api/generate`, kept 10 min) with up to 120 s, outside the row's 30 s deadline and 20 s reader cap. A load that does not finish defers the rest of the batch and stores nothing, so a model swap no longer spends one of a row's three checks. On the owner's node Ollama swaps the derivation 27B and the lane's 9B all day (a cold 9B load took 76 s, a warm reader call 9–13 s), and every row stored `unable` in the lane's first week had used all three checks. Batch counts gain `warmed`, `warm_failed` and `warm_s` while the switch is on. Off: unchanged. The hosted side is never touched. No migration.
 
+### Fixed
+- **Commitments read who an owner's direct message was sent to, on every derivation path.** `[E:derivation]` The
+  recipient label built for commitments on 6 Sep reached only the commitments lane; the ingest batch, the drip catch-up
+  and the enable-offer trial never passed it, so "I'll send it after lunch" had nobody to be promised to: the person
+  being texted is not named in the words, and a counterparty the record does not name is rejected by the grounding
+  guard. An owner-authored message in a conversation with exactly one other sender now carries that sender as its
+  recipient (the lane's existing rule); groups, other people's messages, AI chats, journals and transcripts are
+  unchanged, and a diarised voice ("Speaker 1") is never a DM partner. Only `template.RECIPIENT_LABEL_PACKS`
+  (commitments) read it: given the label, other packs bind the person being texted as the subject of facts that are
+  not about them (a thank-you read as a relationship event). The prompt, the parser's labels and the verifier's
+  addressing all go through `template.addressing_for`, the owner's backfill control included. No other person's words
+  are added to any prompt here (that is DR-62's change). `no-invalidation`: nothing already written is wrong; records
+  already read are not re-read.
+- **The fact parser takes `"person": ["<name>"]` as the name, and never takes "Speaker 2" as a person.** `[E:derivation]`
+  A one-person field written as a one-element array is unwrapped and checked like a string, where before the whole
+  assertion was rejected; two names in a one-person field are still refused. Diarisation labels (`Speaker 2`,
+  `SPEAKER_00`, `spk_1`, `Speaker A`) fail `person_field_ok`, so a transcript's name for an unidentified voice is never
+  stored as a person.
+
 ## [1.5.28] — 2026-10-26
 
 ### Added
