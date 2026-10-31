@@ -1,5 +1,5 @@
 """Same-device /api/local/verify_claim route: full handler round-trip against a
-scratch DB, door policy asserted (app_id mandatory, mode pinned to fun)."""
+scratch DB, door policy asserted (app_id mandatory, no fun mode unless named)."""
 
 from __future__ import annotations
 
@@ -54,7 +54,8 @@ def test_local_verify_claim_roundtrip(client):
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["mode"] == "fun"
+    assert data["mode"] == "standard"
+    assert data["category"] is None
     assert data["lanes"]["self"]["stance"] == "contradicts"
     assert "_audit" not in data and "evidence" not in data
     assert "mandolin" not in str(data.get("lanes"))  # stances only, no text
@@ -65,12 +66,19 @@ def test_local_verify_claim_requires_app_id(client):
     assert response.json().get("status") == "error"
 
 
-def test_local_verify_claim_mode_is_pinned(client):
-    # A caller-supplied mode is ignored by the route (it never reads one) —
-    # even "serious" in the body still runs fun.
+def test_local_verify_claim_runs_fun_when_named(client):
+    response = client.post(
+        "/api/local/verify_claim",
+        json={"statement": "I love playing the mandolin", "app_id": "truth-mirror", "mode": "fun"},
+    )
+    assert response.status_code == 200
+    assert response.json()["mode"] == "fun"
+    assert response.json()["category"] == "hobbies"
+
+
+def test_local_verify_claim_refuses_a_mode_the_registry_does_not_ship(client):
     response = client.post(
         "/api/local/verify_claim",
         json={"statement": "I love playing the mandolin", "app_id": "truth-mirror", "mode": "serious"},
     )
-    assert response.status_code == 200
-    assert response.json()["mode"] == "fun"
+    assert response.json() == {"status": "error", "error": "unknown_mode"}
