@@ -934,3 +934,30 @@ Completed comparable after gate:
 - Live companion: NOT RUN, explicitly prohibited by the sprint. No actual-answer-quality, model-latency, live DNS/provider recovery or GPU-drain claim. All network execution was loopback fixture HTTP; DNS was replaced with controlled synthetic functions. The borrowed test environment was read-only.
 - Deployment: dedicated `fix/budget-review` worktree from `b7290ca`, local commit only. No candidate production/test edits, active-node/service changes, deploy, release, model unload, grants, routines or Rig D. Integration with root startup/other review fixes remains to be tested on the combined candidate.
 - Rollback: revert budget transport module and request wrapper/default change together; no database migration. Reverting cannot terminate already-running native resolver or provider work. Preserve truthful outstanding-resource reporting during any shutdown/restart decision.
+
+### Regression gate — RQ-2026-11-01-review-corrections — after
+
+- Recorded (UTC): 2026-11-01T19:55:12.077692+00:00
+- Note: Reviewed integrated corrections: default120 preserves known slow success; bounded reusable HTTP/DNS runtime; budgeted cold startup; generic pre-inference expiry; narrow remote termination reasons. No live quality/capacity or provider-drain claim.
+- Report: [machine-readable results](response-quality-runs/20261101T195512077692Z-RQ-2026-11-01-review-corrections-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 143 pass / 3 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 3; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_default_budget_allows_previously_observed_slow_success`
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_remote_termination_reason_is_validated_and_preserved[cancelled]`
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_remote_termination_reason_is_validated_and_preserved[deadline_exceeded]`
