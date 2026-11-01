@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 _MESSAGES = {
-    "compute_busy": "Compute is busy; the provider's pending queue is full.",
+    "compute_busy": "Compute capacity is busy.",
     "compute_unavailable": "Compute is temporarily unavailable.",
     "compute_rate_limited": "Compute is rate limited.",
 }

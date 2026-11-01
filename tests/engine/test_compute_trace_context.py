@@ -44,7 +44,7 @@ def test_remote_worker_http_engine_chain_and_rejection_count(monkeypatch, busy):
     app.add_middleware(TelemetryMiddleware)
     app.include_router(engine_run.router)
     app.dependency_overrides[require_api_key] = lambda: None
-    server = TestClient(app)
+    server = TestClient(app).__enter__()
     real_client = httpx.Client
     calls = []
 
@@ -84,5 +84,5 @@ def test_remote_worker_http_engine_chain_and_rejection_count(monkeypatch, busy):
             assert spans['topos.engine.remote'].attributes['error.type'] == 'compute_busy'
             assert spans['topos.engine.run'].attributes['error.type'] == 'compute_busy'
     finally:
-        server.close()
+        server.__exit__(None, None, None)
         instance.shutdown()

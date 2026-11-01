@@ -76,3 +76,49 @@ Hosted control-plane retry behavior, app busy-state rendering, accepted routine
 and shared-answer terminal statuses, real provider saturation, and backend drain
 are not established by these tests. Busy must be reported separately from useful
 completion; do not count expected overload responses as successful answers.
+
+## Bounded Engine HTTP dispatch
+
+`POST /v1/engine/run` runs Engine work in a dedicated worker pool instead of on
+the HTTP event loop. Admission happens before executor submission. A FIFO holds
+at most the configured number of waiting jobs; a single expiry observer removes
+expired waiters even while every worker is blocked. Full and expired queues return
+503 with the existing deferred ProcessingResult, the original task ID, and an
+explicit compute availability code. No retry time is invented.
+
+Configuration is read at application lifespan startup:
+
+| Environment variable | Default | Meaning |
+| --- | ---: | --- |
+| `TOPOS_ENGINE_HTTP_ACTIVE` | 1 | Maximum outstanding Engine HTTP workers in this process (1–32). |
+| `TOPOS_ENGINE_HTTP_WAITING` | 4 | Waiting jobs outside the executor (0–128; zero rejects immediately when all workers are occupied). |
+| `TOPOS_ENGINE_HTTP_QUEUE_TIMEOUT_SEC` | 30 | Maximum queue wait before submission (greater than zero, at most 300 seconds). |
+| `TOPOS_ENGINE_HTTP_SHUTDOWN_GRACE_SEC` | 5 | Time to await local worker drain during lifespan shutdown (0–30 seconds). |
+
+These conservative defaults are policy choices, not measured hardware capacity.
+The dispatcher does not implement service priority or model batching; task
+priority hints do not change its FIFO order. Only authenticated requests can use
+the endpoint or `GET /v1/engine/admission`, which exposes content-free counters,
+current active/waiting/detached counts, and the configured bounds.
+
+Queued cancellation removes work before dispatch. HTTP disconnects and handler
+cancellation detach active callers while retaining worker capacity until the
+worker returns. Context variables, including trace parentage and request policy
+context, cross the thread boundary. Lifespan shutdown refuses new admissions,
+rejects waiters, and reports any remaining workers. A subsequent lifespan on the
+same application object refuses to replace a dispatcher that still has active
+workers. This is not cross-process restart reconciliation.
+
+**Scope:** this bounds Engine HTTP workers in one process. `LocalEngineClient`,
+direct provider generation/streaming, background model work, other processes and
+other provider clients can bypass it. Multiple ASGI workers each have their own
+budget. Worker completion can mean an upstream timeout; it does not establish
+that remote inference stopped. The diagnostic response therefore explicitly
+reports that a global GPU bound and backend-drain knowledge are unavailable.
+A hard process restart loses these in-memory counters and queued jobs. Durable
+job recovery, shared admission ownership and provider cancellation acknowledgements
+remain separate requirements before claiming a whole-compute capacity limit.
+
+Database/compute routing and API-key enforcement are unchanged. A remote GPU
+host remains configurable through the existing Engine service URL. No broker is
+required for this endpoint-level execution limit.
