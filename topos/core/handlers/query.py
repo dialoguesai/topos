@@ -169,15 +169,20 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
         from ...features.lifecycle.blackhole_guard import guard_from_message
         from ...query.verify import verify_claim
         from ...query.verify_modes import DEFAULT_MODE
+        from .common import run_db_read
 
-        conn = hub.get_db_connection()
-        result = verify_claim(
-            conn,
-            statement=statement,
-            mode=str(payload.get("mode") or DEFAULT_MODE),
-            caller_app_id=caller_app_id,
-            guard=guard_from_message(conn, message),
-        )
+        def run(conn):
+            # Retrieval and the synchronous model judge must not hold the app
+            # event loop. Build the guard on the worker's own connection too.
+            return verify_claim(
+                conn,
+                statement=statement,
+                mode=str(payload.get("mode") or DEFAULT_MODE),
+                caller_app_id=caller_app_id,
+                guard=guard_from_message(conn, message),
+            )
+
+        result = await run_db_read(run)
         audit = result.pop("_audit", None)
         if audit:
             # Content-free by construction: mode/category/counts/judge only.
