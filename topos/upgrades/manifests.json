@@ -1348,6 +1348,15 @@
       ]
     },
     {
+      "version": "1.5.36",
+      "summary": "Resilience foundations: explicit compute availability, bounded Engine HTTP admission, verification timing, opt-in telemetry and outbox retry preservation.",
+      "steps": [],
+      "notes": [
+        "Code and protocol changes only. No schema migration, reprocessing, model change or automatic telemetry export.",
+        "Engine HTTP limits do not govern every GPU caller. Experimental provider gateway excluded."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

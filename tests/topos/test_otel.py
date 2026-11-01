@@ -236,6 +236,7 @@ def test_real_otlp_serialization_and_configured_endpoints(monkeypatch):
         if key.startswith("OTEL_") or key == "TOPOS_OTEL_ENABLED":
             monkeypatch.delenv(key)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector.invalid:4318")
+    monkeypatch.setenv("TOPOS_OTEL_ENABLED", "true")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT", "http://metrics.invalid/custom")
     monkeypatch.setenv("OTEL_SERVICE_NAME", "synthetic-service")
     monkeypatch.setenv("OTEL_METRIC_EXPORT_INTERVAL", "60000")
@@ -305,3 +306,75 @@ async def test_lifespan_drains_telemetry_even_on_failure(monkeypatch, fails):
     else:
         await call()
     assert events == ["configure", "app", "shutdown"]
+
+
+@pytest.mark.parametrize("opt_in", [None, "false"])
+def test_host_otel_settings_and_remote_sampling_do_not_enable_export(monkeypatch, opt_in):
+    runtime.shutdown()
+    monkeypatch.delenv("TOPOS_OTEL_ENABLED", raising=False)
+    if opt_in is not None:
+        monkeypatch.setenv("TOPOS_OTEL_ENABLED", opt_in)
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://host-collector.invalid")
+    monkeypatch.setenv("OTEL_TRACES_SAMPLER", "always_on")
+    assert not runtime.configure()
+    remote = {"traceparent": "00-" + "1" * 32 + "-" + "2" * 16 + "-01",
+              "TOPOS_OTEL_ENABLED": "true", "OTEL_EXPORTER_OTLP_ENDPOINT": "https://remote.invalid"}
+    with start_span("remote-request", context=extract_context(remote)) as active:
+        assert not active.is_recording()
+    assert isinstance(runtime.current().tracer_provider, trace.NoOpTracerProvider)
+
+
+def test_owner_opt_in_without_destination_does_not_export(monkeypatch):
+    runtime.shutdown()
+    for key in list(__import__("os").environ):
+        if key.startswith("OTEL_"):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("TOPOS_OTEL_ENABLED", "true")
+    assert not runtime.configure()
+    assert isinstance(runtime.current().tracer_provider, trace.NoOpTracerProvider)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_node_http_lifecycle_works_without_optional_telemetry(monkeypatch, caplog, enabled):
+    """No diagnostics setup is needed; even a missing opted-in SDK fails open."""
+    import builtins
+    import os
+    from starlette.testclient import TestClient
+    from topos.observability.http import TelemetryMiddleware
+
+    runtime.shutdown()
+    for key in list(os.environ):
+        if key.startswith("OTEL_") or key == "TOPOS_OTEL_ENABLED":
+            monkeypatch.delenv(key)
+    if enabled:
+        monkeypatch.setenv("TOPOS_OTEL_ENABLED", "true")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "https://collector.invalid")
+
+    imported = []
+    original_import = builtins.__import__
+
+    def without_sdk(name, *args, **kwargs):
+        if name.startswith(("opentelemetry.sdk", "opentelemetry.exporter")):
+            imported.append(name)
+            raise ImportError("Optional telemetry is not installed")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_sdk)
+    app = FastAPI()
+    app.add_middleware(TelemetryMiddleware)
+
+    @app.get("/operation")
+    def operation():
+        with start_span("synthetic-operation") as span:
+            assert not span.is_recording()
+            return {"result": "completed"}
+
+    # TestClient drives the actual ASGI startup and shutdown as well as HTTP.
+    with TestClient(app) as client:
+        response = client.get("/operation")
+        assert response.status_code == 200
+        assert response.json() == {"result": "completed"}
+        assert isinstance(runtime.current().tracer_provider, trace.NoOpTracerProvider)
+    assert bool(imported) is enabled
+    if not enabled:
+        assert "Telemetry unavailable" not in caplog.text

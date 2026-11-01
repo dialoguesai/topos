@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "topos-node"
-version = "1.5.35"
+version = "1.5.36"
 description = "Topos personal AI engine (FastAPI): local data, sync, control plane WebSocket client"
 readme = "README.md"
 license = "Apache-2.0"
@@ -87,6 +87,7 @@ Homepage = "https://topos.dialogues.ai"
 Source = "https://dialogues.ai"
 
 [project.optional-dependencies]
+# Export is opt-in; the base install keeps context propagation and no-op APIs.
 telemetry = [
   "opentelemetry-sdk>=1.39,<2",
   "opentelemetry-exporter-otlp-proto-http>=1.39,<2",
