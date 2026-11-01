@@ -9,6 +9,11 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.35] — 2026-11-01
+
+### Fixed
+- `[O]` Run standard claim verification on a database read worker so slow inference cannot block unrelated node requests. The worker owns its connection and privacy guard; authorization, local/remote Engine selection, and response contracts are unchanged. No migration or reprocessing.
+
 ## [1.5.34] — 2026-10-31
 
 ### Changed

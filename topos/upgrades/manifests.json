@@ -1340,6 +1340,14 @@
       "notes": []
     },
     {
+      "version": "1.5.35",
+      "summary": "Keep the node responsive during standard claim verification by moving its blocking database/inference work off the app event loop.",
+      "steps": [],
+      "notes": [
+        "[O] Code-only worker isolation. No schema change, reprocessing, or change to local/remote inference routing."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
