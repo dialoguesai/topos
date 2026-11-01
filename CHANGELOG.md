@@ -9,6 +9,12 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- `[O]` Optional OpenTelemetry traces and metrics for node development and diagnostics, with HTTP/RPC/worker context propagation and local log correlation. Export requires explicit enablement and a destination; ordinary installs need no telemetry setup. Built-in spans exclude request contents, credentials and exception text. No schema migration, reprocessing, new log retention or automatic reporting to Dialogues.
+
+### Fixed
+- `[O]` Preserve the unsent outbox tail after a disconnected or cancelled send, while retaining bounded best-effort overflow behavior. Durable Offline Inbox delivery is unchanged.
+
 ## [1.5.35] — 2026-11-01
 
 ### Fixed
