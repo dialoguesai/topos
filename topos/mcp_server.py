@@ -63,15 +63,10 @@ logger = logging.getLogger("topos.mcp_server")
 #: Handshake: an older server and a newer plugin (or the reverse) compare this.
 CONTRACT_VERSION = 1
 #: Canonical client names (CONTRACTS §1.1). The label and the enrolment row
-#: are keyed on these; anything else is refused before a socket is touched.
+#: are keyed on these; anything else is refused before a socket is touched. An app takes any other slug: it is not an
+#: MCP client, so ``topos-node mcp --client`` takes these only, and ``topos-node agents add|disconnect`` takes both.
 CLIENT_NAMES = ("claude-code", "codex", "cursor", "gemini")
-DISPLAY_NAMES = {"claude-code": "Claude Code", "codex": "Codex", "cursor": "Cursor", "gemini": "Gemini",
-                 "moments": "Moments"}
-#: Apps the owner may enrol as owner agents beside the coding tools (GRANT_DECISIONS G1). What each may send is
-#: ``mcp_clients.APP_AGENT_TYPES``, which this mirrors (a test holds the two equal). Not MCP clients: ``topos-node
-#: mcp --client`` takes CLIENT_NAMES only; ``topos-node agents add|disconnect`` takes AGENT_NAMES.
-APP_NAMES = ("moments",)
-AGENT_NAMES = CLIENT_NAMES + APP_NAMES
+DISPLAY_NAMES = {"claude-code": "Claude Code", "codex": "Codex", "cursor": "Cursor", "gemini": "Gemini"}
 #: The v1 tool set, in the order they are registered.
 TOOL_NAMES = ("mcp_session_context", "list_scopes", "query_scope", "aggregate_scope", "sources_status")
 #: The bundled transcript sources (CONTRACTS §2.1) — what `agents disconnect` pauses.
@@ -198,11 +193,10 @@ def validate_client(name: str) -> str:
 
 
 def validate_agent(name: str) -> str:
-    """A name the agents command enrols or disconnects: a coding tool or an app (AGENT_NAMES)."""
-    agent = str(name or "").strip().lower()
-    if agent not in AGENT_NAMES:
-        raise ValueError(f"unknown agent {name!r}; one of: {', '.join(AGENT_NAMES)}")
-    return agent
+    """A name the agents command enrols or disconnects: a coding tool, or any other slug for an app."""
+    from .mcp_clients import _agent_ids
+
+    return _agent_ids(str(name or "").strip())[1]
 
 
 # ------------------------------------------------------------------ socket

@@ -39,7 +39,7 @@ class FakeRegistry:
         self.minted: list[str] = []
         self.revoked: list[str] = []
 
-    def mint_agent_label(self, conn, *, client: str, approved: bool = False) -> dict:
+    def mint_agent_label(self, conn, *, client: str, approved: bool = False, grant=None) -> dict:
         assert isinstance(conn, sqlite3.Connection)
         existing = self.rows.get(client)
         if existing and existing.get("revoked_at") and not approved:
@@ -334,7 +334,7 @@ def test_add_passes_the_approval_verdict_to_the_registry(home, registry, monkeyp
     seen: list[bool] = []
     real = registry.mint_agent_label
 
-    def spy(conn, *, client, approved=False):
+    def spy(conn, *, client, approved=False, grant=None):
         seen.append(approved)
         return real(conn, client=client, approved=approved)
 

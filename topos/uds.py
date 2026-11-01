@@ -291,7 +291,7 @@ async def resolve_socket_principal(scope):
 
 def owner_agent_route_allowed(principal, scope) -> bool:
     """Every class but ``owner_agent`` passes here (their routes decide for themselves); an agent reaches only the
-    §1.2 list, and an enrolled app (``mcp_clients.APP_AGENT_TYPES``) only the dispatch door."""
+    §1.2 list, and an enrolled app (``mcp_clients.app_agent_of``) only the dispatch door."""
     from . import owner_door_routes, principal as principal_module
     from .mcp_clients import app_agent_of
 

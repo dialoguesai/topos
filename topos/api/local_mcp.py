@@ -141,35 +141,6 @@ async def _owner_truth_door(request: Request, response: Response, principal, msg
     return out.get("payload", {})
 
 
-@router.post("/reflection_invitations")
-async def local_reflection_invitations(
-    request: Request,
-    response: Response,
-    principal=Depends(_truth_door("reflection_invitations")),  # noqa: B008
-) -> dict:
-    """The reflection doors (REFLECTION_PROGRAM.md §2a): owner class only; the body is read after the door admitted
-    the caller; an empty body is ``{}``."""
-    return await _owner_truth_door(request, response, principal, "reflection_invitations")
-
-
-@router.post("/reflection_conversation")
-async def local_reflection_conversation(
-    request: Request,
-    response: Response,
-    principal=Depends(_truth_door("reflection_conversation")),  # noqa: B008
-) -> dict:
-    return await _owner_truth_door(request, response, principal, "reflection_conversation")
-
-
-@router.post("/reflection_label")
-async def local_reflection_label(
-    request: Request,
-    response: Response,
-    principal=Depends(_truth_door("reflection_label")),  # noqa: B008
-) -> dict:
-    return await _owner_truth_door(request, response, principal, "reflection_label")
-
-
 @router.post("/truth_inbound_settings")
 async def local_truth_inbound_settings(
     request: Request,

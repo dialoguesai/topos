@@ -9,6 +9,25 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Any app can hold an owner grant** (DR-66). `topos-node agents add <name> --reads facts:<pack>,messages,journals`
+  enrols any name that is not a coding tool's, on a terminal, after a yes to a prompt that lists those reads. The
+  enrolment stores them in `agent_app_grants`. An app reaches only what its grant opens, and a disconnected app can
+  reconnect with a fresh yes. **An app enrolled before this release has no grant and reads nothing until it runs
+  `agents add` again.** No step in the upgrade: the table is created on first use.
+- **`message_context`**: a search match and up to 20 turns each side from its conversation (default 5), for an app whose
+  grant names `messages`, and the owner's app. Off-limits is applied by absence, as for a search.
+
+### Changed
+- **`reflection_facts` is now `pack_facts`**, limited to the packs on the app's grant, and the owner's own read covers
+  every pack that is on. The old type name answers for one release. `version` is `pack_facts/v1`.
+
+### Removed
+- **The node's app-specific code.** No special case for any app by name, and the `reflection_invitations`,
+  `reflection_conversation` and `reflection_label` doors, their routes and the reflection sweep are gone: apps compose,
+  the node serves data. The tables `reflection_candidates` and `reflection_labels` stay on disk, untouched and no longer
+  written, because they can hold the owner's own labels. A queued `reflection_sweep` job is never claimed.
+
 ## [1.5.38] — 2026-11-01
 
 ### Changed

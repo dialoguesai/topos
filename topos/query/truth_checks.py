@@ -246,7 +246,7 @@ def instant(value: Any) -> Optional[datetime]:
     return when.astimezone(timezone.utc)  # a naive time is local: astimezone() applies the node's own zone
 
 
-_aware = instant  # the old name, read by reflection.py and reflection_facts.py
+_aware = instant  # the old name
 
 
 def with_offset(value: Any) -> Optional[str]:

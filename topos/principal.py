@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import contextvars
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 #: Client classes. OWNER_APP and THIRD_PARTY are decisions; CP_RELAY is a
 #: deferral — "the CP already classified this caller, trust its stamping".
@@ -46,6 +46,8 @@ class Principal:
     channel: str  # "local_http" | "cp_relay" | "internal"
     client_id: str = ""
     acting_user: str = ""
+    #: What an enrolled app may read (``mcp_clients.AppGrant``), read from its row on every request. None otherwise.
+    app_grant: Any = None
 
 
 RELAY_PRINCIPAL = Principal(cls=CP_RELAY, channel="cp_relay")
