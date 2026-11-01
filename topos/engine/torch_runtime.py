@@ -131,9 +131,17 @@ def configure() -> None:
         logger.warning("could not bound torch threads", exc_info=True)
 
 
+#: (component, device) pairs already logged: one line each, not one per call. The share-index build asks
+#: ``device_for("embeddings")`` before every passage it embeds, and on 28 Oct 2026 that wrote
+#: ``ml device for embeddings: cpu`` 419 times in 30 minutes, drowning the log the restart was read from.
+_logged: set = set()
+
+
 def device_for(component: str, preferred: Optional[str] = None) -> str:
-    """Resolve, log once per component, and make sure threading is bounded."""
+    """Resolve, log once per component and device, and make sure threading is bounded."""
     configure()
     device = resolve_device(preferred)
-    logger.info("ml device for %s: %s", component, device)
+    if (component, device) not in _logged:
+        _logged.add((component, device))
+        logger.info("ml device for %s: %s", component, device)
     return device
