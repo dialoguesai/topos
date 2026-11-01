@@ -616,3 +616,134 @@ Focused after-change validation: 230 passed in 43.20s across
 `test_kept_answers_off1.py`. The run emitted 1,620 warnings (including existing
 SQLite datetime-adapter deprecations), with no failures or skips. `git diff
 --check` passed. Test durations are synthetic runtime, not user answer latency.
+
+### Regression gate — RQ-2026-11-01-sharing-diagnostics — before
+
+- Recorded (UTC): 2026-11-01T19:07:02.677870+00:00
+- Note: Frozen diagnostic redaction and classification tests before implementation; no live generation
+- Report: [machine-readable results](response-quality-runs/20261101T190702677870Z-RQ-2026-11-01-sharing-diagnostics-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 109 pass / 30 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-sharing-diagnostics — after
+
+- Recorded (UTC): 2026-11-01T19:08:13.500152+00:00
+- Note: Fixed-field node diagnostics classify writer/judge phase failures without content; cancellation preserved; live cause remains unknown
+- Report: [machine-readable results](response-quality-runs/20261101T190813500152Z-RQ-2026-11-01-sharing-diagnostics-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | 140 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 109 pass / 30 fail / 0 skip | 139 pass / 0 fail / 0 skip |
+
+- Fixed: 30; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-False-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-False-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-True-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-True-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-False-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-False-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-True-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-True-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_judge_negative_verdict_is_not_provider_failure[synthetic-invalid-None-invalid_verdict]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_judge_negative_verdict_is_not_provider_failure[{"supported":"no"}-False-ok]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-verification-True]`
+
+### RQ-2026-11-01-sharing-diagnostics — node-only model failure attribution
+
+Follow-up to local sharing lifecycle commit
+`f7421b92ab638219fbe7f2cdeafe1384892dbc15`. Failure: the existing `model_error`
+receipt cannot distinguish provider timeout, error status or incomplete response,
+or identify whether verification or writer/judge generation consumed the time.
+The 1.5.36 recovery cause remains **unknown**. A read-only scan of existing node
+logs in the 2026-11-01 18:31–18:32 UTC recovery window found the sharing model_error
+but no corresponding timeout or HTTP-status classification. Only fixed-word
+counts were inspected/output; no private log excerpts were copied.
+
+Method: `answer_release` now emits `permissions answer model` node log events
+with exactly `role` (writer/judge), `phase` (verification/generation/admission),
+`outcome` (closed code), `http_status` (numeric or null), and `elapsed_ms`
+(monotonic phase duration). Structured handlers can read the `sharing_model`
+LogRecord field; ordinary logs contain the same fixed-field JSON. Verification's
+explicit exception causes are traversed at most eight links to classify the
+wrapped HTTP exception, without formatting any exception. Outcomes distinguish
+ok, timeout, http_status, transport_error, unreviewed_model, malformed_response,
+incomplete_response, invalid_verdict, deadline_expired, cancelled and
+unexpected_error. No exception strings, traceback, model content, prompt, URL,
+token, request ID or grant ID is logged. Diagnostic handler failures do not change
+answer decisions. Public receipts/refusals and quality-filter semantics remain
+unchanged. A valid negative judge verdict logs ok; a malformed verdict logs
+invalid_verdict but still returns None as before.
+
+Affected family: diagnostics for all permissioned writer/judge calls; no routing,
+model configuration, grant checks, prompts, admission gates or root deadlines
+changed. Cancellation retains its original behavior: outer deadline -> model_error,
+external task cancellation -> CancelledError, transport closed in either case.
+The diagnostic timeout covers verification or generation according to the active
+phase. It does not prove backend work stopped after disconnect or reveal the
+provider's internal cause. No shared admission/root-deadline files were edited.
+
+Verification: 30 new tests failed before production edits. Full ten-family gate
+baseline `20261101T190702677870Z-RQ-2026-11-01-sharing-diagnostics-before.json`:
+663 pass, 30 fail, zero skips/errors. The paired after report above records the
+same catalog and fixtures. Focused suite (shared_model_recovery,
+answer_quality_aq158, nr179_judge_reserve): 124 passed in 6.11s, 400 pre-existing
+SQLite warnings. Synthetic private canaries in URLs, bodies, prompts and exception
+messages are absent from complete captured LogRecords; no exception info is logged.
+Tests also verify unchanged PolicyError codes, negative/invalid judge verdicts,
+exactly one cancellation/timeout event per interrupted phase, and client closure.
+`git diff --check` passed.
+
+Live-model baseline and after: unavailable, explicitly prohibited in this sprint;
+1.5.36 also lacks the companion live runner/docs. These synthetic tests are not
+live recovery or actual-answer quality/latency proof. Active node untouched;
+not deployed, merged or released. Roll back this diagnostics commit independently
+of the lifecycle commit; no configuration or database migration is involved.
+
+Completed comparable after gate:
+`20261101T190813500152Z-RQ-2026-11-01-sharing-diagnostics-after.json` — 693 passed,
+0 failed, 0 skipped, 0 runner errors; PASS with 30 fixes and no regressions.

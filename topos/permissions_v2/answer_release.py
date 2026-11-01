@@ -1058,11 +1058,80 @@ def answer_num_ctx(prompt) -> int:
     return ANSWER_NUM_CTX_WIDE if cap is not None and cap > K_ANSWER and items > K_ANSWER else ANSWER_NUM_CTX
 
 
+class _IncompleteModelResponse(ValueError):
+    """A response arrived, but not a completed answer from the pinned model."""
+
+
+def _model_failure_kind(exc: BaseException) -> tuple[str, int | None]:
+    """Classify types only, including the pinned verifier's explicit cause chain.
+
+    Never format an exception: HTTP exceptions carry URLs, headers and bodies.
+    Bound traversal even for a malformed/cyclic exception chain.
+    """
+    import httpx
+    from .shadow_labeler_local import ModelUnreviewed
+
+    current = exc
+    for _ in range(8):
+        if isinstance(current, (TimeoutError, httpx.TimeoutException)):
+            return "timeout", None
+        if isinstance(current, httpx.HTTPStatusError):
+            status = current.response.status_code
+            return "http_status", status if type(status) is int and 100 <= status <= 599 else None
+        if isinstance(current, httpx.RequestError):
+            return "transport_error", None
+        if isinstance(current, ModelUnreviewed):
+            return "unreviewed_model", None
+        if isinstance(current, _IncompleteModelResponse):
+            return "incomplete_response", None
+        if isinstance(current, ValueError):
+            return "malformed_response", None
+        if isinstance(current, asyncio.CancelledError):
+            return "cancelled", None
+        if current.__cause__ is None:
+            break
+        current = current.__cause__
+    return "unexpected_error", None
+
+
+class _ModelDiagnostic:
+    """Node-only fixed fields; no request/grant identifiers or model content.
+
+    Log once per phase, outside public receipts. Logging must never alter release
+    or cancellation behavior, including when a logging handler itself fails.
+    """
+
+    def __init__(self, role: str):
+        self.role = role
+        self.start("verification")
+
+    def start(self, phase: str) -> None:
+        self.phase = phase
+        self.started = time.perf_counter()
+
+    def finish(self, outcome: str = "ok", exc: BaseException | None = None) -> None:
+        try:
+            status = None
+            if exc is not None:
+                outcome, status = _model_failure_kind(exc)
+            event = {"role": self.role, "phase": self.phase, "outcome": outcome,
+                     "http_status": status,
+                     "elapsed_ms": max(0, int((time.perf_counter() - self.started) * 1000))}
+            # Both the plain-text and structured forms contain only these fields.
+            _log.info("permissions answer model: %s", json.dumps(event, sort_keys=True),
+                      extra={"sharing_model": event})
+        except Exception:
+            pass  # Diagnostics must not change the permissioned answer's outcome.
+
+
 async def _generate_local(prompt, *, deadline: int):
     """The pinned checking model on this machine; no pull, fallback or hosted call."""
     from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
+    diagnostic = _ModelDiagnostic("writer")
     budget = min(100, deadline - time.time())
     if budget <= 0:
+        diagnostic.start("admission")
+        diagnostic.finish("deadline_expired")
         raise PolicyError("model_error")
     client = open_transport(base_url=assessment_base_url())
     try:
@@ -1071,10 +1140,14 @@ async def _generate_local(prompt, *, deadline: int):
         async with asyncio.timeout(budget):
             try:
                 await client.verify()
-            except Exception:
+            except Exception as exc:
+                diagnostic.finish(exc=exc)
                 raise PolicyError("model_unavailable") from None
+            diagnostic.finish()
+            diagnostic.start("generation")
             remaining = min(100, deadline - time.time())
             if remaining <= 0:
+                diagnostic.finish("deadline_expired")
                 raise PolicyError("model_error")
             try:
                 response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
@@ -1086,14 +1159,22 @@ async def _generate_local(prompt, *, deadline: int):
                                  {"role": "user", "content": prompt.user}]})
                 response.raise_for_status()
                 body = response.json()
+                if not isinstance(body, dict) or not isinstance(body.get("message") or {}, dict):
+                    raise ValueError("malformed")
                 raw = (body.get("message") or {}).get("content") if isinstance(body, dict) else None
                 if body.get("model") != MODEL or body.get("done") is not True or not isinstance(raw, str) or not raw.strip():
-                    raise ValueError("incomplete")
+                    raise _IncompleteModelResponse()
+                diagnostic.finish()
                 return raw
-            except Exception:
+            except Exception as exc:
+                diagnostic.finish(exc=exc)
                 raise PolicyError("model_error") from None
-    except TimeoutError:
+    except TimeoutError as exc:
+        diagnostic.finish(exc=exc)
         raise PolicyError("model_error") from None
+    except asyncio.CancelledError as exc:
+        diagnostic.finish(exc=exc)
+        raise
     finally:
         await client.client.aclose()
 
@@ -1227,8 +1308,11 @@ async def _judge_local(sentence: str, items, *, deadline: int, question: str | N
     from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
     if not items:
         return False
+    diagnostic = _ModelDiagnostic("judge")
     budget = min(60, deadline - time.time())
     if budget <= 0:
+        diagnostic.start("admission")
+        diagnostic.finish("deadline_expired")
         raise PolicyError("model_error")
     client = open_transport(base_url=assessment_base_url())
     try:
@@ -1237,10 +1321,14 @@ async def _judge_local(sentence: str, items, *, deadline: int, question: str | N
         async with asyncio.timeout(budget):
             try:
                 await client.verify()
-            except Exception:
+            except Exception as exc:
+                diagnostic.finish(exc=exc)
                 raise PolicyError("model_unavailable") from None
+            diagnostic.finish()
+            diagnostic.start("generation")
             remaining = min(60, deadline - time.time())
             if remaining <= 0:
+                diagnostic.finish("deadline_expired")
                 raise PolicyError("model_error")
             version = judge_template()
             try:
@@ -1250,13 +1338,22 @@ async def _judge_local(sentence: str, items, *, deadline: int, question: str | N
                     "messages": judge_messages(sentence, items, version, question, context)})
                 response.raise_for_status()
                 body = response.json()
+                if not isinstance(body, dict) or not isinstance(body.get("message") or {}, dict):
+                    raise ValueError("malformed")
                 raw = (body.get("message") or {}).get("content") if isinstance(body, dict) else None
                 if body.get("model") != MODEL or body.get("done") is not True:
-                    raise ValueError("incomplete")
-                return parse_judge_reply(raw, version)
-            except Exception:
+                    raise _IncompleteModelResponse()
+                verdict = parse_judge_reply(raw, version)
+                diagnostic.finish("invalid_verdict" if verdict is None else "ok")
+                return verdict
+            except Exception as exc:
+                diagnostic.finish(exc=exc)
                 raise PolicyError("model_error") from None
-    except TimeoutError:
+    except TimeoutError as exc:
+        diagnostic.finish(exc=exc)
         raise PolicyError("model_error") from None
+    except asyncio.CancelledError as exc:
+        diagnostic.finish(exc=exc)
+        raise
     finally:
         await client.client.aclose()
