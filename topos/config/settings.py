@@ -186,6 +186,11 @@ class Settings(BaseSettings):
     sanitization_prewarm_on_startup: bool = Field(True)
     platform_privacy_via_engine: bool = Field(True)
     topos_engine_service_url: Optional[str] = Field(None)
+    # Per-process HTTP worker bounds, not a shared-provider concurrency limit.
+    topos_engine_http_active: int = Field(1, ge=1, le=32)
+    topos_engine_http_waiting: int = Field(4, ge=0, le=128)
+    topos_engine_http_queue_timeout_sec: float = Field(30.0, gt=0, le=300)
+    topos_engine_http_shutdown_grace_sec: float = Field(5.0, ge=0, le=30)
 
     topos_database_path: Optional[str] = Field(None)
     # Packet resolution (PLAN_DERIVATION_LAYER.md): env default only; the per-database

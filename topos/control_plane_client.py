@@ -229,6 +229,7 @@ class ControlPlaneClient:
         self._presence_outbox_size = max(1, int(settings.control_plane_presence_outbox_size))
         self._presence_outbox: deque[dict[str, Any]] = deque(maxlen=self._presence_outbox_size)
         self._outbox_lock = asyncio.Lock()
+        self._outbox_flush_lock = asyncio.Lock()
         # Thread-safe outbox for sync callers (Engine.run in worker threads via to_thread).
         self._sync_outbox: deque[dict[str, Any]] = deque(maxlen=self._presence_outbox_size)
         self._sync_outbox_lock = threading.Lock()
@@ -671,17 +672,39 @@ class ControlPlaneClient:
                        sum(n for (why, _), n in counts.items() if why == "gone"), oldest, by_type)
 
     async def _flush_presence_outbox(self) -> None:
-        await self._drain_sync_outbox_into_presence()
+        # One drainer, one in-flight item. Clearing a snapshot before sending
+        # used to lose the unsent tail at the first disconnected send.
+        async with self._outbox_flush_lock:
+            await self._drain_sync_outbox_into_presence()
+            while True:
+                async with self._outbox_lock:
+                    if not self._presence_outbox:
+                        return
+                    message = self._presence_outbox.popleft()
+                try:
+                    success = await self._send_ws_json(self._ws, message)
+                except BaseException:
+                    await self._restore_unsent_presence(message)
+                    raise
+                if not success:
+                    await self._restore_unsent_presence(message)
+                    return
+
+    async def _restore_unsent_presence(self, message: Dict[str, Any]) -> None:
         async with self._outbox_lock:
-            pending = list(self._presence_outbox)
-            self._presence_outbox.clear()
-        if not pending:
-            return
-        for message in pending:
-            success = await self._send_ws_json(self._ws, message)
-            if not success:
-                await self._enqueue_presence_message(message)
-                break
+            if len(self._presence_outbox) < self._presence_outbox_size:
+                self._presence_outbox.appendleft(message)
+            else:
+                # Newer arrivals filled the queue while this send was pending.
+                # Preserve the existing drop-oldest overflow policy.
+                self._record_outbox_drop("presence")
+
+    @staticmethod
+    def _record_outbox_drop(queue: str) -> None:
+        from .observability.metrics import measure
+
+        measure("counter", "topos.control_plane.outbox.dropped", 1, unit="{message}",
+                attributes={"topos.queue": queue, "topos.drop.reason": "capacity"})
 
     async def _drain_sync_outbox_into_presence(self) -> None:
         with self._sync_outbox_lock:
@@ -695,6 +718,7 @@ class ControlPlaneClient:
             at_capacity = len(self._presence_outbox) >= self._presence_outbox_size
             if at_capacity:
                 dropped = self._presence_outbox.popleft()
+                self._record_outbox_drop("presence")
                 logger.warning(
                     "Presence outbox full; dropping oldest message type=%s",
                     dropped.get("type"),
@@ -711,6 +735,7 @@ class ControlPlaneClient:
             at_capacity = len(self._sync_outbox) >= self._presence_outbox_size
             if at_capacity:
                 dropped = self._sync_outbox.popleft()
+                self._record_outbox_drop("sync")
                 logger.warning(
                     "Sync outbox full; dropping oldest message type=%s",
                     dropped.get("type"),
@@ -799,6 +824,12 @@ class ControlPlaneClient:
     _HEALTHCHECK_ANSWER_DEADLINE_S = 1.0
 
     async def _handle_message(self, ws, data: Dict[str, Any]) -> None:
+        from .observability.rpc import observe_message
+
+        with observe_message(data):
+            await self._handle_message_inner(ws, data)
+
+    async def _handle_message_inner(self, ws, data: Dict[str, Any]) -> None:
         msg_type = str(data.get("type") or "").strip().lower()
         if msg_type == "permissions_v2_verify_claim":
             from .permissions_v2.truth_release import dispatch_verify_claim
@@ -858,14 +889,22 @@ class ControlPlaneClient:
             else:
                 resp = await self.handler(data)
         except Exception as exc:  # noqa: BLE001
+            from .observability.tracing import mark_error
+
+            mark_error(type(exc).__name__)
             # NR181: the error's class and where it was raised, never its text: a handler's error can quote the
             # frame it was handling (a validation error repeats its input). The frames are code locations only.
             import traceback
+            from .observability.tracing import mark_error
+            mark_error(type(exc).__name__)
             logger.error("Handler raised exception: type=%s id=%s error=%s\n%s", msg_type, data.get("id"),
                          type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__)).rstrip())
             resp = {"id": data.get("id"), "status": "error", "error": str(exc)}
         if resp is None:
             return  # e.g. connection_info or message without id; CP has no pending request to match
+        if resp.get("status") in {"error", "failed"}:
+            from .observability.tracing import mark_error
+            mark_error("handler_failed")
         if msg_type == "healthcheck" and resp.get("status") == "ok":
             resp = {**resp, "payload": {
                 **(resp.get("payload") or {}),

@@ -8,6 +8,7 @@ from typing import Optional, Protocol
 import httpx
 
 from .engine import Engine
+from .overload import unavailable_from_detail
 from .tasks import ProcessingResult, ProcessingTask
 
 
@@ -38,12 +39,37 @@ class RemoteEngineClient:
         self._timeout_sec = timeout_sec
 
     def run(self, task: ProcessingTask) -> ProcessingResult:
+        from opentelemetry.trace import SpanKind
+        from ..observability.tracing import start_span, mark_error
+
+        with start_span("topos.engine.remote", kind=SpanKind.CLIENT):
+            result = self._run(task)
+            if result.status != "completed":
+                availability = result.output.get("availability")
+                error = unavailable_from_detail(503, availability) or unavailable_from_detail(429, availability)
+                mark_error(error.code if error else "engine_task_failed")
+            return result
+
+    def _run(self, task: ProcessingTask) -> ProcessingResult:
+        from ..observability.tracing import inject_context
+
         headers = {"Content-Type": "application/json"}
+        headers.update(inject_context())
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         body = task.model_dump(mode="json")
         with httpx.Client(timeout=self._timeout_sec) as client:
             resp = client.post(f"{self._base_url}/v1/engine/run", json=body, headers=headers)
+        if resp.status_code in (429, 503):
+            # Only our typed deferred result has Engine semantics. Generic
+            # proxy failures and policy refusals remain HTTP errors.
+            try:
+                deferred = ProcessingResult.model_validate(resp.json()["result"])
+                availability = unavailable_from_detail(resp.status_code, deferred.output.get("availability"))
+                if deferred.task_id == task.id and deferred.status == "deferred" and availability is not None:
+                    return deferred
+            except (ValueError, KeyError, TypeError):
+                pass
         resp.raise_for_status()
         data = resp.json()
         if isinstance(data, dict) and "result" in data:

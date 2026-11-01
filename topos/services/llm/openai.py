@@ -12,8 +12,20 @@ from fastapi import HTTPException, status
 from ...core import state
 from ...openai_client import OpenAIError
 from ...config.settings import settings
+from ...engine.overload import provider_unavailable
 
 logger = logging.getLogger("topos.services.llm")
+
+
+def _raise_provider_unavailable(status_code: int, body: str, headers: Any) -> None:
+    error = provider_unavailable(status_code, body, (headers or {}).get("Retry-After"))
+    if error is not None:
+        from ...observability.metrics import measure
+        from ...observability.tracing import mark_error
+        mark_error(error.code)
+        measure("counter", "topos.compute.rejections", 1, unit="{request}",
+                attributes={"topos.compute.reason": error.code, "topos.compute.path": "generation"})
+        raise HTTPException(status_code=error.status_code, detail=error.detail(), headers=error.headers())
 
 
 class LlmTypedError(Exception):
@@ -184,6 +196,7 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
             r = await client.post(f"{base}/api/generate", json=body)
             if (
                 r.status_code >= 400
+                and r.status_code not in (429, 503)
                 and think is False
                 and "disabling thinking" in (r.text or "").lower()
             ):
@@ -221,6 +234,7 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
     if r.status_code >= 400:
         _log_ollama_failure("error", budget_s=timeout.read, status_code=r.status_code, **clocks)
         detail = (r.text or str(r.status_code))[:800]
+        _raise_provider_unavailable(r.status_code, detail, getattr(r, "headers", None))
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Ollama error: {detail}")
     data = r.json()
     text = (data.get("response") or "").strip()
@@ -432,6 +446,7 @@ async def _ollama_stream_generate(
                         "error", budget_s=timeout.read, status_code=response.status_code, **clocks
                     )
                     detail = (await response.aread()).decode("utf-8", errors="replace")[:800]
+                    _raise_provider_unavailable(response.status_code, detail, getattr(response, "headers", None))
                     raise HTTPException(
                         status_code=status.HTTP_502_BAD_GATEWAY,
                         detail=f"Ollama error: {detail}",

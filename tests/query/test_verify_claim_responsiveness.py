@@ -4,6 +4,7 @@ No live data or inference: the synchronous verifier waits for a callback on the
 event loop. Before the fix that callback cannot run until the wait expires.
 """
 import asyncio
+import logging
 import threading
 
 import pytest
@@ -16,7 +17,8 @@ from topos.query import verify
 
 
 @pytest.mark.parametrize("mode", [None, "fun"])
-def test_slow_verification_keeps_loop_responsive_with_worker_owned_guard(monkeypatch, mode):
+def test_slow_verification_keeps_loop_responsive_with_worker_owned_guard(monkeypatch, mode, caplog):
+    caplog.set_level(logging.INFO, logger="topos.core.handlers")
     seen = {}
     connection, guard = object(), object()
     owner = Principal(cls=OWNER_APP, channel="uds")
@@ -66,5 +68,11 @@ def test_slow_verification_keeps_loop_responsive_with_worker_owned_guard(monkeyp
         assert seen["connection_thread"] == seen["guard_thread"] == seen["verify_thread"] != loop_thread
         assert seen["usage_thread"] == loop_thread
         assert seen["usage"] == ("test", response["payload"])
+        logged = next(r.args for r in caplog.records if r.msg == "truth verify_claim audit: %s")
+        timings = logged["timings_ms"]
+        assert timings["worker_run"] >= 0
+        assert timings["worker_ready"] >= 0
+        assert timings["worker_return_to_loop"] >= 0
+        assert abs(timings["dispatch_to_result"] - sum(timings[k] for k in ("worker_ready", "worker_run", "worker_return_to_loop"))) <= .003
 
     asyncio.run(exercise())

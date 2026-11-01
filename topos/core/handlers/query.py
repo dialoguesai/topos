@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import topos.core.handlers as hub
+from ...engine.overload import ComputeUnavailable
 
 from .common import (
     Any,
@@ -171,26 +173,47 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
         from ...query.verify_modes import DEFAULT_MODE
         from .common import run_db_read
 
+        dispatched = time.perf_counter()
+        worker_times = {}
+
         def run(conn):
             # Retrieval and the synchronous model judge must not hold the app
             # event loop. Build the guard on the worker's own connection too.
-            return verify_claim(
-                conn,
-                statement=statement,
-                mode=str(payload.get("mode") or DEFAULT_MODE),
-                caller_app_id=caller_app_id,
-                guard=guard_from_message(conn, message),
-            )
+            worker_times["ready"] = time.perf_counter()
+            try:
+                return verify_claim(
+                    conn,
+                    statement=statement,
+                    mode=str(payload.get("mode") or DEFAULT_MODE),
+                    caller_app_id=caller_app_id,
+                    guard=guard_from_message(conn, message),
+                )
+            finally:
+                worker_times["finished"] = time.perf_counter()
 
         result = await run_db_read(run)
+        received = time.perf_counter()
         audit = result.pop("_audit", None)
         if audit:
+            timings = audit.setdefault("timings_ms", {})
+            # Worker readiness includes executor scheduling AND connection
+            # acquisition. It is not a measurement of GPU queue time.
+            if "ready" in worker_times and "finished" in worker_times:
+                timings.update(
+                    worker_ready=round((worker_times["ready"] - dispatched) * 1000, 3),
+                    worker_run=round((worker_times["finished"] - worker_times["ready"]) * 1000, 3),
+                    worker_return_to_loop=round((received - worker_times["finished"]) * 1000, 3),
+                )
+            timings["dispatch_to_result"] = round((received - dispatched) * 1000, 3)
             # Content-free by construction: mode/category/counts/judge only.
             logger.info("truth verify_claim audit: %s", audit)
         if "error" in result:
             return {"id": req_id, "status": "error", "error": str(result["error"])}
         _record_verify_claim_after_answer(caller_app_id, result)
         return {"id": req_id, "status": "ok", "payload": result}
+    except ComputeUnavailable as exc:
+        _log_query_failure("verify_claim", req_id, exc)
+        return exc.envelope(req_id)
     except Exception as exc:  # noqa: BLE001
         _log_query_failure("verify_claim", req_id, exc)
         return {"id": req_id, "status": "error", "error": str(exc)}

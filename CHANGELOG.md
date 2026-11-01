@@ -9,6 +9,17 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.36] — 2026-11-01
+
+### Added
+- `[O]` Optional OpenTelemetry traces and metrics for node development and diagnostics, with HTTP/RPC/worker context propagation and local log correlation. Export requires explicit enablement and a destination; ordinary installs need no telemetry setup. Built-in spans exclude request contents, credentials and exception text. No schema migration, reprocessing, new log retention or automatic reporting to Dialogues.
+
+### Fixed
+- `[O]` Bound Engine HTTP execution and waiting queues, expire queued work, and retain active worker slots after caller disconnects. This is an endpoint worker budget, not a global GPU limit.
+- `[P]` Preserve explicit compute busy, unavailable and rate-limited outcomes across local/remote inference and generation. Avoid heuristic verification answers and extra generation retries on explicit overload.
+- `[O]` Record verification stage/provider timings and distinct task identities for repeated calls.
+- `[O]` Preserve the unsent outbox tail after a disconnected or cancelled send, while retaining bounded best-effort overflow behavior. Durable Offline Inbox delivery is unchanged.
+
 ## [1.5.35] — 2026-11-01
 
 ### Fixed

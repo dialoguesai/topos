@@ -319,12 +319,14 @@ def test_a_switch_while_a_build_is_in_flight_is_built_again_by_the_loop(served, 
     reasons = ft.record_refusal_reasons(node)
     running = ft.Running(node, monkeypatch)
     flipped: list[float] = []
+    interrupted_grants: list[str] = []
     build_members = node.index._members
 
     def switch_back_mid_build(*args, **kwargs):
         # `_members` runs at the end of a build's read snapshot, after its facts were decided and before it publishes.
         if not flipped and threading.current_thread().name == "p2c-search-refresh":
             flipped.append(time.monotonic())
+            interrupted_grants.append(str(args[2]))  # _members(conn, key, grant_id, ...)
             assert ft.switch(node, ft.WORK, on_at_start)
         return build_members(*args, **kwargs)
     node.index._members = switch_back_mid_build
@@ -341,7 +343,13 @@ def test_a_switch_while_a_build_is_in_flight_is_built_again_by_the_loop(served, 
                     released_while_off += facts
                     time.sleep(0.02)
             expected = 2 if on_at_start else 0
-            settled = running.wait(lambda: running.quiet() and len(running.builds) >= 4
+            # Only the interrupted grant necessarily owes a second build. The
+            # other grant can take its first snapshot AFTER the switch back,
+            # making three total builds correct. Require the actual interrupted
+            # rebuild and observation of the final state, not four passes.
+            interrupted = interrupted_grants[0]
+            settled = running.wait(lambda: running.settled(node)
+                                   and sum(grant == interrupted for grant, *_ in running.builds) >= 2
                                    and fact_members(node) == expected and fact_members(node, ANSWERS) == expected, 30)
             assert settled is not None, (fact_members(node), running.builds)
             facts, others, refused = ft.ask(node, QUERY)
