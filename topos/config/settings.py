@@ -92,6 +92,15 @@ class Settings(BaseSettings):
     sync_cursor_retry_delay_seconds: float = Field(0.5)
 
     rate_limit_per_minute: int = Field(60)
+    routine_max_runs_per_owner_24h: int = Field(
+        100, ge=1,
+        validation_alias="TOPOS_ROUTINE_MAX_RUNS_PER_OWNER_24H",
+    )
+    # Explicit operator opt-in, never selected by a routine/request payload.
+    # Disables only the rolling run quota, not active-run or compute safeguards.
+    routine_development_unlimited_runs: bool = Field(
+        False, validation_alias="TOPOS_ROUTINE_DEVELOPMENT_UNLIMITED_RUNS",
+    )
     topos_control_plane_url: Optional[str] = Field(DEFAULT_TOPOS_CONTROL_PLANE_URL)
     control_plane_verify_ssl: bool = Field(True)
     hosted_pool_lease_enabled: bool = Field(False)
