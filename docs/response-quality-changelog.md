@@ -875,3 +875,62 @@ Completed comparable after gate:
 | general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
 | cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
 | query_and_synthesis_contracts | 143 pass / 3 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-budget-review — before
+
+- Recorded (UTC): 2026-11-01T19:48:49.502907+00:00
+- Note: DNS cancellation and bounded transport lifecycle tests added before implementation; no live traffic.
+- Report: [machine-readable results](response-quality-runs/20261101T194849502907Z-RQ-2026-11-01-budget-review-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 141 pass / 0 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-budget-review — after
+
+- Recorded (UTC): 2026-11-01T19:52:48.512439+00:00
+- Note: Bounded reusable HTTP loop/resolver ownership, default120, synthetic cancellation/recovery and policy-independent lifecycle tests; no live traffic.
+- Report: [machine-readable results](response-quality-runs/20261101T195248512439Z-RQ-2026-11-01-budget-review-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | 140 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 141 pass / 0 fail / 0 skip | 141 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+### RQ-2026-11-01-budget-review — bounded reusable transport resources
+
+- Failure/cause: independent review of `b7290ca` reproduced an 80ms request taking 402ms with a fake 350ms native resolver. Per-request `asyncio.run()` waits for default-executor shutdown after cancelling HTTPX; native `getaddrinfo` is not cancellable. Repeating requests could retain many caller workers. Also, default60 would truncate previously successful 61–110s stress verifications per the coordinating review; this branch sets the authorized default120/max120 policy.
+- Method: replace per-request loop ownership with one lazy, owned stdlib SelectorEventLoop, at most eight active HTTP operations, and at most four native resolver submissions. No waiting queue. DNS permits survive HTTP cancellation until the actual native future completes. HTTP-operation slots survive caller cancellation until their coroutine cleanup completes. Saturation returns typed compute_busy. Isolated per-call HTTPX clients preserve credential/context separation; no change to endpoint selection or transmitted content. Checks before and after resolution prevent stale resolution results starting new work after known cancellation.
+- Lifecycle: `close_transport(timeout)` is an explicit hook, NOT wired into node/app shutdown in this narrow branch. It permanently refuses new work, signals existing budgets, observes cleanup boundedly, and keeps unresolved resources accounted for. No implicit replacement even when closed before first use. Root owns lifecycle integration if desired. Native DNS cannot be killed and may delay interpreter exit because the executor's exit hook joins native workers. A request can return while cleanup remains; resource counts are not GPU ownership/drain claims. Initial defaults 8 HTTP / 4 DNS are engineering bounds, not measured throughput/capacity. Initialized runtimes are not usable across fork.
+- Scope/families: availability of all budgeted verification and remote Engine question families. No ranking, retrieval, prompt, permission or evidence change. Production changes only `engine/request_budget.py` and new `engine/budget_transport.py`; root owns startup, generic Engine dispatch checks, reason propagation and policy docs.
+- Before: added five focused regressions before production edits. Targeted baseline: 14 passed / 5 failed (default policy, DNS caller return, three missing-lifecycle cases). Full frozen catalog baseline: 695 passed, zero skipped/errors, `20261101T194849502907Z-RQ-2026-11-01-budget-review-before.json`.
+- After: complete paired gate 695 passed, zero skipped/errors/regressions/missing tests, same catalog/fixtures/toolchain, `20261101T195248512439Z-RQ-2026-11-01-budget-review-after.json`. Expanded focused suite 79 passed (23 request-budget tests plus surrounding Engine/API/verification contracts), two existing Starlette deprecation warnings. Four follow-up lifecycle/policy tests were added after the initial focused baseline; this is expanded focused coverage, not a frozen-count paired comparison. The full catalog remained frozen. The transport fixture now handles synthetic GET `/api/tags`, preventing root's forthcoming restored startup path from launching real services during tests.
+- Synthetic coverage: stalled headers/trickling bodies; stalled DNS; explicit cancellation; twelve saturated offers with one retained resolver; eventual resolver recovery; repeated successful fake calls using the same native worker; cancellation-resistant HTTP cleanup retains its slot; context isolation; shutdown before dispatch; shutdown before first use; application event-loop-policy independence. Existing sync/remote interface and duration header tests pass.
+- Live companion: NOT RUN, explicitly prohibited by the sprint. No actual-answer-quality, model-latency, live DNS/provider recovery or GPU-drain claim. All network execution was loopback fixture HTTP; DNS was replaced with controlled synthetic functions. The borrowed test environment was read-only.
+- Deployment: dedicated `fix/budget-review` worktree from `b7290ca`, local commit only. No candidate production/test edits, active-node/service changes, deploy, release, model unload, grants, routines or Rig D. Integration with root startup/other review fixes remains to be tested on the combined candidate.
+- Rollback: revert budget transport module and request wrapper/default change together; no database migration. Reverting cannot terminate already-running native resolver or provider work. Preserve truthful outstanding-resource reporting during any shutdown/restart decision.

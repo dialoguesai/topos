@@ -16,7 +16,7 @@ import httpx
 
 from .overload import ComputeUnavailable
 
-DEFAULT_VERIFY_SECONDS = 60.0
+DEFAULT_VERIFY_SECONDS = 120.0
 MAX_SECONDS = 120.0
 TIMEOUT_HEADER = "X-Topos-Timeout-Ms"
 _current: ContextVar = ContextVar("compute_request_budget", default=None)
@@ -103,8 +103,9 @@ must also observe the shared budget; callers must not report GPU drain here.
 def request(method, url, *, timeout, **kwargs):
     """Synchronous worker entry, cancellation-aware async socket ownership.
 
-One connection attempt, no retries. Total elapsed time, including a trickling
-body, is bounded by the inherited budget (HTTP read timeout alone is not).
+One connection attempt, no retries. Caller wait, including a trickling body
+is bounded by the inherited budget. Native DNS/HTTP cleanup may outlive it;
+the bounded reusable transport retains those resources until actual completion.
 """
     budget = current_budget()
     if budget is None:
@@ -114,11 +115,12 @@ body, is bounded by the inherited budget (HTTP read timeout alone is not).
     async def run():
         async with httpx.AsyncClient(timeout=min(timeout, budget.remaining())) as client:
             try:
-                return await await_budgeted(client.request(method, url, **kwargs), budget)
+                return await client.request(method, url, **kwargs)
             except httpx.TimeoutException:
                 budget.check()
                 raise ComputeUnavailable("compute_unavailable") from None
             except httpx.RequestError:
                 raise ComputeUnavailable("compute_unavailable") from None
 
-    return asyncio.run(run())
+    from .budget_transport import get_transport
+    return get_transport().execute(budget, run)
