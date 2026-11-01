@@ -25,6 +25,7 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
+  "opentelemetry-api>=1.39,<2",
   "fastapi~=0.136.0",
   "uvicorn[standard]~=0.44.0",
   "httpx~=0.28.1",
@@ -86,6 +87,10 @@ Homepage = "https://topos.dialogues.ai"
 Source = "https://dialogues.ai"
 
 [project.optional-dependencies]
+telemetry = [
+  "opentelemetry-sdk>=1.39,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.39,<2",
+]
 # Lean database / sync plane (hosted topos-database Cloud Run image).
 database = [
   "psycopg[binary]~=3.3.3",
@@ -120,6 +125,8 @@ signal = [
   "pysqlcipher3~=1.2.0",
 ]
 dev = [
+  "opentelemetry-sdk>=1.39,<2",
+  "opentelemetry-exporter-otlp-proto-http>=1.39,<2",
   "pytest~=9.0.3",
   "pytest-asyncio~=1.3.0",
   "httpx~=0.28.1",

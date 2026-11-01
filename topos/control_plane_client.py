@@ -799,6 +799,12 @@ class ControlPlaneClient:
     _HEALTHCHECK_ANSWER_DEADLINE_S = 1.0
 
     async def _handle_message(self, ws, data: Dict[str, Any]) -> None:
+        from .observability.rpc import observe_message
+
+        with observe_message(data):
+            await self._handle_message_inner(ws, data)
+
+    async def _handle_message_inner(self, ws, data: Dict[str, Any]) -> None:
         msg_type = str(data.get("type") or "").strip().lower()
         if msg_type == "permissions_v2_verify_claim":
             from .permissions_v2.truth_release import dispatch_verify_claim
@@ -861,11 +867,16 @@ class ControlPlaneClient:
             # NR181: the error's class and where it was raised, never its text: a handler's error can quote the
             # frame it was handling (a validation error repeats its input). The frames are code locations only.
             import traceback
+            from .observability.tracing import mark_error
+            mark_error(type(exc).__name__)
             logger.error("Handler raised exception: type=%s id=%s error=%s\n%s", msg_type, data.get("id"),
                          type(exc).__name__, "".join(traceback.format_tb(exc.__traceback__)).rstrip())
             resp = {"id": data.get("id"), "status": "error", "error": str(exc)}
         if resp is None:
             return  # e.g. connection_info or message without id; CP has no pending request to match
+        if resp.get("status") in {"error", "failed"}:
+            from .observability.tracing import mark_error
+            mark_error("handler_failed")
         if msg_type == "healthcheck" and resp.get("status") == "ok":
             resp = {**resp, "payload": {
                 **(resp.get("payload") or {}),

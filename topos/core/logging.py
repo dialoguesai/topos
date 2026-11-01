@@ -237,6 +237,14 @@ class JsonFormatter(logging.Formatter):
             payload["exc_info"] = self.formatException(record.exc_info)
         if hasattr(record, "extra"):
             payload.update(record.extra)
+        # Correlate local logs without exporting their potentially sensitive body.
+        from opentelemetry import trace
+
+        context = trace.get_current_span().get_span_context()
+        if context.is_valid:
+            payload["trace_id"] = format(context.trace_id, "032x")
+            payload["span_id"] = format(context.span_id, "016x")
+            payload["trace_flags"] = format(int(context.trace_flags), "02x")
         return json.dumps(payload)
 
 

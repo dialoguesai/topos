@@ -20,6 +20,11 @@ logger = logging.getLogger("topos.services.llm")
 def _raise_provider_unavailable(status_code: int, body: str, headers: Any) -> None:
     error = provider_unavailable(status_code, body, (headers or {}).get("Retry-After"))
     if error is not None:
+        from ...observability.metrics import measure
+        from ...observability.tracing import mark_error
+        mark_error(error.code)
+        measure("counter", "topos.compute.rejections", 1, unit="{request}",
+                attributes={"topos.compute.reason": error.code, "topos.compute.path": "generation"})
         raise HTTPException(status_code=error.status_code, detail=error.detail(), headers=error.headers())
 
 
