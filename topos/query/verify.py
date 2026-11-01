@@ -28,6 +28,7 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from ..engine.overload import ComputeUnavailable, unavailable_from_detail
+from ..engine.request_budget import check_budget
 
 from ..features.facts.store import FactStore
 from ..features.lifecycle.blackhole_guard import BlackholeGuard
@@ -253,7 +254,9 @@ def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]], *, audit: Op
             input={"claim": claim, "lanes": lane_texts},
             model_request=ModelRequest(provider="ollama", model=settings.ollama_query_model),
         )
+        check_budget()
         result = get_engine_client_or_local(None).run(task)
+        check_budget()
         if result.status == "deferred":
             for code in (429, 503):
                 unavailable = unavailable_from_detail(code, (result.output or {}).get("availability"))
@@ -313,6 +316,7 @@ def verify_claim(
     With no ``guard`` every Off-limits entry is withheld, as for a caller the node cannot place.
     """
     started = time.perf_counter()
+    check_budget()
     resolved = get_mode(mode)
     if resolved is None:
         return {
@@ -369,6 +373,7 @@ def verify_claim(
     candidates = list(store.search(tokens, limit=50))
     candidates += _facts_by_predicates(store, hinted_predicates)
     for fact in candidates:
+        check_budget()
         if sum(len(entries) for entries in lane_entries.values()) >= _MAX_FACT_EVIDENCE:
             break
         object_id = fact.get("object_id")
@@ -399,6 +404,7 @@ def verify_claim(
             })
 
     audit["evidence_counts"] = {lane: len(entries) for lane, entries in lane_entries.items()}
+    check_budget()
     audit["hinted_predicates"] = sorted(hinted_predicates)
     lane_texts = {lane: [entry["text"] for entry in entries]
                   for lane, entries in lane_entries.items()}

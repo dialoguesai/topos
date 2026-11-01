@@ -423,3 +423,51 @@ comparisons; it is not established by these incidents.
 | query_and_synthesis_contracts | 103 pass / 0 fail / 0 skip | 103 pass / 0 fail / 0 skip |
 
 - Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+### Regression gate — RQ-2026-11-01-verification-deadline — before
+
+- Recorded (UTC): 2026-11-01T19:05:06.484463+00:00
+- Note: Published 1.5.36 production behavior restored after exploratory focused checks; new budget helper is present but not wired into production, with frozen regression fixtures. Capture pre-fix deadline and cancellation failures without live calls.
+- Report: [machine-readable results](response-quality-runs/20261101T190506484463Z-RQ-2026-11-01-verification-deadline-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 103 pass / 2 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-verification-deadline — after
+
+- Recorded (UTC): 2026-11-01T19:05:56.143355+00:00
+- Note: One monotonic verification budget bounds local and remote compute, cancels provider transport on expiry/disconnect, prevents late heuristic success, and retains honest Engine worker ownership. Fake socket and admission regressions passed separately; no live capacity claim.
+- Report: [machine-readable results](response-quality-runs/20261101T190556143355Z-RQ-2026-11-01-verification-deadline-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 103 pass / 2 fail / 0 skip | 105 pass / 0 fail / 0 skip |
+
+- Fixed: 2; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_cancelled_handler_signals_its_worker`
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_expiry_is_unavailable_not_a_heuristic_success_and_worker_finishes`

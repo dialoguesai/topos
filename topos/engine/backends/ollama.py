@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import io
 import logging
 import urllib.error
 import urllib.request
@@ -13,6 +14,22 @@ from .generative_prompts import build_generative_prompt
 from .generative_response import parse_generative_response
 
 logger = logging.getLogger("topos.engine.ollama")
+
+
+def _read_json(req, timeout):
+    from ..request_budget import current_budget, request
+
+    if current_budget() is None:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read().decode())
+    # Budgeted callers own a cancellable socket, including header/body waits.
+    # A closed socket is not evidence that the provider has drained its queue.
+    response = request(req.get_method(), req.full_url, content=req.data,
+                       headers=dict(req.header_items()), timeout=timeout)
+    if response.is_error:
+        raise urllib.error.HTTPError(req.full_url, response.status_code, response.reason_phrase,
+                                     response.headers, io.BytesIO(response.content))
+    return response.json()
 
 # Per-process thinking-capability cache, keyed by (base_url, model). Populated
 # lazily from /api/show ("capabilities" contains "thinking"). Module-level so
@@ -135,8 +152,9 @@ class OllamaAdapter:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
+            data = _read_json(req, timeout=10)
+        except ComputeUnavailable:
+            raise
         except Exception as exc:  # noqa: BLE001 — degrade to "unknown, omit think"
             logger.debug("thinking-capability probe failed for %s: %s", model, exc)
             return False
@@ -373,7 +391,12 @@ class OllamaAdapter:
         # rejected think=false before keep thinking but get a wider output
         # budget so the CoT cannot starve the answer (Ollama returns thinking
         # in a separate field, so 'response' stays clean either way).
-        self._ensure_server()
+        from ..request_budget import current_budget, check_budget
+
+        check_budget()
+        if current_budget() is None:
+            self._ensure_server()
+        # Bounded foreground requests do not start services or await startup.
         requested_think = think
         think = self.resolve_think(model, think)
         if (
@@ -438,6 +461,8 @@ class OllamaAdapter:
         from ...permissions_v2 import answer_gate
 
         answer_gate.yield_if_background()
+        from ..request_budget import check_budget
+        check_budget()
         body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
         if keep_alive is not None:
             body["keep_alive"] = keep_alive
@@ -459,29 +484,24 @@ class OllamaAdapter:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode())
-                prompt_tokens = int(data.get("prompt_eval_count") or 0)
-                completion_tokens = int(data.get("eval_count") or 0)
-                total_tokens = prompt_tokens + completion_tokens
-                # This is the DERIVATION lane, and it had no timing signal at
-                # all — no streaming, no heartbeats, no usage rows. It also
-                # alternates models with chat, which evicts weights and pays a
-                # cold load the chat lane then blames on itself. Capture the
-                # same split here so the two lanes are comparable.
-                from topos.services.llm.openai import _ollama_timings
+            data = _read_json(req, timeout=timeout)
+            check_budget()
+            prompt_tokens = int(data.get("prompt_eval_count") or 0)
+            completion_tokens = int(data.get("eval_count") or 0)
+            total_tokens = prompt_tokens + completion_tokens
+            from topos.services.llm.openai import _ollama_timings
 
-                timings = _ollama_timings(data)
-                return {
-                    "text": data.get("response", ""),
-                    "usage": {
-                        "prompt_tokens": max(0, prompt_tokens),
-                        "completion_tokens": max(0, completion_tokens),
-                        "total_tokens": max(0, total_tokens),
-                        **({"timings": timings} if timings else {}),
-                    },
+            timings = _ollama_timings(data)
+            return {
+                "text": data.get("response", ""),
+                "usage": {
+                    "prompt_tokens": max(0, prompt_tokens),
+                    "completion_tokens": max(0, completion_tokens),
+                    "total_tokens": max(0, total_tokens),
                     **({"timings": timings} if timings else {}),
-                }
+                },
+                **({"timings": timings} if timings else {}),
+            }
         except urllib.error.HTTPError as e:
             # Include the response body: Ollama puts the actionable message
             # there (e.g. '"x" does not support disabling thinking') and the
