@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.37] — 2026-11-01
+
+### Fixed
+- `[O]` Bound standard claim verification to a shared 120-second default/maximum request lifetime, with shorter caller deadlines supported. Propagate cancellation and remaining time through database workers, local model startup and remote Engine calls; expired work cannot start new inference or return a late heuristic answer. Remote server-side enforcement requires an updated compute host.
+- `[O]` Bound budgeted HTTP work and native DNS resources per process, retaining capacity until actual cleanup finishes. This does not establish GPU cancellation or global provider admission; uninterruptible native DNS may still delay process exit.
+- `[O]` Include model verification in the existing permissioned-answer writer (100 seconds) and judge (60 seconds) phase ceilings. Stop further sentence judging after a provider failure, retaining fail-closed answer release and existing grant/model guards.
+
+### Added
+- `[O]` Content-free shared-answer diagnostics for fixed role, phase, outcome, HTTP status and elapsed time. No prompt, answer, exception text, token, URL or recipient identifier is added to these events; public receipt schemas are unchanged.
+
+No schema migration, reprocessing or model change. The separate shared provider-admission prototype and UI work are excluded.
+
 ## [1.5.36] — 2026-11-01
 
 ### Added

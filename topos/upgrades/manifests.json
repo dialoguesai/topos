@@ -1357,6 +1357,16 @@
       ]
     },
     {
+      "version": "1.5.37",
+      "summary": "Bound verification and permissioned-answer request lifetimes, retain transport resource ownership, and classify shared-answer failures.",
+      "steps": [],
+      "notes": [
+        "Code-only changes. No schema migration, reprocessing, model change or new automatic telemetry export.",
+        "Database/compute separation is preserved; remote server-side deadline enforcement requires an updated compute host.",
+        "Socket cancellation is not proof of provider/GPU drain. Global provider admission and UI work are excluded."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

@@ -1,7 +1,8 @@
 # Request lifetime resilience candidate — 2026-11-01
 
-Base: published 1.5.36 (`4e2ac21`). Candidate only: no version bump, release,
-deployment, active-node restart, live traffic, or Rig D.
+Base: published 1.5.36 (`4e2ac21`). This document records the initial candidate.
+The final review corrections and qualification counts are in `resilience-review.md`;
+release metadata does not establish publication, deployment or live capacity.
 
 ## Included
 
@@ -54,7 +55,7 @@ The separate owner-verification reader-budget issue is unchanged.
 
 ## Release and capacity gates
 
-1. Review the default 60s/maximum 120s verification policy against fixed live cases.
+1. Review the default 120s/maximum 120s verification policy against fixed live cases.
    A deadline is a failure bound, not a successful-response SLO. Deploy both sides
    to validate remote propagation; old compute hosts retain caller-side bounds only.
 2. Use a newly commissioned benchmark baseline with pre-run grant policy and model
