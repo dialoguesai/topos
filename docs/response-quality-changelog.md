@@ -747,3 +747,87 @@ of the lifecycle commit; no configuration or database migration is involved.
 Completed comparable after gate:
 `20261101T190813500152Z-RQ-2026-11-01-sharing-diagnostics-after.json` — 693 passed,
 0 failed, 0 skipped, 0 runner errors; PASS with 30 fixes and no regressions.
+
+### Regression gate — RQ-2026-11-01-resilience-integration — before
+
+- Recorded (UTC): 2026-11-01T19:11:42.178667+00:00
+- Note: Combined frozen regression fixtures against restored published 1.5.36 production paths; helper remains unwired. Integration baseline after independent development, not live traffic.
+- Report: [machine-readable results](response-quality-runs/20261101T191142178667Z-RQ-2026-11-01-resilience-integration-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 103 pass / 38 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-resilience-integration — after
+
+- Recorded (UTC): 2026-11-01T19:12:29.667903+00:00
+- Note: Combined verification deadlines, disconnect propagation, bounded sharing model phases, stop-on-judge-failure, and content-free diagnosis. Provider admission prototype remains excluded. Synthetic evidence only; no deployment or live recovery claim.
+- Report: [machine-readable results](response-quality-runs/20261101T191229667903Z-RQ-2026-11-01-resilience-integration-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 103 pass / 38 fail / 0 skip | 141 pass / 0 fail / 0 skip |
+
+- Fixed: 38; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[post-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[post-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[verify-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[verify-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-False-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-False-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-True-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-True-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-False-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-False-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-True-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-True-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_expired_call_never_opens_transport[False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_expired_call_never_opens_transport[True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_judge_negative_verdict_is_not_provider_failure[synthetic-invalid-None-invalid_verdict]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_judge_negative_verdict_is_not_provider_failure[{"supported":"no"}-False-ok]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-verification-True]`
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_cancelled_handler_signals_its_worker`
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_expiry_is_unavailable_not_a_heuristic_success_and_worker_finishes`

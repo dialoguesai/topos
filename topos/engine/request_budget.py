@@ -36,7 +36,7 @@ class RequestStopped(ComputeUnavailable):
 
 class RequestBudget:
     def __init__(self, seconds: float):
-        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not math.isfinite(seconds) or not 0 < seconds <= MAX_SECONDS:
+        if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or not 0 < seconds <= MAX_SECONDS or not math.isfinite(seconds):
             raise ValueError("Invalid compute request budget")
         self.deadline = time.monotonic() + seconds
         self.cancelled = threading.Event()

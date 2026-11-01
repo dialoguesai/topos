@@ -14,7 +14,7 @@ from topos.engine.client import RemoteEngineClient
 from topos.engine.tasks import ProcessingTask, ModelRequest
 
 
-@pytest.mark.parametrize('value', [True, False, 0, -1, float('nan'), float('inf'), 121, '30', None])
+@pytest.mark.parametrize('value', [True, False, 0, -1, float('nan'), float('inf'), 121, 10 ** 1000, '30', None])
 def test_budget_rejects_invalid_lifetimes(value):
     with pytest.raises(ValueError):
         RequestBudget(value)
