@@ -423,3 +423,109 @@ comparisons; it is not established by these incidents.
 | query_and_synthesis_contracts | 103 pass / 0 fail / 0 skip | 103 pass / 0 fail / 0 skip |
 
 - Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+### RQ-2026-10-31-01 — Summary packet empty on asks the store answers (rare gate)
+
+- Recorded / implemented: 2026-11-01T03:42:09Z (UTC; 31 Oct 2026 local). Not loaded on a node,
+  not live-verified, not released.
+- Status: implemented on branch `claude/summary-empty-packet-lme` (node repo); PR to
+  follow. Owner merges.
+- Failing question family and expected behavior: empty/incomplete evidence. A
+  summary-mode ask whose subject is in the store and reached the candidates must
+  return that evidence; an absent qualifier narrows the answer, it does not erase it.
+- Symptom: in the 12-question LongMemEval S-split run (31 Oct–1 Nov 2026, Kaggle,
+  real ingest path), 3 questions produced an EMPTY summary packet under every
+  retrieval pack while raw mode returned 79–100 rows and found the gold session
+  (ranks 5 and 27; the third's gold was not in raw's top 100 either).
+- Observed root cause (proven on copies of the three bench DBs, Python 3.12, isolated
+  HOME, offline models): `_rrf_fuse_summary_lists` → `_veto_for` rule 1 — every query
+  token with FTS df ≤ 2 must be contained in some candidate's text blob or the whole
+  fused list is dropped (`rare_gate emptied rare_token_unevidenced`,
+  `empty_cause=gate_vetoed`). Per question: `sunday` df 0 (nowhere in 474 turns) with
+  the other 7 content tokens evidenced by 4–16 of 43 candidates and the gold turn at
+  vector rank 2; `homegrown` df 0 (nowhere in 503 turns) with serve/dinner/weekend/
+  ingredients evidenced; a person's name df 0 although two stored turns carry it —
+  the FTS `search_text` is the privacy-filtered rendering (`[NAME]`), so a name in
+  an ask can never have df > 0 nor be evidenced — with 8 of 10 tokens evidenced and
+  gold at vector rank 4. Not the supply-state abstention, not `unproven_closed`. Raw
+  mode uses the same df map only to block its browse fallback, so it answered.
+- Method and files: `topos/query/retrieval.py` — an absent word empties a part only
+  when such words are not outnumbered by the words the candidates evidence, counted
+  over the part's content tokens minus answer-shape vocabulary (so common subject
+  words on a large store count); a lone fabricated subject and a tie still veto; the
+  per-part gate and the browse-fallback gate are unchanged; a kept part records
+  `rare_gate scoped absent_token_outnumbered` (tokens local-only) and the witness
+  step keeps the items that evidenced the admitting words. `topos/query/narrowing.py`
+  + `topos/protocol/narrowing_vocabulary.json` — the new reason slug.
+- Dataset/model: LongMemEval S cleaned split, 3 bench DBs; no live model; vector
+  lane with the node's offline embedder; no cache.
+- Before/after evidence: before, 0 summary items for all three (4 packs each).
+  After, 25 items each; gold session at rank 0 for the bike-ride and rotation-sheet
+  questions (rank 0 and 3 by message); the dinner question's gold turn was never
+  among the 43 fused candidates, so the gate change cannot reach it (lane recall,
+  separate). Answer quality not assessed (no synthesis in this harness).
+- Original case, negative controls, adjacent families: new
+  `tests/query/test_absent_qualifier_narrows_not_erases.py` (12 tests: the three
+  shapes, ledger, public-ledger redaction, lone-subject veto, tie veto, two-absent
+  veto, per-part agreement, large-store count). 332 passed / 9 skipped / 14 xfailed
+  across the rare-gate, multi-needle, output-shape, transform-invariance, narrowing
+  vocabulary/ledger, ledger-conservation, lane-fault, corpus-density, scope-aware
+  frequency, vector-head, index-lag and support-retention files.
+- Paired gate RQ-2026-10-31-01 below: 669 tests, 4 fixed (the new test, added to
+  the catalog before the baseline), 0 regressed, 0 outstanding, PASS.
+- Latency: unchanged in kind (one extra membership pass over blobs already built).
+- Known limits / unresolved: a name in an ask still has df 0 because the index text
+  is redacted — covered here only when the rest of the sentence is evidenced; a
+  proper fix needs entity linking or an unredacted df source. Whether synthesis
+  states the absent word is not addressed: the public ledger carries the slug only.
+- Rollback scope: revert the three files and the catalog line; no data migration.
+
+### Regression gate — RQ-2026-10-31-01 — before
+
+- Recorded (UTC): 2026-11-01T03:34:32.500232+00:00
+- Note: Summary packet empties on LongMemEval asks the store answers (3/12 S-split questions, 31 Oct): the rare-token gate vetoes the whole fused list when one query word has FTS df 0 (sunday, homegrown, a [NAME]-redacted person) while every other content word is evidenced and the gold turn is in the vector lane. Hypothesis: an absent word should narrow, not erase, when the evidenced words outnumber it. New failing test added to the catalog before this baseline.
+- Report: [machine-readable results](response-quality-runs/20261101T033432500232Z-RQ-2026-10-31-01-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 82 pass / 4 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 103 pass / 0 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-10-31-01 — after
+
+- Recorded (UTC): 2026-11-01T03:40:51.576068+00:00
+- Note: Rare gate: an absent word (df<=2, unevidenced) now empties a part only when such words are not outnumbered by the words the candidates evidence, counted over the part content tokens; a lone fabricated subject and a tie still veto; a kept part records rare_gate scoped absent_token_outnumbered. Measured after: the three LongMemEval stores return 25 summary items each (gold at rank 0 for 1d4e3b97 and 7161e7e2; 06f04340 gold was never among the 43 candidates).
+- Report: [machine-readable results](response-quality-runs/20261101T034051576068Z-RQ-2026-10-31-01-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | 140 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 82 pass / 4 fail / 0 skip | 86 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 103 pass / 0 fail / 0 skip | 103 pass / 0 fail / 0 skip |
+
+- Fixed: 4; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- fixes: `node::tests/query/test_absent_qualifier_narrows_not_erases.py::tests.query.test_absent_qualifier_narrows_not_erases.TestTheLedgerSaysWhatWasNotFound::test_a_narrowed_ask_is_not_an_empty`
+- fixes: `node::tests/query/test_absent_qualifier_narrows_not_erases.py::tests.query.test_absent_qualifier_narrows_not_erases.TestTheMeasuredFailure::test_a_large_store_counts_the_subject_words_too`
+- fixes: `node::tests/query/test_absent_qualifier_narrows_not_erases.py::tests.query.test_absent_qualifier_narrows_not_erases.TestTheMeasuredFailure::test_a_redacted_name_is_outnumbered_by_the_sentence_around_it`
+- fixes: `node::tests/query/test_absent_qualifier_narrows_not_erases.py::tests.query.test_absent_qualifier_narrows_not_erases.TestTheMeasuredFailure::test_an_absent_day_does_not_empty_an_ask_about_bike_rides`

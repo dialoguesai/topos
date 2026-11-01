@@ -6073,6 +6073,7 @@ def _rrf_fuse_summary_lists(
     context_sources: frozenset = frozenset(),
     rare_tokens: Optional[List[str]] = None,
     rare_token_groups: Optional[List[Dict[str, int]]] = None,
+    content_token_groups: Optional[List[List[str]]] = None,
     min_per_source: Optional[Dict[str, int]] = None,
     source_head_guarantees: Optional[Dict[str, int]] = None,
     goal_cap: Optional[int] = None,
@@ -6106,6 +6107,16 @@ def _rrf_fuse_summary_lists(
     that cannot work: one unevidenced token anywhere empties every part's lane, so a
     report's specific section takes down its ordinary sections and the sections most in
     need of the gate are exactly the ones it can never fire for.
+
+    An absent word (df ≤ 2 and no candidate contains it) empties a part only when such
+    words are not OUTNUMBERED by the words the candidates do evidence. "My Sunday bike
+    rides" with `sunday` nowhere in the corpus and `bike`, `rides` in every candidate is
+    an ask the store answers, narrowed by a day it never names; "zorblatt tourism" and a
+    one-for-one tie ("competitive falconer", only `competitive` evidenced) are still
+    vetoed. `content_token_groups` — the part's content tokens, same order as the
+    groups — is the vocabulary that count runs over when given: on a large store the
+    subject words are common, never in the rare map, and a count over the map alone sees
+    only the absent word. Without it the map's own keys are counted.
 
     Three of those returns are empty and they are NOT the same empty: nothing was
     ever a candidate, or candidates existed and the rare gate vetoed them. Told
@@ -6161,22 +6172,41 @@ def _rrf_fuse_summary_lists(
             # Variant-aware: items saying 'journal' evidence a 'journaling' ask.
             return any(v in blob for v in _token_variants(token) for blob in blobs)
 
-        def _veto_for(rare_dfs: Dict[str, int]) -> Optional[Tuple[str, List[str]]]:
+        narrowed: List[Tuple[int, List[str]]] = []
+
+        def _veto_for(
+            part: int, rare_dfs: Dict[str, int], content: Optional[List[str]], *, note: bool = True
+        ) -> Optional[Tuple[str, List[str]]]:
             """(reason_slug, offending_tokens) if THIS part's ask is unanswerable."""
             if not rare_dfs:
                 # No needles in this part — it never carried a specific ask, so it has
                 # nothing to be unanswerable about (a pure date-scoped "my week" is
                 # narrowed by its window alone).
                 return None
-            # Every effectively-absent token (df ≤ 2: zero, or a porter-stem
-            # collision like 'falconer'→'falcon' df 1) must be evidenced by the
-            # returned items themselves, or the ask is about something that does
-            # not exist. Answer-shape vocabulary ('cadence', 'frequency') is
+            # An effectively-absent token (df ≤ 2: zero, or a porter-stem collision
+            # like 'falconer'→'falcon' df 1) that no returned item contains is a word
+            # the owner asked about and the data does not hold. It empties the part
+            # only when such words are not OUTNUMBERED by the words the items do
+            # evidence. Measured 31 Oct 2026 on three LongMemEval stores (~500 AI-chat
+            # turns each, real ingest path): one absent qualifier ('sunday',
+            # 'homegrown') or a person's name the privacy filter had turned into
+            # [NAME] in the index text dropped 43–57 candidates with every other
+            # content word evidenced and the gold turn at vector rank 2–4, while raw
+            # mode answered the same store. A lone fabricated subject still vetoes;
+            # so does a tie. Answer-shape vocabulary ('cadence', 'frequency') is
             # excluded upstream by the token stoplist — it describes the aggregate
             # wanted, not row content.
             unevidenced = [t for t, df in rare_dfs.items() if df <= 2 and not _evidenced(t)]
             if unevidenced:
-                return "rare_token_unevidenced", unevidenced
+                vocabulary = list(rare_dfs) if content is None else [
+                    t for t in dict.fromkeys(content)
+                    if t not in _OUTPUT_SHAPE_TOKENS and not _is_bare_integer(t)
+                ]
+                evidenced = [t for t in vocabulary if _evidenced(t)]
+                if len(unevidenced) >= len(evidenced):
+                    return "rare_token_unevidenced", unevidenced
+                if note:
+                    narrowed.append((part, unevidenced))
             # A query with SEVERAL rare tokens is a specific ask even when stem
             # collisions keep each df nonzero ('years as a competitive falconer':
             # falconer→'falcon' df 1, competitive df 26): if NONE of them is
@@ -6187,7 +6217,11 @@ def _rrf_fuse_summary_lists(
                 return "no_rare_token_evidenced", sorted(rare_dfs)
             return None
 
-        vetoes = [_veto_for(group) for group in groups]
+        contents: List[Optional[List[str]]] = [None] * len(groups)
+        if content_token_groups is not None:
+            for i, tokens in enumerate(content_token_groups[: len(groups)]):
+                contents[i] = [str(t) for t in tokens]
+        vetoes = [_veto_for(i, group, contents[i]) for i, group in enumerate(groups)]
         if all(veto is not None for veto in vetoes):
             # Every part is unanswerable — the same honest empty as before. The
             # reported reason is the first part's, which for a one-part request is
@@ -6218,6 +6252,20 @@ def _rrf_fuse_summary_lists(
                 "rare_gate_partial_veto",
                 detail={
                     "parts_vetoed": [i for i, v in enumerate(vetoes) if v is not None],
+                    "n_parts": len(groups),
+                },
+            )
+        if ledger is not None and narrowed:
+            # A part kept over an absent word: the answer is about the subject the
+            # candidates evidence, not about the word the corpus lacks, and the ledger
+            # says so. Local only — the words are the owner's.
+            ledger.record(
+                _N.STAGE_RARE_GATE,
+                "scoped",
+                _N.REASON_ABSENT_TOKEN_OUTNUMBERED,
+                detail={
+                    "tokens": sorted({t for _, tokens in narrowed for t in tokens}),
+                    "parts_narrowed": [i for i, _ in narrowed],
                     "n_parts": len(groups),
                 },
             )
@@ -6440,15 +6488,26 @@ def _rrf_fuse_summary_lists(
         # that established answerability. Put witnesses first so a smaller client
         # budget keeps them too. RRF breaks ties and orders remaining context.
         eligible = [key for key, _ in ranked if best_source[key] not in context_sources]
+        witness_tokens = list(dict.fromkeys(
+            [*query_tokens, *(t for part in contents if part for t in part)]
+        ))
         token_keys = {
             token: {key for key in eligible if any(v in _item_text_blob(best_item[key]) for v in _token_variants(token))}
-            for token in query_tokens
+            for token in witness_tokens
         }
         requirements: List[set] = []
-        for group, veto in zip(groups, vetoes):
+        for i, (group, veto) in enumerate(zip(groups, vetoes)):
             if veto is not None:
                 continue
             requirements.extend(token_keys[token] for token, df in group.items() if df <= 2)
+            if any(i == part for part, _ in narrowed):
+                # Kept over an absent word: the words that outnumbered it are what
+                # admitted the part, so the release must carry their witnesses too.
+                vocabulary = contents[i] if contents[i] is not None else list(group)
+                requirements.extend(
+                    token_keys[t] for t in dict.fromkeys(vocabulary)
+                    if t in token_keys and token_keys[t]
+                )
             if len(group) >= 2 and not any(df <= 2 for df in group.values()):
                 requirements.append(set().union(*(token_keys[token] for token in group)))
         witnesses: List[str] = []
@@ -6465,7 +6524,9 @@ def _rrf_fuse_summary_lists(
         # Candidate support is insufficient if deduplication or a hard budget
         # removed it. Re-evaluate on exactly the payload about to be released.
         blobs = [_item_text_blob(best_item[key]) for key in selected if best_source[key] not in context_sources]
-        selected_vetoes = [_veto_for(group) for group in groups]
+        selected_vetoes = [
+            _veto_for(i, group, contents[i], note=False) for i, group in enumerate(groups)
+        ]
         if all(veto is not None for veto in selected_vetoes):
             if ledger is not None:
                 ledger.empty(
@@ -6990,9 +7051,8 @@ def _build_summary_items_unfiltered(
     # The same needles, split per part, for the gates below. One df pass over the
     # union — the flat set above stays exactly what it was, so a single-part request
     # produces one group holding the identical tokens.
-    rare_groups = _rare_token_groups(
-        bundle_conn, _needle_token_groups(needle_text or query_text, needle_parts)
-    )
+    needle_groups = _needle_token_groups(needle_text or query_text, needle_parts)
+    rare_groups = _rare_token_groups(bundle_conn, needle_groups)
     if first_person and rare_groups:
         rare_groups = [
             {t: df for t, df in group.items() if t not in _FIRST_PERSON_SHAPE_TOKENS}
@@ -7711,6 +7771,7 @@ def _build_summary_items_unfiltered(
             ),
             rare_tokens=rare_query_tokens,
             rare_token_groups=rare_groups,
+            content_token_groups=needle_groups,
             now=now,
             min_per_source=min_per,
             source_head_guarantees={"canonical": 2} if canonical_items else None,

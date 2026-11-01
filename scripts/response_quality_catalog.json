@@ -5,7 +5,7 @@
     "identity_and_dataset": {"node": ["tests/query/test_latest_exchange.py"], "web": ["lib/mcp/personThreadEvidence.test.ts"]},
     "dates_and_recency": {"node": ["tests/query/test_activity_recap_recency.py", "tests/query/test_fusion_recency.py"], "web": ["lib/mcp/localEventTime.test.ts"]},
     "routing_and_source_exclusions": {"web": ["lib/mcp/scopeQueryRouter.test.ts", "lib/mcp/scopeRoutingRules.test.ts", "lib/mcp/homeChatAgent.toolElection.test.ts"]},
-    "empty_and_incomplete_evidence": {"node": ["tests/query/test_scope_supply_state.py"], "web": ["lib/mcp/evidenceLimits.test.ts", "lib/mcp/homeChatAgent.evidenceLimits.test.ts", "lib/mcp/scopeSupplyRouting.test.ts"]},
+    "empty_and_incomplete_evidence": {"node": ["tests/query/test_scope_supply_state.py", "tests/query/test_absent_qualifier_narrows_not_erases.py"], "web": ["lib/mcp/evidenceLimits.test.ts", "lib/mcp/homeChatAgent.evidenceLimits.test.ts", "lib/mcp/scopeSupplyRouting.test.ts"]},
     "followups_and_breadth": {"web": ["lib/mcp/homeChatFollowup.agent.test.ts", "lib/mcp/followupBreadth.test.ts"]},
     "citations_and_attribution": {"node": ["tests/query/test_owner_source_urls.py"], "web": ["lib/mcp/conversationCitations.test.ts", "lib/mcp/sourceUrls.test.ts", "lib/mcp/reportedSpeech.test.ts"]},
     "work_recall_and_recommendations": {"web": ["lib/mcp/workEvidence.recalibration.test.ts", "lib/mcp/workEvidence.recommendations.test.ts"]},
