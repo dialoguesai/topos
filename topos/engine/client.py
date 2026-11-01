@@ -8,6 +8,7 @@ from typing import Optional, Protocol
 import httpx
 
 from .engine import Engine
+from .overload import unavailable_from_detail
 from .tasks import ProcessingResult, ProcessingTask
 
 
@@ -44,6 +45,16 @@ class RemoteEngineClient:
         body = task.model_dump(mode="json")
         with httpx.Client(timeout=self._timeout_sec) as client:
             resp = client.post(f"{self._base_url}/v1/engine/run", json=body, headers=headers)
+        if resp.status_code in (429, 503):
+            # Only our typed deferred result has Engine semantics. Generic
+            # proxy failures and policy refusals remain HTTP errors.
+            try:
+                deferred = ProcessingResult.model_validate(resp.json()["result"])
+                availability = unavailable_from_detail(resp.status_code, deferred.output.get("availability"))
+                if deferred.task_id == task.id and deferred.status == "deferred" and availability is not None:
+                    return deferred
+            except (ValueError, KeyError, TypeError):
+                pass
         resp.raise_for_status()
         data = resp.json()
         if isinstance(data, dict) and "result" in data:

@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
+from ..overload import ComputeUnavailable, provider_unavailable
 from .generative_prompts import build_generative_prompt
 from .generative_response import parse_generative_response
 
@@ -338,6 +339,9 @@ class OllamaAdapter:
             if isinstance(usage, dict):
                 out["usage"] = usage
             return out
+        except ComputeUnavailable as exc:
+            return {"status": "deferred", "error": str(exc), "model": model,
+                    "availability": exc.detail()}
         except urllib.error.URLError:
             return {
                 "status": "deferred",
@@ -483,9 +487,12 @@ class OllamaAdapter:
             # there (e.g. '"x" does not support disabling thinking') and the
             # bare status line hides it.
             try:
-                detail = e.read().decode("utf-8", "replace")[:500]
+                detail = e.read(800).decode("utf-8", "replace")
             except Exception:  # noqa: BLE001
                 detail = ""
+            unavailable = provider_unavailable(e.code, detail, (e.headers or {}).get("Retry-After"))
+            if unavailable is not None:
+                raise unavailable from e
             raise RuntimeError(f"Ollama request failed: {e} {detail}".rstrip()) from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"Ollama request failed: {e}") from e

@@ -5,6 +5,7 @@ import asyncio
 import time
 
 import topos.core.handlers as hub
+from ...engine.overload import ComputeUnavailable
 
 from .common import (
     Any,
@@ -210,6 +211,9 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
             return {"id": req_id, "status": "error", "error": str(result["error"])}
         _record_verify_claim_after_answer(caller_app_id, result)
         return {"id": req_id, "status": "ok", "payload": result}
+    except ComputeUnavailable as exc:
+        _log_query_failure("verify_claim", req_id, exc)
+        return exc.envelope(req_id)
     except Exception as exc:  # noqa: BLE001
         _log_query_failure("verify_claim", req_id, exc)
         return {"id": req_id, "status": "error", "error": str(exc)}

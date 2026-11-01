@@ -27,6 +27,7 @@ import sqlite3
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
+from ..engine.overload import ComputeUnavailable, unavailable_from_detail
 
 from ..features.facts.store import FactStore
 from ..features.lifecycle.blackhole_guard import BlackholeGuard
@@ -231,8 +232,7 @@ def _heuristic_lane_stance(claim: str, entries: List[Dict[str, Any]]) -> Dict[st
 
 
 def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]], *, audit: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Dict[str, Any]]]:
-    """One truth_verdict model call over all lanes; None on any failure so the
-    caller falls back to the heuristic."""
+    """One model call; explicit overload must not become a heuristic success."""
     try:
         from ..engine.client import get_engine_client_or_local
         from ..engine.tasks import ModelRequest, ProcessingTask
@@ -254,6 +254,11 @@ def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]], *, audit: Op
             model_request=ModelRequest(provider="ollama", model=settings.ollama_query_model),
         )
         result = get_engine_client_or_local(None).run(task)
+        if result.status == "deferred":
+            for code in (429, 503):
+                unavailable = unavailable_from_detail(code, (result.output or {}).get("availability"))
+                if unavailable is not None:
+                    raise unavailable
         if audit is not None:
             # ProcessingResult already carries provider usage through both
             # Engine clients. Retain only finite, numeric phase measurements;
@@ -287,7 +292,9 @@ def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]], *, audit: Op
                 confidence = 0.0
             cleaned[str(lane)] = {"stance": stance, "confidence": round(confidence, 2)}
         return cleaned
-    except Exception as exc:  # noqa: BLE001 — judge failure must degrade, not crash
+    except ComputeUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 — other judge failures retain their existing fallback
         logger.warning("truth_verdict LLM failed, falling back to heuristic: %s", exc)
         return None
 
