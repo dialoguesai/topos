@@ -261,6 +261,11 @@ def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]], *, audit: Op
             for code in (429, 503):
                 unavailable = unavailable_from_detail(code, (result.output or {}).get("availability"))
                 if unavailable is not None:
+                    detail = result.output["availability"]
+                    reason = detail.get("reason")
+                    if unavailable.code == "compute_unavailable" and reason in ("cancelled", "deadline_exceeded"):
+                        from ..engine.request_budget import RequestStopped
+                        raise RequestStopped(reason)
                     raise unavailable
         if audit is not None:
             # ProcessingResult already carries provider usage through both

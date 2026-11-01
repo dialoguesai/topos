@@ -6,7 +6,7 @@ separate `verify_claim_owner` reader-budget investigation.
 ## Behavior
 
 A request has one monotonic budget covering executor wait, retrieval checkpoints,
-model capability lookup, and model generation. The default is 60 seconds;
+model capability lookup, and model generation. The default is 120 seconds;
 `deadline_s` accepts a finite positive number at most 120 seconds. These are
 initial engineering limits, not a measured capacity or latency promise. Invalid
 values produce `invalid_deadline_s`. Expiry produces typed `compute_unavailable`
@@ -18,8 +18,9 @@ handler. Cancellation signals the worker through a shared budget. Budgeted model
 I/O uses a cancellable HTTP transport with a total elapsed deadline, including
 header stalls and continuously trickling bodies. It does not automatically retry
 cancelled requests. Existing thinking-capability negotiation is unchanged and
-shares the same remaining budget. A bounded foreground request does not launch
-or wait for provider service startup; the runtime owns that lifecycle.
+shares the same remaining budget. Local request-triggered startup is retained. Its lock, health probes, app-launch
+wait and polling observe the remaining request budget; expired work never starts
+a new launch. Remote provider URLs never trigger a local service launch.
 
 ## Database and compute remain separate
 
@@ -68,3 +69,8 @@ with fixed models and grant policy. Require service recovery probes, not just
 health/version success. Preserve timeouts and unknown backend state in reports.
 
 Rollback is a code revert; no database migration or provider configuration change.
+
+Review correction: the original 60s proposal would cut off six successful stress
+verifications (61–110s). Default120 retains those observed successful durations
+while remaining below the prior 180s client timeout. This is not proof of improved
+capacity. Callers may still request a shorter positive deadline.

@@ -5,7 +5,7 @@ deployment, active-node restart, live traffic, or Rig D.
 
 ## Included
 
-- Standard verification: one request budget (60s default, configurable positive
+- Standard verification: one request budget (120s default, configurable positive
   `deadline_s` up to 120s), cooperative cancellation, bounded socket lifetime,
   expiry as unavailable rather than late heuristic success. Remaining duration
   propagates to remote Engine; database/compute separation is retained.

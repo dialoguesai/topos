@@ -121,6 +121,14 @@ class OllamaAdapter:
 
     def is_reachable(self, *, timeout: float = 2.0) -> bool:
         """True when the Ollama server answers /api/tags (fast health probe)."""
+        from ..request_budget import current_budget, check_budget, request
+        if current_budget() is not None:
+            try:
+                response = request("GET", f"{self._base_url}/api/tags", timeout=timeout)
+                return response.is_success
+            except ComputeUnavailable:
+                check_budget()  # Cancellation must not be mistaken for a stopped service.
+                return False
         req = urllib.request.Request(f"{self._base_url}/api/tags", method="GET")
         try:
             with urllib.request.urlopen(req, timeout=timeout):
@@ -391,12 +399,11 @@ class OllamaAdapter:
         # rejected think=false before keep thinking but get a wider output
         # budget so the CoT cannot starve the answer (Ollama returns thinking
         # in a separate field, so 'response' stays clean either way).
-        from ..request_budget import current_budget, check_budget
+        from ..request_budget import check_budget
 
         check_budget()
-        if current_budget() is None:
-            self._ensure_server()
-        # Bounded foreground requests do not start services or await startup.
+        self._ensure_server()
+        check_budget()
         requested_think = think
         think = self.resolve_think(model, think)
         if (
