@@ -9,6 +9,17 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.38] — 2026-11-01
+
+### Changed
+- `[O]` Raise the default local routine allowance to 100 runs per owner and engine in a rolling 24-hour window. Operators can set a positive finite allowance with `TOPOS_ROUTINE_MAX_RUNS_PER_OWNER_24H`.
+
+### Added
+- `[O]` Explicit `TOPOS_ROUTINE_DEVELOPMENT_UNLIMITED_RUNS=true` configuration for intentional development and benchmark runs. It disables only the daily run quota; active-run exclusion, idempotency, compute admission, deadlines and delivery configuration remain enforced. The flag defaults off and applies node-wide after restart.
+- `[P]` Expose the effective routine run policy through local shell status so benchmark manifests can distinguish finite allowances from development mode.
+
+No schema migration, reprocessing, dependency, model or database/compute routing change. This release enables capacity testing; it does not claim a new capacity boundary or improved mixed-workload latency.
+
 ## [1.5.37] — 2026-11-01
 
 ### Fixed
