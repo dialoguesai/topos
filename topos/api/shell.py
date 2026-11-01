@@ -100,6 +100,7 @@ async def shell_status() -> dict:
     from ..features.entities.rebuild_subprocess import graph_rebuild_running
     from ..owner_key import owner_key_persisted
     from ..sanitization.prewarm import prewarm_status
+    from ..routines.store import run_quota_policy
 
     info = get_update_info()
     log_file = get_log_file_path()
@@ -128,6 +129,7 @@ async def shell_status() -> dict:
         # automatic refreshes, manual requests, and upgrade rebuilds. A dirty
         # or debouncing graph is not yet rebuilding.
         "graph_rebuild": {"running": graph_rebuild_running()},
+        "routine_run_policy": run_quota_policy(),
         # Additive, for `topos-node status` / `doctor` over the owner socket and the
         # plugin's SessionStart hook (CONTRACTS §4): the control-plane link as a word,
         # who supervises this process, whether the owner key is on disk (DIGEST J6),

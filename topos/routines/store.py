@@ -13,7 +13,22 @@ from ..storage.db.write_gate import commit_connection, with_db_write
 
 ACTIVE_RUN_STATUSES = frozenset({"queued", "waiting_for_engine", "running"})
 MAX_ROUTINES_PER_OWNER = 10
-MAX_RUNS_PER_OWNER_24H = 50
+
+
+def run_quota_policy() -> Dict[str, Any]:
+    """Effective node-owned policy; safe to expose in local shell status."""
+    from ..config.settings import settings
+
+    unlimited = settings.routine_development_unlimited_runs
+    return {
+        "contract_version": 1,
+        "limit": None if unlimited else settings.routine_max_runs_per_owner_24h,
+        "configured_limit": settings.routine_max_runs_per_owner_24h,
+        "development_unlimited": unlimited,
+        "window_hours": 24,
+        "scope": "owner_engine",
+        "timestamp_basis": "updated_at",
+    }
 
 
 def _now_iso() -> str:
@@ -399,7 +414,8 @@ def create_run(
     ensure_routines_schema(conn)
     uid = str(owner_user_id).strip()
     eid = str(engine_id).strip()
-    if count_runs_last_24h(conn, owner_user_id=uid, engine_id=eid) >= MAX_RUNS_PER_OWNER_24H:
+    limit = run_quota_policy()["limit"]
+    if limit is not None and count_runs_last_24h(conn, owner_user_id=uid, engine_id=eid) >= limit:
         raise ValueError("RUN_RATE_LIMIT")
     if not get_routine(conn, owner_user_id=uid, routine_id=routine_id):
         raise ValueError("NOT_FOUND")
