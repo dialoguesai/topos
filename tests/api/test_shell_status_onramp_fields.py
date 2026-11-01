@@ -93,3 +93,17 @@ def test_owner_key_not_persisted_without_the_line(client, monkeypatch, tmp_path:
     assert payload["owner_key_persisted"] is False
     assert payload["control_plane"] == "unknown"
     assert payload["user_id_present"] is False and payload["topos_id_present"] is False
+
+
+@pytest.mark.parametrize("unlimited", [False, True])
+def test_status_reports_effective_routine_policy(client, monkeypatch, unlimited):
+    from topos.config.settings import settings
+    from topos.routines.store import run_quota_policy
+    monkeypatch.setattr(settings, "routine_max_runs_per_owner_24h", 100)
+    monkeypatch.setattr(settings, "routine_development_unlimited_runs", unlimited)
+    monkeypatch.setattr(state, "get_db_connection", lambda: None)
+    response = client.get("/v1/shell/status")
+    assert response.status_code == 200
+    policy = response.json()["routine_run_policy"]
+    assert policy == run_quota_policy()
+    assert policy["limit"] == (None if unlimited else 100)
