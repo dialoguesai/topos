@@ -428,8 +428,8 @@ comparisons; it is not established by these incidents.
 
 - Recorded / implemented: 2026-11-01T03:42:09Z (UTC; 31 Oct 2026 local). Not loaded on a node,
   not live-verified, not released.
-- Status: implemented on branch `claude/summary-empty-packet-lme` (node repo); PR to
-  follow. Owner merges.
+- Status: implemented on branch `claude/summary-empty-packet-lme` (node repo), PR
+  dialoguesai/topos#232 (commit 8dbcc69d + this line). Owner merges.
 - Failing question family and expected behavior: empty/incomplete evidence. A
   summary-mode ask whose subject is in the store and reached the candidates must
   return that evidence; an absent qualifier narrows the answer, it does not erase it.
