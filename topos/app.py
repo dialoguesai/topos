@@ -68,6 +68,7 @@ from .api import (
 )
 from .config.settings import settings
 from .core.logging import align_uvicorn_loggers, configure_logging
+from .observability.http import TelemetryMiddleware
 from .extensions import load_extensions
 from .core import state
 from .core.handlers import handle_control_plane_request
@@ -115,6 +116,8 @@ app = FastAPI(
     description="Topos node: Topos Database (data plane) and Topos Engine (compute plane), typically co-deployed in this process.",
     version=__version__,
 )
+
+app.add_middleware(TelemetryMiddleware)
 
 
 def _log_runtime_banner() -> None:

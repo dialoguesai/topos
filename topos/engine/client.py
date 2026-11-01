@@ -39,7 +39,22 @@ class RemoteEngineClient:
         self._timeout_sec = timeout_sec
 
     def run(self, task: ProcessingTask) -> ProcessingResult:
+        from opentelemetry.trace import SpanKind
+        from ..observability.tracing import start_span, mark_error
+
+        with start_span("topos.engine.remote", kind=SpanKind.CLIENT):
+            result = self._run(task)
+            if result.status != "completed":
+                availability = result.output.get("availability")
+                error = unavailable_from_detail(503, availability) or unavailable_from_detail(429, availability)
+                mark_error(error.code if error else "engine_task_failed")
+            return result
+
+    def _run(self, task: ProcessingTask) -> ProcessingResult:
+        from ..observability.tracing import inject_context
+
         headers = {"Content-Type": "application/json"}
+        headers.update(inject_context())
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         body = task.model_dump(mode="json")
