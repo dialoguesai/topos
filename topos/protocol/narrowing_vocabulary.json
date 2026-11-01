@@ -44,6 +44,7 @@
     "windowed"
   ],
   "reasons": [
+    "absent_token_outnumbered",
     "aggregate_lane",
     "aggregate_param_invalid",
     "aggregate_principal_denied",
