@@ -66,7 +66,7 @@ def task():
 
 
 @pytest.mark.parametrize('remote', [False, True])
-def test_engine_transport_retains_deferred_signal_without_retry(overloaded_engine, monkeypatch, remote):
+def test_engine_transport_retains_deferred_signal_without_retry(overloaded_engine, monkeypatch, remote, request):
     actual_engine, calls = overloaded_engine
     if remote:
         from topos.api import engine_run
@@ -75,7 +75,8 @@ def test_engine_transport_retains_deferred_signal_without_retry(overloaded_engin
         app = FastAPI()
         app.include_router(engine_run.router)
         app.dependency_overrides[require_api_key] = lambda: None
-        server = TestClient(app)
+        server = TestClient(app).__enter__()
+        request.addfinalizer(lambda: server.__exit__(None, None, None))
         real_http = httpx.Client
         seen = []
 
