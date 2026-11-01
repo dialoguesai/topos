@@ -220,14 +220,18 @@ def test_set_a_call_still_running_at_its_bound_is_cut_off_and_its_sentence_is_un
     assert receipt["sentences"]["dropped_unjudged"] == 3 and receipt["sentences"]["dropped_support"] == 0
 
 
-def test_set_a_judge_error_is_still_a_no(legacy, tmp_path, monkeypatch):
+def test_set_a_judge_provider_error_stops_the_phase(legacy, tmp_path, monkeypatch):
     monkeypatch.setenv(RESERVE, "20")
 
+    calls = []
+
     async def failing(node, sentence, items, *, deadline, question=None, context=None):
+        calls.append(sentence)
         raise PolicyError("model_error")
 
     body, receipt, _accepted = _run(legacy, tmp_path, monkeypatch, failing)
-    assert receipt["reason"] == "all_sentences_dropped" and receipt["sentences"]["dropped_support"] == 3
+    assert receipt["reason"] == "judge_unavailable"
+    assert len(calls) == 1
     assert receipt["sentences"]["dropped_unjudged"] == 0
 
 

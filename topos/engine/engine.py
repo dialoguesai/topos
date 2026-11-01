@@ -153,7 +153,12 @@ class Engine:
         outcome = "failed"
         with start_span("topos.engine.run"):
             try:
-                result = self._run(task)
+                from .request_budget import RequestStopped
+                try:
+                    result = self._run(task)
+                except RequestStopped as exc:
+                    result = format_result(task_id=task.id, status="deferred", error=str(exc),
+                                           raw_output={"availability": exc.detail()})
                 outcome = result.status if result.status in {"completed", "deferred"} else "failed"
                 if outcome == "failed":
                     mark_error("task_failed")
@@ -203,6 +208,8 @@ class Engine:
         # Build adapter config: subtype and model from task or registry
         config = self._build_inference_config(normalized)
         # Route to backend
+        from .request_budget import check_budget
+        check_budget()
         adapter = get_adapter_for_task(normalized)
         cache = get_model_cache()
         subtype = config.get("subtype") or ""
@@ -216,6 +223,7 @@ class Engine:
         from ..observability.metrics import record_metric
         try:
             with start_span("topos.engine.inference"):
+                check_budget()
                 raw_output = adapter.run_inference(normalized.input, config=config)
                 if raw_output.get("error") and raw_output.get("status") != "deferred":
                     mark_error("inference_failed")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import uuid
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
@@ -49,6 +50,7 @@ async def local_list_database_tables(principal=Depends(resolve_request_principal
 
 @router.post("/verify_claim")
 async def local_verify_claim(
+    request: Request,
     body: dict = Body(default_factory=dict),
     principal=Depends(_truth_door("verify_claim")),  # noqa: B008
 ) -> dict:
@@ -65,8 +67,26 @@ async def local_verify_claim(
     payload = {"statement": statement, "caller_app_id": app_id}
     if body.get("mode"):
         payload["mode"] = str(body["mode"])
+    if "deadline_s" in body:
+        payload["deadline_s"] = body["deadline_s"]
     msg = {"id": str(uuid.uuid4()), "type": "verify_claim", "payload": payload}
-    out = await handle_control_plane_request(msg, principal=principal)
+
+    async def disconnected():
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+
+    work = asyncio.create_task(handle_control_plane_request(msg, principal=principal))
+    gone = asyncio.create_task(disconnected())
+    try:
+        done, _ = await asyncio.wait((work, gone), return_when=asyncio.FIRST_COMPLETED)
+        if work not in done:
+            raise HTTPException(status_code=499, detail="Caller disconnected")
+        out = await work
+    finally:
+        for future in (work, gone):
+            if not future.done():
+                future.cancel()
+        await asyncio.gather(work, gone, return_exceptions=True)
     if out.get("status") == "error":
         from ..engine.overload import unavailable_from_detail
 
@@ -74,7 +94,10 @@ async def local_verify_claim(
             "code": out.get("error_type"), "retry_after_seconds": out.get("retry_after_seconds"),
         })
         if unavailable is not None:
-            raise HTTPException(status_code=unavailable.status_code, detail=unavailable.detail(), headers=unavailable.headers())
+            detail = unavailable.detail()
+            if out.get("termination_reason") in {"cancelled", "deadline_exceeded"}:
+                detail["reason"] = out["termination_reason"]
+            raise HTTPException(status_code=unavailable.status_code, detail=detail, headers=unavailable.headers())
         return {"status": "error", "error": out.get("error", "unknown")}
     return out.get("payload", {})
 

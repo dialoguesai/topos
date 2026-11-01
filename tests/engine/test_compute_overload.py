@@ -176,8 +176,14 @@ def test_verification_handler_and_http_door_preserve_busy(monkeypatch):
     monkeypatch.setattr(local_mcp, 'handle_control_plane_request', dispatch)
 
     async def run():
+        from starlette.requests import Request
+
+        async def receive():
+            await asyncio.Event().wait()
+
         with pytest.raises(HTTPException) as raised:
-            await local_mcp.local_verify_claim({'statement': 'Invented claim', 'app_id': 'fixture'}, principal=owner)
+            await local_mcp.local_verify_claim(Request({'type': 'http'}, receive),
+                body={'statement': 'Invented claim', 'app_id': 'fixture'}, principal=owner)
         assert raised.value.status_code == 503
         assert raised.value.detail == ComputeUnavailable('compute_busy', 4).detail()
         assert raised.value.headers == {'Retry-After': '4'}

@@ -172,6 +172,12 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
         from ...query.verify import verify_claim
         from ...query.verify_modes import DEFAULT_MODE
         from .common import run_db_read
+        from ...engine.request_budget import RequestBudget, budget_scope, await_budgeted, DEFAULT_VERIFY_SECONDS
+
+        try:
+            budget = RequestBudget(payload.get("deadline_s", DEFAULT_VERIFY_SECONDS))
+        except ValueError:
+            return {"id": req_id, "status": "error", "error": "invalid_deadline_s"}
 
         dispatched = time.perf_counter()
         worker_times = {}
@@ -181,6 +187,7 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
             # event loop. Build the guard on the worker's own connection too.
             worker_times["ready"] = time.perf_counter()
             try:
+                budget.check()
                 return verify_claim(
                     conn,
                     statement=statement,
@@ -190,8 +197,11 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
                 )
             finally:
                 worker_times["finished"] = time.perf_counter()
+                logger.info("truth verification worker terminal: stopped=%s elapsed_ms=%.3f",
+                            budget.cancelled.is_set(), (worker_times["finished"] - dispatched) * 1000)
 
-        result = await run_db_read(run)
+        with budget_scope(budget):
+            result = await await_budgeted(run_db_read(run), budget)
         received = time.perf_counter()
         audit = result.pop("_audit", None)
         if audit:

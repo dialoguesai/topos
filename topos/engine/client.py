@@ -58,8 +58,15 @@ class RemoteEngineClient:
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
         body = task.model_dump(mode="json")
-        with httpx.Client(timeout=self._timeout_sec) as client:
-            resp = client.post(f"{self._base_url}/v1/engine/run", json=body, headers=headers)
+        from .request_budget import current_budget, request, TIMEOUT_HEADER
+        budget = current_budget()
+        if budget is not None:
+            headers[TIMEOUT_HEADER] = str(max(1, int(budget.remaining() * 1000)))
+            resp = request("POST", f"{self._base_url}/v1/engine/run", json=body,
+                           headers=headers, timeout=self._timeout_sec)
+        else:
+            with httpx.Client(timeout=self._timeout_sec) as client:
+                resp = client.post(f"{self._base_url}/v1/engine/run", json=body, headers=headers)
         if resp.status_code in (429, 503):
             # Only our typed deferred result has Engine semantics. Generic
             # proxy failures and policy refusals remain HTTP errors.
