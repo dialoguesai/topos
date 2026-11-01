@@ -74,7 +74,8 @@
     "query_and_synthesis_contracts": {
       "node": [
         "tests/query/test_retrieval_text_contract.py",
-        "tests/query/test_verification_deadline.py"
+        "tests/query/test_verification_deadline.py",
+        "tests/permissions_v2/test_shared_model_recovery.py"
       ],
       "web": [
         "lib/mcp/homeChatOrchestration.test.ts",

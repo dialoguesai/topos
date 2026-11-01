@@ -897,7 +897,9 @@ class AnswerService:
                             call = within(call, end_by - self.clock())
                         return asyncio.run(call) is True
                     except PolicyError as exc:
-                        if exc.code == "model_unavailable":
+                        if exc.code in ("model_unavailable", "model_error"):
+                            # A failed provider call is no verdict. Stop this phase instead of
+                            # spending another call on every remaining sentence.
                             raise PolicyError(JUDGE_UNAVAILABLE) from None
                         return False
                     except JudgeOutOfTime:
@@ -1059,29 +1061,39 @@ def answer_num_ctx(prompt) -> int:
 async def _generate_local(prompt, *, deadline: int):
     """The pinned checking model on this machine; no pull, fallback or hosted call."""
     from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
+    budget = min(100, deadline - time.time())
+    if budget <= 0:
+        raise PolicyError("model_error")
     client = open_transport(base_url=assessment_base_url())
     try:
-        try:
-            await client.verify()
-        except Exception:
-            raise PolicyError("model_unavailable") from None
-        remaining = max(1, min(100, deadline - int(time.time())))
-        try:
-            response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
-                "model": MODEL, "stream": False, "think": False,
-                # The request context (`answer_num_ctx`): 8K for up to sixteen clipped items, 12K for a v4 job's more.
-                "options": {"temperature": 0.2, "num_predict": answer_num_predict(prompt),
-                            "num_ctx": answer_num_ctx(prompt)},
-                "messages": [{"role": "system", "content": prompt.system},
-                             {"role": "user", "content": prompt.user}]})
-            response.raise_for_status()
-            body = response.json()
-            raw = (body.get("message") or {}).get("content") if isinstance(body, dict) else None
-            if body.get("model") != MODEL or body.get("done") is not True or not isinstance(raw, str) or not raw.strip():
-                raise ValueError("incomplete")
-            return raw
-        except Exception:
-            raise PolicyError("model_error") from None
+        # One wall-clock budget includes verification and the full response, not
+        # just HTTP read inactivity. Cancellation closes this request; never retry.
+        async with asyncio.timeout(budget):
+            try:
+                await client.verify()
+            except Exception:
+                raise PolicyError("model_unavailable") from None
+            remaining = min(100, deadline - time.time())
+            if remaining <= 0:
+                raise PolicyError("model_error")
+            try:
+                response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
+                    "model": MODEL, "stream": False, "think": False,
+                    # The request context (`answer_num_ctx`): 8K for up to sixteen clipped items, 12K for a v4 job's more.
+                    "options": {"temperature": 0.2, "num_predict": answer_num_predict(prompt),
+                                "num_ctx": answer_num_ctx(prompt)},
+                    "messages": [{"role": "system", "content": prompt.system},
+                                 {"role": "user", "content": prompt.user}]})
+                response.raise_for_status()
+                body = response.json()
+                raw = (body.get("message") or {}).get("content") if isinstance(body, dict) else None
+                if body.get("model") != MODEL or body.get("done") is not True or not isinstance(raw, str) or not raw.strip():
+                    raise ValueError("incomplete")
+                return raw
+            except Exception:
+                raise PolicyError("model_error") from None
+    except TimeoutError:
+        raise PolicyError("model_error") from None
     finally:
         await client.client.aclose()
 
@@ -1215,26 +1227,36 @@ async def _judge_local(sentence: str, items, *, deadline: int, question: str | N
     from .shadow_labeler_local import MODEL, assessment_base_url, open_transport
     if not items:
         return False
+    budget = min(60, deadline - time.time())
+    if budget <= 0:
+        raise PolicyError("model_error")
     client = open_transport(base_url=assessment_base_url())
     try:
-        try:
-            await client.verify()
-        except Exception:
-            raise PolicyError("model_unavailable") from None
-        remaining = max(1, min(60, deadline - int(time.time())))
-        version = judge_template()
-        try:
-            response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
-                "model": MODEL, "stream": False, "think": False, "format": JUDGE_FORMATS[version],
-                "options": {"temperature": 0, "num_predict": 24, "num_ctx": 8192},
-                "messages": judge_messages(sentence, items, version, question, context)})
-            response.raise_for_status()
-            body = response.json()
-            raw = (body.get("message") or {}).get("content") if isinstance(body, dict) else None
-            if body.get("model") != MODEL or body.get("done") is not True:
-                raise ValueError("incomplete")
-            return parse_judge_reply(raw, version)
-        except Exception:
-            raise PolicyError("model_error") from None
+        # One wall-clock budget includes verification and the full response, not
+        # just HTTP read inactivity. Cancellation closes this request; never retry.
+        async with asyncio.timeout(budget):
+            try:
+                await client.verify()
+            except Exception:
+                raise PolicyError("model_unavailable") from None
+            remaining = min(60, deadline - time.time())
+            if remaining <= 0:
+                raise PolicyError("model_error")
+            version = judge_template()
+            try:
+                response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
+                    "model": MODEL, "stream": False, "think": False, "format": JUDGE_FORMATS[version],
+                    "options": {"temperature": 0, "num_predict": 24, "num_ctx": 8192},
+                    "messages": judge_messages(sentence, items, version, question, context)})
+                response.raise_for_status()
+                body = response.json()
+                raw = (body.get("message") or {}).get("content") if isinstance(body, dict) else None
+                if body.get("model") != MODEL or body.get("done") is not True:
+                    raise ValueError("incomplete")
+                return parse_judge_reply(raw, version)
+            except Exception:
+                raise PolicyError("model_error") from None
+    except TimeoutError:
+        raise PolicyError("model_error") from None
     finally:
         await client.client.aclose()

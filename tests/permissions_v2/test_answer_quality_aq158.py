@@ -553,7 +553,7 @@ def test_with_the_switch_on_a_yes_delivers(legacy, tmp_path, monkeypatch):
     assert body["outcome"] == "answered" and _receipt_sentences(receipt)["dropped_support"] == 0
 
 
-def test_with_the_switch_on_a_judge_that_fails_drops_not_raises(legacy, tmp_path, monkeypatch):
+def test_with_the_switch_on_a_provider_failure_is_unavailable(legacy, tmp_path, monkeypatch):
     monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "true")
 
     async def judge(sentence, items, *, deadline, question=None):
@@ -561,7 +561,7 @@ def test_with_the_switch_on_a_judge_that_fails_drops_not_raises(legacy, tmp_path
 
     body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
     assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
-    assert _receipt_sentences(receipt)["dropped_support"] == 1 and receipt["reason"] == "all_sentences_dropped"
+    assert receipt["reason"] == "judge_unavailable"
 
 
 # --- V3: more items -------------------------------------------------------------------------------------------------
