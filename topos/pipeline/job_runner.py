@@ -24,7 +24,6 @@ from ..ingestion.stale_text_catchup import CONTINUING_KINDS as STALE_TEXT_CONTIN
 from ..ingestion.stale_text_catchup import KIND as STALE_TEXT_KIND
 # Stdlib only at module level as well.
 from ..ingestion.truth_inbound import KIND as TRUTH_INBOUND_KIND
-from ..query.reflection import JOB_KIND as REFLECTION_SWEEP_KIND
 from .job_store import (
     DEFAULT_LEASE_SECONDS,
     claim_matching_queued_jobs,
@@ -447,28 +446,11 @@ def _enqueue_truth_inbound(conn: Any) -> None:
         logger.warning("Truth lane discovery failed", exc_info=True)
 
 
-async def _execute_reflection_sweep(payload: Dict[str, Any]) -> Dict[str, Any]:
-    from ..query.reflection import execute_sweep
-
-    return await execute_sweep(payload)
-
-
-def _enqueue_reflection_sweep(conn: Any) -> None:
-    """The reflection candidates: rebuild from the enabled packs' facts when a sweep is due and none is in flight."""
-    from ..query.reflection import enqueue_sweep
-
-    try:
-        enqueue_sweep(conn)
-    except Exception:
-        logger.warning("Reflection sweep discovery failed", exc_info=True)
-
-
 EXECUTORS: Dict[str, ExecutorFn] = {
     "ai_tool_enrichment_catchup": _execute_ai_tool_catchup,
     **{kind: _execute_embeddings_catchup for kind in EMBEDDINGS_CATCHUP_KINDS},
     STALE_TEXT_KIND: _execute_stale_text_catchup,
     TRUTH_INBOUND_KIND: _execute_truth_inbound,
-    REFLECTION_SWEEP_KIND: _execute_reflection_sweep,
     "inbox_deferred_enrichment": _execute_inbox_deferred_enrichment,
     "file_ingestion": _execute_file_ingestion,
     "enrichment_process_source": _execute_enrichment_process_source,
@@ -525,10 +507,7 @@ _LONG_MAX_POLL_SECONDS = 10.0
 #:
 #: The owner's inbound truth lane (``truth_inbound``) runs here too: a background check of rows already stored, a
 #: bounded batch at a time (about a minute), paced by the owner's rate, and never on the request path.
-#: The reflection sweep (``query/reflection``) runs here too: deterministic SQL over the enabled packs' facts, a few
-#: seconds, every few hours; never on the request path.
-_CATCHUP_KINDS: frozenset[str] = frozenset((*EMBEDDINGS_CATCHUP_KINDS, STALE_TEXT_KIND, TRUTH_INBOUND_KIND,
-                                            REFLECTION_SWEEP_KIND))
+_CATCHUP_KINDS: frozenset[str] = frozenset((*EMBEDDINGS_CATCHUP_KINDS, STALE_TEXT_KIND, TRUTH_INBOUND_KIND))
 
 
 def _note_queued(conn, label: str, kinds: list[str]) -> None:
@@ -993,7 +972,6 @@ async def _worker_loop(
         await _run_db(conn_factory, _enqueue_ai_tool_catchup, None, True)
         await _run_db(conn_factory, _enqueue_embeddings_catchup, None)
         await _run_db(conn_factory, _enqueue_truth_inbound)
-        await _run_db(conn_factory, _enqueue_reflection_sweep)
     while True:
         try:
             if not _enabled():
@@ -1017,10 +995,6 @@ async def _worker_loop(
                     await _run_db(conn_factory, _enqueue_truth_inbound)
                 except Exception as exc:  # noqa: BLE001 — a sweep must never kill the worker
                     logger.debug("truth lane sweep skipped: %s", exc)
-                try:
-                    await _run_db(conn_factory, _enqueue_reflection_sweep)
-                except Exception as exc:  # noqa: BLE001
-                    logger.debug("reflection sweep skipped: %s", exc)
 
             # claim_next_job takes the process-wide write gate — a BLOCKING
             # threading lock. Called directly it ran on the event loop, so every

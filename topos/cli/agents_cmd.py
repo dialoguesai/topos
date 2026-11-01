@@ -1,8 +1,9 @@
 """`topos-node agents add|list|disconnect NAME` — enrol and revoke AI coding tools and the owner's apps.
 
-An app (``mcp_server.APP_NAMES``: Moments) is enrolled the same way and becomes the same class, ``owner_agent``, but
-reaches only the message types listed for it (``mcp_clients.APP_AGENT_TYPES``) and only the dispatch door on the
-socket (GRANT_DECISIONS G1). It is enrolled on a terminal only: the pairing approval is for coding tools.
+An app is any other name. It is enrolled the same way and becomes the same class, ``owner_agent``, but says with
+``--reads`` what it may read: the prompt shows that, the enrolment stores it (``mcp_clients.AppGrant``, DR-66), and it
+reaches those reads and only the dispatch door on the socket. It is enrolled on a terminal only: the pairing approval
+is for coding tools. A yes on that terminal is also what reconnects a disconnected app.
 
 The label (CONTRACTS §1.1) is minted by lane L1's ``mint_agent_label`` and
 written here, once, to ``~/.topos/agents/<client>.token`` (0700 dir, 0600 file).
@@ -38,7 +39,8 @@ from typing import Optional
 import click
 
 from topos import mcp_server
-from topos.mcp_server import AGENT_NAMES, APP_NAMES, DISPLAY_NAMES
+from topos.mcp_clients import AppGrant, parse_app_reads
+from topos.mcp_server import CLIENT_NAMES, DISPLAY_NAMES
 
 EXIT_OK = 0
 EXIT_NEEDS_HUMAN = 2
@@ -92,15 +94,42 @@ def _client_or_fail(name: str) -> str:
     try:
         return mcp_server.validate_agent(name)
     except ValueError:
-        _fail(f"Unknown agent {name!r}. One of: {', '.join(AGENT_NAMES)}.")
+        _fail(f"{name!r} can't be an agent name. Use letters, digits and hyphens, or one of: {', '.join(CLIENT_NAMES)}.")
         raise AssertionError  # unreachable
 
 
-def _consent_question(client: str, display: str) -> str:
-    """What the owner says yes to. An app reads only its own list, and the question says so."""
-    if client in APP_NAMES:
-        return (f"Connect {display} to your Topos? It reads only what Topos lets {display} read, as you, "
-                "and every read is recorded under its name.")
+def _grant_or_fail(client: str, reads: Optional[str]) -> Optional[AppGrant]:
+    """An app's ``--reads``, checked; None for a coding tool. An app must say what it reads, and a coding tool can't."""
+    if client in CLIENT_NAMES:
+        if reads:
+            _fail(f"{DISPLAY_NAMES[client]} is a coding tool, so it takes no --reads.")
+        return None
+    try:
+        grant = parse_app_reads((reads or "").split(","))
+    except ValueError as exc:
+        hint = "Say what it may read: --reads facts:<pack>,messages,journals." if not reads else str(exc)
+        _fail(f"Could not connect {client}: {hint}")
+        raise AssertionError  # unreachable
+    return grant
+
+
+def _unknown_packs(conn: sqlite3.Connection, grant: AppGrant) -> list[str]:
+    """Packs a grant names that this node does not have: not bundled, and not in its registry (empty on a fresh node)."""
+    from topos.features.derivation.registry import bundled_pack_dir
+
+    known = {path.stem for path in Path(bundled_pack_dir()).glob("*.yaml")}
+    try:
+        known |= {str(r[0]) for r in conn.execute("SELECT pack_id FROM pack_registry").fetchall()}
+    except sqlite3.Error:
+        pass  # no registry yet: the bundled packs are what this node has
+    return [pack for pack in grant.packs if pack not in known]
+
+
+def _consent_question(client: str, display: str, grant: Optional[AppGrant] = None) -> str:
+    """What the owner says yes to. An app reads what its grant says, and the question says what that is."""
+    if grant is not None:
+        return (f"Connect {display} to your Topos? As you, it can read: {grant.plain()}. "
+                "Every read is recorded under its name.")
     return (f"Connect {display} to your Topos? It will read what you allow in Topos, as you, "
             "and every read is recorded under its name.")
 
@@ -210,11 +239,12 @@ def write_label_file(client: str, label: str, *, agents_dir: Optional[Path] = No
 
 
 def _public_row(row: dict) -> dict:
-    return {
+    public = {
         "client": str(row.get("client_id") or "")[len("agent-"):],
         "enrolled_at": row.get("created_at"),
         "revoked": bool(row.get("revoked_at")),
     }
+    return {**public, "reads": row["reads"]} if "reads" in row else public
 
 
 def _echo(payload: dict | list, as_json: bool, human: str) -> None:
@@ -223,7 +253,7 @@ def _echo(payload: dict | list, as_json: bool, human: str) -> None:
 
 @click.group("agents")
 def agents_group() -> None:
-    """Connect, list and disconnect AI coding tools (Claude Code, Codex, Cursor, Gemini) and apps (Moments)."""
+    """Connect, list and disconnect AI coding tools (Claude Code, Codex, Cursor, Gemini) and apps."""
 
 
 @agents_group.command("add")
@@ -235,12 +265,15 @@ def agents_group() -> None:
     help="Enrol on the approval `topos-node pair --add-agent` recorded (no prompt).",
 )
 @click.option("--open-terminal", is_flag=True, help="Open the approval prompt in Terminal on macOS; no command typing needed.")
-def agents_add(name: str, as_json: bool, approved: bool, open_terminal: bool) -> None:
+@click.option("--reads", default=None, help="For an app: what it may read, comma separated: facts:<pack>, messages, journals.")
+def agents_add(name: str, as_json: bool, approved: bool, open_terminal: bool, reads: Optional[str]) -> None:
     """Connect an AI coding tool or an app to this Topos (asks you first)."""
     client = _client_or_fail(name)
-    display = DISPLAY_NAMES[client]
-    if client in APP_NAMES and (approved or open_terminal):
-        _fail(f"{display} is connected from a terminal: run `topos-node agents add {client}` yourself.")
+    display = DISPLAY_NAMES.get(client, client)
+    is_app = client not in CLIENT_NAMES
+    if is_app and (approved or open_terminal):
+        _fail(f"{display} is connected from a terminal: run `topos-node agents add {client} --reads ...` yourself.")
+    grant = _grant_or_fail(client, reads)
     if open_terminal:
         if approved:
             raise click.UsageError("Use either --approved or --open-terminal.")
@@ -258,6 +291,9 @@ def agents_add(name: str, as_json: bool, approved: bool, open_terminal: bool) ->
         )
     conn = _connect(db_path)
     try:
+        unknown = _unknown_packs(conn, grant) if grant else []
+        if unknown:
+            _fail(f"This Topos has no pack named {', '.join(unknown)}.")
         existing = _agent_row(registry, conn, client)
         revoked = bool(existing and existing.get("revoked_at"))
         if approved:
@@ -268,7 +304,7 @@ def agents_add(name: str, as_json: bool, approved: bool, open_terminal: bool) ->
                     f"{client}` yourself in a terminal."
                 )
         else:
-            if revoked:
+            if revoked and not is_app:
                 _fail(
                     f"{display} was disconnected from Topos. Re-connecting needs a fresh approval: "
                     f"run `topos-node pair --add-agent --client {client}`."
@@ -276,15 +312,17 @@ def agents_add(name: str, as_json: bool, approved: bool, open_terminal: bool) ->
             if not _can_prompt():
                 _fail(
                     f"Connecting {display} needs a yes from you in a terminal. Run "
-                    f"`topos-node agents add {client}` yourself, or `topos-node pair --add-agent --client {client}`."
+                    f"`topos-node agents add {client}` yourself"
+                    + (" with the same --reads." if is_app else f", or `topos-node pair --add-agent --client {client}`.")
                 )
             # The prompt goes to stderr so `--json` stdout stays one document.
-            if not click.confirm(_consent_question(client, display), err=True):
+            if not click.confirm(_consent_question(client, display, grant), err=True):
                 _fail("Not connected.")
         # L1's registry refuses a revoked row unless told the approval happened;
         # the gates above are what decide that, so pass exactly their verdict.
         try:
-            row = dict(registry.mint_agent_label(conn, client=client, approved=approved))
+            # An app has no pairing approval: the yes on this terminal is its fresh approval.
+            row = dict(registry.mint_agent_label(conn, client=client, approved=approved or is_app, grant=grant))
         except ValueError as exc:
             _fail(f"Could not connect {display}: {exc}")
             raise AssertionError  # unreachable
@@ -339,7 +377,7 @@ def agents_disconnect(name: str, as_json: bool) -> None:
     from topos.agent_lifecycle import disconnect_agent
 
     client = _client_or_fail(name)
-    display = DISPLAY_NAMES[client]
+    display = DISPLAY_NAMES.get(client, client)
     _registry()
     db_path = _database_path()
     conn = _connect(db_path) if db_path.is_file() else None

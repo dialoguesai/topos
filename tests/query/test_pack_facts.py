@@ -1,5 +1,5 @@
-"""The owner-agent reflection read (GRANT_DECISIONS G2, DISCLOSURE_RULES DR-61): who reaches ``reflection_facts``, and
-what an agent gets from it: the enabled reflection packs' active facts, special-class held back, Off-limits applied by
+"""An app's facts read (DISCLOSURE_RULES DR-61, DR-66): who reaches ``pack_facts``, and
+what an agent gets from it: the enabled granted packs' active facts, special-class held back, Off-limits applied by
 absence, people as display names, the owner's own words only.
 
 Synthetic only: a migrated temp database with invented people, facts and rows; never the live node.
@@ -16,11 +16,15 @@ import pytest
 
 from tests.truth_lane_support import add_contact, add_journal, add_message, bind, build_node, connect
 from topos.features.derivation.registry import bundled_pack_dir, seed_pack_registry
+from topos.mcp_clients import AppGrant
 from topos.principal import CP_RELAY, OWNER_APP, THIRD_PARTY, Principal, reset_principal, set_principal
-from topos.query import reflection_facts as facts_read
+from topos.query import pack_facts as facts_read
 
 NOW = datetime(2026, 10, 24, 12, 0, tzinfo=timezone.utc)
-MOMENTS = Principal(cls="owner_agent", channel="uds", client_id="agent-moments")
+PACKS = ("moments.joy", "moments.tension", "narrative.self", "life.events", "aspirations.goals",
+         "obligations.commitments", "relationships.social")
+APP = Principal(cls="owner_agent", channel="uds", client_id="agent-reader",
+                app_grant=AppGrant(packs=PACKS, scopes=("health:read", "messages:read")))
 CODING_AGENT = Principal(cls="owner_agent", channel="uds", client_id="agent-claude-code")
 OWNER = Principal(cls=OWNER_APP, channel="uds")
 LEAKY = ("id:", "key:", "ent_", "+1555", "@example", "_entity_id", "j-", "m-")
@@ -79,7 +83,7 @@ def add_entity(conn, entity_id, name, *, is_self=False):
     conn.commit()
 
 
-def dispatch(principal, payload=None, msg_type="reflection_facts"):
+def dispatch(principal, payload=None, msg_type="pack_facts"):
     """Through the dispatcher, so the owner-agent type lists are what is tested."""
     from topos.core.handlers import handle_control_plane_request
 
@@ -93,7 +97,7 @@ def as_handler(principal, payload):
 
     token = set_principal(principal)
     try:
-        return asyncio.run(HANDLERS["reflection_facts"]({"id": "r1", "type": "reflection_facts", "payload": payload}))
+        return asyncio.run(HANDLERS["pack_facts"]({"id": "r1", "type": "pack_facts", "payload": payload}))
     finally:
         reset_principal(token)
 
@@ -151,38 +155,105 @@ def by_id(result):
 
 
 # --- who reaches the read ---------------------------------------------------------------------------------------------
-def test_moments_reads_and_a_coding_agent_is_refused(world):
-    out = dispatch(MOMENTS)
-    assert out["status"] == "ok" and out["payload"]["version"] == "reflection_facts/v1"
+def test_an_app_reads_and_a_coding_agent_is_refused(world):
+    out = dispatch(APP)
+    assert out["status"] == "ok" and out["payload"]["version"] == "pack_facts/v1"
     assert dispatch(CODING_AGENT) == {"id": "r1", "status": "error", "code": 403, "error": "owner_agent_not_allowed"}
 
 
-@pytest.mark.parametrize("msg_type", ["query", "aggregate", "get_sources", "reflection_invitations",
-                                      "reflection_conversation", "reflection_label", "signal_list_facts",
-                                      "get_messages", "verify_claim"])
-def test_moments_reaches_nothing_else(world, msg_type):
-    assert dispatch(MOMENTS, {}, msg_type) == {"id": "r1", "status": "error", "code": 403,
+def test_the_old_name_answers_for_one_release(world):
+    assert dispatch(APP, msg_type="pack_facts")["payload"]["version"] == "pack_facts/v1"
+
+
+@pytest.mark.parametrize("msg_type", ["aggregate", "get_sources", "query_live", "signal_list_facts", "get_messages",
+                                      "verify_claim"])
+def test_an_app_reaches_nothing_else(world, msg_type):
+    assert dispatch(APP, {}, msg_type) == {"id": "r1", "status": "error", "code": 403,
+                                            "error": "owner_agent_not_allowed"}
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"scope_id": "health:read"},
+    {"scope_id": "health:read", "access_mode": "summary"}, {"scope_id": "messages:read", "access_mode": "inference"},
+    {"scope_id": "ai_conversations:read", "access_mode": "raw"}, {"scope_id": "places:read", "access_mode": "raw"},
+    {"scope_id": "contacts:resolve", "access_mode": "raw"},
+    {"scope_id": "health:read", "access_mode": "raw", "manifest": {"scope_id": "places:read"}},
+    {"manifest": {"scope_id": "health:read"}, "access_mode": "raw"},
+])
+def test_a_query_outside_the_grant_is_refused(world, payload):
+    assert dispatch(APP, payload, "query") == {"id": "r1", "status": "error", "code": 403,
                                                 "error": "owner_agent_not_allowed"}
 
 
-def test_the_coding_agents_list_is_unchanged():
+@pytest.mark.parametrize("scope", ["health:read", "messages:read"])
+def test_a_query_inside_the_grant_passes_the_gate(scope):
     import topos.core.handlers as hub
-    from topos.mcp_clients import APP_AGENT_TYPES
+
+    token = set_principal(APP)
+    try:
+        assert hub._owner_agent_refusal({"id": "r1", "payload": {"scope_id": scope, "access_mode": "raw"}}, "query") is None
+    finally:
+        reset_principal(token)
+
+
+def test_a_coding_agents_query_is_not_narrowed():
+    import topos.core.handlers as hub
+
+    token = set_principal(CODING_AGENT)
+    try:
+        assert hub._owner_agent_refusal({"id": "r1", "payload": {"scope_id": "places:read"}}, "query") is None
+    finally:
+        reset_principal(token)
+
+
+def test_what_each_kind_of_agent_may_send():
+    import topos.core.handlers as hub
 
     assert hub.owner_agent_allowed_types(CODING_AGENT) == frozenset({"query", "aggregate", "get_sources"})
-    assert hub.owner_agent_allowed_types(MOMENTS) == frozenset({"reflection_facts"}) == APP_AGENT_TYPES["moments"]
-    # an unlisted agent slug is a coding agent's list, never an app's
-    assert hub.owner_agent_allowed_types(Principal(cls="owner_agent", channel="uds", client_id="agent-other")) == \
-        hub.OWNER_AGENT_ALLOWED_TYPES
+    assert hub.owner_agent_allowed_types(APP) == frozenset({"pack_facts", "reflection_facts", "query", "message_context"})
+    facts_only = Principal(cls="owner_agent", channel="uds", client_id="agent-reader", app_grant=AppGrant(packs=("life.events",)))
+    assert hub.owner_agent_allowed_types(facts_only) == frozenset({"pack_facts", "reflection_facts"})
+    journals = Principal(cls="owner_agent", channel="uds", client_id="agent-reader", app_grant=AppGrant(scopes=("health:read",)))
+    assert hub.owner_agent_allowed_types(journals) == frozenset({"query"})  # no messages, no turns around one
+    # any name but a coding tool's is an app, and an app with no grant reads nothing
+    assert hub.owner_agent_allowed_types(Principal(cls="owner_agent", channel="uds", client_id="agent-other")) == frozenset()
     # the row id decides, never a bare client name or another class
-    assert hub.owner_agent_allowed_types(Principal(cls="owner_agent", channel="uds", client_id="moments")) == \
+    assert hub.owner_agent_allowed_types(Principal(cls="owner_agent", channel="uds", client_id="other")) == \
         hub.OWNER_AGENT_ALLOWED_TYPES
+
+
+def test_a_coding_tool_never_uses_a_grant_a_principal_claims():
+    import topos.core.handlers as hub
+
+    claimed = Principal(cls="owner_agent", channel="uds", client_id="agent-codex", app_grant=AppGrant(packs=("life.events",)))
+    assert hub.owner_agent_allowed_types(claimed) == hub.OWNER_AGENT_ALLOWED_TYPES
+
+
+def test_a_pack_outside_the_grant_is_refused_and_the_rest_is_reachable(world):
+    only = Principal(cls="owner_agent", channel="uds", client_id="agent-reader", app_grant=AppGrant(packs=("moments.joy",)))
+    assert dispatch(only, {"packs": ["moments.tension"]})["error"] == "invalid_pack_facts_request"
+    out = dispatch(only)["payload"]
+    assert {f["pack"] for f in out["facts"]} == {"moments.joy"} and out["packs_enabled"] == ["moments.joy"]
+
+
+def test_a_granted_pack_that_is_off_is_named_missing(world):
+    both = Principal(cls="owner_agent", channel="uds", client_id="agent-reader",
+                     app_grant=AppGrant(packs=("moments.joy", "life.events")))
+    out = dispatch(both)["payload"]
+    assert out["packs_enabled"] == ["moments.joy"] and out["packs_missing"] == ["life.events"]
+
+
+def test_the_owners_own_read_is_every_pack_that_is_on(world):
+    out = dispatch(OWNER)["payload"]
+    on = [r[0] for r in world.conn.execute("SELECT pack_id FROM pack_registry WHERE enabled=1 ORDER BY pack_id")]
+    assert out["packs_enabled"] == on and {"moments.joy", "narrative.self"} <= set(on)
+    assert out["packs_missing"] == []
 
 
 @pytest.mark.parametrize("principal", [
-    Principal(CP_RELAY, "cp_relay"), Principal(THIRD_PARTY, "local_http", client_id="moments"),
+    Principal(CP_RELAY, "cp_relay"), Principal(THIRD_PARTY, "local_http", client_id="reader"),
     Principal(THIRD_PARTY, "cp_relay"), Principal("owner_automation", "cp_relay"),
-    Principal("owner_agent", "local_http", client_id="agent-moments"), None,
+    Principal("owner_agent", "local_http", client_id="agent-reader"), None,
 ])
 def test_every_other_class_is_refused_before_the_payload_is_read(principal):
     assert as_handler(principal, Untouchable()) == {"id": "r1", "status": "error", "code": 403,
@@ -192,8 +263,8 @@ def test_every_other_class_is_refused_before_the_payload_is_read(principal):
 def test_on_the_socket_it_is_an_open_read():
     import topos.core.handlers as hub
 
-    assert "reflection_facts" in hub.owner_door_open_types()
-    assert "reflection_facts" not in hub.DANGEROUS_TYPES
+    assert "pack_facts" in hub.owner_door_open_types()
+    assert "pack_facts" not in hub.DANGEROUS_TYPES
 
 
 def test_an_app_reaches_only_the_dispatch_route_on_the_socket():
@@ -202,10 +273,10 @@ def test_an_app_reaches_only_the_dispatch_route_on_the_socket():
     def allowed(principal, method, path):
         return owner_agent_route_allowed(principal, {"method": method, "path": path})
 
-    assert allowed(MOMENTS, "POST", "/api/local/agent/dispatch")
+    assert allowed(APP, "POST", "/api/local/agent/dispatch")
     for method, path in (("GET", "/sources"), ("GET", "/v1/shell/status"), ("GET", "/api/local/owner/scope"),
                          ("GET", "/api/local/owner/sources/claude_code_sessions")):
-        assert not allowed(MOMENTS, method, path), path
+        assert not allowed(APP, method, path), path
         assert allowed(CODING_AGENT, method, path), path
 
 
@@ -213,28 +284,28 @@ def test_the_protocol_snapshot_names_the_read():
     from pathlib import Path
 
     snapshot = json.loads((Path(__file__).resolve().parents[2] / "topos/protocol/handled_message_types.json").read_text())
-    assert "reflection_facts" in snapshot["handled_message_types"]
-    assert "reflection_facts" not in snapshot["owner_only_message_types"]
+    assert "pack_facts" in snapshot["handled_message_types"]
+    assert "pack_facts" not in snapshot["owner_only_message_types"]
 
 
 def test_an_agent_read_is_recorded_under_its_name(world):
-    assert dispatch(MOMENTS)["status"] == "ok"
+    assert dispatch(APP)["status"] == "ok"
     rows = world.conn.execute("SELECT tool_name, verified_cls, verified_client_id FROM mcp_request_log "
-                              "WHERE tool_name='reflection_facts'").fetchall()
-    assert rows == [("reflection_facts", "owner_agent", "agent-moments")]
+                              "WHERE tool_name='pack_facts'").fetchall()
+    assert rows == [("pack_facts", "owner_agent", "agent-reader")]
 
 
 # --- what an agent gets -------------------------------------------------------------------------------------------------
 def test_packs_off_means_nothing(node):
     node.conn.execute("UPDATE pack_registry SET enabled=0")      # a fresh node has relationships.social on (Wave A)
     node.conn.commit()
-    out = dispatch(MOMENTS)["payload"]
+    out = dispatch(APP)["payload"]
     assert out["facts"] == [] and out["packs_enabled"] == [] and out["truncated"] is False
-    assert out["packs_missing"] == list(facts_read.REFLECTION_PACKS)
+    assert out["packs_missing"] == list(PACKS)
 
 
 def test_people_are_display_names_and_nothing_id_shaped_leaves(world):
-    out = dispatch(MOMENTS, {"include_excerpts": True})["payload"]
+    out = dispatch(APP, {"include_excerpts": True})["payload"]
     found = by_id(out)
     peak = found[world.ids.peak]
     assert peak["value"]["with"] == ["Wren Example", "Sol Example", "you"]   # the unnamed key is left out
@@ -249,7 +320,7 @@ def test_people_are_display_names_and_nothing_id_shaped_leaves(world):
 
 
 def test_the_owners_words_only(world):
-    out = by_id(dispatch(MOMENTS, {"include_excerpts": True})["payload"])
+    out = by_id(dispatch(APP, {"include_excerpts": True})["payload"])
     peak, thanks = out[world.ids.peak], out[world.ids.thanks]
     assert peak["quote"] == "Left feeling at home." and peak["authored"] is True
     assert peak["sources"] == [{"source": "journal", "date": day(13)[:10], "authored": True,
@@ -259,12 +330,12 @@ def test_the_owners_words_only(world):
     assert thanks["sources"][0]["authored"] is False and thanks["sources"][0]["excerpt"] == ""
     assert "happy on sunday" not in json.dumps(out)
     # excerpts only when asked
-    plain = by_id(dispatch(MOMENTS)["payload"])[world.ids.peak]
+    plain = by_id(dispatch(APP)["payload"])[world.ids.peak]
     assert plain["sources"][0]["excerpt"] == "" and plain["quote"] == "Left feeling at home."
 
 
 def test_special_class_is_held_back_from_an_agent_and_not_from_the_owner(world):
-    agent = by_id(dispatch(MOMENTS)["payload"])
+    agent = by_id(dispatch(APP)["payload"])
     owner = by_id(dispatch(OWNER)["payload"])
     for held in (world.ids.special, world.ids.stamp_says_personal, world.ids.retired_predicate):
         assert held not in agent and held in owner
@@ -272,13 +343,13 @@ def test_special_class_is_held_back_from_an_agent_and_not_from_the_owner(world):
 
 
 def test_the_request_narrows_and_pages(world):
-    only = dispatch(MOMENTS, {"packs": ["moments.tension"]})["payload"]
+    only = dispatch(APP, {"packs": ["moments.tension"]})["payload"]
     assert [f["id"] for f in only["facts"]] == [world.ids.tension]
-    picked = dispatch(MOMENTS, {"fact_ids": [world.ids.peak, "nope"]})["payload"]
+    picked = dispatch(APP, {"fact_ids": [world.ids.peak, "nope"]})["payload"]
     assert [f["id"] for f in picked["facts"]] == [world.ids.peak]
-    recent = dispatch(MOMENTS, {"since": day(6)[:10]})["payload"]
+    recent = dispatch(APP, {"since": day(6)[:10]})["payload"]
     assert [f["id"] for f in recent["facts"]] == [world.ids.tension]
-    first = dispatch(MOMENTS, {"limit": 1})["payload"]
+    first = dispatch(APP, {"limit": 1})["payload"]
     assert len(first["facts"]) == 1 and first["truncated"] is True and first["facts"][0]["id"] == world.ids.tension
     assert set(first) == {"version", "packs_enabled", "packs_missing", "facts", "truncated", "as_of"}
 
@@ -290,8 +361,8 @@ def test_the_request_narrows_and_pages(world):
     {"limit": 0}, {"limit": 1001}, {"limit": "5"}, {"limit": True}, {"include_excerpts": "yes"},
 ])
 def test_a_bad_request_gets_a_fixed_code(world, payload):
-    out = as_handler(MOMENTS, payload)
-    assert out == {"id": "r1", "status": "error", "error": "invalid_reflection_facts_request"}
+    out = as_handler(APP, payload)
+    assert out == {"id": "r1", "status": "error", "error": "invalid_pack_facts_request"}
 
 
 # --- Off-limits, applied by absence -----------------------------------------------------------------------------------
@@ -307,7 +378,7 @@ def protect(conn, entity_ref, *, complete=True):
 
 def test_a_protected_person_takes_their_facts_out_of_an_agents_read(world):
     protect(world.conn, "ent_0a1b2c3d4e5f6071")
-    agent = by_id(dispatch(MOMENTS)["payload"])
+    agent = by_id(dispatch(APP)["payload"])
     assert world.ids.peak not in agent and world.ids.promise not in agent      # bound by id, in a list and alone
     assert {world.ids.thanks, world.ids.tension} <= set(agent)                  # the rest stays reachable
     owner = by_id(dispatch(OWNER)["payload"])
@@ -316,7 +387,7 @@ def test_a_protected_person_takes_their_facts_out_of_an_agents_read(world):
 
 def test_a_protected_name_takes_out_the_facts_that_show_it(world):
     protect(world.conn, "Sol Example")
-    agent = by_id(dispatch(MOMENTS)["payload"])
+    agent = by_id(dispatch(APP)["payload"])
     assert world.ids.thanks not in agent and world.ids.peak not in agent   # both resolve a key to the protected name
     assert {world.ids.promise, world.ids.tension} <= set(agent)
 
@@ -327,9 +398,9 @@ def test_a_source_record_that_names_a_protected_person_takes_the_fact_out(world)
     conn.commit()
     walk = add_fact(conn, "moments.joy", "moment.peak", {"kind": "small_pleasure", "description": "a long walk by the river",
                                                           "with": []}, at=day(8), refs=ref("journal_entries", "j-walk", 8))
-    assert walk in by_id(dispatch(MOMENTS)["payload"])
+    assert walk in by_id(dispatch(APP)["payload"])
     protect(conn, "Juniper Example")
-    assert walk not in by_id(dispatch(MOMENTS)["payload"])
+    assert walk not in by_id(dispatch(APP)["payload"])
     assert walk in by_id(dispatch(OWNER)["payload"])
 
 
@@ -338,14 +409,14 @@ def test_a_protected_record_takes_out_only_the_facts_resting_on_it(world):
 
     RecordProtectionStore(world.conn).protect(canonical_table="journal_entries", record_id="j-fight")
     world.conn.commit()
-    agent = by_id(dispatch(MOMENTS)["payload"])
+    agent = by_id(dispatch(APP)["payload"])
     assert world.ids.tension not in agent
     assert {world.ids.peak, world.ids.thanks, world.ids.promise} <= set(agent)   # not a blanket: the rest is reachable
 
 
 def test_while_an_off_limits_rebuild_is_pending_an_agent_gets_nothing(world):
     protect(world.conn, "ent_0a1b2c3d4e5f6071", complete=False)
-    out = dispatch(MOMENTS)["payload"]
+    out = dispatch(APP)["payload"]
     assert out["facts"] == [] and out["truncated"] is False
     assert set(out) == {"version", "packs_enabled", "packs_missing", "facts", "truncated", "as_of"}
     assert len(dispatch(OWNER)["payload"]["facts"]) == 7
@@ -355,46 +426,17 @@ def test_a_fact_with_no_source_is_left_out_once_anything_is_off_limits(world):
     bare = add_fact(world.conn, "moments.tension", "moment.tension", {"kind": "disappointment", "with": [],
                                                                       "description": "a plan fell through", "status": "open"},
                     at=day(1), refs=[])
-    assert bare in by_id(dispatch(MOMENTS)["payload"])     # nothing protected: nothing to judge it against
+    assert bare in by_id(dispatch(APP)["payload"])     # nothing protected: nothing to judge it against
     protect(world.conn, "Somebody Unrelated")
-    assert bare not in by_id(dispatch(MOMENTS)["payload"])
+    assert bare not in by_id(dispatch(APP)["payload"])
     assert bare in by_id(dispatch(OWNER)["payload"])
 
 
 def test_what_was_left_out_is_never_counted(world):
-    before = dispatch(MOMENTS)["payload"]
+    before = dispatch(APP)["payload"]
     protect(world.conn, "ent_0a1b2c3d4e5f6071")
-    after = dispatch(MOMENTS)["payload"]
+    after = dispatch(APP)["payload"]
     assert set(before) == set(after)
     assert len(after["facts"]) == len(before["facts"]) - 2 and after["truncated"] is False
 
 
-# --- enrolment ----------------------------------------------------------------------------------------------------------
-def test_moments_enrols_with_the_agents_command_and_is_not_an_mcp_client():
-    from topos import mcp_server
-    from topos.mcp_clients import APP_AGENT_TYPES
-
-    assert set(mcp_server.APP_NAMES) == set(APP_AGENT_TYPES)
-    assert mcp_server.validate_agent("Moments") == "moments" and mcp_server.validate_agent("codex") == "codex"
-    with pytest.raises(ValueError):
-        mcp_server.validate_client("moments")
-    with pytest.raises(ValueError):
-        mcp_server.validate_agent("not-an-app")
-
-
-@pytest.mark.parametrize("flag", ["--approved", "--open-terminal"])
-def test_an_app_is_enrolled_on_a_terminal_only(flag):
-    from click.testing import CliRunner
-
-    from topos.cli.agents_cmd import agents_group
-
-    result = CliRunner().invoke(agents_group, ["add", "moments", flag])
-    assert result.exit_code == 2
-    assert "topos-node agents add moments" in result.output
-
-
-def test_the_consent_question_says_an_app_reads_only_its_own_list():
-    from topos.cli.agents_cmd import _consent_question
-
-    assert "reads only what Topos lets Moments read" in _consent_question("moments", "Moments")
-    assert "will read what you allow" in _consent_question("codex", "Codex")
