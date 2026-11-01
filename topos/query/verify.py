@@ -24,6 +24,8 @@ import logging
 import os
 import re
 import sqlite3
+import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..features.facts.store import FactStore
@@ -228,7 +230,7 @@ def _heuristic_lane_stance(claim: str, entries: List[Dict[str, Any]]) -> Dict[st
     }
 
 
-def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]]) -> Optional[Dict[str, Dict[str, Any]]]:
+def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]], *, audit: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Dict[str, Any]]]:
     """One truth_verdict model call over all lanes; None on any failure so the
     caller falls back to the heuristic."""
     try:
@@ -236,8 +238,14 @@ def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]]) -> Optional[
         from ..engine.tasks import ModelRequest, ProcessingTask
         from ..config.settings import settings
 
+        # Usage observations deduplicate by task id: a constant id silently
+        # discards every verification after the first. Never use claim text or
+        # caller-supplied identifiers as a diagnostic identity.
+        task_id = "truth_verdict:" + str(uuid.uuid4())
+        if audit is not None:
+            audit["task_id"] = task_id
         task = ProcessingTask(
-            id="truth_verdict",
+            id=task_id,
             type="truth_verdict",
             subtype="truth_verdict",
             source_id="truth",
@@ -246,6 +254,21 @@ def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]]) -> Optional[
             model_request=ModelRequest(provider="ollama", model=settings.ollama_query_model),
         )
         result = get_engine_client_or_local(None).run(task)
+        if audit is not None:
+            # ProcessingResult already carries provider usage through both
+            # Engine clients. Retain only finite, numeric phase measurements;
+            # never copy free-form output, errors, prompts, or provider fields.
+            execution = getattr(result, "execution_meta", None)
+            duration = getattr(execution, "duration_ms", None)
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool) and 0 <= duration <= 86_400_000:
+                audit.setdefault("timings_ms", {})["engine_adapter"] = duration
+            usage = (result.output or {}).get("usage")
+            phases = usage.get("timings") if isinstance(usage, dict) else None
+            if isinstance(phases, dict):
+                retained = {k: v for k, v in phases.items() if k in {"total_ms", "load_ms", "prefill_ms", "decode_ms"}
+                            and isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 86_400_000}
+                if retained:
+                    audit["provider_timings_ms"] = retained
         if result.status != "completed":
             return None
         lanes = (result.output or {}).get("lanes")
@@ -282,6 +305,7 @@ def verify_claim(
     Returns a caller-safe response plus an ``_audit`` key the handler pops.
     With no ``guard`` every Off-limits entry is withheld, as for a caller the node cannot place.
     """
+    started = time.perf_counter()
     resolved = get_mode(mode)
     if resolved is None:
         return {
@@ -298,12 +322,14 @@ def verify_claim(
         "retrieval_touched": False,
         "judge": None,
         "evidence_counts": {},
+        "timings_ms": {},
     }
 
     def _neutral(reason: str, category: Optional[str] = None) -> Dict[str, Any]:
         # Out-of-aperture and no-evidence produce byte-identical caller-visible
         # shapes (category is included only for in-aperture claims).
         audit["reason"] = reason
+        audit["timings_ms"]["verify_total"] = round((time.perf_counter() - started) * 1000, 3)
         return {
             "mode": resolved.name,
             "category": category,
@@ -324,6 +350,7 @@ def verify_claim(
     audit["category"] = category
 
     # --- Evidence (facts only in v1; a mode's aperture applied per fact) --------------
+    retrieval_started = time.perf_counter()
     guard = guard if guard is not None else BlackholeGuard(conn)
     audit["retrieval_touched"] = True
     store = FactStore(conn)
@@ -368,6 +395,7 @@ def verify_claim(
     audit["hinted_predicates"] = sorted(hinted_predicates)
     lane_texts = {lane: [entry["text"] for entry in entries]
                   for lane, entries in lane_entries.items()}
+    audit["timings_ms"]["retrieval_and_filter"] = round((time.perf_counter() - retrieval_started) * 1000, 3)
     if not any(lane_texts.values()):
         return _neutral("no_evidence", category=category)
 
@@ -375,7 +403,9 @@ def verify_claim(
     stances: Optional[Dict[str, Dict[str, Any]]] = None
     if _llm_enabled():
         populated = {lane: texts for lane, texts in lane_texts.items() if texts}
-        stances = _llm_lane_stances(statement, populated)
+        judge_started = time.perf_counter()
+        stances = _llm_lane_stances(statement, populated, audit=audit)
+        audit["timings_ms"]["engine_roundtrip"] = round((time.perf_counter() - judge_started) * 1000, 3)
         audit["judge"] = "llm" if stances is not None else "heuristic_fallback"
     if stances is None:
         stances = {}
@@ -405,6 +435,7 @@ def verify_claim(
         else:
             lanes[lane] = deterministic
 
+    audit["timings_ms"]["verify_total"] = round((time.perf_counter() - started) * 1000, 3)
     return {
         "mode": resolved.name,
         "category": category,
