@@ -68,6 +68,13 @@ async def local_verify_claim(
     msg = {"id": str(uuid.uuid4()), "type": "verify_claim", "payload": payload}
     out = await handle_control_plane_request(msg, principal=principal)
     if out.get("status") == "error":
+        from ..engine.overload import unavailable_from_detail
+
+        unavailable = unavailable_from_detail(out.get("error_code"), {
+            "code": out.get("error_type"), "retry_after_seconds": out.get("retry_after_seconds"),
+        })
+        if unavailable is not None:
+            raise HTTPException(status_code=unavailable.status_code, detail=unavailable.detail(), headers=unavailable.headers())
         return {"status": "error", "error": out.get("error", "unknown")}
     return out.get("payload", {})
 

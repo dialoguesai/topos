@@ -599,6 +599,11 @@ async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, A
         }
     except HTTPException as exc:
         _log_failed(exc, exc.status_code)
+        from ...engine.overload import unavailable_from_detail
+
+        unavailable = unavailable_from_detail(exc.status_code, exc.detail)
+        if unavailable is not None:
+            return unavailable.envelope(req_id)
         detail = exc.detail
         err_msg = detail if isinstance(detail, str) else str(detail)
         return {

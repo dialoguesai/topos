@@ -5,10 +5,12 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import JSONResponse
 
 from ..auth import require_api_key
 from ..engine.engine import Engine
 from ..engine.tasks import ProcessingResult, ProcessingTask
+from ..engine.overload import unavailable_from_detail
 
 router = APIRouter(tags=["engine-run"])
 
@@ -24,6 +26,12 @@ async def engine_run(body: Dict[str, Any]) -> Dict[str, Any]:
             detail=f"Invalid ProcessingTask: {exc}",
         ) from exc
     result: ProcessingResult = Engine().run(task)
+    if result.status == "deferred":
+        for code in (429, 503):
+            availability = unavailable_from_detail(code, result.output.get("availability"))
+            if availability is not None:
+                return JSONResponse(status_code=code, headers=availability.headers(),
+                                    content={"result": result.model_dump(mode="json")})
     return {"result": result.model_dump(mode="json")}
 
 
