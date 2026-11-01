@@ -145,6 +145,25 @@ class Engine:
         return True
 
     def run(self, task: ProcessingTask) -> ProcessingResult:
+        """Observe every terminal result, including validation/policy refusal."""
+        from ..observability.tracing import start_span, mark_error
+        from ..observability.metrics import record_metric, measure
+
+        started = time.perf_counter()
+        outcome = "failed"
+        with start_span("topos.engine.run"):
+            try:
+                result = self._run(task)
+                outcome = result.status if result.status in {"completed", "deferred"} else "failed"
+                if outcome == "failed":
+                    mark_error("task_failed")
+                return result
+            finally:
+                record_metric(f"engine.task_{outcome}", 1.0)
+                measure("histogram", "topos.engine.task.duration", time.perf_counter() - started,
+                        unit="s", attributes={"topos.task.outcome": outcome})
+
+    def _run(self, task: ProcessingTask) -> ProcessingResult:
         """
         Execute a task synchronously: intake → validate → route → inference → format.
         Returns a ProcessingResult (never raises; errors are in result.status and result.error).
@@ -183,8 +202,16 @@ class Engine:
             cache_hit = False
         # Run inference
         start = time.perf_counter()
-        raw_output = adapter.run_inference(normalized.input, config=config)
-        duration_ms = int((time.perf_counter() - start) * 1000)
+        from ..observability.tracing import start_span, mark_error
+        from ..observability.metrics import record_metric
+        try:
+            with start_span("topos.engine.inference"):
+                raw_output = adapter.run_inference(normalized.input, config=config)
+                if raw_output.get("error") and raw_output.get("status") != "deferred":
+                    mark_error("inference_failed")
+        finally:
+            duration_ms = int((time.perf_counter() - start) * 1000)
+            record_metric("engine.inference_duration_ms", float(duration_ms))
         try:
             from ..config.settings import settings
 
@@ -218,11 +245,6 @@ class Engine:
             )
         # Adapter may return error in output
         if raw_output.get("error"):
-            try:
-                from ..observability.metrics import record_metric
-                record_metric("engine.task_failed", 1.0)
-            except Exception:
-                pass
             return format_result(
                 task_id=normalized.id,
                 status="failed",
@@ -288,12 +310,6 @@ class Engine:
                 )
             except Exception:
                 logger.debug("Failed to emit engine llm usage observation", exc_info=True)
-        try:
-            from ..observability.metrics import record_metric
-            record_metric("engine.task_completed", 1.0)
-            record_metric("engine.inference_duration_ms", float(duration_ms))
-        except Exception:
-            pass
         return format_result(
             task_id=normalized.id,
             status="completed",
