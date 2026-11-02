@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.39] — 2026-11-02
+
 ### Added
 - **Any app can hold an owner grant** (DR-66). `topos-node agents add <name> --reads facts:<pack>,messages,journals`
   enrols any name that is not a coding tool's, on a terminal, after a yes to a prompt that lists those reads. The
@@ -27,6 +29,9 @@ The machine-readable twin of each release is
   `reflection_conversation` and `reflection_label` doors, their routes and the reflection sweep are gone: apps compose,
   the node serves data. The tables `reflection_candidates` and `reflection_labels` stay on disk, untouched and no longer
   written, because they can hold the owner's own labels. A queued `reflection_sweep` job is never claimed.
+
+### Fixed
+- `[O]` `verify_claim` writes its content-free `truth verify_claim audit:` line on every exit, not only on success. A request that hits its deadline, is cancelled, gets `compute_unavailable` or errors now logs `outcome`, the last `phase` it reached (`retrieval` or `model_call`) and `phase_elapsed`. Success lines gain `outcome: ok`. No caller-visible change.
 
 ## [1.5.38] — 2026-11-01
 
