@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.39] — 2026-11-02
+
 ### Added
 - **Any app can hold an owner grant** (DR-66). `topos-node agents add <name> --reads facts:<pack>,messages,journals`
   enrols any name that is not a coding tool's, on a terminal, after a yes to a prompt that lists those reads. The

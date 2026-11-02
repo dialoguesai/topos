@@ -1377,6 +1377,17 @@
       ]
     },
     {
+      "version": "1.5.39",
+      "summary": "Any app can hold an owner grant with its reads stored on the enrolment, pack_facts replaces reflection_facts, message_context is added, the node's app-specific doors are removed, and verify_claim logs its audit line on every exit.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change. agent_app_grants is created on first use.",
+        "An app enrolled before this release has no grant and reads nothing until it runs `topos-node agents add` again.",
+        "reflection_candidates and reflection_labels stay on disk, untouched and no longer written; a queued reflection_sweep job is never claimed.",
+        "None of the 1.5.38 stress-test fixes (single model profile, two Ollama slots, background yielding, batched judge) are in this release."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
