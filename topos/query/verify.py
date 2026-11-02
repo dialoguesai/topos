@@ -314,11 +314,14 @@ def verify_claim(
     mode: str = DEFAULT_MODE,
     caller_app_id: str = "",
     guard: Optional[BlackholeGuard] = None,
+    audit_sink: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Check ``statement`` against the owner's facts under ``mode``.
 
     Returns a caller-safe response plus an ``_audit`` key the handler pops.
     With no ``guard`` every Off-limits entry is withheld, as for a caller the node cannot place.
+    ``audit_sink``, when given, is the audit dict itself, filled as the check goes (``phase`` and ``phase_started``
+    included), so the handler can log how far a request got when it never returns.
     """
     started = time.perf_counter()
     check_budget()
@@ -332,14 +335,19 @@ def verify_claim(
         return {"error": "caller_app_id_required"}
 
     statement = str(statement or "").strip()[: resolved.max_statement_chars]
-    audit: Dict[str, Any] = {
+    audit: Dict[str, Any] = audit_sink if audit_sink is not None else {}
+    audit.update({
         "mode": resolved.name,
         "caller_app_id": caller_app_id,
         "retrieval_touched": False,
         "judge": None,
         "evidence_counts": {},
         "timings_ms": {},
-    }
+    })
+
+    def _phase(name: str) -> None:
+        audit["phase"] = name
+        audit["phase_started"] = time.perf_counter()
 
     def _neutral(reason: str, category: Optional[str] = None) -> Dict[str, Any]:
         # Out-of-aperture and no-evidence produce byte-identical caller-visible
@@ -367,6 +375,7 @@ def verify_claim(
 
     # --- Evidence (facts only in v1; a mode's aperture applied per fact) --------------
     retrieval_started = time.perf_counter()
+    _phase("retrieval")
     guard = guard if guard is not None else BlackholeGuard(conn)
     audit["retrieval_touched"] = True
     store = FactStore(conn)
@@ -422,6 +431,7 @@ def verify_claim(
     if _llm_enabled():
         populated = {lane: texts for lane, texts in lane_texts.items() if texts}
         judge_started = time.perf_counter()
+        _phase("model_call")
         stances = _llm_lane_stances(statement, populated, audit=audit)
         audit["timings_ms"]["engine_roundtrip"] = round((time.perf_counter() - judge_started) * 1000, 3)
         audit["judge"] = "llm" if stances is not None else "heuristic_fallback"

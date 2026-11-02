@@ -138,6 +138,42 @@ def _log_query_failure(
     )
 
 
+#: Keys copied from a verify_claim's in-progress audit onto its failure line. All content-free by construction
+#: (verify.py builds them from mode, counts and timings); nothing else the worker might add is copied.
+_VERIFY_FAILURE_AUDIT_KEYS = ("mode", "retrieval_touched", "judge", "evidence_counts", "category", "task_id", "phase")
+
+
+def _log_verify_failure_audit(progress: Dict[str, Any], failure: str, caller_app_id: str,
+                              dispatched: float, worker_times: Dict[str, float]) -> None:
+    """The same `truth verify_claim audit:` line a success writes, for a request that ended without a result.
+
+    Before 1.5.39 the line was written only on success, so every 120 s deadline in the 1-2 Nov 2026 stress runs left no
+    record of how far the request got. The worker may still be writing `progress` (the handler stops waiting at the
+    deadline; the worker stops at its next budget check), so read single keys and copy nested dicts defensively.
+    """
+    now = time.perf_counter()
+    audit: Dict[str, Any] = {"outcome": failure, "caller_app_id": caller_app_id}
+    for key in _VERIFY_FAILURE_AUDIT_KEYS:
+        value = progress.get(key)
+        if value is not None:
+            audit[key] = value
+    try:
+        timings = dict(progress.get("timings_ms") or {})
+    except RuntimeError:  # resized by the worker while copying
+        timings = {}
+    phase_started = progress.get("phase_started")
+    if isinstance(phase_started, float):
+        # How long the request had been in its last phase when it ended: for phase=model_call this is the wait for
+        # the model (queue, load and generation together; streaming is needed to split them).
+        timings["phase_elapsed"] = round((now - phase_started) * 1000, 3)
+    if "ready" in worker_times:
+        timings["worker_ready"] = round((worker_times["ready"] - dispatched) * 1000, 3)
+    timings["dispatch_to_result"] = round((now - dispatched) * 1000, 3)
+    audit["timings_ms"] = timings
+    audit.setdefault("phase", "dispatch")
+    logger.info("truth verify_claim audit: %s", audit)
+
+
 def _truth_door_refusal(req_id: Any, msg_type: str) -> Optional[Dict[str, Any]]:
     """Who may use the truth door — topos/query/truth_door.py, decided from the
     channel-verified principal on every entry point (local HTTP, relay, any
@@ -172,7 +208,7 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
         from ...query.verify import verify_claim
         from ...query.verify_modes import DEFAULT_MODE
         from .common import run_db_read
-        from ...engine.request_budget import RequestBudget, budget_scope, await_budgeted, DEFAULT_VERIFY_SECONDS
+        from ...engine.request_budget import RequestBudget, RequestStopped, budget_scope, await_budgeted, DEFAULT_VERIFY_SECONDS
 
         try:
             budget = RequestBudget(payload.get("deadline_s", DEFAULT_VERIFY_SECONDS))
@@ -181,6 +217,9 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
 
         dispatched = time.perf_counter()
         worker_times = {}
+        # Filled by verify_claim as it goes, so a request that never returns still leaves
+        # a content-free audit line saying how far it got.
+        progress: Dict[str, Any] = {}
 
         def run(conn):
             # Retrieval and the synchronous model judge must not hold the app
@@ -194,17 +233,37 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
                     mode=str(payload.get("mode") or DEFAULT_MODE),
                     caller_app_id=caller_app_id,
                     guard=guard_from_message(conn, message),
+                    audit_sink=progress,
                 )
             finally:
                 worker_times["finished"] = time.perf_counter()
                 logger.info("truth verification worker terminal: stopped=%s elapsed_ms=%.3f",
                             budget.cancelled.is_set(), (worker_times["finished"] - dispatched) * 1000)
 
-        with budget_scope(budget):
-            result = await await_budgeted(run_db_read(run), budget)
+        failure = "cancelled"
+        try:
+            with budget_scope(budget):
+                result = await await_budgeted(run_db_read(run), budget)
+            failure = None
+        except RequestStopped as exc:
+            failure = exc.reason
+            raise
+        except ComputeUnavailable as exc:
+            failure = exc.code
+            raise
+        except Exception:
+            failure = "error"
+            raise
+        finally:
+            if failure is not None:
+                _log_verify_failure_audit(progress, failure, caller_app_id, dispatched, worker_times)
         received = time.perf_counter()
         audit = result.pop("_audit", None)
         if audit:
+            # Progress markers are for the failure line; a finished request reports its timings instead.
+            audit.pop("phase", None)
+            audit.pop("phase_started", None)
+            audit["outcome"] = "ok"
             timings = audit.setdefault("timings_ms", {})
             # Worker readiness includes executor scheduling AND connection
             # acquisition. It is not a measurement of GPU queue time.
