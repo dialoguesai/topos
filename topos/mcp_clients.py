@@ -22,17 +22,20 @@ share this tree.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 import secrets
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger("topos.mcp_clients")
 
 MCP_CLIENTS_TABLE = "mcp_clients"
 MCP_CLIENT_ELEVATIONS_TABLE = "mcp_client_elevations"
+APP_GRANTS_TABLE = "agent_app_grants"
 TOKEN_PREFIX = "tpk_"
 
 # --------------------------------------------------------------- agents
@@ -47,22 +50,67 @@ TOKEN_PREFIX = "tpk_"
 AGENT_LABEL_PREFIX = "tpa_"
 AGENT_CLIENT_ID_PREFIX = "agent-"
 AGENT_PRINCIPAL_CLASS = "owner_agent"
-#: Canonical clients and their display names; any other slug is accepted and
-#: shown as itself (the name is recorded as claimed).
+#: The coding tools and their display names. Any other slug is an app, shown as itself (the name is recorded as claimed).
 AGENT_DISPLAY_NAMES = {
     "claude-code": "Claude Code",
     "codex": "Codex",
     "cursor": "Cursor",
     "gemini": "Gemini",
-    "moments": "Moments",
 }
 
-#: Apps the owner enrols as owner agents (GRANT_DECISIONS G1, 24 Oct 2026), each with the ONLY message types it may
-#: send. An app is not a coding agent: it never reaches the coding agents' ``query``, ``aggregate`` and
-#: ``get_sources``, and on the socket it reaches the dispatch door alone (``owner_door_routes.APP_AGENT_ROUTES``).
-#: ``topos-node agents add <app>`` enrols one on a terminal, as for a coding tool; ``topos-node mcp`` does not know
-#: them, since an app is not an MCP client. Moments reads the reflection packs' facts and nothing else (DR-61).
-APP_AGENT_TYPES: Dict[str, frozenset] = {"moments": frozenset({"reflection_facts"})}
+#: The words ``topos-node agents add <app> --reads`` takes beside ``facts:<pack>``, and the scope each opens.
+APP_READ_SCOPES: Dict[str, str] = {"messages": "messages:read", "journals": "health:read"}
+#: How the approval prompt says each scope.
+APP_READ_PLAIN: Dict[str, str] = {"messages:read": "your messages and the turns around them",
+                                  "health:read": "your journals and mood signals"}
+
+
+@dataclass(frozen=True)
+class AppGrant:
+    """What the owner let one app read (DISCLOSURE_RULES DR-66), stored on its enrolment and shown on the approval
+    prompt. An app is not a coding agent: it never reaches the coding agents' ``aggregate`` and ``get_sources``, and on
+    the socket it reaches the dispatch door alone (``owner_door_routes.APP_AGENT_ROUTES``). No grant reads nothing."""
+
+    packs: Tuple[str, ...] = ()
+    scopes: Tuple[str, ...] = ()
+
+    def message_types(self) -> frozenset:
+        types = set()
+        if self.packs:
+            types |= {"pack_facts", "reflection_facts"}  # the old name, for one release
+        if self.scopes:
+            types.add("query")
+        if "messages:read" in self.scopes:
+            types.add("message_context")
+        return frozenset(types)
+
+    def words(self) -> List[str]:
+        """The ``--reads`` words that make this grant."""
+        by_scope = {scope: word for word, scope in APP_READ_SCOPES.items()}
+        return [f"facts:{pack}" for pack in self.packs] + [by_scope[scope] for scope in self.scopes if scope in by_scope]
+
+    def plain(self) -> str:
+        """The grant in words for the approval prompt."""
+        parts = [f"facts from {', '.join(self.packs)}"] if self.packs else []
+        return "; ".join(parts + [APP_READ_PLAIN.get(scope, scope) for scope in self.scopes])
+
+
+NO_GRANT = AppGrant()
+
+
+def parse_app_reads(words: Iterable[str]) -> AppGrant:
+    """``facts:<pack>``, ``messages`` and ``journals`` -> the grant, or ValueError naming the word it does not take."""
+    packs: List[str] = []
+    scopes: List[str] = []
+    for raw in words:
+        word = str(raw or "").strip()
+        if word.startswith("facts:") and word[len("facts:"):].strip():
+            packs.append(word[len("facts:"):].strip())
+        elif word in APP_READ_SCOPES:
+            scopes.append(APP_READ_SCOPES[word])
+        else:
+            raise ValueError(f"unknown read {word!r}; use facts:<pack>, {', '.join(APP_READ_SCOPES)}")
+    return AppGrant(tuple(dict.fromkeys(packs)), tuple(dict.fromkeys(scopes)))
 
 #: Elevation ceiling (owner decision, Who's Asking §06): a consented client may
 #: reach `facts`, never `facts_all` — special-class content (health, beliefs,
@@ -75,15 +123,22 @@ _CLIENT_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
 
 
 def app_agent_of(principal: Any) -> Optional[str]:
-    """The listed app an ``owner_agent`` principal is (its row is ``agent-<app>``), else None. Read off the
-    channel-verified principal only, never off a payload: the row id is what the label resolved to at the socket."""
+    """The app an ``owner_agent`` principal is (its row is ``agent-<name>``, and the name is no coding tool's), else None.
+    Read off the channel-verified principal only, never off a payload: the row id is what the label resolved to at the
+    socket."""
     if getattr(principal, "cls", None) != AGENT_PRINCIPAL_CLASS:
         return None
     client_id = str(getattr(principal, "client_id", "") or "")
     if not client_id.startswith(AGENT_CLIENT_ID_PREFIX):
         return None
     app = client_id[len(AGENT_CLIENT_ID_PREFIX):]
-    return app if app in APP_AGENT_TYPES else None
+    return None if app in AGENT_DISPLAY_NAMES else app
+
+
+def app_grant_of(principal: Any) -> AppGrant:
+    """The grant on a verified principal; none when it carries none."""
+    grant = getattr(principal, "app_grant", None)
+    return grant if isinstance(grant, AppGrant) else NO_GRANT
 
 
 def _now() -> str:
@@ -132,6 +187,15 @@ def ensure_mcp_clients_table(conn: sqlite3.Connection) -> None:
                 requested_at TEXT NOT NULL,
                 decided_at TEXT,
                 expires_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {APP_GRANTS_TABLE} (
+                client_id TEXT PRIMARY KEY,
+                reads_json TEXT NOT NULL,
+                granted_at TEXT NOT NULL
             )
             """
         )
@@ -216,16 +280,31 @@ def _agent_ids(client: str) -> tuple:
     return normalize_client_id(f"{AGENT_CLIENT_ID_PREFIX}{short}"), short
 
 
-def mint_agent_label(conn: sqlite3.Connection, *, client: str, approved: bool = False) -> Dict[str, Any]:
+def read_app_grant(conn: sqlite3.Connection, client_id: str) -> AppGrant:
+    """The stored grant for an ``agent-<name>`` row; an app with none (one enrolled before grants) reads nothing."""
+    try:
+        row = conn.execute(f"SELECT reads_json FROM {APP_GRANTS_TABLE} WHERE client_id = ?", (client_id,)).fetchone()
+        reads = json.loads(row[0]) if row else {}
+        return AppGrant(tuple(reads.get("packs") or ()), tuple(reads.get("scopes") or ()))
+    except (sqlite3.Error, ValueError, TypeError, AttributeError):
+        logger.warning("app grant read failed for %r", client_id, exc_info=True)  # DB trouble must never widen a grant
+        return NO_GRANT
+
+
+def mint_agent_label(conn: sqlite3.Connection, *, client: str, approved: bool = False,
+                     grant: Optional[AppGrant] = None) -> Dict[str, Any]:
     """Enroll (or re-key) an approved agent; returns the row plus the ONE-TIME plaintext ``label``.
 
     Writes nothing to disk — the label FILE (``~/.topos/agents/<client>.token``)
     is the CLI's. A revoked agent is re-minted only with ``approved=True``, which
     the CLI sets after a fresh approval (``--approved``) or a TTY confirmation;
     otherwise ``agents add`` would silently un-revoke (rev-1 security 12). The
-    hash is never returned: the caller has the label itself, once.
+    hash is never returned: the caller has the label itself, once. ``grant`` replaces what an app may read; a coding
+    tool takes none.
     """
     cid, short = _agent_ids(client)
+    if grant is not None and short in AGENT_DISPLAY_NAMES:
+        raise ValueError(f"{short!r} is a coding tool, not an app")
     ensure_mcp_clients_table(conn)
     existing = get_client(conn, cid)
     if existing is not None:
@@ -251,6 +330,14 @@ def mint_agent_label(conn: sqlite3.Connection, *, client: str, approved: bool = 
             """,
             (cid, name, _hash_token(label), _now()),
         )
+        if grant is not None:
+            conn.execute(
+                f"""
+                INSERT INTO {APP_GRANTS_TABLE} (client_id, reads_json, granted_at) VALUES (?, ?, ?)
+                ON CONFLICT(client_id) DO UPDATE SET reads_json = excluded.reads_json, granted_at = excluded.granted_at
+                """,
+                (cid, json.dumps({"packs": list(grant.packs), "scopes": list(grant.scopes)}), _now()),
+            )
         commit_connection(conn)
     row = dict(get_client(conn, cid) or {})
     row.pop("token_hash", None)
@@ -284,7 +371,7 @@ def verify_agent_label(conn: sqlite3.Connection, presented: str) -> Optional[Dic
     if not secrets.compare_digest(str(row.get("token_hash") or ""), _hash_token(label)):
         return None
     _touch_last_used(conn, cid)
-    return row
+    return {**row, "app_grant": read_app_grant(conn, cid)} if short not in AGENT_DISPLAY_NAMES else row
 
 
 def revoke_agent(conn: sqlite3.Connection, *, client: str) -> bool:
@@ -314,6 +401,8 @@ def list_agents(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     rows = [dict(zip(cols, r)) for r in cur.fetchall()]
     for row in rows:
         row["client"] = str(row["client_id"])[len(AGENT_CLIENT_ID_PREFIX):]
+        if row["client"] not in AGENT_DISPLAY_NAMES:
+            row["reads"] = read_app_grant(conn, row["client_id"]).words()
     return rows
 
 

@@ -525,97 +525,12 @@ async def handle_truth_claim_label(message: Dict[str, Any]) -> Optional[Dict[str
         return _truth_error(req_id, "truth_lane_unavailable")
 
 
-# --- the reflection doors (product-iterations/reflection/REFLECTION_PROGRAM.md §2a) ------------------------------------
-# Owner class only at the truth door (a reflection type is not in its read set, so the relay, an enrolled client and a
-# third party are refused before the payload is read). ``reflection_invitations`` and ``reflection_conversation`` are
-# reads and write nothing (OWNER_DOOR_OPEN_TYPES); ``reflection_label`` is the one write: dangerous by subtraction.
-# Errors are fixed codes, never the input.
-
-
-@handles("reflection_invitations")
-async def handle_reflection_invitations(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``{"starter"?: discover|wonderful|relationship|difficult|myself|connect, "limit": 1..6, "exclude": [ids]}`` ->
-    balanced cards from the candidates the sweep built out of the enabled packs' facts, plus which reflection packs
-    are on and which are missing. No starter: the home list across every section."""
-    req_id = message.get("id")
-    if not req_id:
-        return None
-    refused = _truth_door_refusal(req_id, "reflection_invitations")
-    if refused:
-        return refused
-    payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
-    if payload is None or not set(payload) <= {"starter", "limit", "exclude"}:
-        return _truth_error(req_id, "invalid_reflection_request")
-    from ...query.reflection import ReflectionRequestError, invitations
-    from .common import run_db_read
-
-    try:
-        result = await run_db_read(invitations, payload.get("starter"), payload.get("limit", 5), payload.get("exclude"))
-        return {"id": req_id, "status": "ok", "payload": result}
-    except ReflectionRequestError as exc:
-        return _truth_error(req_id, str(exc))
-    except Exception as exc:  # noqa: BLE001
-        _log_query_failure("reflection_invitations", req_id, exc)
-        return _truth_error(req_id, "reflection_unavailable")
-
-
-@handles("reflection_conversation")
-async def handle_reflection_conversation(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``{"candidate_id"}`` -> the prepared conversation: character, system prompt, opening, three questions, the
-    evidence with the owner's own words (a row the owner did not write is its date and source only)."""
-    req_id = message.get("id")
-    if not req_id:
-        return None
-    refused = _truth_door_refusal(req_id, "reflection_conversation")
-    if refused:
-        return refused
-    payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
-    if payload is None:
-        return _truth_error(req_id, "invalid_reflection_request")
-    from ...query.reflection import ReflectionRequestError, conversation
-    from .common import run_db_read
-
-    try:
-        return {"id": req_id, "status": "ok", "payload": await run_db_read(conversation, payload.get("candidate_id"))}
-    except ReflectionRequestError as exc:
-        return _truth_error(req_id, str(exc))
-    except Exception as exc:  # noqa: BLE001
-        _log_query_failure("reflection_conversation", req_id, exc)
-        return _truth_error(req_id, "reflection_unavailable")
-
-
-@handles("reflection_label")
-async def handle_reflection_label(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``{"candidate_id", "label": worth_it|opened|not_now|not_true|too_personal, "note"?}`` -> ``{"ok", "label_id"}``.
-    A second submit replaces the label and its owner-only ``reflection_label`` object; ``opened`` only counts."""
-    req_id = message.get("id")
-    if not req_id:
-        return None
-    refused = _truth_door_refusal(req_id, "reflection_label")
-    if refused:
-        return refused
-    payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
-    if payload is None:
-        return _truth_error(req_id, "invalid_reflection_label")
-    from ...query.reflection import ReflectionRequestError, label
-    from .common import run_db_write
-
-    try:
-        result = await run_db_write(label, payload.get("candidate_id"), payload.get("label"), payload.get("note"))
-        return {"id": req_id, "status": "ok", "payload": result}
-    except ReflectionRequestError as exc:
-        return _truth_error(req_id, str(exc))
-    except Exception as exc:  # noqa: BLE001
-        _log_query_failure("reflection_label", req_id, exc)
-        return _truth_error(req_id, "reflection_unavailable")
-
-
-# --- the owner-agent reflection read (GRANT_DECISIONS G2, DISCLOSURE_RULES DR-61) ---------------------------------
-# The one read the Moments app makes: the enabled reflection packs' facts, filtered for an agent
-# (``query/reflection_facts.py``). The owner's app, and an owner agent on the socket; the dispatcher has already held
-# an agent to its own type list (``owner_agent_allowed_types``: Moments sends this and nothing else), so a coding
-# agent never reaches it. Every other class is refused before the payload is read. A read: writes nothing.
-def _reflection_facts_reader(principal: Any) -> Optional[str]:
+# --- an app's reads (DISCLOSURE_RULES DR-61, DR-65, DR-66) --------------------------------------------------------
+# ``pack_facts`` (``query/pack_facts.py``): the facts of the packs a grant names, filtered for an agent.
+# ``message_context`` (``query/message_context.py``): the turns around a message. The owner's app, and an owner agent on
+# the socket; the dispatcher has already held an agent to what its grant opens (``owner_agent_allowed_types``), so a
+# coding agent never reaches them. Every other class is refused before the payload is read. Reads: they write nothing.
+def _app_reader(principal: Any) -> Optional[str]:
     """"owner" or "agent" for a class this read serves, None for every other."""
     from ...principal import OWNER_AGENT, OWNER_APP
 
@@ -627,26 +542,65 @@ def _reflection_facts_reader(principal: Any) -> Optional[str]:
     return None
 
 
-@handles("reflection_facts")
-async def handle_reflection_facts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``{"packs"?, "fact_ids"?, "since"?, "limit"?, "include_excerpts"?}`` -> the active facts of the reflection packs
-    the owner switched on: value (people as display names), the owner's quote, date, sources; plus which reflection
-    packs are on and which are missing. Fixed error codes, never the input."""
+@handles("pack_facts", "reflection_facts")  # the old name, for one release
+async def handle_pack_facts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"packs"?, "fact_ids"?, "since"?, "limit"?, "include_excerpts"?}`` -> the active facts of the granted packs the
+    owner switched on: value (people as display names), the owner's quote, date, sources; plus which granted packs are
+    on and which are missing. Fixed error codes, never the input."""
     req_id = message.get("id")
     if not req_id:
         return None
     from ...principal import current_principal
 
     principal = current_principal()
-    reader = _reflection_facts_reader(principal)
+    reader = _app_reader(principal)
     if reader is None:
         return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
-    from ...query.reflection_facts import ReflectionFactsRequestError, parse_request, read
+    from ...mcp_clients import app_grant_of
+    from ...query.pack_facts import PackFactsRequestError, parse_request, read
+    from .common import run_db_read
+
+    granted = app_grant_of(principal).packs if reader == "agent" else None
+    try:
+        request = parse_request(message.get("payload"), granted)
+    except PackFactsRequestError as exc:
+        return _truth_error(req_id, str(exc))
+
+    def run(conn: Any) -> Dict[str, Any]:
+        guard = None
+        if reader == "agent":
+            from ...features.lifecycle.blackhole_guard import guard_from_message
+
+            guard = guard_from_message(conn, message)
+        return read(conn, request, agent=reader == "agent", guard=guard, granted=granted)
+
+    try:
+        result = await run_db_read(run)
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("pack_facts", req_id, exc)
+        return _truth_error(req_id, "pack_facts_unavailable")
+    await _record_query_request(message, {}, tool="pack_facts")
+    return {"id": req_id, "status": "ok", "payload": result}
+
+
+@handles("message_context")
+async def handle_message_context(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"record_id", "before"?, "after"?}`` -> the message a search returned and its neighbours in the conversation, in
+    time order. An id it can't find or may not show answers with no turns. Fixed error codes, never the input."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    from ...principal import current_principal
+
+    reader = _app_reader(current_principal())
+    if reader is None:
+        return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
+    from ...query.message_context import MessageContextRequestError, parse_request, read
     from .common import run_db_read
 
     try:
         request = parse_request(message.get("payload"))
-    except ReflectionFactsRequestError as exc:
+    except MessageContextRequestError as exc:
         return _truth_error(req_id, str(exc))
 
     def run(conn: Any) -> Dict[str, Any]:
@@ -660,9 +614,9 @@ async def handle_reflection_facts(message: Dict[str, Any]) -> Optional[Dict[str,
     try:
         result = await run_db_read(run)
     except Exception as exc:  # noqa: BLE001
-        _log_query_failure("reflection_facts", req_id, exc)
-        return _truth_error(req_id, "reflection_facts_unavailable")
-    await _record_query_request(message, {}, tool="reflection_facts")
+        _log_query_failure("message_context", req_id, exc)
+        return _truth_error(req_id, "message_context_unavailable")
+    await _record_query_request(message, {}, tool="message_context")
     return {"id": req_id, "status": "ok", "payload": result}
 
 

@@ -360,13 +360,22 @@ OWNER_AGENT_ALLOWED_TYPES = frozenset({"query", "aggregate", "get_sources"})
 
 
 def owner_agent_allowed_types(principal: Any) -> frozenset:
-    """The types an ``owner_agent`` may send: an enrolled APP's own list (``mcp_clients.APP_AGENT_TYPES``,
-    GRANT_DECISIONS G1: Moments sends ``reflection_facts`` and nothing else), else the coding agents' three reads.
-    Decided from the channel-verified principal's row id, never from the payload."""
-    from ...mcp_clients import APP_AGENT_TYPES, app_agent_of
+    """The types an ``owner_agent`` may send: what an enrolled app's grant opens (``mcp_clients.AppGrant``, DR-66), else
+    the coding agents' three reads. Decided from the channel-verified principal, never from the payload."""
+    from ...mcp_clients import app_agent_of, app_grant_of
 
-    app = app_agent_of(principal)
-    return APP_AGENT_TYPES[app] if app else OWNER_AGENT_ALLOWED_TYPES
+    return app_grant_of(principal).message_types() if app_agent_of(principal) else OWNER_AGENT_ALLOWED_TYPES
+
+
+def _app_query_in_bounds(principal: Any, payload: Any) -> bool:
+    """An app's ``query`` names one of its granted scopes for a raw read, in the plain fields (DR-65, DR-66). A manifest
+    can carry another scope, so an app's query has none. A coding agent's query is not narrowed here."""
+    from ...mcp_clients import app_agent_of, app_grant_of
+
+    if not app_agent_of(principal):
+        return True
+    return isinstance(payload, dict) and not payload.get("manifest") and payload.get("access_mode") == "raw" \
+        and payload.get("scope_id") in app_grant_of(principal).scopes
 
 
 def _owner_agent_refusal(message: Dict[str, Any], msg_type: str) -> Optional[Dict[str, Any]]:
@@ -375,7 +384,10 @@ def _owner_agent_refusal(message: Dict[str, Any], msg_type: str) -> Optional[Dic
     from ...principal import current_principal
 
     principal = current_principal()
-    if getattr(principal, "cls", None) != OWNER_AGENT or msg_type in owner_agent_allowed_types(principal):
+    if getattr(principal, "cls", None) != OWNER_AGENT:
+        return None
+    if msg_type in owner_agent_allowed_types(principal) and (
+            msg_type != "query" or _app_query_in_bounds(principal, message.get("payload"))):
         return None
     return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_agent_not_allowed"}
 
@@ -479,13 +491,9 @@ OWNER_DOOR_OPEN_TYPES = frozenset({
     # writes by a field is a change) and truth_claim_label (it writes the owner's label, the week's truth set, which
     # an agent must never edit). Both are dangerous on the socket by subtraction.
     "truth_weekly_stats", "truth_claim_cards",
-    # The reflection doors' two reads (owner class only at the truth door): the candidates built from the enabled
-    # packs' facts, and the conversation composed from them. Neither writes (freshness is the client's exclude
-    # list). NOT here: reflection_label (the owner's label, which an agent must never edit): dangerous by subtraction.
-    "reflection_invitations", "reflection_conversation",
-    # The owner-agent reflection read (GRANT_DECISIONS G2, DR-61): the enabled reflection packs' facts, filtered for an
-    # agent; it writes nothing. The owner's app and Moments (an enrolled app) only, decided in its handler.
-    "reflection_facts",
+    # An app's two reads (DR-61, DR-66): the facts of the packs its grant names, filtered for an agent, and the turns
+    # around a message. Neither writes. The owner's app and an enrolled app only, decided in their handlers.
+    "pack_facts", "reflection_facts", "message_context",
     # NOT here: tools_index rebuilds the tool index (INSERT OR REPLACE + DELETE with prune_missing,
     # features/signal/tool_index.py) — a write, and an instruction sink (security re-check N1).
 })
