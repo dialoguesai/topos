@@ -28,6 +28,9 @@ The machine-readable twin of each release is
   the node serves data. The tables `reflection_candidates` and `reflection_labels` stay on disk, untouched and no longer
   written, because they can hold the owner's own labels. A queued `reflection_sweep` job is never claimed.
 
+### Fixed
+- `[O]` `verify_claim` writes its content-free `truth verify_claim audit:` line on every exit, not only on success. A request that hits its deadline, is cancelled, gets `compute_unavailable` or errors now logs `outcome`, the last `phase` it reached (`retrieval` or `model_call`) and `phase_elapsed`. Success lines gain `outcome: ok`. No caller-visible change.
+
 ## [1.5.38] — 2026-11-01
 
 ### Changed
