@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- `[O]` `verify_claim` writes its content-free `truth verify_claim audit:` line on every exit, not only on success. A request that hits its deadline, is cancelled, gets `compute_unavailable` or errors now logs `outcome`, the last `phase` it reached (`retrieval` or `model_call`) and `phase_elapsed`. Success lines gain `outcome: ok`. No caller-visible change.
+
 ## [1.5.38] — 2026-11-01
 
 ### Changed
