@@ -15,8 +15,18 @@ The machine-readable twin of each release is
   2 Nov: llama3.2 got no answer in 60 s, and one unload released it in 2.5 s. This was the 42 and 48 minute stalls in
   the 1.5.38 stress runs and the `deadline_exceeded` at `model_call` on every failed verify_claim in 1.5.39's. A
   watchdog (`topos/local_serving.py`) now unloads each loaded model no node request is using, once a node request has
-  waited 30 s for a model the host has not loaded (`TOPOS_LOCAL_MODEL_RELEASE_AFTER_S`; 0 turns it off). A model a
+  waited 15 s for a model the host has not loaded (`TOPOS_LOCAL_MODEL_RELEASE_AFTER_S`; 0 turns it off). A model a
   node request is generating on is never unloaded.
+- **The node moves between its local models instead of starving all but one.** The host runs one request per model at
+  a time and never swaps out a model with work queued on it. In the 3 Nov stress run, home chat and routines kept two
+  or three 27B requests queued, so verification (llama3.2) and the share writer (the 9B) waited out their deadlines:
+  verify_claim passed 7 of 18 and sharing answered 0 of 4. The node now sends one request per model at a time
+  (`TOPOS_LOCAL_MODEL_SLOTS`, default the host's `OLLAMA_NUM_PARALLEL` or 1) and holds the rest itself, the owner's and
+  answers' work first. While one of its requests has waited 3 s for a model the host has not loaded, it sends nothing
+  new to other models, so the model in the way finishes the request it is running, goes idle and is unloaded. A
+  background request waiting holds only background work. No request is held past 120 s or its caller's own deadline,
+  and the time held comes off the request's own timeout. Shell status adds `slots`, `held`, `longest_held_s`,
+  `switch_holds` and `held_s_max`.
 - **One context per local model.** Every node request to the local host is now sent at one context: 32,768 on a host
   of 32 GiB or more, which is that host's own default (`TOPOS_LOCAL_MODEL_CONTEXT`; 0 keeps each caller's own). The
   callers asked for five sizes (81,920, 12,288, 8,192, 4,096 and none), so a model was reloaded under itself, the share

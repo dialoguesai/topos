@@ -380,10 +380,11 @@ class PinnedChat:
         self._lock = threading.Lock()
 
     def _post(self, path, body, timeout):
-        with local_serving.request(body) as body:
+        started = time.monotonic()
+        with local_serving.request(body, limit=timeout) as body:
             request = urllib.request.Request(self.base_url + path, data=json.dumps(body).encode("utf-8"),
                                              headers={"Content-Type": "application/json"}, method="POST")
-            with self._opener.open(request, timeout=max(0.5, timeout)) as response:
+            with self._opener.open(request, timeout=max(0.5, timeout - (time.monotonic() - started))) as response:
                 return json.loads(response.read().decode("utf-8"))
 
     def verify(self) -> None:

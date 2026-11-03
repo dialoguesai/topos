@@ -194,7 +194,7 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
     clocks = {"model": model, "stream": False, "started": started, "wall_started": wall_started}
     try:
         # One context per model, counted in flight for the host watchdog (topos/local_serving.py).
-        with local_serving.request(body) as body:
+        async with local_serving.request_async(body) as body:
             async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.post(f"{base}/api/generate", json=body)
                 if (
@@ -442,8 +442,14 @@ async def _ollama_stream_generate(
     clocks = {"model": model, "stream": True, "started": started, "wall_started": wall_started}
     hb_task = asyncio.create_task(_heartbeats()) if on_protocol is not None else None
     # One context per model, counted in flight for the host watchdog (topos/local_serving.py).
-    serving = local_serving.request(body)
-    body = serving.__enter__()
+    # The node may hold the request until the host can serve this model; the heartbeats say "loading" meanwhile.
+    serving = local_serving.request_async(body)
+    try:
+        body = await serving.__aenter__()
+    except BaseException:
+        if hb_task is not None:
+            hb_task.cancel()
+        raise
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", f"{base}/api/generate", json=body) as response:
@@ -508,7 +514,7 @@ async def _ollama_stream_generate(
             detail=f"Ollama unreachable at {base}: {str(exc) or type(exc).__name__}",
         ) from exc
     finally:
-        serving.__exit__(None, None, None)
+        await serving.__aexit__(None, None, None)
         if hb_task is not None:
             hb_task.cancel()
 

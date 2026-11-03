@@ -217,7 +217,8 @@ def test_the_transport_asks_the_pinned_model_for_a_schema_answer_and_leaves_the_
     (_, tags, _), (url, body, timeout) = host.requests
     assert url.endswith("/api/chat") and body["format"] == {"type": "object"} and body["think"] is False
     assert body["options"] == {"temperature": 0, "seed": ti.SEED} and body["stream"] is False
-    assert [m["role"] for m in body["messages"]] == ["system", "user"] and timeout == 3.0
+    # The node's admission (topos/local_serving.py) takes the time it held the request off the timeout.
+    assert [m["role"] for m in body["messages"]] == ["system", "user"] and 2.5 < timeout <= 3.0
     pinned(host, num_ctx=4096)("s", "u", {}, 1.0)
     assert host.requests[-1][1]["options"]["num_ctx"] == 4096
 

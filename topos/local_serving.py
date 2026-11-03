@@ -25,10 +25,28 @@ So two rules, each with its own switch:
    not loaded, unload each loaded model that no node request is using. That is the eviction the host's scheduler
    failed to make. A model a node request is generating on is never unloaded. A client outside the node (an app
    calling the host itself) can lose its loaded model this way; it pays one reload, never an error.
-   ``TOPOS_LOCAL_MODEL_RELEASE_AFTER_S`` sets the wait, and 0 turns the watchdog off.
+   ``TOPOS_LOCAL_MODEL_RELEASE_AFTER_S`` sets the wait (15 s), and 0 turns the watchdog off.
+
+The candidate stress run of 3 Nov (topos#250) showed the second half of the problem. The host runs one request at a
+time per model (``n_slots = 1``) and never swaps out a model with work queued on it. Home chat and routines kept two
+or three 27B requests queued, each 60 to 120 s, so the 27B was never idle for the watchdog. Verification's llama3.2
+and the share writer's 9B then waited until their own deadlines (120 s, 100 s) and failed, 11 of 18 and 4 of 4.
+Each request the node abandoned stayed queued on the host and was dropped only when it finally ran (two chat
+requests ended 499 after 8m20s and 8m30s). So the node now does its own scheduling, one more rule:
+
+3. ``_admit``: the node sends at most ``SLOTS`` requests per model at a time (the host's own one), and holds the rest
+   itself, the owner's and answers' work ahead of background work. While a node request has waited ``SWITCH_AFTER``
+   for a model the host has not loaded, the node sends nothing new to any other model, so the model it is stuck
+   behind finishes the one request it is running, goes idle and is unloaded. The waiting request is then served,
+   and the held ones go next. A background request waiting holds only background work, never the owner's or an
+   answer's. A request is never held longer than ``HOLD_LIMIT`` (or the limit its caller passes). The node keeps
+   moving through its models as its requests need them; it never pins one.
+   ``TOPOS_LOCAL_MODEL_SLOTS`` sets the per-model limit (0: no limit and no hold).
 
 This module counts requests and sends unloads. It reads no prompt and logs no content, only model names, contexts,
-counts and seconds.
+counts and seconds. With the node's opt-in diagnostics on (docs/OBSERVABILITY.md), each request is also a
+``topos.local_model.request`` span with the same: model, context, whether it is background, how long the node held
+it and why (``slot``, ``switch`` or ``none``), and the error class if it failed.
 """
 from __future__ import annotations
 
@@ -68,22 +86,42 @@ def _default_context() -> int:
 
 #: The one context every local request is served at. 0: callers keep their own.
 CONTEXT = _env_int("TOPOS_LOCAL_MODEL_CONTEXT", _default_context())
-#: A node request that has waited this long for a model the host has not loaded is blocked. 0: no watchdog.
-WAIT_SECONDS = float(_env_int("TOPOS_LOCAL_MODEL_RELEASE_AFTER_S", 30))
-#: How often the watchdog looks. It asks the host for its loaded models only while a request is past WAIT_SECONDS.
-PERIOD_SECONDS = 5.0
-#: A model released is not released again for this long, so a host that keeps reloading it is not fought.
-COOLDOWN_SECONDS = 60.0
+#: A node request that has waited this long for a model the host has not loaded is blocked: the watchdog unloads the
+#: idle models in its way. 0: no watchdog. A load the host makes on its own takes 3 to 22 s and shows in /api/ps
+#: only once it is done, so a shorter wait would unload a model the host was about to keep beside the new one.
+WAIT_SECONDS = float(_env_int("TOPOS_LOCAL_MODEL_RELEASE_AFTER_S", 15))
+#: A node request that has waited this long for a model the host has not loaded holds new requests to other models.
+SWITCH_AFTER = 3.0
+#: Requests sent to one model at a time: the host's own, 1 unless OLLAMA_NUM_PARALLEL says otherwise. 0: no limit.
+SLOTS = _env_int("TOPOS_LOCAL_MODEL_SLOTS", _env_int("OLLAMA_NUM_PARALLEL", 1))
+#: No request is held by the node longer than this. An answer job ends by 110 s and a verification by 120 s.
+HOLD_LIMIT = 120.0
+#: How often a held request looks again.
+POLL_SECONDS = 0.1
+#: How often the watchdog looks. It asks the host for its loaded models only while a request is past SWITCH_AFTER.
+PERIOD_SECONDS = 2.0
+#: A model released is not released again for this long, so a host that keeps reloading it (an app calling the host
+#: itself) is not fought. Short: moving between models is the node's normal work.
+COOLDOWN_SECONDS = 15.0
+#: A /api/ps reading older than this is not trusted to say what is loaded: nothing is held on it.
+_LOADED_FRESH_SECONDS = 3 * PERIOD_SECONDS
 #: Characters per token when estimating whether a prompt needs more than CONTEXT. Low on purpose (JSON, names and
 #: other languages run below 4), so a prompt near the line keeps the context its caller asked for.
 _CHARS_PER_TOKEN = 3
 
 _lock = threading.Lock()
 _ids = itertools.count(1)
-_in_flight: Dict[int, Tuple[str, Optional[int], float]] = {}
+#: Requests the node has sent: (model, context, sent at, background).
+_in_flight: Dict[int, Tuple[str, Optional[int], float, bool]] = {}
+#: Requests the node holds: (model, background, arrived).
+_held: Dict[int, Tuple[str, bool, float]] = {}
 _released_at: Dict[str, float] = {}
+#: The host's loaded models as the watchdog last read them, and when: [(model, context)], monotonic.
+_loaded: Tuple[List[Tuple[str, Optional[int]]], float] = ([], float("-inf"))
 #: lowered_context: requests that asked for more than CONTEXT and did not need it (home chat's 81,920).
-_stats: Dict[str, Any] = {"releases": 0, "last_release": None, "lowered_context": 0, "kept_larger_context": 0}
+#: switch_holds: requests held so a request waiting for another model could be served; held_s_max their longest.
+_stats: Dict[str, Any] = {"releases": 0, "last_release": None, "lowered_context": 0, "kept_larger_context": 0,
+                          "switch_holds": 0, "held_s_max": 0.0}
 
 
 def model_key(name: str) -> str:
@@ -131,40 +169,231 @@ def _is_unload(body: Dict[str, Any]) -> bool:
             and not body.get("messages"))
 
 
-@contextlib.contextmanager
-def request(body: Dict[str, Any]):
-    """Prepare a local request and count it in flight until it ends, however it ends. Usable around a blocking call
-    and around an ``await``: it only counts."""
-    body = prepare(body)
-    if _is_unload(body):
-        yield body
-        return
-    token = next(_ids)
-    with _lock:
-        _in_flight[token] = (model_key(body.get("model") or ""), (body.get("options") or {}).get("num_ctx"),
-                             time.monotonic())
+def _is_background() -> bool:
+    """Work the node marked as background (``answer_gate.background_work``): it waits for the owner's and answers'."""
     try:
-        yield body
-    finally:
+        from .permissions_v2 import answer_gate
+    except Exception:  # noqa: BLE001 -- unmarked work is not background
+        return False
+    return answer_gate.is_background()
+
+
+def _on_a_loop() -> bool:
+    try:
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+
+
+@contextlib.contextmanager
+def _span(ticket: "_Ticket"):
+    """The request's diagnostics span; nothing when the node's diagnostics are off or unavailable."""
+    try:
+        from opentelemetry.trace import SpanKind
+        from .observability.tracing import start_span
+    except Exception:  # noqa: BLE001 -- diagnostics never fail a request
+        yield None
+        return
+    with start_span("topos.local_model.request", kind=SpanKind.CLIENT, attributes={
+            "topos.local_model.name": ticket.model, "topos.local_model.context": int(ticket.context or 0),
+            "topos.local_model.background": ticket.background}) as span:
+        yield span
+
+
+def _measure(kind: str, name: str, value: float, unit: str, attributes: Dict[str, Any]) -> None:
+    try:
+        from .observability.metrics import measure
+    except Exception:  # noqa: BLE001
+        return
+    measure(kind, name, value, unit=unit, attributes=attributes)
+
+
+def _waiters(now: float) -> List[Tuple[str, bool]]:
+    """(model, background) of each sent request that has waited SWITCH_AFTER for a model the host has not loaded,
+    by the watchdog's last reading. Empty while that reading is stale: then nothing is known to wait, so nothing is
+    held for a switch."""
+    loaded, read_at = _loaded
+    if now - read_at > _LOADED_FRESH_SECONDS:
+        return []
+    return [(model, background) for model, context, sent, background in _in_flight.values()
+            if now - sent >= SWITCH_AFTER and not any(_matches(model, context, {"name": name, "context_length": c})
+                                                     for name, c in loaded)]
+
+
+def _admit(token: int, now: float, limit: float) -> Tuple[bool, bool]:
+    """Whether a held request may be sent now, and whether a model switch is what holds it. Call with ``_lock``."""
+    model, background, arrived = _held[token]
+    if now - arrived >= limit:
+        return True, False
+    if SLOTS <= 0:
+        return True, False
+    if sum(1 for m, _, _, _ in _in_flight.values() if m == model) >= SLOTS:
+        return False, False
+    # One model's requests go in order: the owner's and answers' first, then background, each by arrival.
+    if any(m == model and (b, a, t) < (background, arrived, token) for t, (m, b, a) in _held.items() if t != token):
+        return False, False
+    for waiting, waiting_background in _waiters(now):
+        if waiting != model and (background or not waiting_background):
+            return False, True
+    return True, False
+
+
+class _Ticket:
+    """One local request through admission: held, sent, ended."""
+
+    def __init__(self, body: Dict[str, Any], limit: Optional[float]):
+        self.body = prepare(body)
+        self.unload = _is_unload(self.body)
+        self.limit = HOLD_LIMIT if limit is None else max(0.0, float(limit))
+        self.token = next(_ids)
+        self.model = model_key(self.body.get("model") or "")
+        self.context = (self.body.get("options") or {}).get("num_ctx")
+        self.background = _is_background()
+        self.arrived = time.monotonic()
+        self.switch = False
+        self.sent: Optional[float] = None
+
+    def hold(self) -> None:
+        if not self.unload:
+            with _lock:
+                _held[self.token] = (self.model, self.background, self.arrived)
+
+    def try_send(self) -> bool:
+        if self.unload:
+            return True
+        now = time.monotonic()
         with _lock:
-            _in_flight.pop(token, None)
+            admitted, switch = _admit(self.token, now, self.limit)
+            self.switch = self.switch or switch
+            if admitted:
+                _held.pop(self.token, None)
+                _in_flight[self.token] = (self.model, self.context, now, self.background)
+                self.sent = now
+                held = now - self.arrived
+                if self.switch:
+                    _stats["switch_holds"] += 1
+                _stats["held_s_max"] = max(_stats["held_s_max"], round(held, 1))
+        if admitted and self.switch and held >= 1.0:
+            _log.info("local model switch: held a request to %s %.1f s", self.model, held)
+        return admitted
+
+    def held_for(self) -> str:
+        if self.switch:
+            return "switch"
+        return "slot" if self.sent is not None and self.sent - self.arrived >= 0.05 else "none"
+
+    def opened(self, span) -> None:
+        """After admission: how long the node held the request, and why."""
+        if self.unload:
+            return
+        held = (self.sent or time.monotonic()) - self.arrived
+        if span is not None:
+            try:
+                span.set_attribute("topos.local_model.held_s", round(held, 3))
+                span.set_attribute("topos.local_model.held_for", self.held_for())
+            except Exception:  # noqa: BLE001
+                pass
+        _measure("histogram", "topos.local_model.hold.duration", held, "s",
+                 {"topos.local_model.name": self.model, "topos.local_model.held_for": self.held_for()})
+
+    def closed(self, error: Optional[BaseException]) -> None:
+        if self.unload or self.sent is None:
+            return
+        _measure("histogram", "topos.local_model.request.duration", time.monotonic() - self.sent, "s",
+                 {"topos.local_model.name": self.model,
+                  "topos.local_model.outcome": "ok" if error is None else type(error).__name__})
+
+    def end(self) -> None:
+        with _lock:
+            _held.pop(self.token, None)
+            _in_flight.pop(self.token, None)
+
+
+@contextlib.contextmanager
+def request(body: Dict[str, Any], *, limit: Optional[float] = None):
+    """Prepare a local request, hold it until the node may send it (``_admit``), and count it in flight until it
+    ends, however it ends. For a blocking call. On a thread that runs an event loop it is never held, because a wait
+    there would stop that loop; it is still counted. ``limit`` caps the hold (``HOLD_LIMIT`` by default): a caller
+    with a deadline passes what is left of it, and takes the time held off its own timeout."""
+    ticket = _Ticket(body, limit)
+    ticket.hold()
+    error = None
+    try:
+        with _span(ticket) as span:
+            if not _on_a_loop():
+                while not ticket.try_send():
+                    time.sleep(POLL_SECONDS)
+            else:
+                with _lock:
+                    _held.pop(ticket.token, None)
+                    if not ticket.unload:
+                        ticket.sent = time.monotonic()
+                        _in_flight[ticket.token] = (ticket.model, ticket.context, ticket.sent, ticket.background)
+            ticket.opened(span)
+            try:
+                yield ticket.body
+            except BaseException as exc:
+                error = exc
+                raise
+    finally:
+        ticket.closed(error)
+        ticket.end()
+
+
+@contextlib.asynccontextmanager
+async def request_async(body: Dict[str, Any], *, limit: Optional[float] = None):
+    """``request`` for a coroutine: the hold awaits, so it never stops the loop."""
+    ticket = _Ticket(body, limit)
+    ticket.hold()
+    error = None
+    try:
+        with _span(ticket) as span:
+            while not ticket.try_send():
+                await asyncio.sleep(POLL_SECONDS)
+            ticket.opened(span)
+            try:
+                yield ticket.body
+            except BaseException as exc:
+                error = exc
+                raise
+    finally:
+        ticket.closed(error)
+        ticket.end()
+
+
+def _deadline(kwargs: Dict[str, Any]) -> Optional[float]:
+    timeout = kwargs.get("timeout")
+    return float(timeout) if isinstance(timeout, (int, float)) and not isinstance(timeout, bool) else None
+
+
+def _rest(kwargs: Dict[str, Any], limit: Optional[float], started: float) -> Dict[str, Any]:
+    """The call's own timeout less the time the node held it, so a hold never stretches the caller's deadline."""
+    if limit is None:
+        return kwargs
+    return {**kwargs, "timeout": max(0.5, limit - (time.monotonic() - started))}
 
 
 async def post_async(http, url: str, *, json: Dict[str, Any], **kwargs):
-    """``http.post(url, json=...)`` on an async client, through ``request``."""
-    with request(json) as body:
-        return await http.post(url, json=body, **kwargs)
+    """``http.post(url, json=...)`` on an async client, through ``request_async``. A number ``timeout`` is also the
+    hold's limit."""
+    limit, started = _deadline(kwargs), time.monotonic()
+    async with request_async(json, limit=limit) as body:
+        return await http.post(url, json=body, **_rest(kwargs, limit, started))
 
 
 def post(http, url: str, *, json: Dict[str, Any], **kwargs):
-    """``http.post(url, json=...)`` on a blocking client, through ``request``."""
-    with request(json) as body:
-        return http.post(url, json=body, **kwargs)
+    """``http.post(url, json=...)`` on a blocking client, through ``request``. A number ``timeout`` is also the hold's
+    limit."""
+    limit, started = _deadline(kwargs), time.monotonic()
+    with request(json, limit=limit) as body:
+        return http.post(url, json=body, **_rest(kwargs, limit, started))
 
 
 def in_flight() -> List[Tuple[str, Optional[int], float]]:
+    """(model, context, sent at) of each request the node has sent and not seen end."""
     with _lock:
-        return list(_in_flight.values())
+        return [(model, context, sent) for model, context, sent, _ in _in_flight.values()]
 
 
 def _matches(model: str, context: Optional[int], loaded: Dict[str, Any]) -> bool:
@@ -200,28 +429,35 @@ def release_blocked(loaded: Iterable[Dict[str, Any]], requests: Iterable[Tuple[s
 
 
 async def _check_once(client, base_url: str) -> List[str]:
+    global _loaded
     now = time.monotonic()
     requests = in_flight()
-    if not any(now - started >= WAIT_SECONDS for _, _, started in requests):
+    if not any(now - started >= SWITCH_AFTER for _, _, started in requests):
         return []
     response = await client.get(base_url + "/api/ps", timeout=5)
     loaded = (response.json() or {}).get("models") or []
+    now = time.monotonic()
     with _lock:
+        _loaded = ([(model_key(str(m.get("name") or m.get("model") or "")), m.get("context_length")) for m in loaded],
+                   now)
         released_at = dict(_released_at)
-    names, waited = release_blocked(loaded, requests, now, released_at=released_at)
+    if WAIT_SECONDS <= 0:
+        return []
+    names, waited = release_blocked(loaded, in_flight(), now, released_at=released_at)
     for name in names:
         await client.post(base_url + "/api/generate", json={"model": name, "keep_alive": 0}, timeout=10)
         with _lock:
             _released_at[model_key(name)] = now
             _stats["releases"] += 1
             _stats["last_release"] = {"model": name, "at": time.time(), "waited_s": round(waited, 1)}
+        _measure("counter", "topos.local_model.releases", 1, "{unload}", {"topos.local_model.name": model_key(name)})
         _log.warning("local model host blocked %.0f s behind an idle model; unloaded %s", waited, name)
     return names
 
 
 async def watchdog(base_url: str, *, period: float = PERIOD_SECONDS) -> None:
     """Run ``release_blocked`` against the host every ``period`` seconds, for as long as the node runs."""
-    if WAIT_SECONDS <= 0:
+    if WAIT_SECONDS <= 0 and SLOTS <= 0:
         return
     import httpx
 
@@ -242,11 +478,15 @@ def status() -> Dict[str, Any]:
     now = time.monotonic()
     with _lock:
         requests = list(_in_flight.values())
+        held = list(_held.values())
         stats = dict(_stats)
     return {
         "context": CONTEXT or None,
         "release_after_s": WAIT_SECONDS or None,
+        "slots": SLOTS or None,
         "in_flight": len(requests),
-        "longest_in_flight_s": round(max((now - s for _, _, s in requests), default=0.0), 1),
+        "longest_in_flight_s": round(max((now - s for _, _, s, _ in requests), default=0.0), 1),
+        "held": len(held),
+        "longest_held_s": round(max((now - a for _, _, a in held), default=0.0), 1),
         **stats,
     }

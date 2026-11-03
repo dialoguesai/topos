@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -173,8 +174,9 @@ class LocalChat:
         """Load this model and keep it loaded a while: Ollama loads a model for a generate call with no prompt and
         answers once it is ready. Raises ``ModelUnavailable`` like a chat call."""
         # At the serving context, so the chat calls that follow find the model loaded as they ask for it.
-        with local_serving.request({"model": self.model, "keep_alive": keep_alive}) as body:
-            _post_json(self._base + "/api/generate", body, {}, timeout)
+        started = time.monotonic()
+        with local_serving.request({"model": self.model, "keep_alive": keep_alive}, limit=timeout) as body:
+            _post_json(self._base + "/api/generate", body, {}, timeout - (time.monotonic() - started))
 
     def __call__(self, system: str, user: str, schema: Dict[str, Any], timeout: float, usage: Usage) -> Dict[str, Any]:
         # Kept questions Wave 2 (OFF2N): on a background path (the owner's inbound truth lane runs as a pipeline job,
@@ -190,8 +192,10 @@ class LocalChat:
         cap = getattr(schema, "max_tokens", None)
         if cap:
             body["options"]["num_predict"] = int(cap)
-        with local_serving.request(body) as body:
-            reply = _post_json(self._base + "/api/chat", body, {}, timeout)
+        # Held by the node at most what is left of the deadline, and the time held comes off the request's own.
+        started = time.monotonic()
+        with local_serving.request(body, limit=timeout) as body:
+            reply = _post_json(self._base + "/api/chat", body, {}, timeout - (time.monotonic() - started))
         usage.add(reply.get("prompt_eval_count"), reply.get("eval_count"))
         try:
             return _parse(reply["message"]["content"])

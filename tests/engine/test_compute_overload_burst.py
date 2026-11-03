@@ -13,6 +13,7 @@ import httpx
 import pytest
 from fastapi import HTTPException
 
+from topos import local_serving
 from topos.engine import engine
 from topos.engine.backends.ollama import OllamaAdapter
 from topos.engine.tasks import ModelRequest, ProcessingTask
@@ -48,6 +49,9 @@ def test_mixed_burst_has_one_attempt_each_and_recovers(monkeypatch):
 
     monkeypatch.setattr(llm.httpx, 'AsyncClient', lambda **kw: real_http(transport=httpx.MockTransport(async_transport), **kw))
     monkeypatch.setattr(llm, '_ensure_ollama_running', lambda _: None)
+    # The node's own one-request-per-model limit (topos/local_serving.py) would send the burst one at a time; this
+    # tests the host's overload replies, so the host sees all 24 at once.
+    monkeypatch.setattr(local_serving, 'SLOTS', 0)
     monkeypatch.setattr(llm, '_stream_ollama_adapter', lambda _: SimpleNamespace(resolve_think=lambda *a: False))
 
     def urlopen(request, **kwargs):
