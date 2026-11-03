@@ -35,13 +35,22 @@ Each request the node abandoned stayed queued on the host and was dropped only w
 requests ended 499 after 8m20s and 8m30s). So the node now does its own scheduling, one more rule:
 
 3. ``_admit``: the node sends at most ``SLOTS`` requests per model at a time (the host's own one), and holds the rest
-   itself, the owner's and answers' work ahead of background work. While a node request has waited ``SWITCH_AFTER``
+   itself, in priority order (``LIVE``, ``UNWATCHED``, ``BACKGROUND``). While a node request has waited ``SWITCH_AFTER``
    for a model the host has not loaded, the node sends nothing new to any other model, so the model it is stuck
    behind finishes the one request it is running, goes idle and is unloaded. The waiting request is then served,
-   and the held ones go next. A background request waiting holds only background work, never the owner's or an
-   answer's. A request is never held longer than ``HOLD_LIMIT`` (or the limit its caller passes). The node keeps
+   and the held ones go next. A waiting request holds only work of its own priority or lower: a routine waiting never
+   holds the owner's chat or an answer. A hold for a switch ends at ``HOLD_LIMIT``; a hold for the model's own slot at
+   ``SLOT_LIMIT``; both at the limit the caller passes for its own deadline. The node keeps
    moving through its models as its requests need them; it never pins one.
    ``TOPOS_LOCAL_MODEL_SLOTS`` sets the per-model limit (0: no limit and no hold).
+
+The second candidate's stress run (3 Nov) passed verification and sharing under load and left one gate: home chat's
+median, 213 s for 200. The 27B served both the owner's live chat and routines in one slot, oldest first: 5 of its 11
+requests were routines (2,800 to 3,200 prompt tokens, about 30 s of prompt reading each before a token), which nobody
+watches arrive, and a live chat waited behind them up to 120 s. Then the 120 s limit sent held requests to the host
+anyway, where they queue oldest first again. So, 4: priority within a model (``LIVE`` for the owner's own and answers,
+``UNWATCHED`` for generation nobody watches stream, marked with ``unwatched``; ``BACKGROUND`` for work
+``answer_gate.background_work`` marks), and a slot hold that lasts until the caller's own deadline.
 
 This module counts requests and sends unloads. It reads no prompt and logs no content, only model names, contexts,
 counts and seconds. With the node's opt-in diagnostics on (docs/OBSERVABILITY.md), each request is also a
@@ -52,6 +61,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import contextvars
 import itertools
 import logging
 import os
@@ -94,8 +104,17 @@ WAIT_SECONDS = float(_env_int("TOPOS_LOCAL_MODEL_RELEASE_AFTER_S", 15))
 SWITCH_AFTER = 3.0
 #: Requests sent to one model at a time: the host's own, 1 unless OLLAMA_NUM_PARALLEL says otherwise. 0: no limit.
 SLOTS = _env_int("TOPOS_LOCAL_MODEL_SLOTS", _env_int("OLLAMA_NUM_PARALLEL", 1))
-#: No request is held by the node longer than this. An answer job ends by 110 s and a verification by 120 s.
+#: No request is held for a model switch longer than this. An answer job ends by 110 s and a verification by 120 s.
 HOLD_LIMIT = 120.0
+#: No request is held for its model's own slot longer than this, unless its caller passes a shorter limit. Sending it
+#: earlier would not serve it sooner (the host runs one at a time); it would only queue it where it cannot be ordered.
+#: Long enough for a queue of home chat replies (300 s each at most), short enough that a count that never came down
+#: cannot stop a model for good.
+SLOT_LIMIT = 600.0
+#: Priorities, lowest first served first. LIVE: the owner's own requests and answers. UNWATCHED: generation nobody
+#: watches stream (a routine's step). BACKGROUND: work the node marked as background.
+LIVE, UNWATCHED, BACKGROUND = 0, 1, 2
+_PRIORITY_NAMES = {LIVE: "live", UNWATCHED: "unwatched", BACKGROUND: "background"}
 #: How often a held request looks again.
 POLL_SECONDS = 0.1
 #: How often the watchdog looks. It asks the host for its loaded models only while a request is past SWITCH_AFTER.
@@ -111,10 +130,11 @@ _CHARS_PER_TOKEN = 3
 
 _lock = threading.Lock()
 _ids = itertools.count(1)
-#: Requests the node has sent: (model, context, sent at, background).
-_in_flight: Dict[int, Tuple[str, Optional[int], float, bool]] = {}
-#: Requests the node holds: (model, background, arrived).
-_held: Dict[int, Tuple[str, bool, float]] = {}
+#: Requests the node has sent: (model, context, sent at, priority).
+_in_flight: Dict[int, Tuple[str, Optional[int], float, int]] = {}
+#: Requests the node holds: (model, priority, arrived).
+_held: Dict[int, Tuple[str, int, float]] = {}
+_unwatched: contextvars.ContextVar = contextvars.ContextVar("a_local_request_nobody_watches", default=False)
 _released_at: Dict[str, float] = {}
 #: The host's loaded models as the watchdog last read them, and when: [(model, context)], monotonic.
 _loaded: Tuple[List[Tuple[str, Optional[int]]], float] = ([], float("-inf"))
@@ -169,13 +189,27 @@ def _is_unload(body: Dict[str, Any]) -> bool:
             and not body.get("messages"))
 
 
-def _is_background() -> bool:
-    """Work the node marked as background (``answer_gate.background_work``): it waits for the owner's and answers'."""
+@contextlib.contextmanager
+def unwatched():
+    """Mark the local requests made inside (and in every task it creates) as ``UNWATCHED``: generation nobody watches
+    stream, which waits for the owner's live requests and answers on the same model."""
+    token = _unwatched.set(True)
+    try:
+        yield
+    finally:
+        _unwatched.reset(token)
+
+
+def _priority() -> int:
+    """``BACKGROUND`` for work the node marked (``answer_gate.background_work``), ``UNWATCHED`` inside ``unwatched``,
+    else ``LIVE``."""
     try:
         from .permissions_v2 import answer_gate
+        if answer_gate.is_background():
+            return BACKGROUND
     except Exception:  # noqa: BLE001 -- unmarked work is not background
-        return False
-    return answer_gate.is_background()
+        pass
+    return UNWATCHED if _unwatched.get() else LIVE
 
 
 def _on_a_loop() -> bool:
@@ -197,7 +231,8 @@ def _span(ticket: "_Ticket"):
         return
     with start_span("topos.local_model.request", kind=SpanKind.CLIENT, attributes={
             "topos.local_model.name": ticket.model, "topos.local_model.context": int(ticket.context or 0),
-            "topos.local_model.background": ticket.background}) as span:
+            "topos.local_model.background": ticket.priority == BACKGROUND,
+            "topos.local_model.priority": _PRIORITY_NAMES[ticket.priority]}) as span:
         yield span
 
 
@@ -210,32 +245,34 @@ def _measure(kind: str, name: str, value: float, unit: str, attributes: Dict[str
 
 
 def _waiters(now: float) -> List[Tuple[str, bool]]:
-    """(model, background) of each sent request that has waited SWITCH_AFTER for a model the host has not loaded,
+    """(model, priority) of each sent request that has waited SWITCH_AFTER for a model the host has not loaded,
     by the watchdog's last reading. Empty while that reading is stale: then nothing is known to wait, so nothing is
     held for a switch."""
     loaded, read_at = _loaded
     if now - read_at > _LOADED_FRESH_SECONDS:
         return []
-    return [(model, background) for model, context, sent, background in _in_flight.values()
+    return [(model, priority) for model, context, sent, priority in _in_flight.values()
             if now - sent >= SWITCH_AFTER and not any(_matches(model, context, {"name": name, "context_length": c})
                                                      for name, c in loaded)]
 
 
-def _admit(token: int, now: float, limit: float) -> Tuple[bool, bool]:
-    """Whether a held request may be sent now, and whether a model switch is what holds it. Call with ``_lock``."""
-    model, background, arrived = _held[token]
-    if now - arrived >= limit:
-        return True, False
-    if SLOTS <= 0:
+def _admit(token: int, now: float, limit: Optional[float]) -> Tuple[bool, bool]:
+    """Whether a held request may be sent now, and whether a model switch is what holds it. Call with ``_lock``.
+    ``limit`` is the caller's own (None: none); the hold for a slot also ends at SLOT_LIMIT, for a switch at
+    HOLD_LIMIT."""
+    model, priority, arrived = _held[token]
+    held = now - arrived
+    if SLOTS <= 0 or (limit is not None and held >= limit) or held >= SLOT_LIMIT:
         return True, False
     if sum(1 for m, _, _, _ in _in_flight.values() if m == model) >= SLOTS:
         return False, False
-    # One model's requests go in order: the owner's and answers' first, then background, each by arrival.
-    if any(m == model and (b, a, t) < (background, arrived, token) for t, (m, b, a) in _held.items() if t != token):
+    # One model's requests go in priority order, each priority by arrival.
+    if any(m == model and (p, a, t) < (priority, arrived, token) for t, (m, p, a) in _held.items() if t != token):
         return False, False
-    for waiting, waiting_background in _waiters(now):
-        if waiting != model and (background or not waiting_background):
-            return False, True
+    if held < HOLD_LIMIT:
+        for waiting, waiting_priority in _waiters(now):
+            if waiting != model and priority >= waiting_priority:
+                return False, True
     return True, False
 
 
@@ -245,11 +282,11 @@ class _Ticket:
     def __init__(self, body: Dict[str, Any], limit: Optional[float]):
         self.body = prepare(body)
         self.unload = _is_unload(self.body)
-        self.limit = HOLD_LIMIT if limit is None else max(0.0, float(limit))
+        self.limit = None if limit is None else max(0.0, float(limit))
         self.token = next(_ids)
         self.model = model_key(self.body.get("model") or "")
         self.context = (self.body.get("options") or {}).get("num_ctx")
-        self.background = _is_background()
+        self.priority = _priority()
         self.arrived = time.monotonic()
         self.switch = False
         self.sent: Optional[float] = None
@@ -257,7 +294,7 @@ class _Ticket:
     def hold(self) -> None:
         if not self.unload:
             with _lock:
-                _held[self.token] = (self.model, self.background, self.arrived)
+                _held[self.token] = (self.model, self.priority, self.arrived)
 
     def try_send(self) -> bool:
         if self.unload:
@@ -268,7 +305,7 @@ class _Ticket:
             self.switch = self.switch or switch
             if admitted:
                 _held.pop(self.token, None)
-                _in_flight[self.token] = (self.model, self.context, now, self.background)
+                _in_flight[self.token] = (self.model, self.context, now, self.priority)
                 self.sent = now
                 held = now - self.arrived
                 if self.switch:
@@ -314,7 +351,7 @@ class _Ticket:
 def request(body: Dict[str, Any], *, limit: Optional[float] = None):
     """Prepare a local request, hold it until the node may send it (``_admit``), and count it in flight until it
     ends, however it ends. For a blocking call. On a thread that runs an event loop it is never held, because a wait
-    there would stop that loop; it is still counted. ``limit`` caps the hold (``HOLD_LIMIT`` by default): a caller
+    there would stop that loop; it is still counted. ``limit`` caps the hold (see ``_admit`` for the defaults): a caller
     with a deadline passes what is left of it, and takes the time held off its own timeout."""
     ticket = _Ticket(body, limit)
     ticket.hold()
@@ -329,7 +366,7 @@ def request(body: Dict[str, Any], *, limit: Optional[float] = None):
                     _held.pop(ticket.token, None)
                     if not ticket.unload:
                         ticket.sent = time.monotonic()
-                        _in_flight[ticket.token] = (ticket.model, ticket.context, ticket.sent, ticket.background)
+                        _in_flight[ticket.token] = (ticket.model, ticket.context, ticket.sent, ticket.priority)
             ticket.opened(span)
             try:
                 yield ticket.body

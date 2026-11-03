@@ -27,6 +27,13 @@ The machine-readable twin of each release is
   background request waiting holds only background work. No request is held past 120 s or its caller's own deadline,
   and the time held comes off the request's own timeout. Shell status adds `slots`, `held`, `longest_held_s`,
   `switch_holds` and `held_s_max`.
+- **The owner's live chat goes ahead of a routine on the same local model.** In the second candidate's stress run the
+  27B served live home chat and routines from one queue, oldest first; 5 of its 11 requests were routines, and the
+  live chat waited behind them up to 120 s (home chat median 213 s for a 200 s target). Requests on one model are now
+  served by priority: the owner's own and answers first, then generation nobody watches stream (a non-streaming
+  `llm_generation`, which is how a routine's step arrives), then background work. A routine waiting for a model load
+  never holds the owner's chat. A hold for the model's own slot now lasts until the caller's own deadline (at most
+  600 s) instead of ending at 120 s, when it went to the host and queued oldest first again.
 - **One context per local model.** Every node request to the local host is now sent at one context: 32,768 on a host
   of 32 GiB or more, which is that host's own default (`TOPOS_LOCAL_MODEL_CONTEXT`; 0 keeps each caller's own). The
   callers asked for five sizes (81,920, 12,288, 8,192, 4,096 and none), so a model was reloaded under itself, the share

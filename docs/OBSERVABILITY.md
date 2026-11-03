@@ -90,7 +90,7 @@ Use a non-secret identifier if explicitly overriding the instance ID.
 | `topos.engine.process.memory.peak` | Last observed process peak RSS in bytes; the underlying `ru_maxrss` is not current RSS |
 | `topos.engine.model.evictions` | Model-eviction counter |
 | `topos.control_plane.outbox.dropped` | Counter by fixed queue name and capacity reason |
-| `topos.local_model.request` | One request to the local model host (`topos/local_serving.py`): model name, context, background or not, seconds the node held it and why (`slot`, `switch`, `none`), error class; no prompt or reply |
+| `topos.local_model.request` | One request to the local model host (`topos/local_serving.py`): model name, context, priority (`live`, `unwatched`, `background`) and background or not, seconds the node held it and why (`slot`, `switch`, `none`), error class; no prompt or reply |
 | `topos.local_model.hold.duration` | Histogram in seconds the node held a local request, by model and reason |
 | `topos.local_model.request.duration` | Histogram in seconds from sending a local request to its end, by model and outcome (`ok` or the error class) |
 | `topos.local_model.releases` | Counter of unloads the watchdog sent, by model |

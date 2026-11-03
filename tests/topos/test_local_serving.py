@@ -120,7 +120,7 @@ def test_the_watchdog_check_sends_one_unload_and_reports_it(monkeypatch):
 
     clock = iter([100.0])
     monkeypatch.setattr(ls.time, "monotonic", lambda: next(clock, 100.0))
-    ls._in_flight[1] = (SMALL, 32768, 60.0, False)
+    ls._in_flight[1] = (SMALL, 32768, 60.0, ls.LIVE)
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -137,7 +137,7 @@ def test_the_watchdog_does_not_ask_the_host_while_nothing_waits(monkeypatch):
     def handler(request):
         raise AssertionError("asked the host")
 
-    ls._in_flight[1] = (SMALL, 32768, ls.time.monotonic(), False)
+    ls._in_flight[1] = (SMALL, 32768, ls.time.monotonic(), ls.LIVE)
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -166,12 +166,12 @@ def test_every_node_model_call_goes_through_the_serving_rules():
 # The node's own scheduling (``_admit``). Scenario of the 3 Nov candidate stress run: home chat and routines kept two
 # or three 27B requests queued on a host that runs one at a time, so verification's llama3.2 never got the host.
 
-def _hold(token, model, background=False, arrived=0.0):
-    ls._held[token] = (ls.model_key(model), background, arrived)
+def _hold(token, model, priority=ls.LIVE, arrived=0.0):
+    ls._held[token] = (ls.model_key(model), priority, arrived)
 
 
 def test_one_request_per_model_is_sent_and_the_next_is_held():
-    ls._in_flight[1] = (BIG, 32768, 0.0, False)
+    ls._in_flight[1] = (BIG, 32768, 0.0, ls.LIVE)
     _hold(2, BIG)
     assert ls._admit(2, now=1.0, limit=120.0) == (False, False)
     # Another model is not held by it: both fit beside each other on the host.
@@ -181,7 +181,7 @@ def test_one_request_per_model_is_sent_and_the_next_is_held():
 
 def test_a_request_waiting_for_a_load_holds_new_requests_to_the_model_in_its_way():
     ls._loaded = ([(BIG, 32768)], 10.0)
-    ls._in_flight[1] = (SMALL, 32768, 5.0, False)   # sent 5 s ago, its model not loaded
+    ls._in_flight[1] = (SMALL, 32768, 5.0, ls.LIVE)   # sent 5 s ago, its model not loaded
     _hold(2, BIG, arrived=9.0)
     assert ls._admit(2, now=10.0, limit=120.0) == (False, True)
     # Once its model is loaded it no longer waits, and the hold is gone.
@@ -191,49 +191,49 @@ def test_a_request_waiting_for_a_load_holds_new_requests_to_the_model_in_its_way
 
 def test_a_load_in_its_first_seconds_holds_nothing():
     ls._loaded = ([(BIG, 32768)], 10.0)
-    ls._in_flight[1] = (SMALL, 32768, 9.0, False)
+    ls._in_flight[1] = (SMALL, 32768, 9.0, ls.LIVE)
     _hold(2, BIG, arrived=9.5)
     assert ls._admit(2, now=10.0, limit=120.0) == (True, False)
 
 
 def test_a_background_request_waiting_never_holds_the_owners_or_an_answers():
     ls._loaded = ([(BIG, 32768)], 10.0)
-    ls._in_flight[1] = (SMALL, 32768, 0.0, True)
-    _hold(2, BIG, background=False)
+    ls._in_flight[1] = (SMALL, 32768, 0.0, ls.BACKGROUND)
+    _hold(2, BIG, priority=ls.LIVE)
     assert ls._admit(2, now=10.0, limit=120.0)[0] is True
-    _hold(3, "qwen3.5:9b-mlx", background=True)
+    _hold(3, "qwen3.5:9b-mlx", priority=ls.BACKGROUND)
     assert ls._admit(3, now=10.0, limit=120.0) == (False, True)
 
 
 def test_a_stale_reading_of_the_host_holds_nothing():
     ls._loaded = ([(BIG, 32768)], 0.0)
-    ls._in_flight[1] = (SMALL, 32768, 0.0, False)
+    ls._in_flight[1] = (SMALL, 32768, 0.0, ls.LIVE)
     _hold(2, BIG)
     assert ls._admit(2, now=ls._LOADED_FRESH_SECONDS + 1.0, limit=120.0)[0] is True
 
 
 def test_no_request_is_held_past_its_limit():
-    ls._in_flight[1] = (BIG, 32768, 0.0, False)
+    ls._in_flight[1] = (BIG, 32768, 0.0, ls.LIVE)
     _hold(2, BIG, arrived=0.0)
     assert ls._admit(2, now=30.0, limit=30.0) == (True, False)
 
 
 def test_one_models_held_requests_go_the_owners_first_then_by_arrival():
     ls._in_flight.clear()
-    _hold(1, BIG, background=True, arrived=0.0)
-    _hold(2, BIG, background=False, arrived=5.0)
+    _hold(1, BIG, priority=ls.BACKGROUND, arrived=0.0)
+    _hold(2, BIG, priority=ls.LIVE, arrived=5.0)
     assert ls._admit(1, now=6.0, limit=120.0)[0] is False
     assert ls._admit(2, now=6.0, limit=120.0)[0] is True
 
 
 def test_an_unload_is_never_held():
-    ls._in_flight[1] = (BIG, 32768, 0.0, False)
+    ls._in_flight[1] = (BIG, 32768, 0.0, ls.LIVE)
     with ls.request({"model": BIG, "keep_alive": 0}) as body:
         assert body == {"model": BIG, "keep_alive": 0}
 
 
 def test_a_blocking_call_on_an_event_loop_is_counted_but_never_held():
-    ls._in_flight[1] = (BIG, 32768, ls.time.monotonic(), False)
+    ls._in_flight[1] = (BIG, 32768, ls.time.monotonic(), ls.LIVE)
 
     async def run():
         with ls.request({"model": BIG, "prompt": "hi"}):
@@ -260,7 +260,7 @@ def test_the_switch_end_to_end(monkeypatch):
         task = asyncio.create_task(first())
         await asyncio.sleep(0.02)
         # The llama3.2 request has been sent and is waiting for the host (watchdog's reading: only the 27B loaded).
-        ls._in_flight[99] = (SMALL, 32768, ls.time.monotonic() - 5.0, False)
+        ls._in_flight[99] = (SMALL, 32768, ls.time.monotonic() - 5.0, ls.LIVE)
         ls._loaded = ([(BIG, 32768)], ls.time.monotonic())
 
         async def second():
@@ -282,7 +282,7 @@ def test_the_switch_end_to_end(monkeypatch):
 
 
 def test_a_post_held_by_the_node_takes_the_time_held_off_its_own_timeout():
-    ls._in_flight[1] = (BIG, 32768, ls.time.monotonic(), False)
+    ls._in_flight[1] = (BIG, 32768, ls.time.monotonic(), ls.LIVE)
     sent = {}
 
     class Http:
@@ -326,7 +326,8 @@ def test_with_diagnostics_on_a_request_is_a_content_free_span(monkeypatch):
         ok, failed = exporter.get_finished_spans()
         assert ok.name == "topos.local_model.request"
         assert dict(ok.attributes) == {"topos.local_model.name": SMALL, "topos.local_model.context": 32768,
-                                       "topos.local_model.background": False, "topos.local_model.held_s": ok.attributes[
+                                       "topos.local_model.background": False, "topos.local_model.priority": "live",
+                                       "topos.local_model.held_s": ok.attributes[
                                            "topos.local_model.held_s"], "topos.local_model.held_for": "none"}
         assert failed.attributes["error.type"] == "RuntimeError"
         exported = repr([(s.attributes, s.events, s.status.description) for s in (ok, failed)])
@@ -335,3 +336,72 @@ def test_with_diagnostics_on_a_request_is_a_content_free_span(monkeypatch):
         assert "topos.local_model.request.duration" in metrics and "topos.local_model.hold.duration" in metrics
     finally:
         instance.shutdown()
+
+
+# The second candidate's run: a routine (nobody watching it stream) held the owner's live chat on the 27B.
+
+def test_on_one_model_the_owners_live_request_goes_before_a_routine_that_arrived_first():
+    ls._in_flight.clear()
+    _hold(1, BIG, priority=ls.UNWATCHED, arrived=0.0)
+    _hold(2, BIG, priority=ls.LIVE, arrived=30.0)
+    _hold(3, BIG, priority=ls.BACKGROUND, arrived=-10.0)
+    assert [t for t in (1, 2, 3) if ls._admit(t, now=31.0, limit=None)[0]] == [2]
+
+
+def test_a_routine_waiting_for_a_load_never_holds_the_owners_live_request():
+    ls._loaded = ([(BIG, 32768)], 10.0)
+    ls._in_flight[1] = (SMALL, 32768, 0.0, ls.UNWATCHED)
+    _hold(2, BIG, priority=ls.LIVE)
+    assert ls._admit(2, now=10.0, limit=None) == (True, False)
+    _hold(3, "qwen3.5:9b-mlx", priority=ls.UNWATCHED)
+    assert ls._admit(3, now=10.0, limit=None) == (False, True)
+
+
+def test_a_slot_hold_outlasts_the_switch_limit_until_the_callers_deadline_or_the_slot_limit():
+    ls._in_flight[1] = (BIG, 32768, 0.0, ls.LIVE)
+    _hold(2, BIG, arrived=0.0)
+    # 150 s behind the 27B's one running reply: still held, because sending it would only queue it on the host.
+    assert ls._admit(2, now=150.0, limit=None) == (False, False)
+    assert ls._admit(2, now=150.0, limit=100.0) == (True, False)      # its caller's own deadline ends it
+    assert ls._admit(2, now=ls.SLOT_LIMIT, limit=None) == (True, False)
+
+
+def test_a_switch_hold_still_ends_at_the_switch_limit():
+    ls._loaded = ([(BIG, 32768)], 130.0)
+    ls._in_flight[1] = (SMALL, 32768, 0.0, ls.LIVE)
+    _hold(2, BIG, arrived=0.0)
+    assert ls._admit(2, now=119.0, limit=None) == (False, True)
+    ls._loaded = ([(BIG, 32768)], 121.0)
+    assert ls._admit(2, now=121.0, limit=None) == (True, False)
+
+
+def test_unwatched_marks_the_requests_inside_it():
+    seen = []
+
+    async def run():
+        async with ls.request_async({"model": BIG, "prompt": "a"}):
+            seen.append([p for *_, p in ls._in_flight.values()])
+        with ls.unwatched():
+            async with ls.request_async({"model": BIG, "prompt": "b"}):
+                seen.append([p for *_, p in ls._in_flight.values()])
+
+    asyncio.run(run())
+    assert seen == [[ls.LIVE], [ls.UNWATCHED]]
+
+
+def test_a_generation_that_does_not_stream_is_unwatched_and_one_that_streams_is_live(monkeypatch):
+    from topos.core.handlers import device
+
+    seen = []
+
+    class Llm:
+        async def generate(self, payload, on_delta=None, on_protocol=None):
+            seen.append(ls._priority())
+            return {"output": "x", "model": BIG}
+
+    monkeypatch.setattr(device, "get_services", lambda: type("S", (), {"llm": Llm()})())
+    monkeypatch.setattr(device.engine_state, "control_plane_client", None, raising=False)
+    for stream in (False, True):
+        asyncio.run(device.handle_llm_generation({"id": f"r{stream}", "payload": {
+            "provider": "ollama", "model": BIG, "prompt": "p", "stream": stream}}))
+    assert seen == [ls.UNWATCHED, ls.LIVE]
