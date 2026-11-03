@@ -12,6 +12,8 @@ from topos import local_serving as ls
 
 BIG = "smtek/Qwen3.8-27B:IQ2_M"
 SMALL = "llama3.2:latest"
+MID = "qwen3.5:9b-mlx"
+GIB = 2**30
 
 
 @pytest.fixture(autouse=True)
@@ -25,9 +27,14 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(ls, "_held", {})
     monkeypatch.setattr(ls, "_loaded", ([], float("-inf")))
     monkeypatch.setattr(ls, "_released_at", {})
+    monkeypatch.setattr(ls, "GROWTH_LIMIT", 2 * GIB)
+    monkeypatch.setattr(ls, "_sizes", {})
+    monkeypatch.setattr(ls, "_recycling", set())
+    monkeypatch.setattr(ls, "_draining", {})
+    monkeypatch.setattr(ls, "_sized_at", float("-inf"))
     monkeypatch.setattr(ls, "_stats", {"releases": 0, "last_release": None, "lowered_context": 0,
                                        "kept_larger_context": 0, "raised_context": 0, "switch_holds": 0,
-                                       "held_s_max": 0.0})
+                                       "held_s_max": 0.0, "recycles": 0, "last_recycle": None})
 
 
 def test_every_caller_context_becomes_the_one_serving_context():
@@ -177,12 +184,156 @@ def test_the_watchdog_does_not_ask_the_host_while_nothing_waits(monkeypatch):
         raise AssertionError("asked the host")
 
     ls._in_flight[1] = (SMALL, 32768, ls.time.monotonic(), ls.LIVE)
+    ls._sized_at = ls.time.monotonic()  # sizes read moments ago
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
             return await ls._check_once(client, "http://host")
 
     assert asyncio.run(run()) == []
+
+
+def _sized(name, context, gib):
+    return {**_ps(name, context), "size": int(gib * GIB)}
+
+
+def test_the_9b_that_grew_past_the_limit_with_nothing_on_it_is_unloaded():
+    # 3 Nov: the 9B's runner loaded at 8.4 GiB and grew to 13.5 GiB at 8,192 while serving.
+    sizes = {}
+    assert ls.grown_models([_sized(MID, 8192, 8.4)], sizes) == []
+    assert ls.grown_models([_sized(MID, 8192, 10.0)], sizes) == []      # 1.6 GiB: under the limit
+    grown = ls.grown_models([_sized(MID, 8192, 10.5)], sizes)
+    assert [name for name, _ in grown] == [MID] and grown[0][1] == int(10.5 * GIB) - int(8.4 * GIB)
+
+
+def _host(sizes, sent):
+    """A host whose /api/ps lists the 9B at the next of ``sizes`` and which records each unload."""
+    def handler(request):
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": [_sized(MID, 8192, sizes[0])]})
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"done": True, "done_reason": "unload"})
+    return handler
+
+
+def _checks(monkeypatch, handler, steps):
+    """Run ``_check_once`` once per (clock, before) step, calling ``before()`` first; the unloads of each."""
+    now = [0.0]
+    monkeypatch.setattr(ls, "time", type("Clock", (), {"monotonic": staticmethod(lambda: now[0]),
+                                                       "time": staticmethod(ls.time.time)}))
+
+    async def run():
+        out = []
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            for at, before in steps:
+                now[0] = at
+                before()
+                out.append(await ls._check_once(client, "http://host"))
+        return out
+
+    return asyncio.run(run())
+
+
+def test_a_grown_model_with_a_request_on_it_is_held_until_that_request_ends_then_unloaded(monkeypatch):
+    # 3 Nov, live node: background work kept the 9B busy and it grew 6.9 GiB in 50 s before it went idle by itself.
+    sizes, sent = [8.4], []
+
+    def grow():
+        sizes[0] = 10.6
+
+    def finish():
+        ls._in_flight.clear()
+
+    ls._in_flight[1] = (MID, 8192, 0.0, ls.LIVE)
+    out = _checks(monkeypatch, _host(sizes, sent), [(0.0, lambda: None), (10.0, grow), (12.0, lambda: None),
+                                                    (14.0, finish)])
+    assert out == [[], [], [], [MID]]
+    assert sent == [{"model": MID, "keep_alive": 0}]
+    assert ls._recycling == set() and ls._draining == {}
+
+
+def test_while_a_grown_model_drains_new_requests_to_it_are_held():
+    ls._sizes[(MID, 8192)] = int(8.4 * GIB)
+    ls._mark_grown([_sized(MID, 8192, 10.6)], now=0.0)
+    ls._held[1] = (MID, ls.LIVE, 0.0)
+    assert MID in ls._recycling and ls._admit(1, 1.0, None) == (False, False)
+
+
+def test_a_model_still_busy_past_the_hold_limit_is_let_go(monkeypatch):
+    sizes, sent = [8.4], []
+
+    def grow():
+        sizes[0] = 10.6
+
+    ls._in_flight[1] = (MID, 8192, 0.0, ls.LIVE)
+    out = _checks(monkeypatch, _host(sizes, sent), [(0.0, lambda: None), (10.0, grow),
+                                                    (10.0 + ls.HOLD_LIMIT, lambda: None)])
+    # Let go at the limit, then held again at once by the sizes read in the same check: never unloaded under a request.
+    assert out == [[], [], []] and sent == []
+    assert ls._draining[MID][2] == 10.0 + ls.HOLD_LIMIT
+
+
+def test_moving_up_a_step_is_not_growth():
+    # llama3.2 is 2.9 GiB at 8,192 and 5.6 at 32,768: a reload at the larger step is another entry.
+    sizes = {}
+    ls.grown_models([_sized(SMALL, 8192, 2.9)], sizes)
+    assert ls.grown_models([_sized(SMALL, 32768, 5.6)], sizes) == []
+    assert sizes == {(SMALL, 32768): int(5.6 * GIB)}
+
+
+def test_a_model_the_host_unloaded_starts_again_from_its_new_size():
+    sizes = {(MID, 8192): int(8.4 * GIB)}
+    ls.grown_models([_sized(BIG, 16384, 9.8)], sizes)       # the 9B is gone
+    assert (MID, 8192) not in sizes
+    ls.grown_models([_sized(MID, 8192, 9.0)], sizes)
+    assert ls.grown_models([_sized(MID, 8192, 10.5)], sizes) == []
+
+
+def test_a_host_that_reports_no_size_and_the_switch_off_unload_nothing():
+    sizes = {}
+    assert ls.grown_models([_ps(MID, 8192)], sizes) == [] and sizes == {}
+    ls.grown_models([_sized(MID, 8192, 8.4)], sizes, limit=0)
+    assert ls.grown_models([_sized(MID, 8192, 20.0)], sizes, limit=0) == []
+
+
+def test_a_model_being_unloaded_for_growth_holds_new_requests_to_it_only():
+    ls._recycling.add(MID)
+    ls._held[1] = (MID, ls.LIVE, 0.0)
+    ls._held[2] = (SMALL, ls.LIVE, 0.0)
+    assert ls._admit(1, 1.0, None) == (False, False)
+    assert ls._admit(2, 1.0, None) == (True, False)
+    assert ls._admit(1, 1.0, 0.5) == (True, False)    # never past the caller's own limit
+
+
+def test_the_watchdog_reads_sizes_with_nothing_waiting_and_unloads_the_grown_9b(monkeypatch):
+    sizes = iter([8.4, 10.6])
+    sent = []
+
+    def handler(request):
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": [_sized(MID, 8192, next(sizes)), _sized(BIG, 16384, 9.8)]})
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"done": True, "done_reason": "unload"})
+
+    now = [100.0]
+    monkeypatch.setattr(ls, "time", type("Clock", (), {"monotonic": staticmethod(lambda: now[0]),
+                                                       "time": staticmethod(ls.time.time)}))
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            first = await ls._check_once(client, "http://host")
+            now[0] = 105.0
+            early = await ls._check_once(client, "http://host")   # 5 s later: not due, no read
+            now[0] = 111.0
+            return first, early, await ls._check_once(client, "http://host")
+
+    assert asyncio.run(run()) == ([], [], [MID])
+    assert sent == [{"model": MID, "keep_alive": 0}]
+    status = ls.status()
+    assert status["recycles"] == 1 and status["last_recycle"]["model"] == MID
+    assert status["last_recycle"]["grew_mib"] == (int(10.6 * GIB) - int(8.4 * GIB)) // 2**20
+    assert status["releases"] == 0 and ls._recycling == set() and (MID, 8192) not in ls._sizes
+    assert status["recycle_growth_mib"] == 2048
 
 
 _POST = re.compile(r'(/api/chat|/api/generate)"')
