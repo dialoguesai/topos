@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.40] — 2026-11-03
+
 ### Fixed
 - **No request waits behind an idle local model any more.** With the 27B loaded at home chat's 81,920 context, the
   local model host served nothing else until the 27B's 30-minute keep_alive ran out. Reproduced with the node idle on
