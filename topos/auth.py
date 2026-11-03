@@ -83,7 +83,8 @@ def _owner_agent_on_socket(label: str) -> Principal:
     row = verify_agent_label(conn, label) if conn else None
     if row is None:
         raise AgentLabelRefused(status_code=status.HTTP_401_UNAUTHORIZED, detail=dict(AGENT_DISCONNECTED))
-    return Principal(cls=OWNER_AGENT, channel="uds", client_id=str(row.get("client_id") or ""))
+    return Principal(cls=OWNER_AGENT, channel="uds", client_id=str(row.get("client_id") or ""),
+                     app_grant=row.get("app_grant"))
 
 
 def _refuse_label_over_tcp(request: "Optional[Request]") -> None:

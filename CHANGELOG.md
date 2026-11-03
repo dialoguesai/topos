@@ -10,6 +10,196 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Topos Facts v0.1 as a Facts extraction option, off by default.** `[O] [P]` Settings → Node functions → Facts
+  extraction can now pick `topos_facts`: two published encoders (`Dialogues/topos-facts-gate-v0.1`, MIT, and
+  `Dialogues/topos-facts-reader-v0.1`, CC-BY-4.0), pinned by revision and run in process on CPU. When picked, the
+  per-pack pass and the history catch-up send every pack the classifier knows to it instead of the LLM, except
+  `aspirations.goals`, which stays on the local extraction model. Its output goes through the same parser, schema and
+  person-grounding checks as an LLM reply, the verifier still judges every assertion, and facts are stamped with
+  extractor model `topos-facts-v0.1`. If the weights cannot load, the batch defers and nothing is marked done.
+  `GET /v1/facts-llm-config` reports provider `topos_facts`, model `v0.1`, and a new `llm_model`: the LLM that still
+  serves goals and the triple pass. Every other reader of the Facts config keeps an LLM. On the 40-message synthetic
+  gold set, predicate precision is 0.81 against 0.53 for the 9B LLM, and recall is 0.45 against 0.83. The training data
+  is private, which `query.scope_head` would not accept for a routing head. The owner ruled on 3 Nov 2026 to ship it as
+  an opt-in exception. Nothing already processed is redone.
+
+### Fixed
+- **A local model whose runner keeps growing is unloaded when idle, so it reloads at its load size.** The 9B runs
+  on the host's MLX runner, which keeps a prefix cache. On 3 Nov it grew from 8.4 GiB at load to 13.5 GiB (14.9 at
+  peak) in 35 minutes of stress while serving at 8,192, and the cache matched about 5 tokens per prompt. The host
+  sizes a model only when it loads it, so it kept loading the others into memory the 9B then grew into, and macOS
+  swap went from 0 to 13.5 GiB. The node's watchdog now reads the host's model sizes every 10 s. A model that has
+  grown 2 GiB past the smallest size reported for it at its context is held: new requests to it wait, the one it is
+  running finishes, and it is then unloaded. Waiting for it to go idle by itself was not enough: on the live node,
+  background work kept the 9B busy and it grew 6.9 GiB in 50 s (about 0.2 GiB per request). The decision uses only the sizes the host reports. Shell status
+  adds `recycles`, `last_recycle` and `recycle_growth_mib`. `TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB` sets the limit
+  (2,048), and 0 turns it off.
+- **Each local model is loaded only as large as its requests need, so the three fit together with less memory
+  free.** 1.5.40 sent every model 32,768 of context. Before a load the host predicts the model's memory at that
+  context (the 27B 16.4 GiB, llama3.2 6.1) and unloads the others when it does not fit what is free. On 3 Nov,
+  with about 2 GiB taken by another app, that was 10 evictions in a 15-minute stress run, each switch 30 to 46 s:
+  verify_claim's p95 went from 30 to 84 s and sharing answered 1 of 6. By the host's log that day (which names no
+  model, so requests were assigned by reading speed: an estimate), llama3.2's prompts never passed 1,560 tokens and
+  the 27B's 8,981. A model now starts at the first of 8,192, 16,384 or 32,768 that fits its request's
+  prompt and reply (2,048 tokens when the request does not say) and moves up only when a request needs more, never
+  down while the node runs: llama3.2 at 8,192 takes 2.9 GiB instead of 5.6. A request that needs more than 32,768
+  still keeps the larger context it asked for. `TOPOS_LOCAL_MODEL_CONTEXT_STEPS=0` serves every model at 32,768 as
+  before. Shell status adds `contexts` (each model's step) and `raised_context`.
+
+## [1.5.40] — 2026-11-03
+
+### Fixed
+- **No request waits behind an idle local model any more.** With the 27B loaded at home chat's 81,920 context, the
+  local model host served nothing else until the 27B's 30-minute keep_alive ran out. Reproduced with the node idle on
+  2 Nov: llama3.2 got no answer in 60 s, and one unload released it in 2.5 s. This was the 42 and 48 minute stalls in
+  the 1.5.38 stress runs and the `deadline_exceeded` at `model_call` on every failed verify_claim in 1.5.39's. A
+  watchdog (`topos/local_serving.py`) now unloads each loaded model no node request is using, once a node request has
+  waited 15 s for a model the host has not loaded (`TOPOS_LOCAL_MODEL_RELEASE_AFTER_S`; 0 turns it off). A model a
+  node request is generating on is never unloaded.
+- **The node moves between its local models instead of starving all but one.** The host runs one request per model at
+  a time and never swaps out a model with work queued on it. In the 3 Nov stress run, home chat and routines kept two
+  or three 27B requests queued, so verification (llama3.2) and the share writer (the 9B) waited out their deadlines:
+  verify_claim passed 7 of 18 and sharing answered 0 of 4. The node now sends one request per model at a time
+  (`TOPOS_LOCAL_MODEL_SLOTS`, default the host's `OLLAMA_NUM_PARALLEL` or 1) and holds the rest itself, the owner's and
+  answers' work first. While one of its requests has waited 3 s for a model the host has not loaded, it sends nothing
+  new to other models, so the model in the way finishes the request it is running, goes idle and is unloaded. A
+  background request waiting holds only background work. No request is held past 120 s or its caller's own deadline,
+  and the time held comes off the request's own timeout. Shell status adds `slots`, `held`, `longest_held_s`,
+  `switch_holds` and `held_s_max`.
+- **The owner's live chat goes ahead of a routine on the same local model.** In the second candidate's stress run the
+  27B served live home chat and routines from one queue, oldest first; 5 of its 11 requests were routines, and the
+  live chat waited behind them up to 120 s (home chat median 213 s for a 200 s target). Requests on one model are now
+  served by priority: the owner's own and answers first, then generation nobody watches stream (a non-streaming
+  `llm_generation`, which is how a routine's step arrives), then background work. A routine waiting for a model load
+  never holds the owner's chat. A hold for the model's own slot now lasts until the caller's own deadline (at most
+  600 s) instead of ending at 120 s, when it went to the host and queued oldest first again.
+- **One context per local model.** Every node request to the local host is now sent at one context: 32,768 on a host
+  of 32 GiB or more, which is that host's own default (`TOPOS_LOCAL_MODEL_CONTEXT`; 0 keeps each caller's own). The
+  callers asked for five sizes (81,920, 12,288, 8,192, 4,096 and none), so a model was reloaded under itself, the share
+  writer and judge even within one job. A request whose prompt needs more than 32,768 keeps the context it asked for.
+  At 32,768 the 27B takes 11.4 GiB instead of 14.7, and fits beside llama3.2 (5.6 GiB). Shell status shows both
+  under `local_serving`.
+
+## [1.5.39] — 2026-11-02
+
+### Added
+- **Any app can hold an owner grant** (DR-66). `topos-node agents add <name> --reads facts:<pack>,messages,journals`
+  enrols any name that is not a coding tool's, on a terminal, after a yes to a prompt that lists those reads. The
+  enrolment stores them in `agent_app_grants`. An app reaches only what its grant opens, and a disconnected app can
+  reconnect with a fresh yes. **An app enrolled before this release has no grant and reads nothing until it runs
+  `agents add` again.** No step in the upgrade: the table is created on first use.
+- **`message_context`**: a search match and up to 20 turns each side from its conversation (default 5), for an app whose
+  grant names `messages`, and the owner's app. Off-limits is applied by absence, as for a search.
+
+### Changed
+- **`reflection_facts` is now `pack_facts`**, limited to the packs on the app's grant, and the owner's own read covers
+  every pack that is on. The old type name answers for one release. `version` is `pack_facts/v1`.
+
+### Removed
+- **The node's app-specific code.** No special case for any app by name, and the `reflection_invitations`,
+  `reflection_conversation` and `reflection_label` doors, their routes and the reflection sweep are gone: apps compose,
+  the node serves data. The tables `reflection_candidates` and `reflection_labels` stay on disk, untouched and no longer
+  written, because they can hold the owner's own labels. A queued `reflection_sweep` job is never claimed.
+
+### Fixed
+- `[O]` `verify_claim` writes its content-free `truth verify_claim audit:` line on every exit, not only on success. A request that hits its deadline, is cancelled, gets `compute_unavailable` or errors now logs `outcome`, the last `phase` it reached (`retrieval` or `model_call`) and `phase_elapsed`. Success lines gain `outcome: ok`. No caller-visible change.
+
+## [1.5.38] — 2026-11-01
+
+### Changed
+- `[O]` Raise the default local routine allowance to 100 runs per owner and engine in a rolling 24-hour window. Operators can set a positive finite allowance with `TOPOS_ROUTINE_MAX_RUNS_PER_OWNER_24H`.
+
+### Added
+- `[O]` Explicit `TOPOS_ROUTINE_DEVELOPMENT_UNLIMITED_RUNS=true` configuration for intentional development and benchmark runs. It disables only the daily run quota; active-run exclusion, idempotency, compute admission, deadlines and delivery configuration remain enforced. The flag defaults off and applies node-wide after restart.
+- `[P]` Expose the effective routine run policy through local shell status so benchmark manifests can distinguish finite allowances from development mode.
+
+No schema migration, reprocessing, dependency, model or database/compute routing change. This release enables capacity testing; it does not claim a new capacity boundary or improved mixed-workload latency.
+
+## [1.5.37] — 2026-11-01
+
+### Fixed
+- `[O]` Bound standard claim verification to a shared 120-second default/maximum request lifetime, with shorter caller deadlines supported. Propagate cancellation and remaining time through database workers, local model startup and remote Engine calls; expired work cannot start new inference or return a late heuristic answer. Remote server-side enforcement requires an updated compute host.
+- `[O]` Bound budgeted HTTP work and native DNS resources per process, retaining capacity until actual cleanup finishes. This does not establish GPU cancellation or global provider admission; uninterruptible native DNS may still delay process exit.
+- `[O]` Include model verification in the existing permissioned-answer writer (100 seconds) and judge (60 seconds) phase ceilings. Stop further sentence judging after a provider failure, retaining fail-closed answer release and existing grant/model guards.
+
+### Added
+- `[O]` Content-free shared-answer diagnostics for fixed role, phase, outcome, HTTP status and elapsed time. No prompt, answer, exception text, token, URL or recipient identifier is added to these events; public receipt schemas are unchanged.
+
+No schema migration, reprocessing or model change. The separate shared provider-admission prototype and UI work are excluded.
+
+## [1.5.36] — 2026-11-01
+
+### Added
+- `[O]` Optional OpenTelemetry traces and metrics for node development and diagnostics, with HTTP/RPC/worker context propagation and local log correlation. Export requires explicit enablement and a destination; ordinary installs need no telemetry setup. Built-in spans exclude request contents, credentials and exception text. No schema migration, reprocessing, new log retention or automatic reporting to Dialogues.
+
+### Fixed
+- `[O]` Bound Engine HTTP execution and waiting queues, expire queued work, and retain active worker slots after caller disconnects. This is an endpoint worker budget, not a global GPU limit.
+- `[P]` Preserve explicit compute busy, unavailable and rate-limited outcomes across local/remote inference and generation. Avoid heuristic verification answers and extra generation retries on explicit overload.
+- `[O]` Record verification stage/provider timings and distinct task identities for repeated calls.
+- `[O]` Preserve the unsent outbox tail after a disconnected or cancelled send, while retaining bounded best-effort overflow behavior. Durable Offline Inbox delivery is unchanged.
+
+## [1.5.35] — 2026-11-01
+
+### Fixed
+- `[O]` Run standard claim verification on a database read worker so slow inference cannot block unrelated node requests. The worker owns its connection and privacy guard; authorization, local/remote Engine selection, and response contracts are unchanged. No migration or reprocessing.
+
+## [1.5.34] — 2026-10-31
+
+### Changed
+
+- `[P]` **`verify_claim`: fun mode is now optional, and a request that names no mode has none** (owner, 31 Oct 2026;
+  DISCLOSURE_RULES DR-64). The new default mode, `standard`, has no topic gate: no claim or fact is refused for lacking
+  a fun word or for a sensitive word, on the node's handler, the local door and the control plane's door. A caller that
+  wants the old aperture sends `"mode": "fun"`. What is still never evidence, in either mode: `owner_only` facts,
+  `calibration_` labels and anything Off-limits. The reply is still stances only, and `category` is null under `standard`.
+  `truth_prompts` and `truth_seed_fact` stay on `fun`, because what they produce is shown to the other person on a call.
+
+### Fixed
+
+- `[P]` **`verify_claim` now applies Off-limits to the facts it reads.** It read the fact store with no guard, so a fact
+  about a protected person could back a stance. Fun mode's narrow topics made that rare; it now holds in every mode.
+
+## [1.5.33] — 2026-10-31
+
+### Fixed
+- **A verify_claim answer no longer waits for its usage row.** `[O]` Since 1.5.32 both doors wrote the `mcp_request_log` row before answering, and that row takes the write gate: on the owner's node it waited 13-21 s behind other writers, so 30 s checks came back at up to 59 s. The row is now written behind the answer, one at a time and in answer order, so a held gate ties up one worker thread. A row still waiting at shutdown is lost: one call missing from the Home card.
+
+## [1.5.32] — 2026-10-30
+
+### Added
+- **Truth lane: the owner chooses how far back it checks, so it can backfill older history.** `[O]` `truth_inbound_settings` takes `window_days` (1–3650, default 7, the old fixed window). A row is owed a first check while its own time is inside the window; the lane still checks newest first, so new rows go before old ones and a wider window is worked back through at the owner's `rate_per_minute`. Before this the window was the constant `WINDOW_DAYS = 7`: turning the lane on never reached anything older than a week, and a loaded node's history stayed unchecked. A backfilled row counts in the week it is checked, not the week it was said, so a backfill run inside a week the weekly program reads raises that week's `checked`. What is owed is now read before the write gate is taken; only the in-flight check and the enqueue hold it. Measured on a migrated test database with 300,000 synthetic iMessage rows over ten years, a third of them the owner's (best of five): 27 ms at 7 days, 32 ms at a year, 71 ms at ten years; the planner walks the source's rows and sorts them whatever the window. No migration: the setting is one more field of the existing `engine_config` value.
+- **verify_claim calls appear on the Daily overview.** `[O]` Each answered `verify_claim` writes one `mcp_request_log` row (tool `verify_claim`, source the app the call names), the only record the overview's "When TOPOS was used", "Who used your TOPOS" and request history read; before this the door wrote a content-free audit line to the log and nothing the overview could count. A call relayed by the control plane's truth door (owner credential and its app allowlist) or made by the owner class is the owner's own use (`owner_self`, shown as "You"); an allowlisted local client's row names that client as the requester (`other`) beside its verified client id. Refused and failed calls write nothing, and a row that cannot be written never fails the answer. The owner door (`verify_claim_owner`) writes the same row, tool `verify_claim`, so the Home card's verify_claim count has both: its source is an optional `caller_app_id` (caller-asserted, gates nothing), else `owner-door`, so a test run of the labelled transcripts sent with `caller_app_id: "dev-transcripts"` shows as that (owner, 29 Oct 2026); an `unable` answer counts, an invalid, refused or failed one does not. Not counted here: the inbound lane's checks, which never pass a door, and the signed grant path (`permissions_v2_verify_claim`, which the grant ledger records). No migration.
+- **Daily measurements count verify_claim outcomes.** `[O]` The usage row each answered `verify_claim` (either door) writes now also stores the verdict as a nullable `verification_outcome`: `supported` true, `contradicted` false, `no_evidence` unanswerable (the older lane answer: non-conflicting support or contradiction true or false; no evidence, abstention or conflicting lanes unanswerable). `get_dashboard_measurements` gains a `verify_claim` block (population `answered_verify_claim_calls`) whose daily buckets split `count` into `true`, `false`, `unanswerable` and `unavailable`, for the Home card's result proportions. Unavailable is a row with no recorded outcome: one written before this build (never guessed or backfilled), an unknown answer shape, or `unable`, because a deadline or a failed model says nothing about the claim (owner, 29 Oct 2026). Same row, so no double counting; refused, failed and inbound-lane checks stay outside it. The column is added in place by the request log's existing write-time upgrade; a read never migrates. Reporting only: no answer changes. No migration.
+- **verify_claim: a claim is read on the day it was said, and dated only when its words name a time.** `[E:verify]` Two module switches in `verify_v2`, both on. `SAID_LOCAL_DAY`: the reader's `Conversation date:` is the day in the zone the claim was said in (`said_zone`), not the UTC day; 122 of the 123 rows below were said in the evening, so the reader had been told the next day. `DATED_BY_WORDS`: a claim keeps the reader's period only when the statement, or the turn just before it, names a time (`names_a_time`: today, yesterday, a weekday, a month, "last week", "three days ago", a year, a date); otherwise its period is cleared and the reader's date is taken out of its text, so it is checked as of when it was said, under the same evidence cutoff (`STRICT_AS_OF`). A plan (`intention`) keeps its window. Applied after the reading is stored, so a stored reading and the lane's `claim_key` keep the reader's dates; `stages.read.as_of_said` counts the claims cleared. Why: the local reader (qwen3.5:9b-mlx) gave a one-day period on the conversation day to 30 of 34 development yes rows whose words name no time (the hosted 70B, 2 to 5 of 34), and the period rule then refused the records, weeks older, that showed the claim. Measured 29 Oct 2026 on a copy of the owner's database, the 123 labelled rows of one recorded call, local model, both switches off then both on: yes rows backed, from 1 of 50 to 17 of 50; no rows wrongly backed, from 2 of 65 to 10 of 65 (the hosted 70B on 23 Oct: 20 of 50 and 14 of 65). 13 of the 17 yes gains and 7 of the 8 no gains are rows whose claim was cleared; with both on, 5 of the 10 wrong supports and 6 of the 17 right ones rest only on records more than 30 days older than the claim. The two switches were measured together, not apart. Off (either switch `False`): the 1.5.31 reading, the UTC day and the reader's period.
+
+## [1.5.31] — 2026-10-28
+
+### Added
+- **`GET /v1/messenger-analytics/rating-candidates` (`messenger_rating_candidates`): the calibration screen's ratings card without the person graph.** `[O]` The card wants a handful of people the owner messages most who are named and not yet rated on four domains, plus how many such people there are, and it read the whole person graph for that: 2,806 nodes, 7.9–10 s warm on a copy of the owner's database (28 Oct 2026), on the app's event loop. The door answers from the dyad stats, the contact and entity spine, the owner's overlay and the disposition facts alone, runs the graph's own read-time duplicate fold on those rows so a messaged contact takes the same entity the graph gives them, and serves the same `PersonNode` fields the card reads: measured on the same copy, 59–66 ms for 25 rows, the same 157 candidates in the same order as the graph's filter. Off the loop from its first day. `limit` 1–200, default 25; `unrated_count` is the whole count. No migration.
+- **`read_person_graph` can skip structure and the heard-about rail.** `[O]` `include_structure` (communities, centrality and the context-affinity layer) and `include_heard_about` (the luck rail's resolver) are on by default, so every caller gets what it got; off, the read answers in 1.5 s instead of 10 s on the owner's copy and says `skipped` under `structure`, `context_coverage` and `heard_about` rather than reporting zeros. HTTP: `structure=false`, `heard_about=false`; relay payload: `include_structure`, `include_heard_about`. The provenance read, which wants one node, turns both off.
+
+### Fixed
+- **The relationship reads run off the event loop.** `[O]` `handle_relationship_reads` (every `messenger_*` read, the overlay writes included) never awaits, so its queries ran on the app's loop; the node's log of 28 Oct 2026 has a 22.6 s `loop_lag_end` on that loop whose frames sit inside `read_person_graph` under this handler, with the calibration catalog and the truth cards queued behind it. The dispatcher now runs the handler in a worker thread on that thread's own connection (NR166 R3b), where the overlay's write gate belongs.
+- **`resolve_owner_identity` reads the owner's contact cards once.** `[O]` It asked `contacts` and `contact_identifiers` per person entity (1,982 lookups each on the owner's node, 32 ms of a read that is otherwise 60), at the head of every graph read, the naming queue and the rating door. The naming queue measured 110–118 ms on the copy after, from 200–315 ms.
+- **The NER and embedding models load from the local cache, on a loader thread of their own.** `[E:engine]` With every file on disk, `pipeline(model=...)` still made its unauthenticated Hub requests (no `HF_HUB_OFFLINE` in the node's environment), and the load ran inside whichever batch worker first asked, holding the cache's loading mark for 20 s on the owner's node (28 Oct 2026, raw import batches). The NER pipeline now loads through `sanitization.hub_pipeline.load_pipeline` (tokenizer and model `local_files_only=True` first, the Hub only after the cache miss transformers raises) and the embedding model from its cached snapshot path; both load on one `hf-model-loader` thread (`engine.backends.huggingface.warm` / `warm_async`), the raw ingestion stage starts them before its pipeline, and a job's first batch awaits that load (`_engine_runner.warm_model_for`) while the loop keeps running: a concurrent owner frame measures under 100 ms behind a 1 s load, and a load requested synchronously on a loop thread is logged by name.
+
+## [1.5.30] — 2026-10-28
+
+### Fixed
+- **`get_device_info` no longer walks `dbstat` on every poll.** `[O]` The control plane polls `get_device_info` every 60 s and the storage snapshot behind it was cached for 60 s, so every poll found the cache expired and walked `dbstat` over the whole file (2.85 GB, 696,303 pages on the owner's node, 28 Oct 2026): the frame was answered from its stale snapshot once a minute on the minute, a 6 s `sample` across one stall held 55 `statNext` frames, and any owner frame landing in that window waited past the control plane's relay budget ("Couldn't reach the Topos engine"). On 27 Oct six walks had run at once, one per concurrent poll. Now the walk is single-flight (`services.local.StorageSnapshot`): one refresh at a time, on a thread of its own, never the loop's default pool; every caller is answered at once from the last value and the refresh runs behind it; only the first read after a start waits for a walk, at most 20 s; a failed walk keeps the last value; the TTL is 15 minutes (storage totals do not change by the minute). Measured on a copy of the owner's database at the poll's cadence: see the pull request. No migration.
+
+## [1.5.29] — 2026-10-28
+
+### Added
+- **Truth lane, lean v3 A: the truth tables are owner-only by name.** `[O]` `[E:verify]` Every table whose name starts with `truth_` is owner-only (`data_explorer_tables.OWNER_ONLY_TABLE_PREFIXES`), so a new lane table can never fall through to a public read; a test lists the lane's DDL against the rule, and another runs both public reads (`verify_claim`, `truth_prompts`) over a node full of owner labels and checks the bodies are byte-identical with and without them. A removed record takes its checks with it by `(table, id)`, not by a bare id that two tables could share. The weekly lock's engine stamp is a four-file manifest (`verify_v2.ENGINE_MANIFEST`) instead of one file's hash. `truth_claim_cards` takes up to 500 cards. Owner labels count only when written by an owner door (`created_by = 'owner'`).
+- **Truth lane, lean v3 B: one card per claim, the reading kept, polarity read.** `[O]` `[E:verify]` The reader's output is stored with the check (`reading_json`), so a re-check of an `unable` row runs the judge from it and makes no reader call. Each claim gets a `claim_key` (category, kind, window class, its names plus the first three distinctive words of the normalised claim), and the cards group the owner's utterances of one claim: a card carries `check_ids` of the others, `restated` (count, distinct days, first, last), `kind` and `polarity`. `truth_claim_label` with `relevance: "split"` says "not the same" and gives that utterance its own card. With `verify_v2.READ_POLARITY` on (off by default), the reader says whether the claim affirms or denies, stored as `polarity` (+1, −1); a statement and its negation share a key and never count as a repeat. The weekly numbers add `groups`, `grouped`, `restated_distribution`, `distinct_days_distribution`, `opposite_polarity_pairs` and `splits`, and each check records how many owner labels were shown (`owner_labels_shown`).
+- **Truth lane, lean v3 C: a plan is a claim that waits for its moment.** `[O]` `[E:verify]` With `verify_v2.READ_INTENTIONS` on (off by default; requires `READ_POLARITY`), the reader may call a claim an `intention` with a window; the lane stores it `unable` with `waiting_until:<due>` and `due_at`, makes no retrieval, and checks it once the window's end plus a seven-day grace has passed, as of that moment and from the stored reading, so the judge sees records written after the plan was said. The same-thread exclusion is two-sided (twelve hours either side of the statement), so a reply two days later counts. A plan with no window is refused as `plan_without_window`. Cards carry `due_at` and `plan` (`waiting`, `kept`, `nothing_by_due`, `answered`); the weekly numbers add `plans`.
+- **Calibrate step 1: the truth lane checks the owner's own claims, cards say what was said, and a claim can be dismissed.** `[O]` `[E:verify]` Owner, 27 Oct 2026, after labelling the first cards. (1) Lane: only the owner's own rows become claims (`truth_inbound.OWNER_CLAIMS_ONLY`, on); a contact's message is never queued or re-checked and stays evidence (in the lane's first week 685 of 804 iMessage checks were contacts' messages). (2) Engine evidence rules, module switches, on: `SPEAKER_SUBJECT` (a contact's first-person claim is `someone_else` to the role rules, so the owner's words no longer count as the speaker's own record), `STRICT_AS_OF` (evidence recorded at or before the claim's moment; before, anything up to the next day counted), `SAME_THREAD_GUARD` (the claim's own record never counts, and the claim's own conversation counts only when at least 12 h older: a reply minutes later had backed the claim it answered). `ClaimRequest` gains `speaker_is_owner`, `source_ref`, `conversation_id`; the lane fills them. (3) `truth_claim_cards`: each card carries `said` (the record's text) beside `claim_text`, `speaker_is_owner`, `evidence_ok`, `relevance`, `dismiss_reason`; `speakers` = `owner` (default) or `all`. (4) `truth_claim_label` also takes `evidence_ok` (did the cited evidence show the claim) and `relevance: "dismissed"` + `dismiss_reason` (someone_else, not_a_claim, trivial, misread, private, other), stored in a new lazily created `truth_dismissals` table; a dismissal and a label replace each other, and a dismissal removes the claim's `verified_claim` object. `truth_weekly_stats` weeks gain `dismissed`, and `to_confirm` counts the owner's own unlabelled, undismissed claims. `truth_labels` gains `evidence_ok` in place on first write. No migration.
+- **Truth lane: skips are logged.** `[O]` `truth_claim_label` with `relevance: "skipped"`, optional `skip_reason` (`dont_know`, `unclear_claim`, `need_context`, `not_now`) and `evidence_opened` appends a row to a new lazily created `truth_skips` table and changes nothing else (the card stays on the list). `truth_weekly_stats` weeks gain `skipped` (cards skipped at least once); a removed record takes its skips with it. No migration.
+- **Truth lane: a denominator, and why a source went quiet.** `[O]` Each batch adds what it did to `truth_lane_daily` (local day × source: queued, gated, checked, deferred, skipped, paused; `unresolved` for rows deferred or skipped before their source was known). `truth_weekly_stats` weeks gain `lane` (those counts summed), and the answer gains `sources`: for iMessage and Signal, the last local sync's time and outcome, the last success, and a failure category (`full_disk_access`, `disk_floor`, `source_missing`, `other`; never the error text). On 27 Oct 2026 the lane looked stuck while Messages sync was failing on Full Disk Access; this tells the two apart. No migration.
+- **verify_claim: the owner's labels can be evidence, off by default.** `[E:verify]` With `verify_v2.LABELS_AS_EVIDENCE` on, the owner's earlier labels (`verified_claim` objects) are read beside retrieval: a label made before the claim being checked, sharing at least two of its distinctive words or names, is shown to the judge as the owner's own judgement (role `authored`, dated by when the labelled claim was made), never the claim's own record's label, at most three. A card citing one shows the labelled claim. Off: unchanged.
+- **verify_claim: three evidence techniques, each off by default.** `[E:verify]` `TESTIMONY`: a message from someone else in the owner's own thread that both judge orders say shows a non-opinion claim about the owner counts alone (never for an opinion, never a stranger's message). `JOURNAL_CHANNEL`: a second search over journal entries alone; up to three entries retrieval did not return take places in the judged list ahead of retrieval's tail. `CONSISTENCY`: for an opinion no single record shows, one more judge call over the owner-written excerpts in the claim's period (at least two) asks whether together they express the same position; the answer's claim carries `support: "consistent_set"`. Each is for a weekly round to turn on and measure. Off: unchanged.
+- **verify_claim: contradictions, per category, none by default.** `[E:verify]` `[O]` For a claim whose turn falls in `verify_v2.CONTRADICTION_CATEGORIES` (empty), the judge may also label an excerpt "contradicts"; under the same two-order agreement and role/period rules as "shows", with no supporting record, the answer is `verdict: "contradicted"` and the contradicting excerpts carry `contradicts: true`. The truth lane stores it as `no_evidence`, reason `contradicted`, and a new `truth_checks.contradicted` flag (added in place; the verdict column's values do not change); cards carry `contradicted`, weekly stats count it. Callers of `verify_claim_owner` see the new verdict only for an opted-in category.
 - **verify_claim: the reader asks for no more claims than the effort checks, off by default.** `[E:verify]` With `verify_v2.LEAN_READ` on, the reader's output schema allows as many claims as the request's effort checks (one at effort low, the inbound truth lane's effort; three at high, unchanged). The reader was asked for up to three claims of eight fields each and the engine kept the first at effort low: on the owner's node a lane row's reader wrote 343 tokens for three claims and took 21.5 s against the lane's 20 s cap. Generation is greedy and left to right, so the main claim is written the same way; only the list closes sooner. Off: unchanged.
 - **Truth lane: load the local model before a check, off by default.** `[O]` With `TOPOS_VERIFY_V2_WARM_LOCAL=1`, the owner's inbound truth lane checks that its local model is loaded (`/api/ps`) before each model check and, when it is not, loads it (an empty `/api/generate`, kept 10 min) with up to 120 s, outside the row's 30 s deadline and 20 s reader cap. A load that does not finish defers the rest of the batch and stores nothing, so a model swap no longer spends one of a row's three checks. On the owner's node Ollama swaps the derivation 27B and the lane's 9B all day (a cold 9B load took 76 s, a warm reader call 9–13 s), and every row stored `unable` in the lane's first week had used all three checks. Batch counts gain `warmed`, `warm_failed` and `warm_s` while the switch is on. Off: unchanged. The hosted side is never touched. No migration.
 

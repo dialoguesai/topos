@@ -180,7 +180,9 @@ def build_usage_observation_envelope(
         action=action,
         canonical_action_identity=canonical_action_identity,
     )
-    resolved_topos_id = str(topos_id or "").strip() or f"engine:{str(settings.topos_key or '')[:12]}"
+    # CP resolves the trusted Topos identity from the authenticated connection.
+    # Never use even a prefix of a credential as telemetry identity.
+    resolved_topos_id = str(topos_id or "").strip() or "engine"
     return {
         "event_id": f"eng_usage_{uuid.uuid4().hex}",
         "topos_id": resolved_topos_id,

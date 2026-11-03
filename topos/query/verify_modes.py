@@ -1,10 +1,12 @@
 """Truthfulness verification modes (PLAN_TRUTHFULNESS_PLUGIN.md §3.2).
 
 A mode is a declarative evidence-eligibility policy enforced INSIDE the node,
-before retrieval and before any model sees a byte. The registry deliberately
-contains ONLY ``fun`` in v1 — serious/business modes are unwritten by design
-(owner directive 2026-07-27: "too much truth is a huge error"). Adding a mode
-is an explicit, reviewed act: new entry here + new CP scope + new eval gates.
+before retrieval and before any model sees a byte. ``standard`` is the default
+(owner, 31 Oct 2026: fun mode is optional, the default has none, DISCLOSURE_RULES
+DR-64): it has no topic gate, and only the disclosure rules bound its evidence.
+``fun`` is opt-in, by a caller naming it: the topic aperture of the 27 Jul 2026
+directive ("too much truth is a huge error"). Adding a mode is an explicit,
+reviewed act: new entry here + new eval gates.
 
 Refusal must be indistinguishable from ignorance: a claim outside a mode's
 aperture produces the same neutral response as a claim the store knows nothing
@@ -121,6 +123,8 @@ def categorize(text: str) -> Tuple[Optional[str], bool]:
 class VerifyMode:
     name: str
     allowed_categories: FrozenSet[str]
+    # False: neither the claim nor a fact is categorized, so no topic is refused.
+    topic_gate: bool = True
     # Facts at or above this disclosure are NEVER eligible (owner_only is the
     # most restrictive value the extractors write; 'scoped' is the default).
     excluded_disclosures: FrozenSet[str] = frozenset({"owner_only"})
@@ -130,12 +134,20 @@ class VerifyMode:
     max_statement_chars: int = 500
 
 
+#: The mode of a verify_claim that names none. truth_prompts and truth_seed_fact do not read this: what they
+#: produce is shown to the other person on a call, so they stay on ``fun`` (standard has no categories to allow).
+DEFAULT_MODE = "standard"
+
 _REGISTRY: Dict[str, VerifyMode] = {
+    "standard": VerifyMode(
+        name="standard",
+        allowed_categories=frozenset(),
+        topic_gate=False,
+    ),
     "fun": VerifyMode(
         name="fun",
         allowed_categories=frozenset(FUN_LEXICONS.keys()),
     ),
-    # serious / business: deliberately unwritten (see module docstring).
 }
 
 

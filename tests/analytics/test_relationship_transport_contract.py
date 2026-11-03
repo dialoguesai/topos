@@ -58,13 +58,17 @@ def conn(tmp_path, monkeypatch):
 
 
 def _ws(msg_type, payload):
-    from topos.core.handlers.messenger_analytics import handle_relationship_reads
+    # The handler REGISTERED for the type, as the dispatcher finds it: the reads share one
+    # handler and the ratings door has its own, and a type sent to the wrong one would be
+    # answered as something else (the shared handler's last branch is the directed edges).
+    import topos.core.handlers.messenger_analytics  # noqa: F401 — registers the handlers
+    from topos.core.handlers.registry import HANDLERS
 
     # asyncio.get_event_loop() is deprecated and returns a loop that ANOTHER test may have
     # closed: running this file after tests/sources failed every case here with "no current
     # event loop", which reads as a contract break and is only test hygiene. Own the loop.
     res = asyncio.run(
-        handle_relationship_reads({"id": "t1", "type": msg_type, "payload": payload}))
+        HANDLERS[msg_type]({"id": "t1", "type": msg_type, "payload": payload}))
     assert res["status"] == "ok", res
     out = dict(res["payload"])
     out.pop("status", None)
@@ -127,6 +131,42 @@ def test_naming_queue_identical_over_both_transports(conn):
     assert ws == http
 
 
+def test_rating_candidates_identical_over_both_transports(conn):
+    from topos.api.messenger_analytics import get_rating_candidates
+
+    http = get_rating_candidates(dataset_id=DS, limit=25)
+    ws = _ws("messenger_rating_candidates", {"dataset_id": DS, "limit": 25})
+    assert ws == http
+
+
+def test_the_person_graph_flags_reach_the_read_over_both_transports(conn, monkeypatch):
+    """`include_structure` / `include_heard_about` (28 Oct 2026) must mean the same thing on
+    the route and on the relay, or one transport pays 7.5 s the other does not."""
+    import topos.analytics.relationship_reads as reads
+    from topos.api.messenger_analytics import get_person_graph
+
+    seen = []
+
+    def record(conn_, **kwargs):
+        seen.append(kwargs)
+        return {"dataset_id": DS, "nodes": []}
+
+    monkeypatch.setattr(reads, "read_person_graph", record)
+    get_person_graph(dataset_id=DS, include_automated=False, include_third_party=False,
+                     structure=False, heard_about=False)
+    _ws("messenger_person_graph", {"dataset_id": DS, "include_structure": False,
+                                   "include_heard_about": False})
+    assert len(seen) == 2 and seen[0] == seen[1]
+    assert seen[0]["include_structure"] is False and seen[0]["include_heard_about"] is False
+    seen.clear()
+    # the route's defaults are Query objects when called as a function: say them
+    get_person_graph(dataset_id=DS, include_automated=False, include_third_party=False,
+                     structure=True, heard_about=True)
+    _ws("messenger_person_graph", {"dataset_id": DS})
+    assert seen[0] == seen[1]
+    assert seen[0]["include_structure"] is True and seen[0]["include_heard_about"] is True
+
+
 def test_the_protocol_names_are_pinned():
     """The CP proxy routes and the client will address these exact strings; renaming one
     silently strands the other side."""
@@ -135,7 +175,7 @@ def test_the_protocol_names_are_pinned():
     for name in ("messenger_relationships", "messenger_relationship_signals",
                  "messenger_directed_edges", "messenger_bench",
                  "messenger_luck_surface", "messenger_person_graph",
-                 "messenger_naming_queue"):
+                 "messenger_naming_queue", "messenger_rating_candidates"):
         assert name in HANDLERS, f"protocol name {name!r} unregistered"
 
 

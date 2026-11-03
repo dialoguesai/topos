@@ -89,7 +89,8 @@ async def test_local_device_info_storage_breakdown_runs_off_the_loop(
 
     monkeypatch.setattr(settings, "topos_database_mode", "sqlite")
     monkeypatch.setattr(local_mod, "_resolve_device_database_path", lambda: db_path)
-    monkeypatch.setattr(local_mod, "_cached_storage_snapshot", _slow)
+    # The walk is the snapshot's own thread's (StorageSnapshot); the first read awaits it.
+    monkeypatch.setattr(local_mod, "_storage_snapshot", local_mod.StorageSnapshot(_slow))
     monkeypatch.setattr(state, "db_conn", None, raising=False)
     monkeypatch.setattr(state, "sync_client", None, raising=False)
     monkeypatch.setattr(state, "get_system_info", lambda: {"hostname": "test-host"}, raising=True)

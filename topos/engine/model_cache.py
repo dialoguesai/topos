@@ -24,6 +24,7 @@ class ModelSlot(str, Enum):
     PRIVACY_FILTER = "privacy_filter"
     RERANKER = "reranker"
     SCOPE_HEAD = "scope_head"
+    TOPOS_FACTS = "topos_facts"
 
 
 _SUBTYPE_TO_SLOT: Dict[str, ModelSlot] = {

@@ -68,6 +68,7 @@ from .api import (
 )
 from .config.settings import settings
 from .core.logging import align_uvicorn_loggers, configure_logging
+from .observability.http import TelemetryMiddleware
 from .extensions import load_extensions
 from .core import state
 from .core.handlers import handle_control_plane_request
@@ -115,6 +116,8 @@ app = FastAPI(
     description="Topos node: Topos Database (data plane) and Topos Engine (compute plane), typically co-deployed in this process.",
     version=__version__,
 )
+
+app.add_middleware(TelemetryMiddleware)
 
 
 def _log_runtime_banner() -> None:
@@ -534,6 +537,14 @@ async def startup_event() -> None:
         _start_search_refresh()
     except Exception as e:  # noqa: BLE001
         logger.warning("Search refresh at startup failed (non-fatal): %s", type(e).__name__)
+    try:
+        # Unload an idle model when a node request is stuck waiting for the host to load another
+        # (topos/local_serving.py: the 30-minute stall behind home chat's keep_alive).
+        from . import local_serving
+
+        _spawn_background(local_serving.watchdog(settings.engine_ollama_base_url), name="local-model-watchdog")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Local model watchdog at startup failed (non-fatal): %s", type(e).__name__)
     if getattr(settings, "sanitization_prewarm_on_startup", True):
         async def _prewarm_sanitization() -> None:
             try:

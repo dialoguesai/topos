@@ -277,6 +277,24 @@ def _columns(conn, table):
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
+def verification_activity(earliest, rows, start, end, *, now=None):
+    """Answered verification calls, with unknown legacy outcomes separate from abstentions."""
+    from .verification import OUTCOMES
+
+    activity = mcp_request_activity(earliest, [at for at, _ in rows], start, end, now=now)
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    grouped = {}
+    for at, outcome in rows:
+        stamp = _parse_utc(at)
+        if stamp is not None and stamp <= now:
+            counts = grouped.setdefault(stamp.date().isoformat(), dict.fromkeys((*OUTCOMES, "unavailable"), 0))
+            counts[outcome if outcome in OUTCOMES else "unavailable"] += 1
+    return {"population": "answered_verify_claim_calls", "measured_since": activity["measured_since"],
+            "buckets": [{"date": b["date"], "count": b["count"], "coverage": b["coverage"],
+                         "outcomes": (grouped.get(b["date"], dict.fromkeys((*OUTCOMES, "unavailable"), 0))
+                                      if b["count"] is not None else None)} for b in activity["buckets"]]}
+
+
 def daily_measurements(conn, start: str, end: str, *, now=None):
     first, last = date.fromisoformat(start), date.fromisoformat(end)
     if first.isoformat() != start or last.isoformat() != end or not 0 < (last-first).days <= 366:
@@ -295,17 +313,20 @@ def daily_measurements(conn, start: str, end: str, *, now=None):
             FROM dashboard_measurement_items WHERE recorded_at >= ? AND recorded_at < ?
             AND recorded_at <= ? GROUP BY 1,2,3""", (start, end, as_of)).fetchall()
         earliest, request_rows, call_rows = None, [], []
+        verification_rows = []
         routine_earliest, routine_rows = None, []
         serve_earliest, serve_rows = None, []
         if "mcp_request_log" in tables and "requested_at" in _columns(conn, "mcp_request_log"):
             mcp_columns = _columns(conn, "mcp_request_log")
-            selected = ["requested_at"] + [name for name in ("tool_name", "source", "access_context") if name in mcp_columns]
+            selected = ["requested_at"] + [name for name in ("tool_name", "source", "access_context", "verification_outcome") if name in mcp_columns]
             earliest = conn.execute("SELECT MIN(requested_at) FROM mcp_request_log").fetchone()[0]
             for record in conn.execute(
                 f"SELECT {', '.join(selected)} FROM mcp_request_log WHERE requested_at >= ? AND requested_at < ?",
                 (start, end)):
                 values = dict(zip(selected, record))
                 request_rows.append(values["requested_at"])
+                if values.get("tool_name") == "verify_claim":
+                    verification_rows.append((values["requested_at"], values.get("verification_outcome")))
                 call_rows.append((values["requested_at"], values.get("tool_name"), values.get("source"), values.get("access_context")))
         if "routine_runs" in tables and {"updated_at", "status"} <= _columns(conn, "routine_runs"):
             routine_earliest = conn.execute("SELECT MIN(updated_at) FROM routine_runs").fetchone()[0]
@@ -342,8 +363,9 @@ def daily_measurements(conn, start: str, end: str, *, now=None):
         metrics[metric] = {"measured_since": since, "buckets": buckets}
     requests = mcp_request_activity(earliest, request_rows, start, end, now=now)
     callers = mcp_caller_activity(earliest, call_rows, start, end, now=now)
+    verification = verification_activity(earliest, verification_rows, start, end, now=now)
     routines = routine_run_activity(routine_earliest, routine_rows, start, end, now=now)
     serve = serve_activity(serve_earliest, serve_rows, start, end, now=now)
     return {"available": True, "schema_version": 1, "scope": "owner_node", "period_start": start,
             "period_end": end, "as_of": as_of, "metrics": metrics, "requests": requests,
-            "callers": callers, "routine_runs": routines, "serve": serve, "inbound_bytes": None}
+            "callers": callers, "verify_claim": verification, "routine_runs": routines, "serve": serve, "inbound_bytes": None}

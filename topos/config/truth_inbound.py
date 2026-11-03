@@ -11,6 +11,10 @@ a change takes effect at the next batch with no restart. No new store and no mig
   Pill key: it spends credits and sends the checked text, contacts' messages included, to a provider, so it is a
   deliberate choice).
 - ``rate_per_minute`` (default 6, 1-60): the most model checks the lane starts in a minute.
+- ``window_days`` (default 7, 1-3650): how far back, by a row's own time, a row is still owed a first check. Widening
+  it is how the owner backfills older history: the lane keeps checking newest first, so new rows still go before old
+  ones, and it works back through the wider window at ``rate_per_minute``. A backfilled row counts in the week it is
+  checked (``truth_checks.weekly_stats``), not the week it was said.
 
 The pause is a separate key, ``truth_inbound_paused_until`` (an ISO time in UTC, empty when not paused): a hosted 402
 or an exhausted wallet pauses the lane for ten minutes, and it resumes only after a probe passes.
@@ -29,7 +33,10 @@ SOURCES = ("imessage", "signal", "transcripts", "journal")
 MODELS = ("local", "hosted")
 DEFAULT_RATE_PER_MINUTE = 6
 MAX_RATE_PER_MINUTE = 60
-FIELDS = ("enabled", "sources", "model", "rate_per_minute")
+DEFAULT_WINDOW_DAYS = 7
+#: Ten years: past every source the lane reads, and well inside what ``timedelta`` can subtract from now.
+MAX_WINDOW_DAYS = 3650
+FIELDS = ("enabled", "sources", "model", "rate_per_minute", "window_days")
 
 
 class InvalidTruthSettings(ValueError):
@@ -37,11 +44,16 @@ class InvalidTruthSettings(ValueError):
 
 
 def defaults() -> Dict[str, Any]:
-    return {"enabled": False, "sources": list(SOURCES), "model": "local", "rate_per_minute": DEFAULT_RATE_PER_MINUTE}
+    return {"enabled": False, "sources": list(SOURCES), "model": "local", "rate_per_minute": DEFAULT_RATE_PER_MINUTE,
+            "window_days": DEFAULT_WINDOW_DAYS}
 
 
 def _valid_rate(value: Any) -> bool:
     return type(value) is int and 1 <= value <= MAX_RATE_PER_MINUTE
+
+
+def _valid_window(value: Any) -> bool:
+    return type(value) is int and 1 <= value <= MAX_WINDOW_DAYS
 
 
 def _valid_sources(value: Any) -> bool:
@@ -63,11 +75,13 @@ def normalize(stored: Any) -> Dict[str, Any]:
         out["model"] = stored["model"]
     if _valid_rate(stored.get("rate_per_minute")):
         out["rate_per_minute"] = stored["rate_per_minute"]
+    if _valid_window(stored.get("window_days")):
+        out["window_days"] = stored["window_days"]
     return out
 
 
 def validate_patch(patch: Any) -> Dict[str, Any]:
-    """A ``set`` payload: any subset of the four fields, each exactly typed. Raises InvalidTruthSettings."""
+    """A ``set`` payload: any subset of the five fields, each exactly typed. Raises InvalidTruthSettings."""
     if not isinstance(patch, Mapping) or not patch or not set(patch) <= set(FIELDS):
         raise InvalidTruthSettings("invalid_truth_settings")
     out: Dict[str, Any] = {}
@@ -87,6 +101,10 @@ def validate_patch(patch: Any) -> Dict[str, Any]:
         if not _valid_rate(patch["rate_per_minute"]):
             raise InvalidTruthSettings("invalid_truth_settings")
         out["rate_per_minute"] = patch["rate_per_minute"]
+    if "window_days" in patch:
+        if not _valid_window(patch["window_days"]):
+            raise InvalidTruthSettings("invalid_truth_settings")
+        out["window_days"] = patch["window_days"]
     return out
 
 
@@ -141,7 +159,7 @@ def set_paused_until(conn: sqlite3.Connection, when: Optional[datetime]) -> None
 
 
 def public_view(conn: Optional[sqlite3.Connection]) -> Dict[str, Any]:
-    """What ``truth_inbound_settings`` answers: the four settings, plus ``paused_until`` (null unless a hosted lane is
+    """What ``truth_inbound_settings`` answers: the five settings, plus ``paused_until`` (null unless a hosted lane is
     waiting out a 402) so the owner's screen can say why nothing is being checked."""
     settings = load(conn)
     until = paused_until(conn)

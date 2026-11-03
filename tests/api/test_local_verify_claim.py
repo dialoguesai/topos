@@ -1,5 +1,5 @@
 """Same-device /api/local/verify_claim route: full handler round-trip against a
-scratch DB, door policy asserted (app_id mandatory, mode pinned to fun)."""
+scratch DB, door policy asserted (app_id mandatory, no fun mode unless named)."""
 
 from __future__ import annotations
 
@@ -54,7 +54,8 @@ def test_local_verify_claim_roundtrip(client):
     )
     assert response.status_code == 200
     data = response.json()
-    assert data["mode"] == "fun"
+    assert data["mode"] == "standard"
+    assert data["category"] is None
     assert data["lanes"]["self"]["stance"] == "contradicts"
     assert "_audit" not in data and "evidence" not in data
     assert "mandolin" not in str(data.get("lanes"))  # stances only, no text
@@ -65,12 +66,64 @@ def test_local_verify_claim_requires_app_id(client):
     assert response.json().get("status") == "error"
 
 
-def test_local_verify_claim_mode_is_pinned(client):
-    # A caller-supplied mode is ignored by the route (it never reads one) —
-    # even "serious" in the body still runs fun.
+def test_local_verify_claim_runs_fun_when_named(client):
+    response = client.post(
+        "/api/local/verify_claim",
+        json={"statement": "I love playing the mandolin", "app_id": "truth-mirror", "mode": "fun"},
+    )
+    assert response.status_code == 200
+    assert response.json()["mode"] == "fun"
+    assert response.json()["category"] == "hobbies"
+
+
+def test_local_verify_claim_refuses_a_mode_the_registry_does_not_ship(client):
     response = client.post(
         "/api/local/verify_claim",
         json={"statement": "I love playing the mandolin", "app_id": "truth-mirror", "mode": "serious"},
     )
-    assert response.status_code == 200
-    assert response.json()["mode"] == "fun"
+    assert response.json() == {"status": "error", "error": "unknown_mode"}
+
+
+def test_disconnect_cancels_verification_worker(client, monkeypatch):
+    """Actual ASGI disconnect reaches the route, handler and cooperative worker."""
+    import asyncio
+    import json
+    import threading
+    import time
+    from topos.query import verify
+    from topos.engine.request_budget import current_budget
+
+    started, finished = threading.Event(), threading.Event()
+
+    def blocked(*args, **kwargs):
+        started.set()
+        try:
+            while True:
+                current_budget().check()
+                time.sleep(.005)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(verify, 'verify_claim', blocked)
+
+    async def run():
+        incoming, sent = asyncio.Queue(), []
+        payload = {'statement': 'synthetic claim', 'app_id': 'synthetic-app'}
+        await incoming.put({'type': 'http.request', 'body': json.dumps(payload).encode(), 'more_body': False})
+        scope = {'type': 'http', 'asgi': {'version': '3.0'}, 'http_version': '1.1', 'method': 'POST',
+                 'scheme': 'http', 'path': '/api/local/verify_claim', 'raw_path': b'/api/local/verify_claim',
+                 'query_string': b'', 'root_path': '', 'headers': [(b'content-type', b'application/json')],
+                 'client': ('fixture', 1), 'server': ('fixture', 80)}
+        async def send(message):
+            sent.append(message)
+        request = asyncio.create_task(client.app(scope, incoming.get, send))
+        try:
+            assert await asyncio.to_thread(started.wait, 1)
+            await incoming.put({'type': 'http.disconnect'})
+            await asyncio.wait_for(request, 1)
+            assert sent[0]['status'] == 499
+            assert await asyncio.to_thread(finished.wait, .5)
+        finally:
+            request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+    asyncio.run(run())

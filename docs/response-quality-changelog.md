@@ -423,3 +423,541 @@ comparisons; it is not established by these incidents.
 | query_and_synthesis_contracts | 103 pass / 0 fail / 0 skip | 103 pass / 0 fail / 0 skip |
 
 - Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+### Regression gate — RQ-2026-11-01-verification-deadline — before
+
+- Recorded (UTC): 2026-11-01T19:05:06.484463+00:00
+- Note: Published 1.5.36 production behavior restored after exploratory focused checks; new budget helper is present but not wired into production, with frozen regression fixtures. Capture pre-fix deadline and cancellation failures without live calls.
+- Report: [machine-readable results](response-quality-runs/20261101T190506484463Z-RQ-2026-11-01-verification-deadline-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 103 pass / 2 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-verification-deadline — after
+
+- Recorded (UTC): 2026-11-01T19:05:56.143355+00:00
+- Note: One monotonic verification budget bounds local and remote compute, cancels provider transport on expiry/disconnect, prevents late heuristic success, and retains honest Engine worker ownership. Fake socket and admission regressions passed separately; no live capacity claim.
+- Report: [machine-readable results](response-quality-runs/20261101T190556143355Z-RQ-2026-11-01-verification-deadline-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 103 pass / 2 fail / 0 skip | 105 pass / 0 fail / 0 skip |
+
+- Fixed: 2; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_cancelled_handler_signals_its_worker`
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_expiry_is_unavailable_not_a_heuristic_success_and_worker_finishes`
+
+### Regression gate — RQ-2026-11-01-sharing-recovery — before
+
+- Recorded (UTC): 2026-11-01T18:57:01.154126+00:00
+- Note: Frozen sharing deadline failures before implementation; no live generation authorized
+- Report: [machine-readable results](response-quality-runs/20261101T185701154126Z-RQ-2026-11-01-sharing-recovery-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 103 pass / 6 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-sharing-recovery — before
+
+- Recorded (UTC): 2026-11-01T18:58:00.205979+00:00
+- Note: Corrected baseline: Python 3.12 and explicit synthetic transport judge marker; earlier report retained, not comparable
+- Report: [machine-readable results](response-quality-runs/20261101T185800205979Z-RQ-2026-11-01-sharing-recovery-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 103 pass / 6 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-sharing-recovery — after
+
+- Recorded (UTC): 2026-11-01T18:58:37.294168+00:00
+- Note: Sharing verification and response share a cancellable wall-clock cap; provider judge errors stop subsequent calls; no live-model claim
+- Report: [machine-readable results](response-quality-runs/20261101T185837294168Z-RQ-2026-11-01-sharing-recovery-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | 140 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 103 pass / 6 fail / 0 skip | 109 pass / 0 fail / 0 skip |
+
+- Fixed: 6; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[post-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[post-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[verify-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[verify-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_expired_call_never_opens_transport[False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_expired_call_never_opens_transport[True]`
+
+### RQ-2026-11-01-sharing-recovery — bounded grant-backed writer/judge lifecycle
+
+Scope: Clark's grant-backed owner-compute `with_sources` answer path on published
+1.5.36 (`4e2ac2167b0e18e37c5dc70a082525eaeb094c37`), not generic developer calls.
+No grant, node, model residency, remote compute routing, database boundary or live
+traffic was changed. This patch has not been deployed or merged.
+
+Evidence: supplied `topos-benchmarks/results/expedited-baseline-1536-20261101`,
+`focused-stress-1536-20261101-v2`, and `recovery-probes-1536-20261101` requests and
+counts-only node receipts: baseline 4/4 answered; stress 2/7 answered, with one
+deadline, one all_sentences_dropped, two model_error and one ask 429. Isolated
+recovery ended model_error in 107.87 seconds (105 seconds between job start/end).
+The preceding model observation listed a different resident model. This supports
+investigating cold/model-switch latency, but does NOT establish its cause.
+Model_error collapses HTTP errors, incomplete responses and other exceptions;
+receipt sentence counts are zero when checked is absent, not proof the writer
+never produced text. No raw owner text or private logs were copied into this change.
+
+Code-level causes reproduced: writer/judge verification had an independent 25s
+HTTP timeout before the 100s/60s generation read timeout; HTTP inactivity timeouts
+are not overall deadlines. Expired calls still verified and posted with a forced
+minimum one-second allowance. Separately, a judge model_error became False and
+could trigger another provider call for every surviving sentence, obscuring
+provider failure as quality rejection. The stress quality-filter case includes
+four relevance drops, one support drop and three unjudged sentences; it cannot be
+reclassified wholesale as provider failure. The ask 429 remains admission control.
+
+Method: keep the existing 100s writer / 60s judge ceilings, but bound verification
+and generation together with cancellable asyncio timeouts and close the client
+on cancellation. Refuse expired work before opening transport. A judge
+model_error now follows the existing judge_unavailable path and stops the phase;
+a completed negative or malformed verdict still fails closed under existing
+quality checks. No fallback, retry, ask resubmission, model pull/unload or routing
+change. Existing kept-question deferral rules are unchanged (both provider error
+categories already used the costly-deferral policy).
+
+Affected families: all permissioned generated answers and sentence verification;
+retrieval, prompts, permission filters, model/digest checks and release authority
+rechecks are unchanged. Provider failure may now withhold an entire answer whose
+earlier sentences passed, rather than continuing calls and returning a partial
+answer. This is deliberate fail-closed behavior.
+
+Verification: new tests were added before implementation. The first baseline
+(`20261101T185701154126Z`) is retained but superseded: the workspace venv was Python
+3.10 and the judge fixture lacked its explicit real-body/fake-transport marker.
+Production code was restored before the corrected baseline. The comparable pair
+is `20261101T185800205979Z` before (657 pass, 6 fail, 0 skip) and
+`20261101T185837294168Z` after (663 pass, 0 fail, 0 skip), across all ten catalog
+families, zero runner errors, identical catalog/fixtures/toolchain. Reports above
+retain the full paths and hashes. The two service-level provider-error regressions
+also failed before implementation. Tests exercise expired admission, cancellation
+during verification/response, client closure, a fresh successful independent call,
+and stopping after the first provider error; they do not prove server-side work
+stops on client disconnect.
+
+Real-model companion baseline and after result: unavailable/not run. This sprint
+explicitly prohibits live generation, and this 1.5.36 checkout has neither
+`docs/response-quality-live.md` nor `scripts/run_response_quality_live.py`.
+Synthetic transport checks are not live-model recovery, answer-quality or latency
+proof. Full live validation remains outstanding; no release readiness is claimed.
+No Rig D was run. Rollback scope: revert this commit's sharing lifecycle changes,
+associated tests/catalog entry and documentation; no database migration or runtime
+configuration rollback is required.
+
+Focused after-change validation: 230 passed in 43.20s across
+`test_shared_model_recovery.py`, `test_answer_quality_aq158.py`,
+`test_nr179_judge_reserve.py`, `test_answer_release.py`, and
+`test_kept_answers_off1.py`. The run emitted 1,620 warnings (including existing
+SQLite datetime-adapter deprecations), with no failures or skips. `git diff
+--check` passed. Test durations are synthetic runtime, not user answer latency.
+
+### Regression gate — RQ-2026-11-01-sharing-diagnostics — before
+
+- Recorded (UTC): 2026-11-01T19:07:02.677870+00:00
+- Note: Frozen diagnostic redaction and classification tests before implementation; no live generation
+- Report: [machine-readable results](response-quality-runs/20261101T190702677870Z-RQ-2026-11-01-sharing-diagnostics-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 109 pass / 30 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-sharing-diagnostics — after
+
+- Recorded (UTC): 2026-11-01T19:08:13.500152+00:00
+- Note: Fixed-field node diagnostics classify writer/judge phase failures without content; cancellation preserved; live cause remains unknown
+- Report: [machine-readable results](response-quality-runs/20261101T190813500152Z-RQ-2026-11-01-sharing-diagnostics-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | 140 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 109 pass / 30 fail / 0 skip | 139 pass / 0 fail / 0 skip |
+
+- Fixed: 30; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-False-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-False-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-True-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-True-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-False-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-False-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-True-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-True-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_judge_negative_verdict_is_not_provider_failure[synthetic-invalid-None-invalid_verdict]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_judge_negative_verdict_is_not_provider_failure[{"supported":"no"}-False-ok]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-verification-True]`
+
+### RQ-2026-11-01-sharing-diagnostics — node-only model failure attribution
+
+Follow-up to local sharing lifecycle commit
+`f7421b92ab638219fbe7f2cdeafe1384892dbc15`. Failure: the existing `model_error`
+receipt cannot distinguish provider timeout, error status or incomplete response,
+or identify whether verification or writer/judge generation consumed the time.
+The 1.5.36 recovery cause remains **unknown**. A read-only scan of existing node
+logs in the 2026-11-01 18:31–18:32 UTC recovery window found the sharing model_error
+but no corresponding timeout or HTTP-status classification. Only fixed-word
+counts were inspected/output; no private log excerpts were copied.
+
+Method: `answer_release` now emits `permissions answer model` node log events
+with exactly `role` (writer/judge), `phase` (verification/generation/admission),
+`outcome` (closed code), `http_status` (numeric or null), and `elapsed_ms`
+(monotonic phase duration). Structured handlers can read the `sharing_model`
+LogRecord field; ordinary logs contain the same fixed-field JSON. Verification's
+explicit exception causes are traversed at most eight links to classify the
+wrapped HTTP exception, without formatting any exception. Outcomes distinguish
+ok, timeout, http_status, transport_error, unreviewed_model, malformed_response,
+incomplete_response, invalid_verdict, deadline_expired, cancelled and
+unexpected_error. No exception strings, traceback, model content, prompt, URL,
+token, request ID or grant ID is logged. Diagnostic handler failures do not change
+answer decisions. Public receipts/refusals and quality-filter semantics remain
+unchanged. A valid negative judge verdict logs ok; a malformed verdict logs
+invalid_verdict but still returns None as before.
+
+Affected family: diagnostics for all permissioned writer/judge calls; no routing,
+model configuration, grant checks, prompts, admission gates or root deadlines
+changed. Cancellation retains its original behavior: outer deadline -> model_error,
+external task cancellation -> CancelledError, transport closed in either case.
+The diagnostic timeout covers verification or generation according to the active
+phase. It does not prove backend work stopped after disconnect or reveal the
+provider's internal cause. No shared admission/root-deadline files were edited.
+
+Verification: 30 new tests failed before production edits. Full ten-family gate
+baseline `20261101T190702677870Z-RQ-2026-11-01-sharing-diagnostics-before.json`:
+663 pass, 30 fail, zero skips/errors. The paired after report above records the
+same catalog and fixtures. Focused suite (shared_model_recovery,
+answer_quality_aq158, nr179_judge_reserve): 124 passed in 6.11s, 400 pre-existing
+SQLite warnings. Synthetic private canaries in URLs, bodies, prompts and exception
+messages are absent from complete captured LogRecords; no exception info is logged.
+Tests also verify unchanged PolicyError codes, negative/invalid judge verdicts,
+exactly one cancellation/timeout event per interrupted phase, and client closure.
+`git diff --check` passed.
+
+Live-model baseline and after: unavailable, explicitly prohibited in this sprint;
+1.5.36 also lacks the companion live runner/docs. These synthetic tests are not
+live recovery or actual-answer quality/latency proof. Active node untouched;
+not deployed, merged or released. Roll back this diagnostics commit independently
+of the lifecycle commit; no configuration or database migration is involved.
+
+Completed comparable after gate:
+`20261101T190813500152Z-RQ-2026-11-01-sharing-diagnostics-after.json` — 693 passed,
+0 failed, 0 skipped, 0 runner errors; PASS with 30 fixes and no regressions.
+
+### Regression gate — RQ-2026-11-01-resilience-integration — before
+
+- Recorded (UTC): 2026-11-01T19:11:42.178667+00:00
+- Note: Combined frozen regression fixtures against restored published 1.5.36 production paths; helper remains unwired. Integration baseline after independent development, not live traffic.
+- Report: [machine-readable results](response-quality-runs/20261101T191142178667Z-RQ-2026-11-01-resilience-integration-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 103 pass / 38 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-resilience-integration — after
+
+- Recorded (UTC): 2026-11-01T19:12:29.667903+00:00
+- Note: Combined verification deadlines, disconnect propagation, bounded sharing model phases, stop-on-judge-failure, and content-free diagnosis. Provider admission prototype remains excluded. Synthetic evidence only; no deployment or live recovery claim.
+- Report: [machine-readable results](response-quality-runs/20261101T191229667903Z-RQ-2026-11-01-resilience-integration-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 103 pass / 38 fail / 0 skip | 141 pass / 0 fail / 0 skip |
+
+- Fixed: 38; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[post-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[post-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[verify-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_deadline_cancels_inflight_closes_and_next_call_recovers[verify-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-False-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-False-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-True-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[generation-True-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-False-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-False-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-True-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_diagnostics_preserve_cancellation[verification-True-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_expired_call_never_opens_transport[False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_expired_call_never_opens_transport[True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_judge_negative_verdict_is_not_provider_failure[synthetic-invalid-None-invalid_verdict]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_judge_negative_verdict_is_not_provider_failure[{"supported":"no"}-False-ok]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[http_status-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[incomplete_response-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[malformed_response-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[timeout-verification-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-generation-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-generation-True]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-verification-False]`
+- fixes: `node::tests/permissions_v2/test_shared_model_recovery.py::tests.permissions_v2.test_shared_model_recovery::test_model_diagnostics_classify_without_content[transport_error-verification-True]`
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_cancelled_handler_signals_its_worker`
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_expiry_is_unavailable_not_a_heuristic_success_and_worker_finishes`
+
+### Regression gate — RQ-2026-11-01-review-startup — before
+
+- Recorded (UTC): 2026-11-01T19:46:02.264855+00:00
+- Note: Review regression fixtures: retain published slow verification successes; preserve budget-aware cold startup. Production unchanged from first combined candidate.
+- Report: [machine-readable results](response-quality-runs/20261101T194602264855Z-RQ-2026-11-01-review-startup-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 141 pass / 1 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-review-corrections — before
+
+- Recorded (UTC): 2026-11-01T19:47:21.059840+00:00
+- Note: Frozen review regressions before production fixes: slow-success default and validated remote termination reason. Earlier startup-only baseline retained, superseded by this expanded test inventory.
+- Report: [machine-readable results](response-quality-runs/20261101T194721059840Z-RQ-2026-11-01-review-corrections-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 143 pass / 3 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-budget-review — before
+
+- Recorded (UTC): 2026-11-01T19:48:49.502907+00:00
+- Note: DNS cancellation and bounded transport lifecycle tests added before implementation; no live traffic.
+- Report: [machine-readable results](response-quality-runs/20261101T194849502907Z-RQ-2026-11-01-budget-review-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 141 pass / 0 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-01-budget-review — after
+
+- Recorded (UTC): 2026-11-01T19:52:48.512439+00:00
+- Note: Bounded reusable HTTP loop/resolver ownership, default120, synthetic cancellation/recovery and policy-independent lifecycle tests; no live traffic.
+- Report: [machine-readable results](response-quality-runs/20261101T195248512439Z-RQ-2026-11-01-budget-review-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 140 pass / 0 fail / 0 skip | 140 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 141 pass / 0 fail / 0 skip | 141 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+### RQ-2026-11-01-budget-review — bounded reusable transport resources
+
+- Failure/cause: independent review of `b7290ca` reproduced an 80ms request taking 402ms with a fake 350ms native resolver. Per-request `asyncio.run()` waits for default-executor shutdown after cancelling HTTPX; native `getaddrinfo` is not cancellable. Repeating requests could retain many caller workers. Also, default60 would truncate previously successful 61–110s stress verifications per the coordinating review; this branch sets the authorized default120/max120 policy.
+- Method: replace per-request loop ownership with one lazy, owned stdlib SelectorEventLoop, at most eight active HTTP operations, and at most four native resolver submissions. No waiting queue. DNS permits survive HTTP cancellation until the actual native future completes. HTTP-operation slots survive caller cancellation until their coroutine cleanup completes. Saturation returns typed compute_busy. Isolated per-call HTTPX clients preserve credential/context separation; no change to endpoint selection or transmitted content. Checks before and after resolution prevent stale resolution results starting new work after known cancellation.
+- Lifecycle: `close_transport(timeout)` is an explicit hook, NOT wired into node/app shutdown in this narrow branch. It permanently refuses new work, signals existing budgets, observes cleanup boundedly, and keeps unresolved resources accounted for. No implicit replacement even when closed before first use. Root owns lifecycle integration if desired. Native DNS cannot be killed and may delay interpreter exit because the executor's exit hook joins native workers. A request can return while cleanup remains; resource counts are not GPU ownership/drain claims. Initial defaults 8 HTTP / 4 DNS are engineering bounds, not measured throughput/capacity. Initialized runtimes are not usable across fork.
+- Scope/families: availability of all budgeted verification and remote Engine question families. No ranking, retrieval, prompt, permission or evidence change. Production changes only `engine/request_budget.py` and new `engine/budget_transport.py`; root owns startup, generic Engine dispatch checks, reason propagation and policy docs.
+- Before: added five focused regressions before production edits. Targeted baseline: 14 passed / 5 failed (default policy, DNS caller return, three missing-lifecycle cases). Full frozen catalog baseline: 695 passed, zero skipped/errors, `20261101T194849502907Z-RQ-2026-11-01-budget-review-before.json`.
+- After: complete paired gate 695 passed, zero skipped/errors/regressions/missing tests, same catalog/fixtures/toolchain, `20261101T195248512439Z-RQ-2026-11-01-budget-review-after.json`. Expanded focused suite 79 passed (23 request-budget tests plus surrounding Engine/API/verification contracts), two existing Starlette deprecation warnings. Four follow-up lifecycle/policy tests were added after the initial focused baseline; this is expanded focused coverage, not a frozen-count paired comparison. The full catalog remained frozen. The transport fixture now handles synthetic GET `/api/tags`, preventing root's forthcoming restored startup path from launching real services during tests.
+- Synthetic coverage: stalled headers/trickling bodies; stalled DNS; explicit cancellation; twelve saturated offers with one retained resolver; eventual resolver recovery; repeated successful fake calls using the same native worker; cancellation-resistant HTTP cleanup retains its slot; context isolation; shutdown before dispatch; shutdown before first use; application event-loop-policy independence. Existing sync/remote interface and duration header tests pass.
+- Live companion: NOT RUN, explicitly prohibited by the sprint. No actual-answer-quality, model-latency, live DNS/provider recovery or GPU-drain claim. All network execution was loopback fixture HTTP; DNS was replaced with controlled synthetic functions. The borrowed test environment was read-only.
+- Deployment: dedicated `fix/budget-review` worktree from `b7290ca`, local commit only. No candidate production/test edits, active-node/service changes, deploy, release, model unload, grants, routines or Rig D. Integration with root startup/other review fixes remains to be tested on the combined candidate.
+- Rollback: revert budget transport module and request wrapper/default change together; no database migration. Reverting cannot terminate already-running native resolver or provider work. Preserve truthful outstanding-resource reporting during any shutdown/restart decision.
+
+### Regression gate — RQ-2026-11-01-review-corrections — after
+
+- Recorded (UTC): 2026-11-01T19:55:12.077692+00:00
+- Note: Reviewed integrated corrections: default120 preserves known slow success; bounded reusable HTTP/DNS runtime; budgeted cold startup; generic pre-inference expiry; narrow remote termination reasons. No live quality/capacity or provider-drain claim.
+- Report: [machine-readable results](response-quality-runs/20261101T195512077692Z-RQ-2026-11-01-review-corrections-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 143 pass / 3 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 3; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_default_budget_allows_previously_observed_slow_success`
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_remote_termination_reason_is_validated_and_preserved[cancelled]`
+- fixes: `node::tests/query/test_verification_deadline.py::tests.query.test_verification_deadline::test_remote_termination_reason_is_validated_and_preserved[deadline_exceeded]`

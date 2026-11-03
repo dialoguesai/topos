@@ -806,7 +806,8 @@ def _ensure_mcp_request_log_table(conn: sqlite3.Connection) -> None:
                         requester_id TEXT,
                         access_context TEXT,
                         verified_cls TEXT,
-                        verified_client_id TEXT
+                        verified_client_id TEXT,
+                        verification_outcome TEXT
                     )
                 """)
                 commit_connection(conn)
@@ -817,7 +818,7 @@ def _ensure_mcp_request_log_table(conn: sqlite3.Connection) -> None:
         cursor = conn.execute(f"PRAGMA table_info({MCP_REQUEST_LOG_TABLE})")
         columns = [row[1] for row in cursor.fetchall()]
         missing = [
-            col for col in ("source", "requester_id", "access_context", "verified_cls", "verified_client_id") if col not in columns
+            col for col in ("source", "requester_id", "access_context", "verified_cls", "verified_client_id", "verification_outcome") if col not in columns
         ]
         if missing:
             with with_db_write():
@@ -839,6 +840,7 @@ def record_mcp_request(
     uma_resource_id: Optional[str] = None,
     verified_cls: Optional[str] = None,
     verified_client_id: Optional[str] = None,
+    verification_outcome: Optional[str] = None,
 ) -> None:
     """
     Record one MCP tool invocation in the engine's DB.
@@ -851,6 +853,10 @@ def record_mcp_request(
     if not conn or not tool_name:
         return
     try:
+        from ..dashboard.verification import OUTCOMES
+
+        if tool_name != "verify_claim" or verification_outcome not in OUTCOMES:
+            verification_outcome = None
         _ensure_mcp_request_log_table(conn)
         requested_at = datetime.now(timezone.utc).isoformat()
         # Principal fabric P2: record the CHANNEL-verified principal next to the
@@ -887,9 +893,9 @@ def record_mcp_request(
             access_ctx = ROUTINE_ACCESS_CONTEXT
         with with_db_write():
             conn.execute(
-                f"INSERT INTO {MCP_REQUEST_LOG_TABLE} (tool_name, requested_at, source, requester_id, access_context, verified_cls, verified_client_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO {MCP_REQUEST_LOG_TABLE} (tool_name, requested_at, source, requester_id, access_context, verified_cls, verified_client_id, verification_outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (tool_name, requested_at, source or None, requester_id or None, access_ctx,
-                 verified_cls, verified_client_id),
+                 verified_cls, verified_client_id, verification_outcome),
             )
             commit_connection(conn)
         if is_routine_mcp_source(source) and resource_owner_user_id:

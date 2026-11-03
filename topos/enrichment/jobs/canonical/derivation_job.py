@@ -284,8 +284,37 @@ def run_derivation_batch(
             logger.warning("derivation deferred: verifier %s unavailable (%s)", vmodel, exc)
             return 0
 
+    # Topos Facts (owner opt-in under Node functions → Facts extraction): the packs it
+    # knows skip the LLM call; ROUTED_TO_LLM and unknown packs keep `model`. A pick that
+    # cannot load defers the batch, like an unavailable verifier: nothing is marked done.
+    from ....config.facts_llm import facts_classifier_version
+    tf_model = None
+    if facts_classifier_version(conn):
+        from ....features.derivation import topos_facts as _tf
+        try:
+            tf_model = _tf.load()
+        except Exception as exc:  # noqa: BLE001
+            st["deferred"] = f"topos_facts_unavailable: {exc}"[:120]
+            logger.warning("derivation deferred: Topos Facts unavailable (%s)", exc)
+            return 0
+
     filters = {pid: PackPrefilter(pk) for pid, pk in all_packs.items()}
     writer = DerivationWriter(conn, model=model)
+    writers = {model: writer}
+
+    def pack_raw(pack, rec, mode):
+        """(raw output, extract model) for one record and pack: Topos Facts or the LLM."""
+        if tf_model is not None and _tf.routes_to_classifier(pack.pack, tf_model):
+            return _tf.raw_output(tf_model, pack.pack, rec["text"]), _tf.MODEL_ID
+        raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec)),
+                  pack_id=pack.pack, mode=mode)
+        _bump_yield(conn, pack.pack, llm_calls=1)
+        return raw, model
+
+    def writer_for(extract_model):
+        if extract_model not in writers:
+            writers[extract_model] = DerivationWriter(conn, model=extract_model)
+        return writers[extract_model]
     posture_for = make_posture_resolver(conn)
     retired = retire_role_skipped_progress(conn, all_packs, posture_for)
     if retired:
@@ -357,9 +386,7 @@ def run_derivation_batch(
                     conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
                 continue
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec)),
-                          pack_id=pack.pack, mode="ingest")
-                _bump_yield(conn, pid, llm_calls=1)
+                raw, used = pack_raw(pack, rec, "ingest")
             except Exception as exc:  # noqa: BLE001
                 st["llm_errors"] = st.get("llm_errors", 0) + 1
                 logger.debug("derivation llm error on %s: %s", key, exc)
@@ -372,10 +399,10 @@ def run_derivation_batch(
                 st[f"v_{a.get('verifier_status')}"] = st.get(f"v_{a.get('verifier_status')}", 0) + 1
                 if a.get("verifier_status") == "rejected":
                     _ledger_write(conn, stage="ingest", pack=pack, rec=rec, a=a,
-                                  model=model, vmodel=vmodel)
+                                  model=used, vmodel=vmodel)
                     continue
                 _bump_yield(conn, pid, accepted=1)
-                out = writer.assert_pack_fact(
+                out = writer_for(used).assert_pack_fact(
                     pack=pack, predicate=a["predicate"], subject_entity_id=owner,
                     value=a["value"], actor_role=rec["role"],
                     source_refs=[{"table": rec["table"], "record_id": rec["record_id"],
@@ -390,13 +417,13 @@ def run_derivation_batch(
                     written += 1
                     _bump_yield(conn, pid, written=1)
                 _ledger_write(conn, stage="ingest", pack=pack, rec=rec, a=a,
-                              model=model, vmodel=vmodel,
+                              model=used, vmodel=vmodel,
                               written_id=out.get("object_id") if stored else None)
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
         conn.commit()
 
-    _drip_catchup(conn, packs=packs, filters=filters, llm=llm, judge=judge,
-                  writer=writer, owner=owner, done=done, st=st, cancel=cancel,
+    _drip_catchup(conn, packs=packs, filters=filters, pack_raw=pack_raw, judge=judge,
+                  writer_for=writer_for, owner=owner, done=done, st=st, cancel=cancel,
                   posture_for=posture_for)
 
     _self_gate(conn, all_packs=all_packs, enabled=set(packs), filters=filters,
@@ -407,7 +434,10 @@ def run_derivation_batch(
         mark_pack_run(conn, pid, pack.version)
     conn.commit()
     st["written"] = written
-    st.update({f"w_{k}": v for k, v in writer.stats.items() if v})
+    for w in writers.values():
+        for k, v in w.stats.items():
+            if v:
+                st[f"w_{k}"] = st.get(f"w_{k}", 0) + v
     return written
 
 
@@ -525,16 +555,13 @@ def _iter_history(conn, limit=2000, posture_for=None):
     return out
 
 
-def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, cancel,
+def _drip_catchup(conn, *, packs, filters, pack_raw, judge, writer_for, owner, done, st, cancel,
                   posture_for=None):
     """Process up to CATCHUP_PER_BATCH unprocessed HISTORY (record, pack) pairs
     per batch. Newest-first: recent history answers queries soonest."""
     if not packs:
         return
-    from ....features.derivation.template import build_prompt, parse_output
-    from ....features.facts.llm_extract import _resolved_extraction_model
-    from ....config.settings import settings as _settings
-    model = _resolved_extraction_model(_settings, conn)
+    from ....features.derivation.template import parse_output
     budget = CATCHUP_PER_BATCH
     for rec in _iter_history(conn, posture_for=posture_for):
         if budget <= 0 or (cancel is not None and cancel.is_set()):
@@ -549,9 +576,8 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
                 continue
             budget -= 1
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec)),
-                          pack_id=pack.pack, mode="catchup")
-                _bump_yield(conn, pid, llm_calls=1, prefilter_hits=1)
+                raw, used = pack_raw(pack, rec, "catchup")
+                _bump_yield(conn, pid, prefilter_hits=1)
             except Exception:  # noqa: BLE001
                 st["llm_errors"] = st.get("llm_errors", 0) + 1
                 continue
@@ -561,10 +587,10 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
                 a = judge(pack, rec, a, "catchup")
                 if a.get("verifier_status") == "rejected":
                     _ledger_write(conn, stage="catchup", pack=pack, rec=rec, a=a,
-                                  model=model, vmodel="(job)", )
+                                  model=used, vmodel="(job)", )
                     continue
                 _bump_yield(conn, pid, accepted=1)
-                out = writer.assert_pack_fact(
+                out = writer_for(used).assert_pack_fact(
                     pack=pack, predicate=a["predicate"], subject_entity_id=owner,
                     value=a["value"], actor_role=rec["role"],
                     source_refs=[{"table": rec["table"], "record_id": rec["record_id"]}],
@@ -577,7 +603,7 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
                     _bump_yield(conn, pid, written=1)
                     st["catchup_written"] = st.get("catchup_written", 0) + 1
                 _ledger_write(conn, stage="catchup", pack=pack, rec=rec, a=a,
-                              model=model, vmodel="(job)",
+                              model=used, vmodel="(job)",
                               written_id=out.get("object_id") if stored else None)
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
             done.add(key)
