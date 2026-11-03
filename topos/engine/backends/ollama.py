@@ -10,6 +10,7 @@ import urllib.request
 from typing import Any, Callable, Dict, List, Optional
 
 from ..overload import ComputeUnavailable, provider_unavailable
+from ... import local_serving
 from .generative_prompts import build_generative_prompt
 from .generative_response import parse_generative_response
 
@@ -484,45 +485,47 @@ class OllamaAdapter:
             options["num_ctx"] = num_ctx
         if options:
             body["options"] = options
-        req = urllib.request.Request(
-            f"{self._base_url}/api/generate",
-            data=json.dumps(body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            data = _read_json(req, timeout=timeout)
-            check_budget()
-            prompt_tokens = int(data.get("prompt_eval_count") or 0)
-            completion_tokens = int(data.get("eval_count") or 0)
-            total_tokens = prompt_tokens + completion_tokens
-            from topos.services.llm.openai import _ollama_timings
-
-            timings = _ollama_timings(data)
-            return {
-                "text": data.get("response", ""),
-                "usage": {
-                    "prompt_tokens": max(0, prompt_tokens),
-                    "completion_tokens": max(0, completion_tokens),
-                    "total_tokens": max(0, total_tokens),
-                    **({"timings": timings} if timings else {}),
-                },
-                **({"timings": timings} if timings else {}),
-            }
-        except urllib.error.HTTPError as e:
-            # Include the response body: Ollama puts the actionable message
-            # there (e.g. '"x" does not support disabling thinking') and the
-            # bare status line hides it.
+        # One context per model, counted in flight for the host watchdog (topos/local_serving.py).
+        with local_serving.request(body) as body:
+            req = urllib.request.Request(
+                f"{self._base_url}/api/generate",
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
             try:
-                detail = e.read(800).decode("utf-8", "replace")
-            except Exception:  # noqa: BLE001
-                detail = ""
-            unavailable = provider_unavailable(e.code, detail, (e.headers or {}).get("Retry-After"))
-            if unavailable is not None:
-                raise unavailable from e
-            raise RuntimeError(f"Ollama request failed: {e} {detail}".rstrip()) from e
-        except urllib.error.URLError as e:
-            raise RuntimeError(f"Ollama request failed: {e}") from e
+                data = _read_json(req, timeout=timeout)
+                check_budget()
+                prompt_tokens = int(data.get("prompt_eval_count") or 0)
+                completion_tokens = int(data.get("eval_count") or 0)
+                total_tokens = prompt_tokens + completion_tokens
+                from topos.services.llm.openai import _ollama_timings
+
+                timings = _ollama_timings(data)
+                return {
+                    "text": data.get("response", ""),
+                    "usage": {
+                        "prompt_tokens": max(0, prompt_tokens),
+                        "completion_tokens": max(0, completion_tokens),
+                        "total_tokens": max(0, total_tokens),
+                        **({"timings": timings} if timings else {}),
+                    },
+                    **({"timings": timings} if timings else {}),
+                }
+            except urllib.error.HTTPError as e:
+                # Include the response body: Ollama puts the actionable message
+                # there (e.g. '"x" does not support disabling thinking') and the
+                # bare status line hides it.
+                try:
+                    detail = e.read(800).decode("utf-8", "replace")
+                except Exception:  # noqa: BLE001
+                    detail = ""
+                unavailable = provider_unavailable(e.code, detail, (e.headers or {}).get("Retry-After"))
+                if unavailable is not None:
+                    raise unavailable from e
+                raise RuntimeError(f"Ollama request failed: {e} {detail}".rstrip()) from e
+            except urllib.error.URLError as e:
+                raise RuntimeError(f"Ollama request failed: {e}") from e
 
     def unload_model(self, model_name: str) -> None:
         """Unload model from memory by sending a minimal generate with keep_alive=0."""

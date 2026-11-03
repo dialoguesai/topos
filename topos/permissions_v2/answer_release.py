@@ -151,6 +151,7 @@ def receipt_reason(code: str) -> str:
 # final PolicyError with the `Unresolved`'s own code (a bounded machine word, never its text). Only this family: any
 # other exception keeps its own path, so a real bug still shows as one.
 from .shadow_labeler_local import Unresolved  # noqa: E402
+from .. import local_serving
 
 
 def unresolved_refusal(exc: Unresolved) -> PolicyError:
@@ -1150,7 +1151,7 @@ async def _generate_local(prompt, *, deadline: int):
                 diagnostic.finish("deadline_expired")
                 raise PolicyError("model_error")
             try:
-                response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
+                response = await local_serving.post_async(client.client, client.base_url + "/api/chat", timeout=remaining, json={
                     "model": MODEL, "stream": False, "think": False,
                     # The request context (`answer_num_ctx`): 8K for up to sixteen clipped items, 12K for a v4 job's more.
                     "options": {"temperature": 0.2, "num_predict": answer_num_predict(prompt),
@@ -1332,7 +1333,7 @@ async def _judge_local(sentence: str, items, *, deadline: int, question: str | N
                 raise PolicyError("model_error")
             version = judge_template()
             try:
-                response = await client.client.post(client.base_url + "/api/chat", timeout=remaining, json={
+                response = await local_serving.post_async(client.client, client.base_url + "/api/chat", timeout=remaining, json={
                     "model": MODEL, "stream": False, "think": False, "format": JUDGE_FORMATS[version],
                     "options": {"temperature": 0, "num_predict": 24, "num_ctx": 8192},
                     "messages": judge_messages(sentence, items, version, question, context)})

@@ -48,6 +48,7 @@ from pathlib import Path
 
 from . import switches
 from .canonical import PolicyError, digest
+from .. import local_serving
 
 FLAG = switches.ENTAILMENT_GROUNDING.name
 # The model judge is a second, separate switch (OD-38 29 Sep: "keep the model judge off"). With only FLAG
@@ -798,7 +799,7 @@ class LocalEntailmentJudge:
 
         yield_unless_the_owners()
         try:
-            response = self._http().post(self.base_url + "/api/chat", timeout=self.TIMEOUT_SECONDS, json={
+            response = local_serving.post(self._http(), self.base_url + "/api/chat", timeout=self.TIMEOUT_SECONDS, json={
                 "model": MODEL, "stream": False, "think": False, "format": "json",
                 "options": {"temperature": 0, "seed": 0},
                 "messages": [{"role": "system", "content": PROMPT}, {"role": "user", "content": user}]})

@@ -20,6 +20,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
+from .. import local_serving
 from ..core import state
 from ..core.logging import get_log_file_path
 from ..runtime_update import (
@@ -130,6 +131,8 @@ async def shell_status() -> dict:
         # or debouncing graph is not yet rebuilding.
         "graph_rebuild": {"running": graph_rebuild_running()},
         "routine_run_policy": run_quota_policy(),
+        # How the node serves its local models: one context, and the watchdog's unloads (topos/local_serving.py).
+        "local_serving": local_serving.status(),
         # Additive, for `topos-node status` / `doctor` over the owner socket and the
         # plugin's SessionStart hook (CONTRACTS §4): the control-plane link as a word,
         # who supervises this process, whether the owner key is on disk (DIGEST J6),
