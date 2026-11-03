@@ -10,6 +10,15 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **A local model whose runner keeps growing is unloaded when idle, so it reloads at its load size.** The 9B runs
+  on the host's MLX runner, which keeps a prefix cache. On 3 Nov it grew from 8.4 GiB at load to 13.5 GiB (14.9 at
+  peak) in 35 minutes of stress while serving at 8,192, and the cache matched about 5 tokens per prompt. The host
+  sizes a model only when it loads it, so it kept loading the others into memory the 9B then grew into, and macOS
+  swap went from 0 to 13.5 GiB. The node's watchdog now reads the host's model sizes every 10 s. A model that has
+  grown 2 GiB past the smallest size reported for it at its context, with no node request on it, is unloaded, and
+  new requests to it wait the moment that takes. The decision uses only the sizes the host reports. Shell status
+  adds `recycles`, `last_recycle` and `recycle_growth_mib`. `TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB` sets the limit
+  (2,048), and 0 turns it off.
 - **Each local model is loaded only as large as its requests need, so the three fit together with less memory
   free.** 1.5.40 sent every model 32,768 of context. Before a load the host predicts the model's memory at that
   context (the 27B 16.4 GiB, llama3.2 6.1) and unloads the others when it does not fit what is free. On 3 Nov,

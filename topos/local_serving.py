@@ -65,6 +65,20 @@ Hence the steps in rule 1, decided per request from its own prompt and reply len
 speed: llama3.2 stays at 8,192 (2.9 GiB instead of 5.6, measured by loading it) and the 27B at 16,384 unless a request
 needs more.
 
+The steps' own run (3 Nov, after a reboot, the same 2 GiB app open) had no evictions and no switch holds, yet macOS
+swap went from 0 to 13.5 GiB in 20 minutes, the 27B's runs slowed (186 s at most, 138 before) and home chat's median
+reached 233 s. The host's log showed where the memory went. The 9B runs on the host's MLX runner, which keeps a prefix
+cache. That cache grew the runner from 8.4 GiB at load to 13.5 GiB (14.9 at peak) while it served at 8,192, and it
+matched about 5 tokens per prompt, so it saved almost nothing. The runner is not bounded by ``num_ctx``, and the
+host predicts a model's memory only when it loads one, so it kept loading the others into memory the 9B then grew
+into. ``/api/ps`` does report the grown size (12.7 GB mid-run). So, 5:
+
+5. ``grown_models``, run by ``watchdog`` every ``GROWTH_PERIOD``: a loaded model that has grown ``GROWTH_LIMIT`` past
+   the smallest size the host reported for it at its context, with no node request sent to it, is unloaded. Its next
+   request reloads it at its load size (the 9B in about 8 s). New requests to it are held for the moment the unload
+   takes. This reads only the sizes the host reports; a llama-server model never grows, so only a growing runner
+   trips it. ``TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB`` sets the limit (2,048), and 0 turns it off.
+
 This module counts requests and sends unloads. It reads no prompt and logs no content, only model names, contexts,
 counts and seconds. With the node's opt-in diagnostics on (docs/OBSERVABILITY.md), each request is also a
 ``topos.local_model.request`` span with the same: model, context, whether it is background, how long the node held
@@ -145,6 +159,12 @@ PERIOD_SECONDS = 2.0
 COOLDOWN_SECONDS = 15.0
 #: A /api/ps reading older than this is not trusted to say what is loaded: nothing is held on it.
 _LOADED_FRESH_SECONDS = 3 * PERIOD_SECONDS
+#: A loaded model that has grown this far past its load size is unloaded once no node request is on it. 3 Nov: the
+#: 9B's runner grew 5.1 GiB in 35 minutes of load, so about one reload of 8 s every 14 minutes. 0: never.
+GROWTH_LIMIT = _env_int("TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB", 2048) * 2**20
+#: How often the watchdog reads the host's model sizes while GROWTH_LIMIT is on (one /api/ps; the host's own app
+#: reads it every 2 s).
+GROWTH_PERIOD = 10.0
 #: Characters per token when estimating whether a prompt needs more than CONTEXT. Low on purpose (JSON, names and
 #: other languages run below 4), so a prompt near the line keeps the context its caller asked for.
 _CHARS_PER_TOKEN = 3
@@ -161,11 +181,18 @@ _released_at: Dict[str, float] = {}
 _loaded: Tuple[List[Tuple[str, Optional[int]]], float] = ([], float("-inf"))
 #: Each model's context step so far: it only moves up.
 _contexts: Dict[str, int] = {}
+#: The smallest size the host has reported for each loaded (model, context), in bytes: its load size.
+_sizes: Dict[Tuple[str, Optional[int]], int] = {}
+#: Models being unloaded for growth: nothing new is sent to them until the unload returns.
+_recycling: set = set()
+#: When the watchdog last read the host's sizes (monotonic).
+_sized_at = float("-inf")
 #: lowered_context: requests that asked for more than CONTEXT and did not need it (home chat's 81,920).
 #: raised_context: times a model moved up a step. switch_holds: requests held so a request waiting for another model
-#: could be served; held_s_max their longest.
+#: could be served; held_s_max their longest. recycles: models unloaded for growing past GROWTH_LIMIT.
 _stats: Dict[str, Any] = {"releases": 0, "last_release": None, "lowered_context": 0, "kept_larger_context": 0,
-                          "raised_context": 0, "switch_holds": 0, "held_s_max": 0.0}
+                          "raised_context": 0, "switch_holds": 0, "held_s_max": 0.0, "recycles": 0,
+                          "last_recycle": None}
 
 
 def model_key(name: str) -> str:
@@ -303,7 +330,7 @@ def _admit(token: int, now: float, limit: Optional[float]) -> Tuple[bool, bool]:
     held = now - arrived
     if SLOTS <= 0 or (limit is not None and held >= limit) or held >= SLOT_LIMIT:
         return True, False
-    if sum(1 for m, _, _, _ in _in_flight.values() if m == model) >= SLOTS:
+    if model in _recycling or sum(1 for m, _, _, _ in _in_flight.values() if m == model) >= SLOTS:
         return False, False
     # One model's requests go in priority order, each priority by arrival.
     if any(m == model and (p, a, t) < (priority, arrived, token) for t, (m, p, a) in _held.items() if t != token):
@@ -504,11 +531,71 @@ def release_blocked(loaded: Iterable[Dict[str, Any]], requests: Iterable[Tuple[s
     return idle, max(waiting)
 
 
+def _size_key(entry: Dict[str, Any]) -> Tuple[str, Optional[int]]:
+    context = entry.get("context_length")
+    return model_key(str(entry.get("name") or entry.get("model") or "")), int(context) if context else None
+
+
+def grown_models(loaded: Iterable[Dict[str, Any]], sizes: Dict[Tuple[str, Optional[int]], int], busy: Iterable[str],
+                 *, limit: int = None) -> List[Tuple[str, int]]:
+    """The loaded models to unload for growth, each with how far it grew, in bytes. Updates ``sizes`` in place.
+
+    ``loaded`` is the host's ``/api/ps`` list; ``sizes`` the smallest size seen for each (model, context) while
+    loaded, which is its load size; ``busy`` the models a node request has been sent to. A (model, context) the host no
+    longer lists is forgotten, so a reload starts from its new size. A model reloaded at another context is another
+    entry, so moving up a step is never read as growth."""
+    limit = GROWTH_LIMIT if limit is None else limit
+    loaded, busy = list(loaded), set(busy)
+    present = set()
+    grown = []
+    for entry in loaded:
+        size = entry.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            continue
+        key = _size_key(entry)
+        present.add(key)
+        base = sizes[key] = min(size, sizes.get(key, size))
+        if limit > 0 and size - base >= limit and key[0] not in busy:
+            grown.append((str(entry.get("name") or entry.get("model") or ""), size - base))
+    for key in [k for k in sizes if k not in present]:
+        del sizes[key]
+    return grown
+
+
+async def _recycle_grown(client, base_url: str, loaded: List[Dict[str, Any]], now: float) -> List[str]:
+    """Unload each model ``grown_models`` names. The choice and the hold on new requests are made under one lock, so
+    no node request is sent to a model between the check that it is idle and its unload."""
+    with _lock:
+        grown = grown_models(loaded, _sizes, (m for m, _, _, _ in _in_flight.values()))
+        _recycling.update(model_key(name) for name, _ in grown)
+    names = []
+    for name, grew in grown:
+        key = model_key(name)
+        try:
+            await client.post(base_url + "/api/generate", json={"model": name, "keep_alive": 0}, timeout=10)
+        finally:
+            with _lock:
+                _recycling.discard(key)
+                _released_at[key] = now
+        with _lock:
+            for size_key in [k for k in _sizes if k[0] == key]:
+                del _sizes[size_key]
+            _stats["recycles"] += 1
+            _stats["last_recycle"] = {"model": name, "at": time.time(), "grew_mib": grew // 2**20}
+        names.append(name)
+        _measure("counter", "topos.local_model.recycles", 1, "{unload}", {"topos.local_model.name": key})
+        _log.info("local model %s grew %.1f GiB past its load size; unloaded so it reloads at that size", key,
+                  grew / 2**30)
+    return names
+
+
 async def _check_once(client, base_url: str) -> List[str]:
-    global _loaded
+    global _loaded, _sized_at
     now = time.monotonic()
     requests = in_flight()
-    if not any(now - started >= SWITCH_AFTER for _, _, started in requests):
+    blocked = any(now - started >= SWITCH_AFTER for _, _, started in requests)
+    sizing = GROWTH_LIMIT > 0 and now - _sized_at >= GROWTH_PERIOD
+    if not blocked and not sizing:
         return []
     response = await client.get(base_url + "/api/ps", timeout=5)
     loaded = (response.json() or {}).get("models") or []
@@ -517,9 +604,14 @@ async def _check_once(client, base_url: str) -> List[str]:
         _loaded = ([(model_key(str(m.get("name") or m.get("model") or "")), m.get("context_length")) for m in loaded],
                    now)
         released_at = dict(_released_at)
-    if WAIT_SECONDS <= 0:
-        return []
-    names, waited = release_blocked(loaded, in_flight(), now, released_at=released_at)
+    recycled = []
+    if GROWTH_LIMIT > 0:
+        _sized_at = now
+        recycled = await _recycle_grown(client, base_url, loaded, now)
+    if WAIT_SECONDS <= 0 or not blocked:
+        return recycled
+    names, waited = release_blocked([m for m in loaded if str(m.get("name") or m.get("model") or "") not in recycled],
+                                    in_flight(), now, released_at=released_at)
     for name in names:
         await client.post(base_url + "/api/generate", json={"model": name, "keep_alive": 0}, timeout=10)
         with _lock:
@@ -528,12 +620,13 @@ async def _check_once(client, base_url: str) -> List[str]:
             _stats["last_release"] = {"model": name, "at": time.time(), "waited_s": round(waited, 1)}
         _measure("counter", "topos.local_model.releases", 1, "{unload}", {"topos.local_model.name": model_key(name)})
         _log.warning("local model host blocked %.0f s behind an idle model; unloaded %s", waited, name)
-    return names
+    return recycled + names
 
 
 async def watchdog(base_url: str, *, period: float = PERIOD_SECONDS) -> None:
-    """Run ``release_blocked`` against the host every ``period`` seconds, for as long as the node runs."""
-    if WAIT_SECONDS <= 0 and SLOTS <= 0:
+    """Run ``release_blocked`` and ``grown_models`` against the host every ``period`` seconds, for as long as the
+    node runs."""
+    if WAIT_SECONDS <= 0 and SLOTS <= 0 and GROWTH_LIMIT <= 0:
         return
     import httpx
 
@@ -562,6 +655,7 @@ def status() -> Dict[str, Any]:
         "contexts": contexts,
         "release_after_s": WAIT_SECONDS or None,
         "slots": SLOTS or None,
+        "recycle_growth_mib": GROWTH_LIMIT // 2**20 or None,
         "in_flight": len(requests),
         "longest_in_flight_s": round(max((now - s for _, _, s, _ in requests), default=0.0), 1),
         "held": len(held),
