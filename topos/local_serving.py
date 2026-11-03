@@ -17,10 +17,13 @@ Measured on the owner's node on 2 Nov (1.5.39, Ollama 0.40.13, a 36 GiB host wit
 
 So two rules, each with its own switch:
 
-1. ``prepare`` / ``request``: every local request is sent at the one serving context, ``CONTEXT`` (32,768 on a host
-   of 32 GiB or more, see ``_default_context``; ``TOPOS_LOCAL_MODEL_CONTEXT``, where 0 leaves each caller's own). A request that asked for more keeps it, but
-   only when its prompt and output need more. A larger context never truncates more, so raising a caller's 4,096 or
-   8,192 changes no reply. It only stops the reload.
+1. ``prepare`` / ``request``: every local request to a model is sent at that model's one context, whatever its caller
+   asked: the first of ``STEPS`` (8,192, 16,384) or ``CONTEXT`` (32,768 on a host of 32 GiB or more, see
+   ``_default_context``; ``TOPOS_LOCAL_MODEL_CONTEXT``, where 0 leaves each caller's own) that fits the prompt and
+   reply. A model moves up a step when a request needs more and never down while the node runs, so it is reloaded at
+   most once per step. A request that asked for more than ``CONTEXT`` keeps it, but only when its prompt and reply
+   need more. A context that fits never truncates, so a caller's 4,096 or 81,920 changes no reply. It only stops the
+   reload.
 2. ``release_blocked``, run by ``watchdog``: once a node request has waited ``WAIT_SECONDS`` for a model the host has
    not loaded, unload each loaded model that no node request is using. That is the eviction the host's scheduler
    failed to make. A model a node request is generating on is never unloaded. A client outside the node (an app
@@ -51,6 +54,16 @@ watches arrive, and a live chat waited behind them up to 120 s. Then the 120 s l
 anyway, where they queue oldest first again. So, 4: priority within a model (``LIVE`` for the owner's own and answers,
 ``UNWATCHED`` for generation nobody watches stream, marked with ``unwatched``; ``BACKGROUND`` for work
 ``answer_gate.background_work`` marks), and a slot hold that lasts until the caller's own deadline.
+
+The released 1.5.40 run of 3 Nov, with about 2 GiB of another app open, showed what one context for every model
+costs. Before loading a model the host predicts its memory at the context asked for (the 27B 16.4 GiB, llama3.2 6.1
+at 32,768) and unloads others when that does not fit what is free. All three models had fit together; with 2 GiB less
+free they no longer did, and the host made 10 evictions in 15 minutes, each switch 30 to 46 s. Yet, by the host's
+log that day, llama3.2's prompts never passed 1,560 tokens and the 27B's never 8,981 (the log does not name the model,
+so each request was assigned to one by its reading speed on that host: an estimate, used only to size the steps).
+Hence the steps in rule 1, decided per request from its own prompt and reply length and its model's name, never from
+speed: llama3.2 stays at 8,192 (2.9 GiB instead of 5.6, measured by loading it) and the 27B at 16,384 unless a request
+needs more.
 
 This module counts requests and sends unloads. It reads no prompt and logs no content, only model names, contexts,
 counts and seconds. With the node's opt-in diagnostics on (docs/OBSERVABILITY.md), each request is also a
@@ -94,8 +107,16 @@ def _default_context() -> int:
     return 32768 if memory >= 32 * 2**30 else 0
 
 
-#: The one context every local request is served at. 0: callers keep their own.
+#: The largest context a local request is served at, unless its prompt needs more. 0: callers keep their own.
 CONTEXT = _env_int("TOPOS_LOCAL_MODEL_CONTEXT", _default_context())
+#: The contexts a model moves up through, below CONTEXT. A model starts at the first that fits its request and moves
+#: up only when a request needs more, never down while the node runs, so it is reloaded at most once per step and
+#: never under itself. Measured on 3 Nov: llama3.2 takes 2.9 GiB at 8,192 and 5.6 at 32,768, and the host predicts the
+#: 27B at 16.4 GiB at 32,768 (about 0.2 GiB less per 1,000 tokens). 0 in TOPOS_LOCAL_MODEL_CONTEXT_STEPS: every model
+#: at CONTEXT.
+STEPS = (8192, 16384) if _env_int("TOPOS_LOCAL_MODEL_CONTEXT_STEPS", 1) else ()
+#: Tokens kept for the reply when a request does not say how long it may be (home chat's ran to 1,200 on 3 Nov).
+_REPLY_TOKENS = 2048
 #: A node request that has waited this long for a model the host has not loaded is blocked: the watchdog unloads the
 #: idle models in its way. 0: no watchdog. A load the host makes on its own takes 3 to 22 s and shows in /api/ps
 #: only once it is done, so a shorter wait would unload a model the host was about to keep beside the new one.
@@ -138,10 +159,13 @@ _unwatched: contextvars.ContextVar = contextvars.ContextVar("a_local_request_nob
 _released_at: Dict[str, float] = {}
 #: The host's loaded models as the watchdog last read them, and when: [(model, context)], monotonic.
 _loaded: Tuple[List[Tuple[str, Optional[int]]], float] = ([], float("-inf"))
+#: Each model's context step so far: it only moves up.
+_contexts: Dict[str, int] = {}
 #: lowered_context: requests that asked for more than CONTEXT and did not need it (home chat's 81,920).
-#: switch_holds: requests held so a request waiting for another model could be served; held_s_max their longest.
+#: raised_context: times a model moved up a step. switch_holds: requests held so a request waiting for another model
+#: could be served; held_s_max their longest.
 _stats: Dict[str, Any] = {"releases": 0, "last_release": None, "lowered_context": 0, "kept_larger_context": 0,
-                          "switch_holds": 0, "held_s_max": 0.0}
+                          "raised_context": 0, "switch_holds": 0, "held_s_max": 0.0}
 
 
 def model_key(name: str) -> str:
@@ -158,14 +182,28 @@ def _prompt_chars(body: Dict[str, Any]) -> int:
     return chars
 
 
-def serving_context(requested: Optional[int], *, prompt_chars: int, num_predict: Optional[int]) -> Optional[int]:
-    """The context to send: CONTEXT, unless the caller asked for more and its prompt and output need more."""
+def serving_context(requested: Optional[int], *, prompt_chars: int, num_predict: Optional[int],
+                    model: Optional[str] = None) -> Optional[int]:
+    """The context to send: the model's step, moved up to the first that fits this request's prompt and reply; or
+    the caller's own, when it asked for more than CONTEXT and its prompt and reply need more. With no model named,
+    CONTEXT."""
     if CONTEXT <= 0:
         return requested
-    need = prompt_chars // _CHARS_PER_TOKEN + int(num_predict or 0)
+    need = prompt_chars // _CHARS_PER_TOKEN + int(num_predict or _REPLY_TOKENS)
     if requested and requested > CONTEXT and need > CONTEXT:
         return int(requested)
-    return CONTEXT
+    if not model:
+        return CONTEXT
+    step = next((s for s in STEPS if need <= s < CONTEXT), CONTEXT)
+    key = model_key(model)
+    with _lock:
+        current = _contexts.get(key)
+        if current is None or step > current:
+            _contexts[key] = step
+            if current is not None:
+                _stats["raised_context"] += 1
+                _log.info("local model %s moves up to context %d (was %d)", key, step, current)
+        return _contexts[key]
 
 
 def prepare(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -175,7 +213,8 @@ def prepare(body: Dict[str, Any]) -> Dict[str, Any]:
         return body
     options = dict(body.get("options") or {})
     requested = options.get("num_ctx")
-    context = serving_context(requested, prompt_chars=_prompt_chars(body), num_predict=options.get("num_predict"))
+    context = serving_context(requested, prompt_chars=_prompt_chars(body), num_predict=options.get("num_predict"),
+                              model=body.get("model"))
     if requested and requested > CONTEXT:
         with _lock:
             _stats["kept_larger_context" if context == requested else "lowered_context"] += 1
@@ -517,8 +556,10 @@ def status() -> Dict[str, Any]:
         requests = list(_in_flight.values())
         held = list(_held.values())
         stats = dict(_stats)
+        contexts = dict(_contexts)
     return {
         "context": CONTEXT or None,
+        "contexts": contexts,
         "release_after_s": WAIT_SECONDS or None,
         "slots": SLOTS or None,
         "in_flight": len(requests),
