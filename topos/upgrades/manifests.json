@@ -1388,6 +1388,16 @@
       ]
     },
     {
+      "version": "1.5.40",
+      "summary": "The node schedules its own local model requests: one context per model, at most one request per model at a time, the owner's live work first, and an idle model unloaded when a request waits behind it.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "A routine's model calls can wait longer while the owner's live chat or an answer is queued on the same model; what a routine computes is unchanged.",
+        "TOPOS_LOCAL_MODEL_CONTEXT, TOPOS_LOCAL_MODEL_SLOTS and TOPOS_LOCAL_MODEL_RELEASE_AFTER_S tune it; 0 turns each off."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
