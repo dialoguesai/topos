@@ -9,8 +9,10 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.41] — 2026-11-03
+
 ### Fixed
-- **A local model whose runner keeps growing is unloaded when idle, so it reloads at its load size.** The 9B runs
+- **A local model whose runner keeps growing is unloaded once its current request ends, so it reloads at its load size.** The 9B runs
   on the host's MLX runner, which keeps a prefix cache. On 3 Nov it grew from 8.4 GiB at load to 13.5 GiB (14.9 at
   peak) in 35 minutes of stress while serving at 8,192, and the cache matched about 5 tokens per prompt. The host
   sizes a model only when it loads it, so it kept loading the others into memory the 9B then grew into, and macOS

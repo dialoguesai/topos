@@ -1398,6 +1398,16 @@
       ]
     },
     {
+      "version": "1.5.41",
+      "summary": "Local models start at the smallest of three contexts that fits the request and move up only, and a model whose runner keeps growing is unloaded once its current request ends, so it reloads at its load size.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "A grown model's new requests wait while its current request finishes, at most 120 s, before it is unloaded and reloaded.",
+        "TOPOS_LOCAL_MODEL_CONTEXT_STEPS and TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB tune it; 0 turns each off."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
