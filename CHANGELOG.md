@@ -11,6 +11,20 @@ The machine-readable twin of each release is
 
 ## [1.5.41] — 2026-11-03
 
+### Added
+- **Topos Facts v0.1 as a Facts extraction option, off by default.** `[O] [P]` Settings → Node functions → Facts
+  extraction can now pick `topos_facts`: two published encoders (`Dialogues/topos-facts-gate-v0.1`, MIT, and
+  `Dialogues/topos-facts-reader-v0.1`, CC-BY-4.0), pinned by revision and run in process on CPU. When picked, the
+  per-pack pass and the history catch-up send every pack the classifier knows to it instead of the LLM, except
+  `aspirations.goals`, which stays on the local extraction model. Its output goes through the same parser, schema and
+  person-grounding checks as an LLM reply, the verifier still judges every assertion, and facts are stamped with
+  extractor model `topos-facts-v0.1`. If the weights cannot load, the batch defers and nothing is marked done.
+  `GET /v1/facts-llm-config` reports provider `topos_facts`, model `v0.1`, and a new `llm_model`: the LLM that still
+  serves goals and the triple pass. Every other reader of the Facts config keeps an LLM. On the 40-message synthetic
+  gold set, predicate precision is 0.81 against 0.53 for the 9B LLM, and recall is 0.45 against 0.83. The training data
+  is private, which `query.scope_head` would not accept for a routing head. The owner ruled on 3 Nov 2026 to ship it as
+  an opt-in exception. Nothing already processed is redone.
+
 ### Fixed
 - **A local model whose runner keeps growing is unloaded once its current request ends, so it reloads at its load size.** The 9B runs
   on the host's MLX runner, which keeps a prefix cache. On 3 Nov it grew from 8.4 GiB at load to 13.5 GiB (14.9 at
