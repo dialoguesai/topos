@@ -13,6 +13,7 @@ as it was: sixteen records and 8,000 characters, read at 3's caps.
 """
 from __future__ import annotations
 
+from topos import local_serving
 import asyncio
 import json
 from types import SimpleNamespace
@@ -297,6 +298,8 @@ def test_the_longest_answers_fit_the_byte_limits():
 
 @pytest.mark.asyncio
 async def test_with_1_5_9s_settings_the_writer_is_given_room_for_eight_sentences(monkeypatch):
+    # The caller's own context; the serving layer (topos/local_serving.py) raises it on the wire, tested there.
+    monkeypatch.setattr(local_serving, "CONTEXT", 0)
     from topos.permissions_v2 import shadow_labeler_local as sl
     # 1.5.9's template v8 (eight short sentences): ANSWER_DENSE is on by default since 1.5.10 (v10, 2,048 tokens).
     monkeypatch.setenv(P + "ANSWER_DENSE", "false")

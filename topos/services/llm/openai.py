@@ -13,6 +13,7 @@ from ...core import state
 from ...openai_client import OpenAIError
 from ...config.settings import settings
 from ...engine.overload import provider_unavailable
+from ... import local_serving
 
 logger = logging.getLogger("topos.services.llm")
 
@@ -192,20 +193,22 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     clocks = {"model": model, "stream": False, "started": started, "wall_started": wall_started}
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(f"{base}/api/generate", json=body)
-            if (
-                r.status_code >= 400
-                and r.status_code not in (429, 503)
-                and think is False
-                and "disabling thinking" in (r.text or "").lower()
-            ):
-                logger.info(
-                    "Ollama model %s rejects think=false; retrying without think flag",
-                    model,
-                )
-                body.pop("think", None)
+        # One context per model, counted in flight for the host watchdog (topos/local_serving.py).
+        with local_serving.request(body) as body:
+            async with httpx.AsyncClient(timeout=timeout) as client:
                 r = await client.post(f"{base}/api/generate", json=body)
+                if (
+                    r.status_code >= 400
+                    and r.status_code not in (429, 503)
+                    and think is False
+                    and "disabling thinking" in (r.text or "").lower()
+                ):
+                    logger.info(
+                        "Ollama model %s rejects think=false; retrying without think flag",
+                        model,
+                    )
+                    body.pop("think", None)
+                    r = await client.post(f"{base}/api/generate", json=body)
     except httpx.ConnectTimeout as exc:
         # Ahead of TimeoutException, which it also is: no connection within the
         # connect budget is a host that is off or asleep, not a slow model. The
@@ -438,6 +441,9 @@ async def _ollama_stream_generate(
     started, wall_started = time.monotonic(), time.time()
     clocks = {"model": model, "stream": True, "started": started, "wall_started": wall_started}
     hb_task = asyncio.create_task(_heartbeats()) if on_protocol is not None else None
+    # One context per model, counted in flight for the host watchdog (topos/local_serving.py).
+    serving = local_serving.request(body)
+    body = serving.__enter__()
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", f"{base}/api/generate", json=body) as response:
@@ -502,6 +508,7 @@ async def _ollama_stream_generate(
             detail=f"Ollama unreachable at {base}: {str(exc) or type(exc).__name__}",
         ) from exc
     finally:
+        serving.__exit__(None, None, None)
         if hb_task is not None:
             hb_task.cancel()
 
