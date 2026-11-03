@@ -9,6 +9,19 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Each local model is loaded only as large as its requests need, so the three fit together with less memory
+  free.** 1.5.40 sent every model 32,768 of context. Before a load the host predicts the model's memory at that
+  context (the 27B 16.4 GiB, llama3.2 6.1) and unloads the others when it does not fit what is free. On 3 Nov,
+  with about 2 GiB taken by another app, that was 10 evictions in a 15-minute stress run, each switch 30 to 46 s:
+  verify_claim's p95 went from 30 to 84 s and sharing answered 1 of 6. By the host's log that day (which names no
+  model, so requests were assigned by reading speed: an estimate), llama3.2's prompts never passed 1,560 tokens and
+  the 27B's 8,981. A model now starts at the first of 8,192, 16,384 or 32,768 that fits its request's
+  prompt and reply (2,048 tokens when the request does not say) and moves up only when a request needs more, never
+  down while the node runs: llama3.2 at 8,192 takes 2.9 GiB instead of 5.6. A request that needs more than 32,768
+  still keeps the larger context it asked for. `TOPOS_LOCAL_MODEL_CONTEXT_STEPS=0` serves every model at 32,768 as
+  before. Shell status adds `contexts` (each model's step) and `raised_context`.
+
 ## [1.5.40] — 2026-11-03
 
 ### Fixed

@@ -17,6 +17,8 @@ SMALL = "llama3.2:latest"
 @pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     monkeypatch.setattr(ls, "CONTEXT", 32768)
+    monkeypatch.setattr(ls, "STEPS", (8192, 16384))
+    monkeypatch.setattr(ls, "_contexts", {})
     monkeypatch.setattr(ls, "WAIT_SECONDS", 30.0)
     monkeypatch.setattr(ls, "SLOTS", 1)
     monkeypatch.setattr(ls, "_in_flight", {})
@@ -24,7 +26,8 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(ls, "_loaded", ([], float("-inf")))
     monkeypatch.setattr(ls, "_released_at", {})
     monkeypatch.setattr(ls, "_stats", {"releases": 0, "last_release": None, "lowered_context": 0,
-                                       "kept_larger_context": 0, "switch_holds": 0, "held_s_max": 0.0})
+                                       "kept_larger_context": 0, "raised_context": 0, "switch_holds": 0,
+                                       "held_s_max": 0.0})
 
 
 def test_every_caller_context_becomes_the_one_serving_context():
@@ -39,6 +42,42 @@ def test_a_prompt_that_needs_more_keeps_the_larger_context_it_asked_for():
     assert ls.serving_context(None, prompt_chars=120_000, num_predict=2048) == 32768
 
 
+def _context(model, chars, num_predict=None, asked=None):
+    return ls.serving_context(asked, prompt_chars=chars, num_predict=num_predict, model=model)
+
+
+def test_a_model_starts_at_the_first_step_its_request_fits():
+    # 3 Nov: verification's llama3.2 prompts stayed under 1,600 tokens; the 27B's reached about 9,000.
+    assert _context(SMALL, 4_800, num_predict=64) == 8192
+    assert _context(BIG, 27_000) == 16384     # 9,000 tokens and a 2,048-token reply
+    assert ls.status()["contexts"] == {SMALL: 8192, BIG: 16384}
+
+
+def test_a_model_moves_up_when_a_request_needs_more_and_never_down():
+    assert _context(BIG, 3_000) == 8192
+    assert _context(BIG, 60_000) == 32768    # 20,000 tokens: past the last step, so CONTEXT
+    assert _context(BIG, 3_000) == 32768     # a short request after it does not reload the model
+    assert _context("llama3.2", 3_000) == 8192  # each model has its own
+    assert ls.status()["raised_context"] == 1
+
+
+def test_a_reply_with_no_length_keeps_room_for_one():
+    # 7,000 prompt tokens: with 100 reply tokens 8,192 fits, with no length given it does not.
+    assert _context(SMALL, 21_000, num_predict=100) == 8192
+    assert _context(BIG, 21_000) == 16384
+
+
+def test_steps_off_serves_every_model_at_the_one_context(monkeypatch):
+    monkeypatch.setattr(ls, "STEPS", ())
+    assert _context(SMALL, 300, num_predict=10) == 32768
+
+
+def test_a_request_past_the_context_keeps_its_own_without_moving_the_model():
+    assert _context(BIG, 3_000) == 8192
+    assert _context(BIG, 300_000, asked=81920) == 81920
+    assert _context(BIG, 3_000) == 8192
+
+
 def test_off_leaves_each_caller_its_own(monkeypatch):
     monkeypatch.setattr(ls, "CONTEXT", 0)
     body = {"model": SMALL, "messages": [{"role": "user", "content": "x"}], "options": {"num_ctx": 8192}}
@@ -48,7 +87,7 @@ def test_off_leaves_each_caller_its_own(monkeypatch):
 def test_prepare_sets_the_context_without_touching_the_callers_body():
     body = {"model": SMALL, "messages": [{"role": "user", "content": "x"}], "options": {"temperature": 0}}
     prepared = ls.prepare(body)
-    assert prepared["options"] == {"temperature": 0, "num_ctx": 32768}
+    assert prepared["options"] == {"temperature": 0, "num_ctx": 8192}  # a short prompt: the model's first step
     assert body["options"] == {"temperature": 0}
 
 
@@ -69,8 +108,8 @@ def test_lowering_home_chats_pack_context_is_counted():
 def test_a_request_is_counted_until_it_ends_however_it_ends():
     with pytest.raises(RuntimeError):
         with ls.request({"model": "llama3.2", "prompt": "hi"}) as body:
-            assert body["options"]["num_ctx"] == 32768
-            assert [(m, c) for m, c, _ in ls.in_flight()] == [(SMALL, 32768)]
+            assert body["options"]["num_ctx"] == 8192
+            assert [(m, c) for m, c, _ in ls.in_flight()] == [(SMALL, 8192)]
             raise RuntimeError("the host went away")
     assert ls.in_flight() == []
 
@@ -325,7 +364,7 @@ def test_with_diagnostics_on_a_request_is_a_content_free_span(monkeypatch):
         asyncio.run(run())
         ok, failed = exporter.get_finished_spans()
         assert ok.name == "topos.local_model.request"
-        assert dict(ok.attributes) == {"topos.local_model.name": SMALL, "topos.local_model.context": 32768,
+        assert dict(ok.attributes) == {"topos.local_model.name": SMALL, "topos.local_model.context": 8192,
                                        "topos.local_model.background": False, "topos.local_model.priority": "live",
                                        "topos.local_model.held_s": ok.attributes[
                                            "topos.local_model.held_s"], "topos.local_model.held_for": "none"}
