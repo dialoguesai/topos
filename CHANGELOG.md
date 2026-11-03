@@ -15,8 +15,9 @@ The machine-readable twin of each release is
   peak) in 35 minutes of stress while serving at 8,192, and the cache matched about 5 tokens per prompt. The host
   sizes a model only when it loads it, so it kept loading the others into memory the 9B then grew into, and macOS
   swap went from 0 to 13.5 GiB. The node's watchdog now reads the host's model sizes every 10 s. A model that has
-  grown 2 GiB past the smallest size reported for it at its context, with no node request on it, is unloaded, and
-  new requests to it wait the moment that takes. The decision uses only the sizes the host reports. Shell status
+  grown 2 GiB past the smallest size reported for it at its context is held: new requests to it wait, the one it is
+  running finishes, and it is then unloaded. Waiting for it to go idle by itself was not enough: on the live node,
+  background work kept the 9B busy and it grew 6.9 GiB in 50 s (about 0.2 GiB per request). The decision uses only the sizes the host reports. Shell status
   adds `recycles`, `last_recycle` and `recycle_growth_mib`. `TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB` sets the limit
   (2,048), and 0 turns it off.
 - **Each local model is loaded only as large as its requests need, so the three fit together with less memory

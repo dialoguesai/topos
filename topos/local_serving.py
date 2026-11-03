@@ -74,9 +74,11 @@ host predicts a model's memory only when it loads one, so it kept loading the ot
 into. ``/api/ps`` does report the grown size (12.7 GB mid-run). So, 5:
 
 5. ``grown_models``, run by ``watchdog`` every ``GROWTH_PERIOD``: a loaded model that has grown ``GROWTH_LIMIT`` past
-   the smallest size the host reported for it at its context, with no node request sent to it, is unloaded. Its next
-   request reloads it at its load size (the 9B in about 8 s). New requests to it are held for the moment the unload
-   takes. This reads only the sizes the host reports; a llama-server model never grows, so only a growing runner
+   the smallest size the host reported for it at its context is unloaded. New requests to it are held from then on,
+   so the one it is running finishes, and it is unloaded as soon as no node request is on it. Its next request
+   reloads it at its load size (the 9B in about 8 s). The first version waited for the model to go idle by itself.
+   On the live node, background work kept the 9B busy, and it grew 6.9 GiB in 50 s (to 15.2 GiB) before it did. The
+   runner grew about 0.2 GiB per request, 2 GiB in one to two minutes of steady use. This reads only the sizes the host reports; a llama-server model never grows, so only a growing runner
    trips it. ``TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB`` sets the limit (2,048), and 0 turns it off.
 
 This module counts requests and sends unloads. It reads no prompt and logs no content, only model names, contexts,
@@ -185,6 +187,8 @@ _contexts: Dict[str, int] = {}
 _sizes: Dict[Tuple[str, Optional[int]], int] = {}
 #: Models being unloaded for growth: nothing new is sent to them until the unload returns.
 _recycling: set = set()
+#: Models past GROWTH_LIMIT waiting for the request they are running to end: (name, bytes grown, held since).
+_draining: Dict[str, Tuple[str, int, float]] = {}
 #: When the watchdog last read the host's sizes (monotonic).
 _sized_at = float("-inf")
 #: lowered_context: requests that asked for more than CONTEXT and did not need it (home chat's 81,920).
@@ -536,16 +540,15 @@ def _size_key(entry: Dict[str, Any]) -> Tuple[str, Optional[int]]:
     return model_key(str(entry.get("name") or entry.get("model") or "")), int(context) if context else None
 
 
-def grown_models(loaded: Iterable[Dict[str, Any]], sizes: Dict[Tuple[str, Optional[int]], int], busy: Iterable[str],
-                 *, limit: int = None) -> List[Tuple[str, int]]:
+def grown_models(loaded: Iterable[Dict[str, Any]], sizes: Dict[Tuple[str, Optional[int]], int], *,
+                 limit: int = None) -> List[Tuple[str, int]]:
     """The loaded models to unload for growth, each with how far it grew, in bytes. Updates ``sizes`` in place.
 
     ``loaded`` is the host's ``/api/ps`` list; ``sizes`` the smallest size seen for each (model, context) while
-    loaded, which is its load size; ``busy`` the models a node request has been sent to. A (model, context) the host no
-    longer lists is forgotten, so a reload starts from its new size. A model reloaded at another context is another
-    entry, so moving up a step is never read as growth."""
+    loaded, which is its load size. A (model, context) the host no longer lists is forgotten, so a reload starts from
+    its new size. A model reloaded at another context is another entry, so moving up a step is never read as growth."""
     limit = GROWTH_LIMIT if limit is None else limit
-    loaded, busy = list(loaded), set(busy)
+    loaded = list(loaded)
     present = set()
     grown = []
     for entry in loaded:
@@ -555,27 +558,45 @@ def grown_models(loaded: Iterable[Dict[str, Any]], sizes: Dict[Tuple[str, Option
         key = _size_key(entry)
         present.add(key)
         base = sizes[key] = min(size, sizes.get(key, size))
-        if limit > 0 and size - base >= limit and key[0] not in busy:
+        if limit > 0 and size - base >= limit:
             grown.append((str(entry.get("name") or entry.get("model") or ""), size - base))
     for key in [k for k in sizes if k not in present]:
         del sizes[key]
     return grown
 
 
-async def _recycle_grown(client, base_url: str, loaded: List[Dict[str, Any]], now: float) -> List[str]:
-    """Unload each model ``grown_models`` names. The choice and the hold on new requests are made under one lock, so
-    no node request is sent to a model between the check that it is idle and its unload."""
+def _mark_grown(loaded: List[Dict[str, Any]], now: float) -> None:
+    """Hold new requests to each model ``grown_models`` names, so the one it is running finishes and it goes idle."""
     with _lock:
-        grown = grown_models(loaded, _sizes, (m for m, _, _, _ in _in_flight.values()))
-        _recycling.update(model_key(name) for name, _ in grown)
+        for name, grew in grown_models(loaded, _sizes):
+            key = model_key(name)
+            if key not in _recycling:
+                _recycling.add(key)
+                _draining[key] = (name, grew, now)
+
+
+async def _unload_drained(client, base_url: str, now: float) -> List[str]:
+    """Unload each held model no node request is on any more. Checked and held under one lock, so nothing is sent to
+    it between that check and its unload. A model still busy after ``HOLD_LIMIT`` is let go unrecycled: its sizes
+    are read again and it is held again only if it is still past the limit."""
+    unload = []
+    with _lock:
+        busy = {m for m, _, _, _ in _in_flight.values()}
+        for key, (name, grew, since) in list(_draining.items()):
+            if key not in busy:
+                unload.append((name, grew))
+            elif now - since >= HOLD_LIMIT:
+                _recycling.discard(key)
+                del _draining[key]
     names = []
-    for name, grew in grown:
+    for name, grew in unload:
         key = model_key(name)
         try:
             await client.post(base_url + "/api/generate", json={"model": name, "keep_alive": 0}, timeout=10)
         finally:
             with _lock:
                 _recycling.discard(key)
+                _draining.pop(key, None)
                 _released_at[key] = now
         with _lock:
             for size_key in [k for k in _sizes if k[0] == key]:
@@ -592,11 +613,12 @@ async def _recycle_grown(client, base_url: str, loaded: List[Dict[str, Any]], no
 async def _check_once(client, base_url: str) -> List[str]:
     global _loaded, _sized_at
     now = time.monotonic()
+    recycled = await _unload_drained(client, base_url, now) if _draining else []
     requests = in_flight()
     blocked = any(now - started >= SWITCH_AFTER for _, _, started in requests)
     sizing = GROWTH_LIMIT > 0 and now - _sized_at >= GROWTH_PERIOD
     if not blocked and not sizing:
-        return []
+        return recycled
     response = await client.get(base_url + "/api/ps", timeout=5)
     loaded = (response.json() or {}).get("models") or []
     now = time.monotonic()
@@ -604,10 +626,10 @@ async def _check_once(client, base_url: str) -> List[str]:
         _loaded = ([(model_key(str(m.get("name") or m.get("model") or "")), m.get("context_length")) for m in loaded],
                    now)
         released_at = dict(_released_at)
-    recycled = []
     if GROWTH_LIMIT > 0:
         _sized_at = now
-        recycled = await _recycle_grown(client, base_url, loaded, now)
+        _mark_grown(loaded, now)
+        recycled += await _unload_drained(client, base_url, now)
     if WAIT_SECONDS <= 0 or not blocked:
         return recycled
     names, waited = release_blocked([m for m in loaded if str(m.get("name") or m.get("model") or "") not in recycled],
