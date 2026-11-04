@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.43] — 2026-11-04
+
 ### Fixed
 - **A write that fails under the write gate no longer keeps SQLite's write lock.** `[O]` SQLite backs out a failed
   statement but keeps its transaction, and in WAL a transaction that wrote keeps the write lock. The helper the query
