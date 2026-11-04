@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.42] — 2026-11-04
+
 ### Changed
 - **Dashboard days can end at the owner's local midnight.** `[D]` `get_dashboard_measurements` takes an optional
   `time_zone` (an IANA name such as `America/Los_Angeles`) and cuts every daily bucket at local midnight in that
@@ -16,9 +18,53 @@ The machine-readable twin of each release is
   `time_zone`. A missing, malformed or unloadable zone keeps UTC days and reports `"UTC"`, so a client never labels
   UTC buckets as local ones. Instants (`as_of`, `measured_since`, call times) stay UTC. With no zone, the output
   matches 1.5.41 plus the new field.
+- **The people graph rebuilds at most once every 2 hours, and a rebuild scores only new or changed goals.** `[O] [E:entities]`
+  Every message changed the graph's input fingerprint, so the node rebuilt the whole graph whenever one arrived. On the
+  owner's node (4 Nov 2026) each rebuild took 603–1113 s and moved 0–7 of 68,794 edges, and the graph was rebuilding 26% of
+  the time (66–100% of each active hour). An automatic rebuild now waits until `TOPOS_GRAPH_REFRESH_MIN_INTERVAL_S` (7,200;
+  0 turns it off) has passed since the last one ended. The time is kept in `graph_materialization_state.last_run_at`, so a
+  restart does not start one early. A trigger inside the interval leaves the graph marked and looks again when it ends. This
+  holds the debounced refresh, the incomplete retry, the age limit, the startup check and the fill before signal derivation,
+  which reads only `entities.mention_count` from a rebuild. The owner's own rebuild is never held, and a node's first import
+  still builds its graph at once. The goal lane's all-pairs comparison was 92% of each rebuild. Its pair decisions are now
+  kept between rebuilds (`graph_goal_pair_items`, `graph_goal_pairs`: hashes of each goal's key and text, the rule and the
+  embedder, never the text), so a rebuild scores only goals that are new or changed. On a copy of the owner's node (9,877
+  goals) a rebuild after a day's 213 new goals took 75 s instead of 857 s, and the graph matched a full rebuild's. The first
+  rebuild after the upgrade fills the cache and takes as long as before (about 13 minutes). (#259)
+- **Share-index builds are about a third faster.** `[P]` A build ran the Off-limits matcher without its normalised-string
+  memory, so it normalised every token of every reading again for every row: 33 M calls and about 40% of a build's CPU on a
+  copy of the owner's node. The build now keeps the matcher's normalised strings of up to 64 characters while it runs. On the
+  copy, one 478-member share built in 130 s instead of 200 s and held the write gate 14.5 s instead of 20.5 s at publish, and
+  the published members, terms and vectors were byte-identical. The matching itself is unchanged, and so is the request
+  path. (#257)
 
 ### Fixed
 - **The owner's request path survives index rebuilds and derive storms.** `[O]` After a restart the node rebuilds every share's search index (5.2, 6.8 and 6.2 minutes on the owner's node on 28 Oct 2026, 1.5.29) while derivation batches spawn graph rebuilds, and every owner frame's database read went through the loop's default thread pool, the pool those jobs fill: the doors themselves answer in milliseconds (`truth_claim_cards(500)` 8 ms, `weekly_stats` 29 ms, the calibration catalog one SELECT) but waited seconds for a worker, so the calibration screen failed ("We couldn't load your answers.") and `get_device_info` was answered from its snapshot 28 times in 30 minutes. Now (`core/owner_requests.py`): (1) a frame of an owner request type (`signal_*`, `truth_*`, `calibration_*`, `get_device_info`) runs its blocking steps (`run_db_read`/`run_db_write`, the dispatcher's off-loop handlers) on a small executor of its own that rebuilds, embedding jobs and derivation batches never use (4 workers; `TOPOS_OWNER_REQUEST_WORKERS`); (2) the share-index build yields while such a frame is being handled: between shares (the owner-change queue and the refresh loop's restore) and between batches within a share (every 32 candidates or members, and before each passage embedding), on the ungated read snapshot only, never under the write gate, at most 5 s per yield point, so a rebuild stretches around the owner's screens instead of queueing them. `device_for` logs the ML device once per component instead of once per embedding call (419 lines in 30 minutes). Kill switches `TOPOS_OWNER_REQUEST_EXECUTOR=off` and `TOPOS_OWNER_REQUEST_PACING=off`. Measured on a copy of the owner's database under a synthetic rebuild and derive storm: see the pull request. No migration.
+- **Writes no longer stall for five minutes behind the topic-cluster cleanup.** `[O]` The topic-cluster job's cleanup of
+  stale top-topic facts deleted rows on its own connection without the write gate and without committing, then waited for
+  the gate while holding SQLite's write lock. The job-queue claim holding the gate waited on that lock until it gave up,
+  about 160 s, and the next claim did the same, so every writer on the node waited about 320 s. In a 4 Nov stress run on
+  1.5.41, six requests hit their 180 s deadline in that window. The cleanup is now one delete under the write gate that
+  commits its own work. (#256)
+- **Commitments in an owner's direct messages know who they were made to.** `[O] [E:derivation]` "I'll send it after
+  lunch" names nobody. The prompt and verifier have taken the message's recipient since 6 Sep, but the ingest batch, the
+  history catch-up and the enable-offer trial never passed it, so the model wrote a placeholder counterparty that the
+  grounding check rejected and the promise never reached the ledger. Every job path now passes it, and only to the
+  commitments pack.
+  A one-person field written as a one-element list is read as the name instead of rejecting the whole assertion, and
+  diarisation labels (`Speaker 2`, `SPEAKER_00`, `spk_1`) are never a person. (#209)
+- **One unknown word no longer empties a summary answer.** `[O] [E:query]` The rare-word check dropped every candidate
+  when one word of the question appeared in no candidate and almost nowhere in the store, even when every other word was
+  matched. A person's name always looks like that, because the searchable text masks names. In a 12-question benchmark it
+  emptied 3 answers that raw search answered. An absent word now removes candidates only when it is not outnumbered by the
+  words the candidates do contain, and a lone made-up subject still does. The narrowing ledger records the kept part as
+  `absent_token_outnumbered`; the control plane relays that reason as `unrecognized` until it learns it. (#232)
+- **A restart no longer runs the interest refresh at once.** `[P]` The refresh kept its last run time in memory only, so
+  every start found it due, and on the owner's node it nearly always closes or re-inserts a few interests, which queues a
+  full rebuild of every interest grant. After a 4 Nov restart that was 306 s and 249 s of share-index rebuilds in the first
+  12 minutes, each publish holding the write gate 22–29 s. The time is now kept in `refresh-state.json`
+  (`last_interest_at`), and a restart inside the hour waits for the hour as an uninterrupted node would. A missing, future
+  or malformed time still runs it at once. (#258)
 
 ## [1.5.41] — 2026-11-03
 
