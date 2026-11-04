@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **A write that fails under the write gate no longer keeps SQLite's write lock.** `[O]` SQLite backs out a failed
+  statement but keeps its transaction, and in WAL a transaction that wrote keeps the write lock. The helper the query
+  session store writes through rolled back only after a stale-snapshot busy error, so any other error left that
+  thread's connection holding the lock. In a 4 Nov 2026 stress run on 1.5.42 one query artifact's INSERT failed a
+  constraint (its session foreign key, the only one it can fail; the message was not logged) and did this: every other
+  writer took the write gate and then waited out the 30 s busy timeout, job claims held the gate about 156 s each, the
+  node dropped inbound requests, and 11 of the run's 18 failed requests ended in the 11.5 minutes before the
+  transaction ended. A failed write now rolls back the transaction it opened before the error propagates; a batch the
+  caller already had open is still left to the caller. The warning names the call site and SQLite's message, which
+  names the failed constraint and no row values. Why that artifact's session row was missing is not yet known.
+
 ## [1.5.42] — 2026-11-04
 
 ### Changed
