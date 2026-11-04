@@ -9,12 +9,15 @@ localhost base URL, and only once under a process lock.
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 import shutil
 import subprocess
 import threading
 import time
 from typing import Callable, Optional
 from urllib.parse import urlparse
+
+from .request_budget import check_budget, current_budget
 
 logger = logging.getLogger("topos.engine.ollama_runtime")
 
@@ -23,6 +26,22 @@ _WAIT_SEC = 20.0
 _POLL_INTERVAL = 0.5
 
 _LOCK = threading.Lock()
+
+
+@contextmanager
+def _startup_lock():
+    budget = current_budget()
+    if budget is None:
+        with _LOCK:
+            yield
+        return
+    while not _LOCK.acquire(timeout=min(.025, budget.remaining())):
+        budget.check()
+    try:
+        budget.check()
+        yield
+    finally:
+        _LOCK.release()
 
 
 def _default_base_url() -> str:
@@ -58,7 +77,11 @@ def default_app_present() -> bool:
 def default_open_app() -> None:
     from .ollama_install import default_open_app as _open_app
 
-    _open_app()
+    budget = current_budget()
+    if budget is None:
+        _open_app()
+    else:
+        _open_app(timeout=budget.remaining())
 
 
 def default_cli_present() -> bool:
@@ -94,22 +117,29 @@ def ensure_running(
     installed, or the wait timed out — callers then hit the existing 502 /
     deferred path.
     """
+    check_budget()
     url = (base_url if base_url is not None else _default_base_url()).rstrip("/")
     local_check = is_local if is_local is not None else is_local_base_url
     if not local_check(url):
         return False
 
-    reachable = is_reachable if is_reachable is not None else (lambda: default_is_reachable(url))
+    probe = is_reachable if is_reachable is not None else (lambda: default_is_reachable(url))
+    def reachable():
+        check_budget()
+        ready = probe()
+        check_budget()
+        return ready
     if reachable():
         return True
 
-    with _LOCK:
+    with _startup_lock():
         if reachable():
             return True
 
         launched = False
         present = app_present if app_present is not None else default_app_present
         if present():
+            check_budget()
             try:
                 (open_app if open_app is not None else default_open_app)()
                 launched = True
@@ -117,15 +147,20 @@ def ensure_running(
             except Exception as exc:  # noqa: BLE001 — launch is best-effort
                 logger.warning("failed to open Ollama.app: %s", exc)
 
+        check_budget()
+
         if not launched:
             has_cli = cli_present if cli_present is not None else default_cli_present
             if has_cli():
+                check_budget()
                 try:
                     (spawn_serve if spawn_serve is not None else default_spawn_serve)()
                     launched = True
                     logger.info("spawned `ollama serve`; waiting for %s", url)
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("failed to spawn ollama serve: %s", exc)
+
+        check_budget()
 
         if not launched:
             logger.info("ollama is down and nothing on this machine can start it")
@@ -137,6 +172,12 @@ def ensure_running(
         while time.monotonic() < deadline:
             if reachable():
                 return True
-            sleeper(interval)
+            budget = current_budget()
+            if budget is None:
+                sleeper(interval)
+            else:
+                delay = min(interval, budget.remaining(), max(0, deadline - time.monotonic()))
+                (sleep if sleep is not None else budget.cancelled.wait)(delay)
+                budget.check()
         logger.warning("ollama did not become reachable at %s within %.1fs", url, wait_sec)
         return False

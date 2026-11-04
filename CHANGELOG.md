@@ -9,6 +9,150 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **Dashboard days can end at the owner's local midnight.** `[D]` `get_dashboard_measurements` takes an optional
+  `time_zone` (an IANA name such as `America/Los_Angeles`) and cuts every daily bucket at local midnight in that
+  zone, including 23- and 25-hour DST days and half-hour offsets. The response names the zone it actually used in
+  `time_zone`. A missing, malformed or unloadable zone keeps UTC days and reports `"UTC"`, so a client never labels
+  UTC buckets as local ones. Instants (`as_of`, `measured_since`, call times) stay UTC. With no zone, the output
+  matches 1.5.41 plus the new field.
+
+## [1.5.41] — 2026-11-03
+
+### Added
+- **Topos Facts v0.1 as a Facts extraction option, off by default.** `[O] [P]` Settings → Node functions → Facts
+  extraction can now pick `topos_facts`: two published encoders (`Dialogues/topos-facts-gate-v0.1`, MIT, and
+  `Dialogues/topos-facts-reader-v0.1`, CC-BY-4.0), pinned by revision and run in process on CPU. When picked, the
+  per-pack pass and the history catch-up send every pack the classifier knows to it instead of the LLM, except
+  `aspirations.goals`, which stays on the local extraction model. Its output goes through the same parser, schema and
+  person-grounding checks as an LLM reply, the verifier still judges every assertion, and facts are stamped with
+  extractor model `topos-facts-v0.1`. If the weights cannot load, the batch defers and nothing is marked done.
+  `GET /v1/facts-llm-config` reports provider `topos_facts`, model `v0.1`, and a new `llm_model`: the LLM that still
+  serves goals and the triple pass. Every other reader of the Facts config keeps an LLM. On the 40-message synthetic
+  gold set, predicate precision is 0.81 against 0.53 for the 9B LLM, and recall is 0.45 against 0.83. The training data
+  is private, which `query.scope_head` would not accept for a routing head. The owner ruled on 3 Nov 2026 to ship it as
+  an opt-in exception. Nothing already processed is redone.
+
+### Fixed
+- **A local model whose runner keeps growing is unloaded once its current request ends, so it reloads at its load size.** The 9B runs
+  on the host's MLX runner, which keeps a prefix cache. On 3 Nov it grew from 8.4 GiB at load to 13.5 GiB (14.9 at
+  peak) in 35 minutes of stress while serving at 8,192, and the cache matched about 5 tokens per prompt. The host
+  sizes a model only when it loads it, so it kept loading the others into memory the 9B then grew into, and macOS
+  swap went from 0 to 13.5 GiB. The node's watchdog now reads the host's model sizes every 10 s. A model that has
+  grown 2 GiB past the smallest size reported for it at its context is held: new requests to it wait, the one it is
+  running finishes, and it is then unloaded. Waiting for it to go idle by itself was not enough: on the live node,
+  background work kept the 9B busy and it grew 6.9 GiB in 50 s (about 0.2 GiB per request). The decision uses only the sizes the host reports. Shell status
+  adds `recycles`, `last_recycle` and `recycle_growth_mib`. `TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB` sets the limit
+  (2,048), and 0 turns it off.
+- **Each local model is loaded only as large as its requests need, so the three fit together with less memory
+  free.** 1.5.40 sent every model 32,768 of context. Before a load the host predicts the model's memory at that
+  context (the 27B 16.4 GiB, llama3.2 6.1) and unloads the others when it does not fit what is free. On 3 Nov,
+  with about 2 GiB taken by another app, that was 10 evictions in a 15-minute stress run, each switch 30 to 46 s:
+  verify_claim's p95 went from 30 to 84 s and sharing answered 1 of 6. By the host's log that day (which names no
+  model, so requests were assigned by reading speed: an estimate), llama3.2's prompts never passed 1,560 tokens and
+  the 27B's 8,981. A model now starts at the first of 8,192, 16,384 or 32,768 that fits its request's
+  prompt and reply (2,048 tokens when the request does not say) and moves up only when a request needs more, never
+  down while the node runs: llama3.2 at 8,192 takes 2.9 GiB instead of 5.6. A request that needs more than 32,768
+  still keeps the larger context it asked for. `TOPOS_LOCAL_MODEL_CONTEXT_STEPS=0` serves every model at 32,768 as
+  before. Shell status adds `contexts` (each model's step) and `raised_context`.
+
+## [1.5.40] — 2026-11-03
+
+### Fixed
+- **No request waits behind an idle local model any more.** With the 27B loaded at home chat's 81,920 context, the
+  local model host served nothing else until the 27B's 30-minute keep_alive ran out. Reproduced with the node idle on
+  2 Nov: llama3.2 got no answer in 60 s, and one unload released it in 2.5 s. This was the 42 and 48 minute stalls in
+  the 1.5.38 stress runs and the `deadline_exceeded` at `model_call` on every failed verify_claim in 1.5.39's. A
+  watchdog (`topos/local_serving.py`) now unloads each loaded model no node request is using, once a node request has
+  waited 15 s for a model the host has not loaded (`TOPOS_LOCAL_MODEL_RELEASE_AFTER_S`; 0 turns it off). A model a
+  node request is generating on is never unloaded.
+- **The node moves between its local models instead of starving all but one.** The host runs one request per model at
+  a time and never swaps out a model with work queued on it. In the 3 Nov stress run, home chat and routines kept two
+  or three 27B requests queued, so verification (llama3.2) and the share writer (the 9B) waited out their deadlines:
+  verify_claim passed 7 of 18 and sharing answered 0 of 4. The node now sends one request per model at a time
+  (`TOPOS_LOCAL_MODEL_SLOTS`, default the host's `OLLAMA_NUM_PARALLEL` or 1) and holds the rest itself, the owner's and
+  answers' work first. While one of its requests has waited 3 s for a model the host has not loaded, it sends nothing
+  new to other models, so the model in the way finishes the request it is running, goes idle and is unloaded. A
+  background request waiting holds only background work. No request is held past 120 s or its caller's own deadline,
+  and the time held comes off the request's own timeout. Shell status adds `slots`, `held`, `longest_held_s`,
+  `switch_holds` and `held_s_max`.
+- **The owner's live chat goes ahead of a routine on the same local model.** In the second candidate's stress run the
+  27B served live home chat and routines from one queue, oldest first; 5 of its 11 requests were routines, and the
+  live chat waited behind them up to 120 s (home chat median 213 s for a 200 s target). Requests on one model are now
+  served by priority: the owner's own and answers first, then generation nobody watches stream (a non-streaming
+  `llm_generation`, which is how a routine's step arrives), then background work. A routine waiting for a model load
+  never holds the owner's chat. A hold for the model's own slot now lasts until the caller's own deadline (at most
+  600 s) instead of ending at 120 s, when it went to the host and queued oldest first again.
+- **One context per local model.** Every node request to the local host is now sent at one context: 32,768 on a host
+  of 32 GiB or more, which is that host's own default (`TOPOS_LOCAL_MODEL_CONTEXT`; 0 keeps each caller's own). The
+  callers asked for five sizes (81,920, 12,288, 8,192, 4,096 and none), so a model was reloaded under itself, the share
+  writer and judge even within one job. A request whose prompt needs more than 32,768 keeps the context it asked for.
+  At 32,768 the 27B takes 11.4 GiB instead of 14.7, and fits beside llama3.2 (5.6 GiB). Shell status shows both
+  under `local_serving`.
+
+## [1.5.39] — 2026-11-02
+
+### Added
+- **Any app can hold an owner grant** (DR-66). `topos-node agents add <name> --reads facts:<pack>,messages,journals`
+  enrols any name that is not a coding tool's, on a terminal, after a yes to a prompt that lists those reads. The
+  enrolment stores them in `agent_app_grants`. An app reaches only what its grant opens, and a disconnected app can
+  reconnect with a fresh yes. **An app enrolled before this release has no grant and reads nothing until it runs
+  `agents add` again.** No step in the upgrade: the table is created on first use.
+- **`message_context`**: a search match and up to 20 turns each side from its conversation (default 5), for an app whose
+  grant names `messages`, and the owner's app. Off-limits is applied by absence, as for a search.
+
+### Changed
+- **`reflection_facts` is now `pack_facts`**, limited to the packs on the app's grant, and the owner's own read covers
+  every pack that is on. The old type name answers for one release. `version` is `pack_facts/v1`.
+
+### Removed
+- **The node's app-specific code.** No special case for any app by name, and the `reflection_invitations`,
+  `reflection_conversation` and `reflection_label` doors, their routes and the reflection sweep are gone: apps compose,
+  the node serves data. The tables `reflection_candidates` and `reflection_labels` stay on disk, untouched and no longer
+  written, because they can hold the owner's own labels. A queued `reflection_sweep` job is never claimed.
+
+### Fixed
+- `[O]` `verify_claim` writes its content-free `truth verify_claim audit:` line on every exit, not only on success. A request that hits its deadline, is cancelled, gets `compute_unavailable` or errors now logs `outcome`, the last `phase` it reached (`retrieval` or `model_call`) and `phase_elapsed`. Success lines gain `outcome: ok`. No caller-visible change.
+
+## [1.5.38] — 2026-11-01
+
+### Changed
+- `[O]` Raise the default local routine allowance to 100 runs per owner and engine in a rolling 24-hour window. Operators can set a positive finite allowance with `TOPOS_ROUTINE_MAX_RUNS_PER_OWNER_24H`.
+
+### Added
+- `[O]` Explicit `TOPOS_ROUTINE_DEVELOPMENT_UNLIMITED_RUNS=true` configuration for intentional development and benchmark runs. It disables only the daily run quota; active-run exclusion, idempotency, compute admission, deadlines and delivery configuration remain enforced. The flag defaults off and applies node-wide after restart.
+- `[P]` Expose the effective routine run policy through local shell status so benchmark manifests can distinguish finite allowances from development mode.
+
+No schema migration, reprocessing, dependency, model or database/compute routing change. This release enables capacity testing; it does not claim a new capacity boundary or improved mixed-workload latency.
+
+## [1.5.37] — 2026-11-01
+
+### Fixed
+- `[O]` Bound standard claim verification to a shared 120-second default/maximum request lifetime, with shorter caller deadlines supported. Propagate cancellation and remaining time through database workers, local model startup and remote Engine calls; expired work cannot start new inference or return a late heuristic answer. Remote server-side enforcement requires an updated compute host.
+- `[O]` Bound budgeted HTTP work and native DNS resources per process, retaining capacity until actual cleanup finishes. This does not establish GPU cancellation or global provider admission; uninterruptible native DNS may still delay process exit.
+- `[O]` Include model verification in the existing permissioned-answer writer (100 seconds) and judge (60 seconds) phase ceilings. Stop further sentence judging after a provider failure, retaining fail-closed answer release and existing grant/model guards.
+
+### Added
+- `[O]` Content-free shared-answer diagnostics for fixed role, phase, outcome, HTTP status and elapsed time. No prompt, answer, exception text, token, URL or recipient identifier is added to these events; public receipt schemas are unchanged.
+
+No schema migration, reprocessing or model change. The separate shared provider-admission prototype and UI work are excluded.
+
+## [1.5.36] — 2026-11-01
+
+### Added
+- `[O]` Optional OpenTelemetry traces and metrics for node development and diagnostics, with HTTP/RPC/worker context propagation and local log correlation. Export requires explicit enablement and a destination; ordinary installs need no telemetry setup. Built-in spans exclude request contents, credentials and exception text. No schema migration, reprocessing, new log retention or automatic reporting to Dialogues.
+
+### Fixed
+- `[O]` Bound Engine HTTP execution and waiting queues, expire queued work, and retain active worker slots after caller disconnects. This is an endpoint worker budget, not a global GPU limit.
+- `[P]` Preserve explicit compute busy, unavailable and rate-limited outcomes across local/remote inference and generation. Avoid heuristic verification answers and extra generation retries on explicit overload.
+- `[O]` Record verification stage/provider timings and distinct task identities for repeated calls.
+- `[O]` Preserve the unsent outbox tail after a disconnected or cancelled send, while retaining bounded best-effort overflow behavior. Durable Offline Inbox delivery is unchanged.
+
+## [1.5.35] — 2026-11-01
+
+### Fixed
+- `[O]` Run standard claim verification on a database read worker so slow inference cannot block unrelated node requests. The worker owns its connection and privacy guard; authorization, local/remote Engine selection, and response contracts are unchanged. No migration or reprocessing.
+
 ## [1.5.34] — 2026-10-31
 
 ### Changed
@@ -68,6 +212,25 @@ The machine-readable twin of each release is
 - **verify_claim: contradictions, per category, none by default.** `[E:verify]` `[O]` For a claim whose turn falls in `verify_v2.CONTRADICTION_CATEGORIES` (empty), the judge may also label an excerpt "contradicts"; under the same two-order agreement and role/period rules as "shows", with no supporting record, the answer is `verdict: "contradicted"` and the contradicting excerpts carry `contradicts: true`. The truth lane stores it as `no_evidence`, reason `contradicted`, and a new `truth_checks.contradicted` flag (added in place; the verdict column's values do not change); cards carry `contradicted`, weekly stats count it. Callers of `verify_claim_owner` see the new verdict only for an opted-in category.
 - **verify_claim: the reader asks for no more claims than the effort checks, off by default.** `[E:verify]` With `verify_v2.LEAN_READ` on, the reader's output schema allows as many claims as the request's effort checks (one at effort low, the inbound truth lane's effort; three at high, unchanged). The reader was asked for up to three claims of eight fields each and the engine kept the first at effort low: on the owner's node a lane row's reader wrote 343 tokens for three claims and took 21.5 s against the lane's 20 s cap. Generation is greedy and left to right, so the main claim is written the same way; only the list closes sooner. Off: unchanged.
 - **Truth lane: load the local model before a check, off by default.** `[O]` With `TOPOS_VERIFY_V2_WARM_LOCAL=1`, the owner's inbound truth lane checks that its local model is loaded (`/api/ps`) before each model check and, when it is not, loads it (an empty `/api/generate`, kept 10 min) with up to 120 s, outside the row's 30 s deadline and 20 s reader cap. A load that does not finish defers the rest of the batch and stores nothing, so a model swap no longer spends one of a row's three checks. On the owner's node Ollama swaps the derivation 27B and the lane's 9B all day (a cold 9B load took 76 s, a warm reader call 9–13 s), and every row stored `unable` in the lane's first week had used all three checks. Batch counts gain `warmed`, `warm_failed` and `warm_s` while the switch is on. Off: unchanged. The hosted side is never touched. No migration.
+
+### Fixed
+- **Commitments read who an owner's direct message was sent to, on every derivation path.** `[E:derivation]` The
+  recipient label built for commitments on 6 Sep reached only the commitments lane; the ingest batch, the drip catch-up
+  and the enable-offer trial never passed it, so "I'll send it after lunch" had nobody to be promised to: the person
+  being texted is not named in the words, and a counterparty the record does not name is rejected by the grounding
+  guard. An owner-authored message in a conversation with exactly one other sender now carries that sender as its
+  recipient (the lane's existing rule); groups, other people's messages, AI chats, journals and transcripts are
+  unchanged, and a diarised voice ("Speaker 1") is never a DM partner. Only `template.RECIPIENT_LABEL_PACKS`
+  (commitments) read it: given the label, other packs bind the person being texted as the subject of facts that are
+  not about them (a thank-you read as a relationship event). The prompt, the parser's labels and the verifier's
+  addressing all go through `template.addressing_for`, the owner's backfill control included. No other person's words
+  are added to any prompt here (that is DR-62's change). `no-invalidation`: nothing already written is wrong; records
+  already read are not re-read.
+- **The fact parser takes `"person": ["<name>"]` as the name, and never takes "Speaker 2" as a person.** `[E:derivation]`
+  A one-person field written as a one-element array is unwrapped and checked like a string, where before the whole
+  assertion was rejected; two names in a one-person field are still refused. Diarisation labels (`Speaker 2`,
+  `SPEAKER_00`, `spk_1`, `Speaker A`) fail `person_field_ok`, so a transcript's name for an unidentified voice is never
+  stored as a person.
 
 ## [1.5.28] — 2026-10-26
 

@@ -295,7 +295,7 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     from .prefilter import PackPrefilter
     from . import template as _T
     from .registry import bundled_pack_dir
-    from .template import build_prompt, parse_output
+    from .template import addressing_for, build_prompt, parse_output
     from .verify import (apply_verdict, build_verify_prompt, label_note_for, lens_note_for,
                          parse_verdict, verifier_model)
     from .writer import DerivationWriter
@@ -344,6 +344,7 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
             continue
         stats["processed"] += 1
+        rec = addressing_for(pack, rec)
         try:
             raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"],
                                           speaker=str(rec.get("speaker") or ""),

@@ -1,6 +1,15 @@
 # Owner dashboard measurements v1
 
-The personal SQLite node records first observations at storage commit. The control plane exposes `GET /v1/dashboard/measurements?period_start=YYYY-MM-DD&period_end=YYYY-MM-DD` (exclusive UTC end, at most 366 days) to the verified first-party owner. The owner-only `get_dashboard_measurements` relay handler runs off the event loop. Shared hosted pools are unavailable: facts do not carry a reliable tenant partition.
+The personal SQLite node records first observations at storage commit. The control plane exposes `GET /v1/dashboard/measurements?period_start=YYYY-MM-DD&period_end=YYYY-MM-DD` (exclusive end, at most 366 days; `&time_zone=` optional, see Day boundaries) to the verified first-party owner. The owner-only `get_dashboard_measurements` relay handler runs off the event loop. Shared hosted pools are unavailable: facts do not carry a reliable tenant partition.
+
+## Day boundaries
+
+`time_zone` (optional, an IANA name, at most 64 characters) sets where days end. Each bucket covers local midnight to
+local midnight in that zone, so a DST day is 23 or 25 hours and half-hour offsets fall on the right day. The response
+always carries `time_zone`: the zone the buckets were actually cut in. A missing, malformed or unloadable zone (the
+node may lack tzdata) is `"UTC"`. A response without the field comes from an older node and its days are UTC. Instants
+(`as_of`, `measured_since`, `calls[].at`) are UTC ISO timestamps in every zone. Request-activity `blocks` are four-hour
+spans of the local day. Coverage days (the activation day and today are partial) are local days too.
 
 ## Definitions
 

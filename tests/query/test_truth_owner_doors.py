@@ -788,13 +788,16 @@ def _reading(text, names, polarity, kind="did_or_made", category="did"):
 
 def _said(conn, record_id, said, *, claim, names, polarity, hours_ago, verdict="no_evidence", shown=None):
     """One owner message and its check, with what the reader made of it: the lane's row for increment B."""
-    add_message(conn, record_id, said, from_self=True, at=ago(hours=hours_ago))
+    # The message and its check describe one instant, even if fixture setup
+    # crosses a clock-second boundary between the two database writes.
+    said_time = ago(hours=hours_ago)
+    add_message(conn, record_id, said, from_self=True, at=said_time)
     conn.commit()
     result = {"verdict": verdict, "reason": None, "category": "did", "claim": {"text": claim}, "evidence": [],
               "timings_ms": {"total": 900.0}, "reading": _reading(claim, names, polarity),
               **({"stages": {"retrieve": {"owner_labels": shown}}} if shown is not None else {})}
     record = {"table": "conversation_messages", "record_id": record_id, "source": "imessage", "owner": True}
-    return store.record_check(conn, lane.check_row(record, result, model="local:test", said_at=store.with_offset(ago(hours=hours_ago))))
+    return store.record_check(conn, lane.check_row(record, result, model="local:test", said_at=store.with_offset(said_time)))
 
 
 PINWHEEL_KEY = "did|did_or_made|none|day every pinwheel"  # claim_key of "The owner uses Pinwheel every day." named Pinwheel ("uses" is a stop word)

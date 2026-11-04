@@ -57,6 +57,9 @@ modules = [
     "topos.app",
     "topos.cli.commands",
     "topos.core.logging",
+    "topos.observability.runtime",
+    "topos.observability.http",
+    "topos.observability.rpc",
     "topos.engine.backends.huggingface",
     "topos.sanitization.privacy_filter",
     "topos.sanitization.nsfw_classifier",
@@ -91,6 +94,11 @@ os.environ.setdefault("TOPOS_KEY", "release-smoke-test-key")
 
 from fastapi.testclient import TestClient
 from topos.app import app
+from opentelemetry.trace import NoOpTracerProvider
+from topos.observability import runtime
+
+assert not runtime.configure(), "A normal wheel install must not enable telemetry"
+assert isinstance(runtime.current().tracer_provider, NoOpTracerProvider)
 
 client = TestClient(app)
 for path in ("/", "/healthcheck", "/version"):
@@ -183,6 +191,10 @@ def _install_and_verify(
         raise SystemExit(f"Console script missing after install: {topos_node}")
 
     env = os.environ.copy()
+    # A package smoke test must not inherit a developer's diagnostic destination.
+    for name in list(env):
+        if name.startswith("OTEL_") or name == "TOPOS_OTEL_ENABLED":
+            env.pop(name)
     env["TOPOS_SKIP_UPDATE_CHECK"] = "1"
     env["TOPOS_KEY"] = "release-smoke-test-key"
 

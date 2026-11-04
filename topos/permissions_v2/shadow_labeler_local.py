@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from .. import local_serving
 
 # The campaign's own local binding (`run_nl_experiment.py`): the same tag and reviewed digest, so a verdict here is
 # attributable to the same model the program has already measured. `ORIGIN` is the campaign's loopback host, and
@@ -166,7 +167,7 @@ class _PinnedTransport:
 
         await yield_to_answers_if_background()
         try:
-            response = await self.client.post(self.base_url + "/api/chat", timeout=TIMEOUT_SECONDS, json={
+            response = await local_serving.post_async(self.client, self.base_url + "/api/chat", timeout=TIMEOUT_SECONDS, json={
                 "model": MODEL, "stream": False, "think": False, "format": "json",
                 "messages": [{"role": "system", "content": prompt},
                              {"role": "user", "content": text[:MAX_TEXT_CHARS]}]})
