@@ -9,6 +9,14 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **Dashboard days can end at the owner's local midnight.** `[D]` `get_dashboard_measurements` takes an optional
+  `time_zone` (an IANA name such as `America/Los_Angeles`) and cuts every daily bucket at local midnight in that
+  zone, including 23- and 25-hour DST days and half-hour offsets. The response names the zone it actually used in
+  `time_zone`. A missing, malformed or unloadable zone keeps UTC days and reports `"UTC"`, so a client never labels
+  UTC buckets as local ones. Instants (`as_of`, `measured_since`, call times) stay UTC. With no zone, the output
+  matches 1.5.41 plus the new field.
+
 ## [1.5.41] — 2026-11-03
 
 ### Added
