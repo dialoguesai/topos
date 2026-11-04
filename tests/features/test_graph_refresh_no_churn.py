@@ -48,6 +48,8 @@ def _offline(monkeypatch):
         return [[1.0 if j == i else 0.0 for j in range(n)] for i in range(n)]
 
     monkeypatch.setattr(graph_enrichers, "_default_goal_embedder", one_direction_per_goal)
+    # These tests rebuild back to back to watch the fingerprint; the 2h interval has its own (test_graph_refresh_interval).
+    monkeypatch.setenv("TOPOS_GRAPH_REFRESH_MIN_INTERVAL_S", "0")
     graph_refresh.reset_for_tests(rebuild_fn=lambda: None)
     yield
     graph_refresh.reset_for_tests()
