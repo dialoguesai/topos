@@ -1267,6 +1267,35 @@ def test_changed_interests_queue_one_rebuild_of_the_grants_that_sign_them(tmp_pa
     assert service.rebuilds == ["g-int", "g-int"]             # exactly one more
 
 
+def test_a_restart_inside_the_interval_does_not_run_the_interest_refresh_again(tmp_path, browsing, model):
+    """4 Nov 2026: the last run's time is kept in the state file, so a restart does not make the refresh, and the
+    full rebuild of every interest grant it queues, due at once."""
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop, _service = interest_grants_loop(tmp_path, browsing, clock, interests=True)
+    assert loop.run_interests().rebuild_requested == 1
+    clock.now = T + 600
+    restarted, _service = interest_grants_loop(tmp_path, browsing, clock, interests=True)
+    assert restarted.run_interests() is None and restarted._pending == {}
+    clock.now = T + 3600
+    assert restarted.run_interests().cause_class == "interval"
+
+
+@pytest.mark.parametrize("kept", [-3600, 600, "T", -1])
+def test_a_kept_interest_time_that_is_old_from_the_future_or_unreadable_leaves_the_refresh_due(tmp_path, browsing,
+                                                                                               model, kept):
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    from topos.permissions_v2.refresh_loop import STATE_FILE, STATE_VERSION
+    T = NOW_US // 1_000_000
+    root = tmp_path / "index"
+    root.mkdir()
+    value = T + kept if isinstance(kept, int) and kept != -1 else kept
+    (root / STATE_FILE).write_text(json.dumps({"version": STATE_VERSION, "last_interest_at": value}))
+    loop, _service = interest_grants_loop(tmp_path, browsing, Clock(T), interests=True)
+    assert loop.run_interests().cause_class == "interval"
+
+
 def test_with_the_interest_flag_off_no_rebuild_is_ever_requested(tmp_path, browsing, model):
     from tests.permissions_v2.interest_fixtures import NOW_US
     T = NOW_US // 1_000_000
@@ -1694,6 +1723,21 @@ def test_second_tries_wait_once_for_a_restore_that_is_owed(tmp_path, bad_label, 
     assert site_month(bad_label) == (None, GOOD_LABEL, 1)
     clock.now = T + 10
     assert loop.run_interests() is None                        # and the interval holds again
+
+
+def test_a_restart_between_a_wait_and_its_next_round_still_runs_that_round_at_once(tmp_path, bad_label, model,
+                                                                                    second_model):
+    """The wait asks for the next round at once; a restart in between keeps that ask (no kept time)."""
+    from tests.permissions_v2.interest_fixtures import NOW_US
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop = interest_loop(tmp_path, bad_label, clock, FakeWorker(), interests=True, relabels=True)
+    loop._pending["g-dark"] = {"causes": {"review_changed"}, "attempts": 0, "not_before": 0.0, "first_drop_at": T}
+    second_model.answers[:] = [GOOD_LABEL]
+    assert loop.run_interests().relabel_calls == 0
+    clock.now = T + 5
+    restarted = interest_loop(tmp_path, bad_label, clock, FakeWorker(), interests=True, relabels=True)
+    assert restarted.run_interests().relabelled == 1
 
 
 def test_an_owed_restore_holds_nothing_back_when_no_second_label_is_owed(tmp_path, browsing, model, second_model):

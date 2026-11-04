@@ -122,6 +122,13 @@ backoff), because a new interest or a newly assessed label moves no index basis,
 would ever drop the index (WS0, 1 Oct, on Lane C's finding). With the flag off nothing here
 touches the interest family.
 
+The time of the last interval run is kept in the state file (``last_interest_at``), so a restart
+does not make the refresh due at once (4 Nov 2026). Measured on the owner's node: the refresh
+nearly always finds a current-month interest whose visits moved, and the full rebuild of every
+interest grant it then queues (306 s and 249 s after the 4 Nov restart, each publish holding the
+write gate 22-29 s) landed on top of the restart's own graph rebuild. A kept time from the future
+(the clock went back) or one older than the interval leaves the refresh due, as before.
+
 A cluster whose own label is a bad name for a grant (it names a site, echoes a page title, or is
 not a short topic name) and which nothing explicitly excludes is given a second try at a label in
 the same refresh (``interest_relabel``; owner direction, 1 Oct): after the labels owed an
@@ -590,6 +597,7 @@ class RefreshLoop:
         self._state: dict | None = None
         self._interest_after_pass: tuple | None = None   # (budget the pass left, was it a full pass)
         self._last_interest_at: float | None = None
+        self._interest_clock_read = False         # the kept `last_interest_at` is read once, at the first run
         self._relabels_waited = False             # the last refresh held its second tries back for a restore
         self._facts: str | None = None            # IF-6: the fact digest when last observed
         self._goal_field_owed: tuple | None = None   # (rule state,) queued grants are being rebuilt under
@@ -603,7 +611,7 @@ class RefreshLoop:
         if self._state is None:
             state = {"version": STATE_VERSION, "names": [], "ingest_high_water": None, "last_full_pass_at": None,
                      "assessment_revisions": None, "proof_digest": None, "continuation": None, "fact_digest": None,
-                     "goal_field": None}
+                     "goal_field": None, "last_interest_at": None}
             try:
                 loaded = json.loads(self._state_path().read_text("utf-8"))
                 if isinstance(loaded, dict) and loaded.get("version") == STATE_VERSION:
@@ -618,6 +626,8 @@ class RefreshLoop:
                         state["fact_digest"] = None
                     if not isinstance(state["goal_field"], str):
                         state["goal_field"] = None
+                    if type(state["last_interest_at"]) is not int or state["last_interest_at"] < 0:
+                        state["last_interest_at"] = None
                     if not self._valid_continuation(state["continuation"]):
                         state["continuation"] = None
             except (OSError, ValueError):
@@ -1352,6 +1362,12 @@ class RefreshLoop:
             if self._pass is not None:
                 return None
             after, self._interest_after_pass = self._interest_after_pass, None
+            if not self._interest_clock_read:
+                # Kept across a restart (module docstring): a refresh within the interval is not due again.
+                self._interest_clock_read = True
+                kept = self._load_state().get("last_interest_at")
+                if self._last_interest_at is None and kept is not None and kept <= now:
+                    self._last_interest_at = kept
             interval_due = (self._last_interest_at is None
                             or now >= self._last_interest_at + self.settings.interest_interval)
             if after is not None and (after[1] or interval_due):
@@ -1362,7 +1378,7 @@ class RefreshLoop:
                 return None
         if self._worker_object().running():
             return None  # the owner's own pass; the interval brings this back once it is done
-        self._last_interest_at = now
+        self._note_interest_run(now)
         counts = dict(inserted=0, closed=0, unchanged=0, pending=0, assessed=0, unresolved=0, short=False)
         if self.settings.relabels:
             counts.update(relabel_pending=0, relabel_calls=0, relabelled=0)
@@ -1384,6 +1400,19 @@ class RefreshLoop:
                                          rebuild_requested=requested, **counts)
         self._record(receipt)
         return receipt
+
+    def _note_interest_run(self, at: int | None) -> None:
+        """The last interest refresh, kept across a restart (module docstring); None makes the next one due at once.
+        A failed write costs only that: the refresh is due at the next start, as it was before."""
+        with self._lock:
+            self._last_interest_at = at
+            state = self._load_state()
+            if state.get("last_interest_at") != at:
+                state["last_interest_at"] = at
+                try:
+                    self._save_state()
+                except OSError as exc:
+                    _log.warning("interest refresh time not kept (%s)", type(exc).__name__)
 
     def _interest_grants(self, now: int) -> list[str]:
         """Active grants that sign interests (``interest_index.admits``) and have an index here, published or
@@ -1438,7 +1467,8 @@ class RefreshLoop:
                 # A restore is owed, and it runs right after this refresh. A grant whose index was dropped is dark
                 # until it does, and the second tries are model calls it would wait for: they stand back for the
                 # next round, which is due at once. Once only: the round after a wait makes them whatever is owed.
-                self._relabels_waited, self._last_interest_at = True, None
+                self._relabels_waited = True
+                self._note_interest_run(None)
                 return state
             state = self._second_labels(service, owed, opt_outs, budget, counts, spent)
             if state != "complete" or not counts["relabelled"]:
