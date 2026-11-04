@@ -607,7 +607,9 @@ async def handle_signal_entity_graph_search(message: Dict[str, Any]) -> Optional
                 event_before=payload.get("event_before") or None,
             )
 
-        result = await asyncio.to_thread(_run)
+        from ..owner_requests import run_off_loop
+
+        result = await run_off_loop(_run)
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
