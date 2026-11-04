@@ -150,21 +150,26 @@ class _Normalizer:
     A context the scope's own context was copied into (an asyncio task started inside it) sees it closed and empty
     once the scope ends; another thread never reads it.
 
-    NR175: `loose` remembers here too (`loose`), for the same reason: it is given the words of the texts it reads."""
+    NR175: `loose` remembers here too (`loose`), for the same reason: it is given the words of the texts it reads.
 
-    __slots__ = ("thread", "open", "normalized", "skeleton", "loose", "chars")
+    `keep_max` (a share-index build's scope, `build_normalizer`): strings longer than it are computed and not kept."""
+
+    __slots__ = ("thread", "open", "normalized", "skeleton", "loose", "chars", "keep_max")
     #: Characters kept (keys and values together) before it stops taking more: about 8 MB of str on a node.
     LIMIT = 4_000_000
 
-    def __init__(self):
+    def __init__(self, keep_max: int | None = None):
         self.thread = threading.get_ident()
         self.open = True
         self.normalized, self.skeleton, self.loose, self.chars = {}, {}, {}, 0
+        self.keep_max = keep_max
 
     def usable(self) -> bool:
         return self.open and self.thread == threading.get_ident()
 
     def keep(self, table: dict, value: str, found: str) -> None:
+        if self.keep_max is not None and len(value) > self.keep_max:
+            return
         size = len(value) + len(found)
         if self.chars + size <= self.LIMIT:
             table[value] = found
@@ -181,6 +186,38 @@ class _Normalizer:
 #: The scope's normaliser memory (`_Normalizer`), set by `EntityBoundary.one_pass` and reset on its way out; None
 #: everywhere else. A context variable, so a thread that never entered a scope never sees one.
 _PASS_NORMALIZER: contextvars.ContextVar = contextvars.ContextVar("entity_boundary_pass_normalizer", default=None)
+
+#: A share-index build's normaliser keeps only strings up to this many characters (`build_normalizer`).
+BUILD_KEEP_MAX = 64
+
+
+@contextlib.contextmanager
+def build_normalizer():
+    """Cache 3 alone (`_Normalizer`), for one share-index build: search_index `_rebuild_now`, around its attempts.
+
+    The build opens no boundary pass (`one_pass`: `_rebuild_once` is pinned by the grant census), so until this every
+    row it matched normalised every token of every reading again. Measured on a copy of the owner's node (4 Nov 2026,
+    one 478-member share): 33 M `_normalized` calls, about 40% of the build's CPU. The memory is the one `one_pass`
+    sets, with the same bounds and the same end on every path; it only holds no string longer than `BUILD_KEEP_MAX`.
+    A whole message rarely repeats inside a build and filled the 4 M-character budget with 31.5 k of them, after which
+    nothing more was kept and the build took as long as without it (200 s); the short strings (tokens, names) are what
+    repeat: 200 s -> 130 s, its gated publish 20.5 s -> 14.5 s, the published members, terms and vectors identical.
+    `normalized` and `skeleton` are pure functions of the string, so what is kept is what would be computed. A scope
+    already open on this thread is used as it is. With PASS_MEMORY off nothing is kept, as for `one_pass`."""
+    current = _PASS_NORMALIZER.get()
+    if not PASS_MEMORY or (current is not None and current.usable()):
+        yield
+        return
+    normalizer = _Normalizer(keep_max=BUILD_KEEP_MAX)
+    token = _PASS_NORMALIZER.set(normalizer)
+    try:
+        yield
+    finally:
+        normalizer.close()
+        try:
+            _PASS_NORMALIZER.reset(token)
+        except ValueError:   # left in another context than it was entered in: none is left set here
+            _PASS_NORMALIZER.set(None)
 
 #: NR175: whether a boundary remembers the forms of its term sets (`_per_boundary`). Only the equivalence proof and the
 #: tests turn it off, to compare the memory with none; it is not a switch of the node's.

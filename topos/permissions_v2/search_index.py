@@ -1191,10 +1191,12 @@ class SearchIndexService:
         from . import search_timing
         # Attribution only (NR166): the mode a policy states itself; one it leaves to the client is a request's to say.
         search_timing.share_seen(index_path(self.root, grant_id), mode=getattr(policy.search, "answers", None))
-        for _attempt in range(self.REBUILD_ATTEMPTS):
-            result = self._rebuild_once(grant_id, authority, policy, key, now=now)
-            if result is not None:
-                return result
+        from .entity_boundary import build_normalizer
+        with build_normalizer():   # the matcher's normalised strings, kept for this build only (entity_boundary)
+            for _attempt in range(self.REBUILD_ATTEMPTS):
+                result = self._rebuild_once(grant_id, authority, policy, key, now=now)
+                if result is not None:
+                    return result
         # The owner kept changing reviews or protection while the index was being built. BL-157: an index the full
         # current check still proves keeps serving (a failed refresh is not a restriction); any other is purged.
         self._discard_unsafe(grant_id, now=now)
