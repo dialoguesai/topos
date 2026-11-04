@@ -958,20 +958,26 @@ def _top_topics_fact_id(cluster_id: str) -> str:
 
 
 def _prune_stale_top_topics_facts(conn, active_cluster_ids: Sequence[str]) -> int:
-    """Drop top_topics signal facts whose cluster_id is no longer in the active set."""
+    """Drop top_topics signal facts whose cluster_id is no longer in the active set.
+
+    One statement under the write gate, committed here. It used to delete row by row with neither: the first
+    DELETE took SQLite's write lock at execute time, and the refresh then queued for the gate in ``put_fact`` while
+    holding it. A job claim already in the gate sat out its BEGIN IMMEDIATE busy retries (~160 s) against that lock,
+    twice, and every writer in the node waited behind it (stress run, 2026-11-04).
+    """
     if conn is None:
         return 0
-    active = {str(cid) for cid in active_cluster_ids if cid}
-    rows = conn.execute(
-        "SELECT fact_id, record_id FROM signal_facts WHERE fact_id LIKE ?",
-        (f"{_TOP_TOPICS_FACT_PREFIX}%",),
-    ).fetchall()
-    pruned = 0
-    for fact_id, record_id in rows:
-        if str(record_id or "") not in active:
-            conn.execute("DELETE FROM signal_facts WHERE fact_id=?", (fact_id,))
-            pruned += 1
-    return pruned
+
+    from ...storage.db.write_gate import commit_connection, with_db_write
+
+    active = sorted({str(cid) for cid in active_cluster_ids if cid})
+    query = "DELETE FROM signal_facts WHERE fact_id LIKE ?"
+    if active:
+        query += f" AND COALESCE(record_id, '') NOT IN ({','.join('?' for _ in active)})"
+    with with_db_write():
+        pruned = conn.execute(query, (f"{_TOP_TOPICS_FACT_PREFIX}%", *active)).rowcount
+        commit_connection(conn)
+    return int(pruned or 0)
 
 
 def persist_topic_clusters(
