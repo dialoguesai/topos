@@ -89,3 +89,21 @@ def test_a_rebuild_runs_inside_the_scope_and_publishes_what_it_publishes_without
     assert seen[1] is not None and seen[1].keep_max == entity_boundary.BUILD_KEEP_MAX
     assert not seen[1].open and not seen[1].normalized                # ended with the build
     assert entity_boundary._PASS_NORMALIZER.get() is None
+
+
+def test_the_builds_yield_points_run_inside_the_scope_and_leave_it_open(tmp_path, monkeypatch) -> None:
+    """``owner_requests.pace`` only sleeps on the build's own thread, so a yield keeps the memory and hands it to no one."""
+    corpus = mc.build(tmp_path / "corpus", seed=5, counts={name: 2 for name in mc.KINDS})
+    embed_corpus(corpus)
+    node = Node(corpus, tmp_path)
+    at_yield = []
+    monkeypatch.setattr(search_index.owner_requests, "pace",
+                        lambda **_: at_yield.append((entity_boundary._PASS_NORMALIZER.get(),
+                                                     getattr(entity_boundary._PASS_NORMALIZER.get(), "open", False))) or 0.0)
+    monkeypatch.setattr(entity_boundary, "PASS_MEMORY", True)
+
+    assert node.rebuild() == {"grant-search": "ready"}
+    assert at_yield, "the build reached no yield point"
+    memory = at_yield[0][0]
+    assert memory is not None and all(seen is memory and was_open for seen, was_open in at_yield)
+    assert not memory.open and entity_boundary._PASS_NORMALIZER.get() is None   # still ends with the build
