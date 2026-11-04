@@ -1409,6 +1409,17 @@
       ]
     },
     {
+      "version": "1.5.42",
+      "summary": "Writes no longer stall for minutes behind the topic-cluster cleanup; the people graph rebuilds at most every 2 hours and scores only new or changed goals; the owner's requests run on their own workers and index rebuilds yield to them; share-index builds are about a third faster; a restart no longer runs the interest refresh at once; Essentials days can end at the owner's local midnight; commitments in direct messages know who they were made to; and one unknown word no longer empties a summary answer.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "The first graph rebuild after the upgrade fills the goal-pair cache and takes as long as before (about 13 minutes on the owner's node); later rebuilds score only new or changed goals. The two cache tables (graph_goal_pair_items, graph_goal_pairs) hold hashes, never goal text.",
+        "An automatic graph rebuild waits until 2 hours after the last one ended, so an import inside that window derives against the last rebuild's graph. TOPOS_GRAPH_REFRESH_MIN_INTERVAL_S sets the interval (7200; 0 turns it off). The owner's own rebuild is never held.",
+        "TOPOS_OWNER_REQUEST_EXECUTOR=off and TOPOS_OWNER_REQUEST_PACING=off turn off the owner request workers and the rebuild yields; TOPOS_OWNER_REQUEST_WORKERS sets the workers (4)."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
