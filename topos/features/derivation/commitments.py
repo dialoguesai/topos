@@ -28,6 +28,9 @@ logger = logging.getLogger("topos.features.derivation.commitments")
 PACK_ID = "obligations.commitments"
 #: Per run, so a first pass is a bounded spend the owner can see the yield of.
 MAX_PER_RUN = 40
+#: The recipient's name when the DM partner has no usable display name. A stand-in for the
+#: prompt, never a person value.
+UNNAMED_RECIPIENT = "the person you are texting"
 
 _VERBS = (r"(send|get|bring|intro|introduce|review|pay|call|share|forward|look|check|do|"
           r"have|make|set|write|drop|grab|book|follow|ping|text|email|put|add|fix|ship|"
@@ -101,6 +104,7 @@ def _dm_recipients(conn: sqlite3.Connection, conversation_ids: List[str]) -> Dic
     """
     if not conversation_ids:
         return {}
+    from .template import is_diarisation_label
     peers: Dict[str, set] = {}
     for chunk_start in range(0, len(conversation_ids), 400):
         chunk = conversation_ids[chunk_start:chunk_start + 400]
@@ -113,8 +117,11 @@ def _dm_recipients(conn: sqlite3.Connection, conversation_ids: List[str]) -> Dic
         except sqlite3.Error:
             return {}
         for conv, sender in rows:
-            peers.setdefault(str(conv), set()).add(str(sender))
-    singles = {conv: next(iter(ss)) for conv, ss in peers.items() if len(ss) == 1}
+            # A diarisation label ("Speaker 1") is a voice in a recording, not someone the
+            # owner messaged: a two-voice transcript is not a direct message.
+            peers.setdefault(str(conv), set()).add(
+                "" if is_diarisation_label(str(sender)) else str(sender))
+    singles = {conv: next(iter(ss)) for conv, ss in peers.items() if len(ss) == 1 and "" not in ss}
     if not singles:
         return {}
     try:
@@ -131,7 +138,7 @@ def _dm_recipients(conn: sqlite3.Connection, conversation_ids: List[str]) -> Dic
     for conv, key in singles.items():
         _cid, eid, display = idents.get(key, (None, None, None))
         label = str(display or "") if display and any(ch.isalpha() for ch in str(display)) else ""
-        out[conv] = (label or "the person you are texting", str(eid or ""), str(key))
+        out[conv] = (label or UNNAMED_RECIPIENT, str(eid or ""), str(key))
     return out
 
 

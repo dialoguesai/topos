@@ -206,6 +206,7 @@ ACTIONS = frozenset(
 REASONS = frozenset(
     {
         # --- engine: retrieval lanes, gates and caps
+        "absent_token_outnumbered",
         "aggregate_lane",
         "aggregate_param_invalid",
         "aggregate_principal_denied",
@@ -351,6 +352,12 @@ REASONS = frozenset(
         UNRECOGNIZED,
     }
 )
+
+#: The rare gate kept a part it would once have emptied: a word the corpus does not hold
+#: (df ≤ 2, no candidate contains it) was outnumbered by the words the candidates DO
+#: evidence, so the ask was narrowed rather than erased. The absent words themselves
+#: are the owner's and stay in the entry's local ``detail``.
+REASON_ABSENT_TOKEN_OUTNUMBERED = "absent_token_outnumbered"
 
 _SLUG_RE = re.compile(r"[^a-z0-9_.:-]+")
 _SLUG_MAX = 64

@@ -28,7 +28,8 @@
     },
     "empty_and_incomplete_evidence": {
       "node": [
-        "tests/query/test_scope_supply_state.py"
+        "tests/query/test_scope_supply_state.py",
+        "tests/query/test_absent_qualifier_narrows_not_erases.py"
       ],
       "web": [
         "lib/mcp/evidenceLimits.test.ts",
