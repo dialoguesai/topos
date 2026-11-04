@@ -1250,6 +1250,9 @@ def rebuild_entity_graph(
         # How the goal lane clustered: "embeddings", or "tokens" when the
         # embedder was unavailable.
         "goal_clustering": enrich.get("goal_clustering"),
+        # Goal groups, and how many of them this rebuild scored (the rest came from goal_pair_cache).
+        "goal_items": enrich.get("goal_items"),
+        "goal_items_scored": enrich.get("goal_items_scored"),
         "incomplete": incomplete,
         "rows_written": written,
     }

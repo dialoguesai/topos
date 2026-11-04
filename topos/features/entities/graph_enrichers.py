@@ -30,7 +30,7 @@ import hashlib
 import logging
 import sqlite3
 import uuid
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from ...storage.db.write_gate import commit_connection, with_db_write
 from .fact_materializer import (
@@ -189,8 +189,11 @@ def _default_goal_embedder(texts):
         return None
 
 
-def _similar_goal_pairs(keys: List[str], vectors) -> List[Tuple[int, int]]:
+def _similar_goal_pairs(keys: List[str], vectors, rows: Optional[Sequence[int]] = None) -> List[Tuple[int, int]]:
     """Every (i, j), i < j, the all-pairs comparison would have merged, in order.
+
+    ``rows`` limits it to the pairs with at least one side in ``rows``, each scored exactly as the full comparison
+    scores it (``goal_pair_cache`` keeps the rest from the last rebuild). None compares every pair.
 
     The same rule as testing every pair — cosine >= GOAL_EMBED_MERGE_SCORE, or
     else token_set_similarity >= GOAL_TOKEN_MERGE_SCORE — without testing every
@@ -218,9 +221,19 @@ def _similar_goal_pairs(keys: List[str], vectors) -> List[Tuple[int, int]]:
     n = len(keys)
     block = 256
     edges: set = set()
+    order = np.arange(n) if rows is None else np.unique(np.asarray(list(rows), dtype=np.int64))
+    in_rows = np.zeros(n, dtype=bool)
+    in_rows[order] = True
+    chunks = [order[c : c + block] for c in range(0, len(order), block)]
 
-    def _upper(i0: int, i1: int):
-        return np.arange(n)[None, :] > np.arange(i0, i1)[:, None]
+    def _upper(r):
+        # Each unordered pair once: (r, j) for j > r, and for every j outside ``rows`` (whose own row never runs).
+        cols = np.arange(n)[None, :]
+        return (cols > r[:, None]) | ~in_rows[None, :]
+
+    def _pair(r, i, j) -> Tuple[int, int]:
+        a, b = int(r[i]), int(j)
+        return (a, b) if a < b else (b, a)
 
     # -- cosine ---------------------------------------------------------------
     if vectors is not None:
@@ -235,26 +248,28 @@ def _similar_goal_pairs(keys: List[str], vectors) -> List[Tuple[int, int]]:
         if mat is None:
             # What the loop did with vectors it could not batch: score each pair
             # and treat a failure as dissimilar. A batch embedder never lands here.
-            for i in range(n):
-                for j in range(i + 1, n):
+            for i in order:
+                for j in range(n):
+                    if j == i or (in_rows[j] and j < i):
+                        continue
+                    a, b = (int(i), j) if i < j else (j, int(i))
                     try:
-                        if cosine_similarity(vectors[i], vectors[j]) >= GOAL_EMBED_MERGE_SCORE:
-                            edges.add((i, j))
+                        if cosine_similarity(vectors[a], vectors[b]) >= GOAL_EMBED_MERGE_SCORE:
+                            edges.add((a, b))
                     except Exception:  # noqa: BLE001 — the loop's own rule
                         pass
         else:
             norms = np.linalg.norm(mat, axis=1)
             live = norms > 0.0  # cosine_similarity scores a zero vector 0.0
             unit = np.divide(mat, norms[:, None], out=np.zeros_like(mat), where=live[:, None])
-            for i0 in range(0, n, block):
-                i1 = min(n, i0 + block)
-                sims = unit[i0:i1] @ unit.T
-                upper = _upper(i0, i1)
+            for r in chunks:
+                sims = unit[r] @ unit.T
+                upper = _upper(r)
                 for i, j in zip(*np.nonzero(upper & (sims >= GOAL_EMBED_MERGE_SCORE + 1e-9))):
-                    edges.add((int(i) + i0, int(j)))
+                    edges.add(_pair(r, i, j))
                 near = upper & (np.abs(sims - GOAL_EMBED_MERGE_SCORE) < 1e-9)
                 for i, j in zip(*np.nonzero(near)):
-                    a, b = int(i) + i0, int(j)
+                    a, b = _pair(r, i, j)
                     if cosine_similarity(vectors[a], vectors[b]) >= GOAL_EMBED_MERGE_SCORE:
                         edges.add((a, b))
 
@@ -264,17 +279,17 @@ def _similar_goal_pairs(keys: List[str], vectors) -> List[Tuple[int, int]]:
     size = np.array([len(t) for t in tokens], dtype=np.float64)
     length = np.array([len(s) for s in joined], dtype=np.float64)
     vocab: Dict[str, int] = {}
-    rows: List[int] = []
-    cols: List[int] = []
+    at_goal: List[int] = []
+    at_token: List[int] = []
     chars: List[float] = []
     for i, toks in enumerate(tokens):
         for tok in toks:
-            rows.append(i)
-            cols.append(vocab.setdefault(tok, len(vocab)))
+            at_goal.append(i)
+            at_token.append(vocab.setdefault(tok, len(vocab)))
             chars.append(float(len(tok)))
     shape = (n, max(len(vocab), 1))
-    has = sparse.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=shape)
-    tok_chars = sparse.csr_matrix((np.asarray(chars), (rows, cols)), shape=shape)
+    has = sparse.csr_matrix((np.ones(len(at_goal)), (at_goal, at_token)), shape=shape)
+    tok_chars = sparse.csr_matrix((np.asarray(chars), (at_goal, at_token)), shape=shape)
     alphabet = {ch: a for a, ch in enumerate(sorted({ch for s in joined for ch in s}))}
     counts = np.zeros((n, max(len(alphabet), 1)))
     for i, s in enumerate(joined):
@@ -282,39 +297,41 @@ def _similar_goal_pairs(keys: List[str], vectors) -> List[Tuple[int, int]]:
             counts[i, alphabet[ch]] += 1
 
     reachable = GOAL_TOKEN_MERGE_SCORE - 1e-9  # a rounding error must never prune a merge
-    for i0 in range(0, n, block):
-        i1 = min(n, i0 + block)
+    for r in chunks:
         # token_set_similarity is 0.0 when either side has no tokens.
-        upper = _upper(i0, i1) & (size[i0:i1, None] > 0) & (size[None, :] > 0)
-        shared = (has[i0:i1] @ has.T).toarray()
-        contained = (shared == size[i0:i1, None]) | (shared == size[None, :])
+        upper = _upper(r) & (size[r, None] > 0) & (size[None, :] > 0)
+        shared = (has[r] @ has.T).toarray()
+        contained = (shared == size[r, None]) | (shared == size[None, :])
         for i, j in zip(*np.nonzero(upper & contained)):  # exactly 1.0
-            edges.add((int(i) + i0, int(j)))
+            edges.add(_pair(r, i, j))
 
-        la, lb = length[i0:i1, None], length[None, :]
-        common = np.zeros((i1 - i0, n))
+        la, lb = length[r, None], length[None, :]
+        common = np.zeros((len(r), n))
         for a in range(counts.shape[1]):
-            common += np.minimum(counts[i0:i1, a][:, None], counts[None, :, a])
+            common += np.minimum(counts[r, a][:, None], counts[None, :, a])
         bound = 2.0 * common / (la + lb)  # ratio(sa, sb)
         # ratio(inter, sa) and ratio(inter, sb): inter is " ".join(shared tokens).
-        inter_len = (tok_chars[i0:i1] @ has.T).toarray() + np.maximum(shared - 1, 0)
+        inter_len = (tok_chars[r] @ has.T).toarray() + np.maximum(shared - 1, 0)
         with np.errstate(divide="ignore", invalid="ignore"):
             via_inter = np.where(shared > 0, 2.0 * inter_len / (inter_len + np.minimum(la, lb)), 0.0)
         maybe = upper & ~contained & (np.maximum(bound, via_inter) >= reachable)
         for i, j in zip(*np.nonzero(maybe)):
-            a, b = int(i) + i0, int(j)
+            a, b = _pair(r, i, j)
             if (a, b) not in edges and token_set_similarity(keys[a], keys[b]) >= GOAL_TOKEN_MERGE_SCORE:
                 edges.add((a, b))
     return sorted(edges)
 
 
 def _cluster_goal_keys(
-    grouped: Dict[str, Dict], embed_fn, mode: Optional[Dict[str, str]] = None
+    grouped: Dict[str, Dict], embed_fn, mode: Optional[Dict[str, str]] = None, cache=None
 ) -> Dict[str, list]:
     """Union near-duplicate goal groups. Returns {cluster_root_key: [keys]}.
 
     ``mode["goal_clustering"]`` records how: "embeddings", or "tokens" when the
     embedder returned nothing usable and token similarity alone decided.
+    ``cache`` (``goal_pair_cache.GoalPairCache``) keeps the pair decisions between
+    rebuilds, so only new or changed goals are scored; the pairs, and so the
+    clusters, are the ones the full comparison makes.
     """
     keys = list(grouped.keys())
     if len(keys) <= 1:
@@ -341,8 +358,13 @@ def _cluster_goal_keys(
         if ra != rb:
             parent[rb] = ra
 
+    from .goal_pair_cache import similar_pairs_with_cache
+
+    pairs, counts = similar_pairs_with_cache(keys, [grouped[k]["text"] for k in keys], vectors, cache)
+    if mode is not None:
+        mode.update({name: str(value) for name, value in counts.items()})
     # In the order the all-pairs loop met them, so even the roots come out the same.
-    for i, j in _similar_goal_pairs(keys, vectors):
+    for i, j in pairs:
         union(keys[i], keys[j])
 
     clusters: Dict[str, list] = {}
@@ -412,6 +434,23 @@ def _journal_field_goal_ids(conn: sqlite3.Connection) -> set:
         return set()
 
 
+def _goal_pair_cache(conn: sqlite3.Connection, goal_embed_fn):
+    """The pair cache for the node's own embedder; None (compare every pair) for an embedder passed in."""
+    if goal_embed_fn is not None:
+        return None
+    from .goal_pair_cache import GoalPairCache
+
+    try:
+        from ...engine.backends.huggingface import active_embedding_model
+
+        model = active_embedding_model()
+    except Exception:  # noqa: BLE001 -- an unnamed model is still one model per process
+        model = None
+    embedder = _default_goal_embedder
+    tag = f"{getattr(embedder, '__module__', '')}.{getattr(embedder, '__qualname__', '')}|{model}"
+    return GoalPairCache(conn, tag)
+
+
 def _materialize_goals(
     conn: sqlite3.Connection,
     owner: Optional[str],
@@ -453,7 +492,7 @@ def _materialize_goals(
     # Near-duplicate clustering: exact-text groups union by embedding cosine /
     # token similarity, so "Deepen Orion scope coverage" and "Deepen the Orion
     # scope coverage work" become ONE node with the variants listed on it.
-    clusters = _cluster_goal_keys(grouped, goal_embed_fn, mode)
+    clusters = _cluster_goal_keys(grouped, goal_embed_fn, mode, cache=_goal_pair_cache(conn, goal_embed_fn))
     selves = _owner_spellings(conn, owner)
 
     edges = 0
@@ -726,6 +765,9 @@ def materialize_graph_enrichments(
     }
     if mode:
         out["goal_clustering"] = mode["goal_clustering"]
+    for name in ("goal_items", "goal_items_scored"):  # how much of the pair comparison this rebuild ran
+        if name in mode:
+            out[name] = int(mode[name])
     # Each phase committed inside its own hold; this only catches a stray
     # implicit transaction.
     commit_connection(conn)
