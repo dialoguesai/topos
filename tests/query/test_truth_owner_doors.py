@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -245,10 +246,24 @@ def _handler(msg_type):
     return HANDLERS[msg_type]
 
 
+async def _usage_written():
+    """An answer leaves its usage row still being written: wait for it, in the loop that started it."""
+    from topos.core import state
+
+    pending = [task for task in state.background_tasks if task.get_name() == "verify_claim_usage"]
+    if pending:
+        await asyncio.wait(pending)
+
+
 def _as(principal, msg_type, payload):
+    async def answered():
+        out = await _handler(msg_type)({"id": "r1", "type": msg_type, "payload": payload})
+        await _usage_written()
+        return out
+
     token = set_principal(principal)
     try:
-        return asyncio.run(_handler(msg_type)({"id": "r1", "type": msg_type, "payload": payload}))
+        return asyncio.run(answered())
     finally:
         reset_principal(token)
 
@@ -272,9 +287,11 @@ def test_the_owner_reads_and_changes_the_settings_and_turning_on_queues_a_batch(
     assert got["status"] == "ok" and got["payload"] == {**cfg.defaults(), "paused_until": None}
     changed = _as(owner, "truth_inbound_settings", {"set": {"enabled": True, "sources": ["journal"], "rate_per_minute": 3}})
     assert changed["payload"] == {"enabled": True, "sources": ["journal"], "model": "local", "rate_per_minute": 3,
-                                  "paused_until": None}
+                                  "window_days": 7, "paused_until": None}
+    widened = _as(owner, "truth_inbound_settings", {"set": {"window_days": 365}})
+    assert widened["payload"]["window_days"] == 365 and widened["payload"]["rate_per_minute"] == 3
     assert node.conn.execute("SELECT COUNT(*) FROM pipeline_jobs WHERE kind=?", (lane.KIND,)).fetchone()[0] == 1
-    for bad in ({"set": {"model": "gpt"}}, {"set": "on"}, {"get": True, "drop": 1}, "get"):
+    for bad in ({"set": {"model": "gpt"}}, {"set": {"window_days": 0}}, {"set": "on"}, {"get": True, "drop": 1}, "get"):
         assert _as(owner, "truth_inbound_settings", bad) == {"id": "r1", "status": "error", "error": "invalid_truth_settings"}
 
 
@@ -771,13 +788,16 @@ def _reading(text, names, polarity, kind="did_or_made", category="did"):
 
 def _said(conn, record_id, said, *, claim, names, polarity, hours_ago, verdict="no_evidence", shown=None):
     """One owner message and its check, with what the reader made of it: the lane's row for increment B."""
-    add_message(conn, record_id, said, from_self=True, at=ago(hours=hours_ago))
+    # The message and its check describe one instant, even if fixture setup
+    # crosses a clock-second boundary between the two database writes.
+    said_time = ago(hours=hours_ago)
+    add_message(conn, record_id, said, from_self=True, at=said_time)
     conn.commit()
     result = {"verdict": verdict, "reason": None, "category": "did", "claim": {"text": claim}, "evidence": [],
               "timings_ms": {"total": 900.0}, "reading": _reading(claim, names, polarity),
               **({"stages": {"retrieve": {"owner_labels": shown}}} if shown is not None else {})}
     record = {"table": "conversation_messages", "record_id": record_id, "source": "imessage", "owner": True}
-    return store.record_check(conn, lane.check_row(record, result, model="local:test", said_at=store.with_offset(ago(hours=hours_ago))))
+    return store.record_check(conn, lane.check_row(record, result, model="local:test", said_at=store.with_offset(said_time)))
 
 
 PINWHEEL_KEY = "did|did_or_made|none|day every pinwheel"  # claim_key of "The owner uses Pinwheel every day." named Pinwheel ("uses" is a stop word)
@@ -837,3 +857,221 @@ def test_the_lane_row_carries_how_many_owner_labels_the_check_was_shown(node):
     unread = _said(node.conn, "m-u", "I fixed the Orbit build.", claim="The owner fixed the Orbit build.", names=["Orbit"], polarity=1, hours_ago=3)
     rows = dict(node.conn.execute("SELECT check_id, owner_labels_shown FROM truth_checks").fetchall())
     assert rows[shown] == 2 and rows[none] == 0 and rows[unread] is None
+
+
+# --- verify_claim usage on the Daily overview ---------------------------------------------------------------------
+CHECK = {"statement": "I have never played chess", "mode": "fun", "caller_app_id": "truth-mirror"}
+
+
+@pytest.fixture
+def answering(node, monkeypatch):
+    """verify_claim answers without reading anything, and the node is linked to an owner id."""
+    monkeypatch.setattr("topos.query.verify.verify_claim",
+                        lambda conn, **kw: {"stance": "unknown", "_audit": {"mode": kw["mode"]}})
+    from topos.core.state import set_engine_config_value
+
+    set_engine_config_value(node.conn, "user_id", "owner-1")
+    return node
+
+
+def _usage(conn):
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name='mcp_request_log'").fetchone():
+        return []
+    return [tuple(row) for row in conn.execute(
+        "SELECT tool_name, source, requester_id, access_context, verified_cls, verified_client_id FROM mcp_request_log "
+        "ORDER BY id")]
+
+
+@pytest.mark.parametrize(("payload", "mode"), [({}, "standard"), ({"mode": "fun"}, "fun")])
+def test_verify_claim_has_no_fun_mode_unless_the_request_names_it(node, monkeypatch, payload, mode):
+    seen = {}
+
+    def answer(conn, **kw):
+        seen.update(kw)
+        return {"stance": "unknown"}
+
+    monkeypatch.setattr("topos.query.verify.verify_claim", answer)
+    out = _as(Principal(CP_RELAY, "cp_relay"), "verify_claim", {"statement": "I was at the office", "caller_app_id": "app", **payload})
+    assert out["status"] == "ok"
+    assert seen["mode"] == mode
+    assert seen["guard"].view is not None  # the relay reads the request's own Off-limits view, never none
+
+
+def test_an_answered_verify_claim_is_one_request_log_row_the_daily_overview_names(answering):
+    from topos.dashboard.measurements import daily_measurements
+
+    out = _as(Principal(CP_RELAY, "cp_relay"), "verify_claim", CHECK)
+    assert out["status"] == "ok" and "_audit" not in out["payload"]
+    assert _usage(answering.conn) == [("verify_claim", "truth-mirror", "owner-1", "owner_self", "cp_relay", None)]
+
+    today = datetime.now(timezone.utc).date()
+    report = daily_measurements(answering.conn, today.isoformat(), (today + timedelta(days=1)).isoformat())
+    day = report["callers"]["buckets"][0]
+    assert day["callers"] == [{"source": "truth-mirror", "access_context": "owner_self", "count": 1}]
+    assert [(call["tool"], call["source"]) for call in day["calls"]] == [("verify_claim", "truth-mirror")]
+
+
+def test_the_owner_class_is_the_owners_own_use(answering):
+    assert _as(Principal(OWNER_APP, "uds"), "verify_claim", CHECK)["status"] == "ok"
+    assert _usage(answering.conn) == [("verify_claim", "truth-mirror", "owner-1", "owner_self", "owner_app", None)]
+
+
+def test_an_allowlisted_local_client_is_recorded_as_itself_beside_the_app_it_names(answering, monkeypatch):
+    monkeypatch.setenv("TOPOS_TRUTH_CLIENT_ALLOWLIST", "fun-cam-dev")
+    assert _as(Principal(THIRD_PARTY, "local_http", client_id="fun-cam-dev"), "verify_claim", CHECK)["status"] == "ok"
+    assert _usage(answering.conn) == [("verify_claim", "truth-mirror", "fun-cam-dev", "other", "third_party",
+                                       "fun-cam-dev")]
+
+
+def test_a_refused_or_failed_verify_claim_writes_no_usage_row(answering, monkeypatch):
+    refused = _as(Principal(THIRD_PARTY, "cp_relay"), "verify_claim", CHECK)
+    assert refused["error"] == "owner_mode_required"
+    monkeypatch.setattr("topos.query.verify.verify_claim", lambda conn, **kw: {"error": "caller_app_id required"})
+    assert _as(Principal(CP_RELAY, "cp_relay"), "verify_claim", CHECK)["status"] == "error"
+    assert _usage(answering.conn) == []
+
+
+def test_a_usage_row_that_cannot_be_written_never_fails_the_answer(answering, monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr("topos.core.handlers.common.record_mcp_request", broken)
+    assert _as(Principal(CP_RELAY, "cp_relay"), "verify_claim", CHECK)["status"] == "ok"
+    assert _usage(answering.conn) == []
+
+
+@pytest.fixture
+def owner_door(answering, monkeypatch):
+    """verify_claim_owner answers without a model or retrieval: the engine stood in, its verdict given per test."""
+    from topos.query import verify_v2, verify_v2_models
+
+    verdict = {"verdict": "no_evidence", "reason": "no_record_shows_it"}
+
+    async def answer(request, **kwargs):
+        if verdict.get("raise"):
+            raise RuntimeError("model down")
+        return dict(verdict)
+
+    monkeypatch.setattr(verify_v2, "verify_owner_claim", answer)
+    monkeypatch.setattr(verify_v2_models, "chat_for_setting", lambda *a, **k: None)
+    monkeypatch.setattr(verify_v2_models, "judges_for_setting", lambda *a, **k: None)
+    return SimpleNamespace(node=answering, verdict=verdict)
+
+
+OWNER_CHECK = {"statement": "I restyled the pinwheel sidebar.", "said_at": "2026-10-07T19:47:36-05:00",
+               "context": [{"speaker": "", "text": "What did you change?"}], "effort": "high", "deadline_s": 30}
+
+
+def test_an_owner_door_check_is_a_verify_claim_row_under_the_name_the_caller_gives(owner_door):
+    """Owner, 29 Oct 2026: runs of the labelled transcripts should count on the Home card, labelled as tests. The owner
+    door names no app of itself; a run says ``caller_app_id`` and the row carries it."""
+    assert _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", {**OWNER_CHECK, "caller_app_id": "dev-transcripts"})["status"] == "ok"
+    assert _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", OWNER_CHECK)["status"] == "ok"
+    owner_door.verdict.update(verdict="unable", reason="deadline")  # an answer all the same: it was asked
+    assert _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", {**OWNER_CHECK, "caller_app_id": " dev-transcripts "})["status"] == "ok"
+    assert _usage(owner_door.node.conn) == [
+        ("verify_claim", "dev-transcripts", "owner-1", "owner_self", "owner_app", None),
+        ("verify_claim", "owner-door", "owner-1", "owner_self", "owner_app", None),
+        ("verify_claim", "dev-transcripts", "owner-1", "owner_self", "owner_app", None),
+    ]
+
+
+@pytest.fixture
+def held_usage_row(owner_door, monkeypatch):
+    """Every usage row stands at a write gate another writer holds, until the test lets go."""
+    from topos.core.handlers import query
+
+    gate, reached, write = threading.Event(), [], query._verify_claim_usage
+
+    def held(conn, source, *args):
+        reached.append(source)
+        assert gate.wait(10)
+        write(conn, source, *args)
+
+    monkeypatch.setattr(query, "_verify_claim_usage", held)
+    yield SimpleNamespace(node=owner_door.node, gate=gate, reached=reached)
+    gate.set()
+
+
+@pytest.mark.parametrize("msg_type,payload", [("verify_claim", CHECK), ("verify_claim_owner", OWNER_CHECK)])
+def test_the_answer_does_not_wait_for_its_usage_row(held_usage_row, msg_type, payload):
+    """30 Oct 2026: the row waited 13-21 s on the write gate before the answer left, so 30 s checks came back at up to
+    59 s. The answer leaves first. The row still names who asked once the door has moved on to the next request."""
+    async def asked():
+        try:
+            token = set_principal(Principal(OWNER_APP, "uds"))
+            try:
+                out = await asyncio.wait_for(_handler(msg_type)({"id": "r1", "type": msg_type, "payload": payload}), 5)
+            finally:
+                reset_principal(token)
+            assert _usage(held_usage_row.node.conn) == []
+        finally:
+            held_usage_row.gate.set()
+        await _usage_written()
+        return out
+
+    assert asyncio.run(asked())["status"] == "ok"
+    assert [row[4] for row in _usage(held_usage_row.node.conn)] == ["owner_app"]
+
+
+def test_usage_rows_go_one_at_a_time_in_answer_order(held_usage_row):
+    """A held gate ties up one worker thread however many answers go out: reads share those threads."""
+    async def asked():
+        token = set_principal(Principal(OWNER_APP, "uds"))
+        try:
+            for name in ("first", "second"):
+                await _handler("verify_claim_owner")({"id": name, "type": "verify_claim_owner",
+                                                      "payload": {**OWNER_CHECK, "caller_app_id": name}})
+        finally:
+            reset_principal(token)
+        for _ in range(200):
+            if held_usage_row.reached:
+                break
+            await asyncio.sleep(0.01)
+        await asyncio.sleep(0.05)
+        assert held_usage_row.reached == ["first"]
+        held_usage_row.gate.set()
+        await _usage_written()
+
+    asyncio.run(asked())
+    assert [row[1] for row in _usage(held_usage_row.node.conn)] == ["first", "second"]
+
+
+def test_an_owner_door_check_refused_invalid_or_failed_writes_no_row(owner_door):
+    assert _as(Principal(CP_RELAY, "cp_relay"), "verify_claim_owner", OWNER_CHECK)["error"] == "owner_mode_required"
+    for bad in ({**OWNER_CHECK, "caller_app_id": 7}, {**OWNER_CHECK, "deadline_s": 31}, {"caller_app_id": "dev-transcripts"}):
+        assert _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", bad)["error"] == "invalid_truth_request"
+    owner_door.verdict["raise"] = True
+    assert _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", OWNER_CHECK)["error"] == "verification_unavailable"
+    assert _usage(owner_door.node.conn) == []
+
+
+@pytest.mark.parametrize("verdict,expected", [("supported", "true"), ("contradicted", "false"),
+                                              ("no_evidence", "unanswerable"), ("unable", None)])
+def test_owner_verification_records_only_outcome_on_same_usage_row(owner_door, verdict, expected):
+    owner_door.verdict.update(verdict=verdict)
+    out = _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", {**OWNER_CHECK, "caller_app_id": "dev-transcripts"})
+    assert out["payload"]["verdict"] == verdict
+    rows = owner_door.node.conn.execute("SELECT source, verification_outcome FROM mcp_request_log").fetchall()
+    assert [tuple(r) for r in rows] == [("dev-transcripts", expected)]
+
+
+def test_app_verification_records_lane_result_on_same_usage_row(answering, monkeypatch):
+    monkeypatch.setattr("topos.query.verify.verify_claim", lambda conn, **kw: {
+        "lanes": {"work": {"stance": "supports"}, "social": {"stance": "no_evidence"}}})
+    assert _as(Principal(CP_RELAY, "cp_relay"), "verify_claim", CHECK)["status"] == "ok"
+    assert [r[0] for r in answering.conn.execute("SELECT verification_outcome FROM mcp_request_log")] == ["true"]
+
+
+def test_a_timed_out_owner_check_counts_as_a_call_with_its_outcome_unavailable(owner_door):
+    """Owner, 29 Oct 2026: ``unable`` (deadline, model down) says nothing about the claim, so the Home card shows it as
+    unavailable, never as a claim the data could not answer; the call itself still counts."""
+    from topos.dashboard.measurements import daily_measurements
+
+    owner_door.verdict.update(verdict="unable", reason="deadline")
+    assert _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", {**OWNER_CHECK, "caller_app_id": "dev-transcripts"})["status"] == "ok"
+    owner_door.verdict.update(verdict="no_evidence", reason="no_record_shows_it")
+    assert _as(Principal(OWNER_APP, "uds"), "verify_claim_owner", {**OWNER_CHECK, "caller_app_id": "dev-transcripts"})["status"] == "ok"
+    today = datetime.now(timezone.utc).date()
+    day = daily_measurements(owner_door.node.conn, today.isoformat(), (today + timedelta(days=1)).isoformat())["verify_claim"]["buckets"][0]
+    assert day["count"] == 2 and day["outcomes"] == {"true": 0, "false": 0, "unanswerable": 1, "unavailable": 1}

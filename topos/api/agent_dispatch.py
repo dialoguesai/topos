@@ -9,8 +9,8 @@ presents a valid label; lane L1). The answer is the handler's result dict as the
 The class decides, never the body:
 
 * ``owner_agent`` reaches exactly ``OWNER_AGENT_ALLOWED_TYPES`` (``query``, ``aggregate``, ``get_sources``), or,
-  for an enrolled app, exactly that app's own list (``mcp_clients.APP_AGENT_TYPES``: Moments sends
-  ``reflection_facts``); any other type is 403 ``{"error": "owner_agent_not_allowed"}`` before anything is
+  for an enrolled app, exactly what its grant opens (``mcp_clients.AppGrant``); any other type is 403
+  ``{"error": "owner_agent_not_allowed"}`` before anything is
   dispatched. The dispatcher refuses the same types again on its own (``_owner_agent_refusal``), so a second door
   cannot forget to.
 * ``owner_app`` keeps today's rights through this door, so the node's own CLI can use it; the dispatcher's

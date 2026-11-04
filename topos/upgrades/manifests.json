@@ -1310,6 +1310,105 @@
       "notes": []
     },
     {
+      "version": "1.5.30",
+      "summary": "Hotfix: the storage snapshot behind get_device_info walks dbstat once at a time, behind the caller, cached 15 minutes; nothing to run on upgrade.",
+      "steps": [],
+      "notes": []
+    },
+    {
+      "version": "1.5.31",
+      "summary": "A rating-candidates door for the calibration ratings card (60 ms instead of the whole person graph), the relationship reads off the event loop, person-graph skip flags, and NER/embedding models loaded from the local cache on a loader thread; nothing to run on upgrade.",
+      "steps": [],
+      "notes": []
+    },
+    {
+      "version": "1.5.32",
+      "summary": "The truth lane checks back as far as the owner sets (window_days, for backfill); every answered verify_claim, from either door, writes one request-log row with its outcome for the Home card; and a claim is read on the day it was said and dated only by its words (both switches on).",
+      "steps": [],
+      "notes": []
+    },
+    {
+      "version": "1.5.33",
+      "summary": "A verify_claim answer no longer waits for its usage row: both doors write the row behind the answer, one at a time, so a held write gate cannot push a 30 s check past its deadline.",
+      "steps": [],
+      "notes": []
+    },
+    {
+      "version": "1.5.34",
+      "summary": "verify_claim: fun mode is optional and a request naming no mode has none (DR-64); Off-limits now applies to the facts it reads. No derived data changes.",
+      "steps": [],
+      "notes": []
+    },
+    {
+      "version": "1.5.35",
+      "summary": "Keep the node responsive during standard claim verification by moving its blocking database/inference work off the app event loop.",
+      "steps": [],
+      "notes": [
+        "[O] Code-only worker isolation. No schema change, reprocessing, or change to local/remote inference routing."
+      ]
+    },
+    {
+      "version": "1.5.36",
+      "summary": "Resilience foundations: explicit compute availability, bounded Engine HTTP admission, verification timing, opt-in telemetry and outbox retry preservation.",
+      "steps": [],
+      "notes": [
+        "Code and protocol changes only. No schema migration, reprocessing, model change or automatic telemetry export.",
+        "Engine HTTP limits do not govern every GPU caller. Experimental provider gateway excluded."
+      ]
+    },
+    {
+      "version": "1.5.37",
+      "summary": "Bound verification and permissioned-answer request lifetimes, retain transport resource ownership, and classify shared-answer failures.",
+      "steps": [],
+      "notes": [
+        "Code-only changes. No schema migration, reprocessing, model change or new automatic telemetry export.",
+        "Database/compute separation is preserved; remote server-side deadline enforcement requires an updated compute host.",
+        "Socket cancellation is not proof of provider/GPU drain. Global provider admission and UI work are excluded."
+      ]
+    },
+    {
+      "version": "1.5.38",
+      "summary": "Raise the normal local routine allowance to 100 and add explicit development-only unlimited daily runs with observable policy.",
+      "steps": [],
+      "notes": [
+        "Code and additive status-contract changes only. No migration, reprocessing, dependency or model change.",
+        "Development unlimited mode defaults off; it changes the daily allowance only, preserving other admission and delivery safeguards.",
+        "Database/compute separation is unchanged; no capacity or mixed-workload speedup is established by this release."
+      ]
+    },
+    {
+      "version": "1.5.39",
+      "summary": "Any app can hold an owner grant with its reads stored on the enrolment, pack_facts replaces reflection_facts, message_context is added, the node's app-specific doors are removed, and verify_claim logs its audit line on every exit.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change. agent_app_grants is created on first use.",
+        "An app enrolled before this release has no grant and reads nothing until it runs `topos-node agents add` again.",
+        "reflection_candidates and reflection_labels stay on disk, untouched and no longer written; a queued reflection_sweep job is never claimed.",
+        "None of the 1.5.38 stress-test fixes (single model profile, two Ollama slots, background yielding, batched judge) are in this release."
+      ]
+    },
+    {
+      "version": "1.5.40",
+      "summary": "The node schedules its own local model requests: one context per model, at most one request per model at a time, the owner's live work first, and an idle model unloaded when a request waits behind it.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "A routine's model calls can wait longer while the owner's live chat or an answer is queued on the same model; what a routine computes is unchanged.",
+        "TOPOS_LOCAL_MODEL_CONTEXT, TOPOS_LOCAL_MODEL_SLOTS and TOPOS_LOCAL_MODEL_RELEASE_AFTER_S tune it; 0 turns each off."
+      ]
+    },
+    {
+      "version": "1.5.41",
+      "summary": "Topos Facts v0.1 is available as an opt-in Facts extraction option; local models start at the smallest of three contexts that fits the request and move up only; and a model whose runner keeps growing is unloaded once its current request ends, so it reloads at its load size.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change by default.",
+        "Picking topos_facts in Settings downloads two pinned encoders (about 1.7 GB) on first use; if they cannot load, the batch defers and nothing is marked done. Nothing already processed is redone.",
+        "A grown model's new requests wait while its current request finishes, at most 120 s, before it is unloaded and reloaded.",
+        "TOPOS_LOCAL_MODEL_CONTEXT_STEPS and TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB tune the model changes; 0 turns each off."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

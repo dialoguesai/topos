@@ -19,6 +19,7 @@ from .evidence import _key, _owner
 from .message_review_contract import MessageClassification, MessageSnapshot
 from .message_evidence import snapshot_message, _floors, message_key, DOMAINS
 from .shadow_labeler_local import MODEL, MODEL_REVISION, MAX_TEXT_CHARS, assessment_base_url, open_transport, rubric
+from .. import local_serving
 
 VERSION = "topos-machine-message-review/v1"
 KEY_PREFIX = "machine-message-review:"
@@ -322,7 +323,7 @@ async def assess(prepared, *, transport=None):
                      else (open_transport(base_url=assessment_base_url()), True))
     try:
         await client.verify()
-        response = await client.client.post(client.base_url + "/api/chat", timeout=25, json={
+        response = await local_serving.post_async(client.client, client.base_url + "/api/chat", timeout=25, json={
             "model": MODEL, "stream": False, "think": False, "format": "json",
             "options": {"temperature": 0, "num_predict": 512},
             "messages": [{"role": "system", "content": PROMPT + "\n" + classification_rubric()},

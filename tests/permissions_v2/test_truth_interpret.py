@@ -1,5 +1,6 @@
 """verify-claim effort high: the interpreter alone (guards, examples, the two model calls, capacity). No model runs:
 the pinned model is replaced by a scripted chat, and the transport by a scripted host."""
+from topos import local_serving
 import io
 import json
 from pathlib import Path
@@ -208,13 +209,16 @@ def pinned(host, **kwargs):
     return chat
 
 
-def test_the_transport_asks_the_pinned_model_for_a_schema_answer_and_leaves_the_context_to_the_host():
+def test_the_transport_asks_the_pinned_model_for_a_schema_answer_and_leaves_the_context_to_the_host(monkeypatch):
+    # The caller's own context; the serving layer (topos/local_serving.py) raises it on the wire, tested there.
+    monkeypatch.setattr(local_serving, "CONTEXT", 0)
     host = Host()
     assert pinned(host)("system", "user", {"type": "object"}, 3.0) == {"option": "drink=tea"}
     (_, tags, _), (url, body, timeout) = host.requests
     assert url.endswith("/api/chat") and body["format"] == {"type": "object"} and body["think"] is False
     assert body["options"] == {"temperature": 0, "seed": ti.SEED} and body["stream"] is False
-    assert [m["role"] for m in body["messages"]] == ["system", "user"] and timeout == 3.0
+    # The node's admission (topos/local_serving.py) takes the time it held the request off the timeout.
+    assert [m["role"] for m in body["messages"]] == ["system", "user"] and 2.5 < timeout <= 3.0
     pinned(host, num_ctx=4096)("s", "u", {}, 1.0)
     assert host.requests[-1][1]["options"]["num_ctx"] == 4096
 

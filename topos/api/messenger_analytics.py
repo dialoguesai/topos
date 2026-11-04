@@ -543,6 +543,10 @@ def get_person_graph(
     dataset_id: str = Query("", description="empty => the engine picks the busiest dataset"),
     include_automated: bool = Query(False, description="shortcodes are not people"),
     include_third_party: bool = Query(False, description="edges between two OTHER people"),
+    structure: bool = Query(True, description="communities, centrality and the context "
+                                              "layer; off for the nodes alone"),
+    heard_about: bool = Query(True, description="what of your own work each person has "
+                                                "heard about; off for the nodes alone"),
 ) -> Dict[str, Any]:
     conn = get_db_connection()
     if conn is None:
@@ -551,7 +555,25 @@ def get_person_graph(
 
     return read_person_graph(conn, dataset_id=dataset_id,
                              include_automated=include_automated,
-                             include_third_party=include_third_party)
+                             include_third_party=include_third_party,
+                             include_structure=structure,
+                             include_heard_about=heard_about)
+
+
+@router.get("/messenger-analytics/rating-candidates", dependencies=[Depends(require_api_key)])
+def get_rating_candidates(
+    dataset_id: str = Query("", description="empty => the engine picks the busiest dataset"),
+    limit: int = Query(25, ge=1, le=200),
+) -> Dict[str, Any]:
+    """The calibration screen's ratings card: the people the owner can rate, busiest
+    first, and how many there are — without reading the whole person graph."""
+    conn = get_db_connection()
+    if conn is None:
+        return {"dataset_id": dataset_id, "candidates": [], "unrated_count": 0,
+                "error": "no database"}
+    from ..analytics.relationship_reads import read_rating_candidates
+
+    return read_rating_candidates(conn, dataset_id=dataset_id, limit=limit)
 
 
 @router.get("/messenger-analytics/naming-queue", dependencies=[Depends(require_api_key)])

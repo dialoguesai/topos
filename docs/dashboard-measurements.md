@@ -1,6 +1,15 @@
 # Owner dashboard measurements v1
 
-The personal SQLite node records first observations at storage commit. The control plane exposes `GET /v1/dashboard/measurements?period_start=YYYY-MM-DD&period_end=YYYY-MM-DD` (exclusive UTC end, at most 366 days) to the verified first-party owner. The owner-only `get_dashboard_measurements` relay handler runs off the event loop. Shared hosted pools are unavailable: facts do not carry a reliable tenant partition.
+The personal SQLite node records first observations at storage commit. The control plane exposes `GET /v1/dashboard/measurements?period_start=YYYY-MM-DD&period_end=YYYY-MM-DD` (exclusive end, at most 366 days; `&time_zone=` optional, see Day boundaries) to the verified first-party owner. The owner-only `get_dashboard_measurements` relay handler runs off the event loop. Shared hosted pools are unavailable: facts do not carry a reliable tenant partition.
+
+## Day boundaries
+
+`time_zone` (optional, an IANA name, at most 64 characters) sets where days end. Each bucket covers local midnight to
+local midnight in that zone, so a DST day is 23 or 25 hours and half-hour offsets fall on the right day. The response
+always carries `time_zone`: the zone the buckets were actually cut in. A missing, malformed or unloadable zone (the
+node may lack tzdata) is `"UTC"`. A response without the field comes from an older node and its days are UTC. Instants
+(`as_of`, `measured_since`, `calls[].at`) are UTC ISO timestamps in every zone. Request-activity `blocks` are four-hour
+spans of the local day. Coverage days (the activation day and today are partial) are local days too.
 
 ## Definitions
 
@@ -21,3 +30,29 @@ Migration 88 seeds existing identities with NULL observation times. It never rec
 ## Rollout
 
 Land/release the node migration with the node's normal backup and downgrade guard. Then advance the control-plane compatibility pin and deploy its owner relay endpoint; deploy the dashboard client. Old/offline nodes and missing endpoints remain unavailable, never fixture values or zeroes. This change does not migrate a running owner's database during development.
+
+### Verification outcomes
+
+The additive `verify_claim` block uses population `answered_verify_claim_calls`.
+Each daily bucket contains `count`, `coverage`, and `outcomes` with integer counts
+for `true`, `false`, `unanswerable`, and `unavailable`. The four counts sum to the
+bucket total. Unmeasured days have null count/outcomes; measured empty days are zero.
+Only answered app/owner verification-door calls are included, including labelled
+development callers. Automatic inbound checks, signed-grant checks, refusals, and
+failed requests are outside this population, matching the usage-log contract.
+
+A nullable `verification_outcome` column is added by the request log's existing
+idempotent write-time schema upgrade. The same usage row stores the outcome; there
+is no second event or claim/evidence text. Historical rows are never guessed or
+backfilled. Read-only dashboard requests do not migrate the schema.
+
+Owner verdicts map `supported` → true, `contradicted` → false, and `no_evidence` →
+unanswerable. `unable` (the deadline passed or the model failed) records no outcome:
+the call still counts, under unavailable, because a timeout says nothing about the claim. The older lane response maps non-conflicting support or
+contradiction to true/false; no evidence, explicit abstention, or conflicting lanes
+is unanswerable. Unknown/malformed schemas remain unavailable. This reporting
+adapter does not modify the answer, evidence selection, or verifier behavior.
+
+The Essentials bar uses all recorded calls as its denominator and keeps unavailable
+outcomes as a separate hatched portion. Its outcome shades follow the selected Essentials accent; labels and segment order retain their meaning.
+Older nodes without this block can still show usage totals with unavailable outcomes.

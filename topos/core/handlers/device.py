@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import re
 import time
@@ -554,9 +555,14 @@ async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, A
             # S1 made real: the engine acknowledges the dispatch before any
             # model work, replacing the control plane's synthesized ack.
             await _emit_protocol("ack", {})
-        result = await get_services().llm.generate(
-            payload, on_delta=on_delta, on_protocol=on_protocol
-        )
+        # A generation that does not stream (a routine's step) has nobody watching it arrive: on the local model
+        # host it waits for the owner's live requests and answers on the same model (topos/local_serving.py).
+        from ... import local_serving
+
+        with contextlib.nullcontext() if payload.get("stream") else local_serving.unwatched():
+            result = await get_services().llm.generate(
+                payload, on_delta=on_delta, on_protocol=on_protocol
+            )
         logger.info(
             "llm_generation done: id=%s model=%r output_chars=%d elapsed_s=%.1f wall_s=%.1f",
             req_id,
@@ -599,6 +605,11 @@ async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, A
         }
     except HTTPException as exc:
         _log_failed(exc, exc.status_code)
+        from ...engine.overload import unavailable_from_detail
+
+        unavailable = unavailable_from_detail(exc.status_code, exc.detail)
+        if unavailable is not None:
+            return unavailable.envelope(req_id)
         detail = exc.detail
         err_msg = detail if isinstance(detail, str) else str(detail)
         return {

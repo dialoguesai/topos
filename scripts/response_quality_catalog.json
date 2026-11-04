@@ -2,15 +2,85 @@
   "version": "response-quality-contracts-1",
   "model": "none: synthetic fixtures and mocked generation; not a live-model evaluation",
   "families": {
-    "identity_and_dataset": {"node": ["tests/query/test_latest_exchange.py"], "web": ["lib/mcp/personThreadEvidence.test.ts"]},
-    "dates_and_recency": {"node": ["tests/query/test_activity_recap_recency.py", "tests/query/test_fusion_recency.py"], "web": ["lib/mcp/localEventTime.test.ts"]},
-    "routing_and_source_exclusions": {"web": ["lib/mcp/scopeQueryRouter.test.ts", "lib/mcp/scopeRoutingRules.test.ts", "lib/mcp/homeChatAgent.toolElection.test.ts"]},
-    "empty_and_incomplete_evidence": {"node": ["tests/query/test_scope_supply_state.py"], "web": ["lib/mcp/evidenceLimits.test.ts", "lib/mcp/homeChatAgent.evidenceLimits.test.ts", "lib/mcp/scopeSupplyRouting.test.ts"]},
-    "followups_and_breadth": {"web": ["lib/mcp/homeChatFollowup.agent.test.ts", "lib/mcp/followupBreadth.test.ts"]},
-    "citations_and_attribution": {"node": ["tests/query/test_owner_source_urls.py"], "web": ["lib/mcp/conversationCitations.test.ts", "lib/mcp/sourceUrls.test.ts", "lib/mcp/reportedSpeech.test.ts"]},
-    "work_recall_and_recommendations": {"web": ["lib/mcp/workEvidence.recalibration.test.ts", "lib/mcp/workEvidence.recommendations.test.ts"]},
-    "general_knowledge_negative_controls": {"web": ["lib/mcp/worldKnowledgeAsk.test.ts", "lib/mcp/homeChatEval.worldKnowledge.test.ts"]},
-    "cache_and_access_boundaries": {"node": ["tests/query/test_query_multi_turn_cache.py", "tests/query/test_principal_floors.py", "tests/query/test_turn_replay_with_principal.py"]},
-    "query_and_synthesis_contracts": {"node": ["tests/query/test_retrieval_text_contract.py"], "web": ["lib/mcp/homeChatOrchestration.test.ts", "lib/mcp/scopeQueryIssuerContract.test.ts"]}
+    "identity_and_dataset": {
+      "node": [
+        "tests/query/test_latest_exchange.py"
+      ],
+      "web": [
+        "lib/mcp/personThreadEvidence.test.ts"
+      ]
+    },
+    "dates_and_recency": {
+      "node": [
+        "tests/query/test_activity_recap_recency.py",
+        "tests/query/test_fusion_recency.py"
+      ],
+      "web": [
+        "lib/mcp/localEventTime.test.ts"
+      ]
+    },
+    "routing_and_source_exclusions": {
+      "web": [
+        "lib/mcp/scopeQueryRouter.test.ts",
+        "lib/mcp/scopeRoutingRules.test.ts",
+        "lib/mcp/homeChatAgent.toolElection.test.ts"
+      ]
+    },
+    "empty_and_incomplete_evidence": {
+      "node": [
+        "tests/query/test_scope_supply_state.py"
+      ],
+      "web": [
+        "lib/mcp/evidenceLimits.test.ts",
+        "lib/mcp/homeChatAgent.evidenceLimits.test.ts",
+        "lib/mcp/scopeSupplyRouting.test.ts"
+      ]
+    },
+    "followups_and_breadth": {
+      "web": [
+        "lib/mcp/homeChatFollowup.agent.test.ts",
+        "lib/mcp/followupBreadth.test.ts"
+      ]
+    },
+    "citations_and_attribution": {
+      "node": [
+        "tests/query/test_owner_source_urls.py"
+      ],
+      "web": [
+        "lib/mcp/conversationCitations.test.ts",
+        "lib/mcp/sourceUrls.test.ts",
+        "lib/mcp/reportedSpeech.test.ts"
+      ]
+    },
+    "work_recall_and_recommendations": {
+      "web": [
+        "lib/mcp/workEvidence.recalibration.test.ts",
+        "lib/mcp/workEvidence.recommendations.test.ts"
+      ]
+    },
+    "general_knowledge_negative_controls": {
+      "web": [
+        "lib/mcp/worldKnowledgeAsk.test.ts",
+        "lib/mcp/homeChatEval.worldKnowledge.test.ts"
+      ]
+    },
+    "cache_and_access_boundaries": {
+      "node": [
+        "tests/query/test_query_multi_turn_cache.py",
+        "tests/query/test_principal_floors.py",
+        "tests/query/test_turn_replay_with_principal.py"
+      ]
+    },
+    "query_and_synthesis_contracts": {
+      "node": [
+        "tests/query/test_retrieval_text_contract.py",
+        "tests/query/test_verification_deadline.py",
+        "tests/permissions_v2/test_shared_model_recovery.py"
+      ],
+      "web": [
+        "lib/mcp/homeChatOrchestration.test.ts",
+        "lib/mcp/scopeQueryIssuerContract.test.ts"
+      ]
+    }
   }
 }

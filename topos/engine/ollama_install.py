@@ -71,13 +71,14 @@ def default_app_present() -> bool:
     return OLLAMA_APP.is_dir()
 
 
-def default_open_app() -> None:
+def default_open_app(*, timeout: float | None = None) -> None:
     # Hidden so a headless node does not pop a window in the owner's face.
     subprocess.run(
         ["open", "-a", "Ollama", "--args", "hidden"],
         check=False,
         capture_output=True,
         text=True,
+        timeout=timeout,
     )
 
 
