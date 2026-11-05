@@ -112,17 +112,16 @@ async def handle_put_pack_offer(message):
 async def handle_run_pack_backfill(message):
     """Owner-initiated bounded history backfill for one enabled pack (W-B #4).
     Runs in a worker thread; bounded by `limit` hit-records per call."""
-    import asyncio as _asyncio
     req_id = message.get("id")
-    conn = hub.get_db_connection()
-    if not conn:
+    if not hub.get_db_connection():
         return {"id": req_id, "status": "error", "error": "Database not available"}
     payload = message.get("payload") or {}
     pack_id = str(payload.get("pack_id") or "").strip()
     limit = min(int(payload.get("limit") or 200), 1000)
     try:
         from ...features.derivation.surfaces import run_pack_backfill
-        stats = await _asyncio.to_thread(run_pack_backfill, conn, pack_id, limit)
+        from .common import run_db_write
+        stats = await run_db_write(run_pack_backfill, pack_id, limit)
         return {"id": req_id, "status": "ok", "payload": {"status": "ok", "pack_id": pack_id, **stats}}
     except ValueError as exc:
         return {"id": req_id, "status": "error", "error": str(exc)}

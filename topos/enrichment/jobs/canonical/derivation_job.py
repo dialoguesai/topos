@@ -734,9 +734,12 @@ class DerivationJob(BaseEnrichmentJob):
         cancel = threading.Event()
         stats: Dict[str, Any] = {}
         try:
-            written = await asyncio.to_thread(
-                run_derivation_batch, conn, canonical_messages,
-                cancel=cancel, stats=stats)
+            def _run_batch():
+                # The worker's own handle; `conn` above belongs to this coroutine's thread.
+                return run_derivation_batch(
+                    get_db_connection(), canonical_messages, cancel=cancel, stats=stats)
+
+            written = await asyncio.to_thread(_run_batch)
         except asyncio.CancelledError:
             cancel.set()
             raise

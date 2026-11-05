@@ -9,6 +9,38 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Query work moved off the event loop now runs on the worker thread's own database connection.** `[O]` Since
+  8 Sep 2026 the query pipeline hands retrieval, the facts lanes and the session-store writes to a pool thread so the
+  loop keeps answering. The helper meant to give that thread its own handle first asked whether the work "stays on
+  the loop", a check that begins with `asyncio.get_running_loop()`; a pool thread has no loop, so there the answer was
+  always yes, and every offloaded read and write went through the event loop's connection while the loop went on
+  using it. A `sqlite3.Connection` has one transaction state, one statement cache and one last-error code. In the
+  4–5 Nov 2026 stress runs that sharing showed as a query artifact INSERT failing a constraint and holding the write
+  lock for 11.5 minutes (1.5.42), and as two session writes failing with "another row available" (1.5.43), which is
+  SQLite's SQLITE_ROW: a failing INSERT can only report it when another thread stepped a statement on the same handle
+  between the failure and the read of its error code. The worker now marks itself and resolves its own per-thread
+  connection; injected adapters (tests, harnesses) are untouched, since their work never leaves the loop. The adapter
+  bundle on a worker's handle is built once per thread.
+- **Every piece of work hopped off the event loop now runs on the worker thread's own database connection.** `[O]`
+  The fix above closed the query pipeline's hop; a sweep of the node's other 213 `asyncio.to_thread` and
+  `run_in_executor` calls found 24 more that handed the loop's connection to a worker, as an argument evaluated before
+  the hop or inside the closure the worker runs: the entity graph, graph search, graph activity, affinity recompute,
+  complexity (summary, timeline, topics, influence), pack backfill, Cypher query and tool-index routes and handlers,
+  the job-progress and disk-status routes, and the complexity-snapshot, derivation and fact-extraction enrichment
+  jobs — plus the derivation lane's first use of the derived-tables manager, which built it on the owner's handle, DDL
+  included, from a worker. Each now resolves its handle on the worker (`run_db_read` / `run_db_write` in the handlers,
+  a closure around the lane's own resolver in the routes and jobs). A test reads every hop in the package and fails on
+  a hand-off of that shape; fourteen sites are also driven against a file-backed owner connection to check which
+  handle the worker is given.
+- **A thread that does not own the node's database connection no longer runs statements on it.** `[O]`
+  `get_db_connection()` validated the owner's handle — `PRAGMA database_list`, then `SELECT 1` — from every calling
+  thread, under a lock the owner's own statements never take, so a worker asking for its own connection first touched
+  the loop's. That is the sharing the per-thread design exists to prevent, and the route by which a corrupted statement
+  cache (17 Aug 2026) could reach the owner's handle. Other threads now take the owner's handle as its owner last
+  validated it and open their own; the path check that notices a re-pointed database runs as before, from every
+  thread, and a handle nobody has described yet (one a test injected) is still read once.
+
 ## [1.5.43] — 2026-11-04
 
 ### Fixed

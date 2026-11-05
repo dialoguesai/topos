@@ -194,6 +194,10 @@ _db_conn_path: str | None = None  # resolved path for current db_conn; invalidat
 #: Thread that owns ``db_conn`` — every other thread gets its own connection to
 #: the same file (see ``get_db_connection``). None until the database is opened.
 _conn_owner_thread: int | None = None
+#: The handle ``_db_conn_path`` describes. A test that injects a new ``db_conn``
+#: without resetting the path leaves the two disagreeing; comparing identities
+#: is how ``_get_owner_db_connection`` notices without a statement.
+_db_conn_described: sqlite3.Connection | None = None
 #: Per-thread connections keyed implicitly by thread identity.
 _thread_state = threading.local()
 #: Serializes every read/validate/close/swap of the owner globals above.
@@ -466,36 +470,60 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
     threads racing an initial open both build a connection; the loser's is
     closed at the swap.
     """
-    global db_conn, _db_conn_path, _conn_owner_thread
+    global db_conn, _db_conn_path, _conn_owner_thread, _db_conn_described
 
     bind_active_database()
 
     from ..config.settings import settings
 
     with _owner_conn_lock:
+        # Only the owner thread runs statements on db_conn here. From any other
+        # thread, PRAGMA database_list or SELECT 1 lands on a Connection its owner
+        # may be mid-execute on — the sharing this module exists to prevent, and
+        # the route by which the 2026-08-17 statement-cache KeyError reached the
+        # owner's handle — so other threads take the handle as its owner last
+        # validated it (their own handle is checked in _get_thread_db_connection).
+        # The exception is a handle nobody has described yet: an injected test
+        # handle, whose file has to be read off it once before any thread can
+        # open its own.
+        described = db_conn is not None and db_conn is _db_conn_described
+        if described and _db_conn_path is None:
+            # Read once and found to be in-memory: shared by every thread (see
+            # get_db_connection), and never re-pointed, so nothing to re-check.
+            return db_conn
+        validate = (
+            _conn_owner_thread is None
+            or threading.get_ident() == _conn_owner_thread
+            or not described
+        )
         # Respect injected in-memory sqlite handles used by tests, even if _db_conn_path
         # still points to a stale file-backed connection from a prior run.
-        if db_conn is not None:
+        if db_conn is not None and validate:
             try:
                 row = db_conn.execute("PRAGMA database_list").fetchone()
                 if row is not None:
                     db_file = str(row[2] or "").strip()  # seq, name, file
                     if db_file in {"", ":memory:"}:
                         _db_conn_path = None
+                        _db_conn_described = db_conn
                         return db_conn
                     if _db_conn_path is None:
                         _db_conn_path = str(Path(db_file).resolve())
+                    _db_conn_described = db_conn
             except Exception:
                 pass
 
         if db_conn is not None and settings.topos_database_path and _db_conn_path:
-            try:
-                db_conn.execute("SELECT 1")
-            except _UNHEALTHY_CONNECTION_ERRORS:
-                unregister_connection(db_conn)
-                db_conn = None
-                _db_conn_path = None
-            else:
+            healthy = True
+            if validate:
+                try:
+                    db_conn.execute("SELECT 1")
+                except _UNHEALTHY_CONNECTION_ERRORS:
+                    unregister_connection(db_conn)
+                    db_conn = None
+                    _db_conn_path = None
+                    healthy = False
+            if healthy:
                 try:
                     explicit_resolved = str(Path(settings.topos_database_path).resolve())
                 except (OSError, RuntimeError):
@@ -528,6 +556,8 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
             _db_conn_path = None
 
         if db_conn is not None:
+            if not validate:
+                return db_conn
             try:
                 db_conn.execute("SELECT 1")
                 # Scrub/adapters may have cleared Row factory on the shared conn.
@@ -565,6 +595,7 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
                 return db_conn
         db_conn = new_conn
         _db_conn_path = resolved
+        _db_conn_described = new_conn
         _conn_owner_thread = threading.get_ident()
         return db_conn
 
