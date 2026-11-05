@@ -1420,6 +1420,15 @@
       ]
     },
     {
+      "version": "1.5.43",
+      "summary": "A write that fails under the write gate now rolls back its transaction, so one failed query write can no longer hold SQLite's write lock and stop every other write on the node.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "A rolled-back write logs a [WRITE_GATE] warning with its call site and SQLite's message, which names the failed constraint and no row values."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
