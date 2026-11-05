@@ -70,7 +70,11 @@ class ComplexitySnapshotJob(BaseEnrichmentJob):
         try:
             from ....features.complexity.engine import get_complexity_summary
 
-            summary = await asyncio.to_thread(get_complexity_summary, conn, recompute=True)
+            def _recompute():
+                # The worker's own handle; `conn` above belongs to this coroutine's thread.
+                return get_complexity_summary(get_db_connection(), recompute=True)
+
+            summary = await asyncio.to_thread(_recompute)
             logger.info(
                 "complexity_snapshot recomputed: focus=%.1f threads=%d",
                 float(summary.get("focus_index", {}).get("score") or 0.0),

@@ -325,21 +325,25 @@ async def get_entity_graph(
     from ..features.entities.reads import entity_graph
     from ..features.lifecycle.blackhole_guard import owner_ui_guard
 
-    conn = _entities_conn()
-    return await asyncio.to_thread(
-        entity_graph,
-        conn,
-        guard=owner_ui_guard(conn),
-        limit_nodes=limit_nodes,
-        limit_edges=limit_edges,
-        min_weight=min_weight,
-        include_closed=include_closed,
-        as_of=as_of,
-        selection=selection,
-        offset=offset,
-        event_after=event_after,
-        event_before=event_before,
-    )
+    def _read():
+        # Resolved on the worker, where it is used; the guard built from the
+        # handle carries that handle, so it is built there too.
+        conn = _entities_conn()
+        return entity_graph(
+            conn,
+            guard=owner_ui_guard(conn),
+            limit_nodes=limit_nodes,
+            limit_edges=limit_edges,
+            min_weight=min_weight,
+            include_closed=include_closed,
+            as_of=as_of,
+            selection=selection,
+            offset=offset,
+            event_after=event_after,
+            event_before=event_before,
+        )
+
+    return await asyncio.to_thread(_read)
 
 
 @router.post("/entities/graph/rebuild")
@@ -414,9 +418,10 @@ async def search_entity_graph(
 
     _check_tier_vector()
     service = get_signal_service()
-    conn = _entities_conn()
 
     def _run():
+        conn = _entities_conn()
+
         def search_fn(*, query, limit, event_after=None, event_before=None):
             return service.search_vectors(
                 query=query,
@@ -471,15 +476,17 @@ async def entity_graph_activity_route(
     from ..features.entities.reads import entity_graph_activity
     from ..features.lifecycle.blackhole_guard import owner_ui_guard
 
-    conn = _entities_conn()
-    return await asyncio.to_thread(
-        entity_graph_activity,
-        conn,
-        guard=owner_ui_guard(conn),
-        min_weight=min_weight,
-        since=since,
-        until=until,
-    )
+    def _read():
+        conn = _entities_conn()
+        return entity_graph_activity(
+            conn,
+            guard=owner_ui_guard(conn),
+            min_weight=min_weight,
+            since=since,
+            until=until,
+        )
+
+    return await asyncio.to_thread(_read)
 
 
 @router.get("/entities/{entity_id}")
@@ -596,7 +603,7 @@ async def post_affinity_recompute(_api_key: str = Depends(require_api_key)):
 
     from ..features.entities.affinity_owner import recompute_affinity_now
 
-    return await asyncio.to_thread(recompute_affinity_now, _entities_conn())
+    return await asyncio.to_thread(lambda: recompute_affinity_now(_entities_conn()))
 
 
 @router.get("/affinity/pairs")
@@ -1115,19 +1122,16 @@ async def complexity_summary(
     """
     import asyncio
 
-    from ..core.state import get_db_connection
     from ..features.complexity.engine import get_complexity_summary
 
-    conn = get_db_connection()
-    if conn is None:
-        raise HTTPException(status_code=503, detail="database unavailable")
     return await asyncio.to_thread(
-        get_complexity_summary,
-        conn,
-        recompute=recompute,
-        weeks=weeks,
-        window_days=window_days,
-        half_life_days=half_life_days,
+        lambda: get_complexity_summary(
+            _entities_conn(),
+            recompute=recompute,
+            weeks=weeks,
+            window_days=window_days,
+            half_life_days=half_life_days,
+        )
     )
 
 
@@ -1139,13 +1143,11 @@ async def complexity_timeline(
 ):
     import asyncio
 
-    from ..core.state import get_db_connection
     from ..features.complexity.engine import get_shift_timeline
 
-    conn = get_db_connection()
-    if conn is None:
-        raise HTTPException(status_code=503, detail="database unavailable")
-    return await asyncio.to_thread(get_shift_timeline, conn, recompute=recompute, weeks=weeks)
+    return await asyncio.to_thread(
+        lambda: get_shift_timeline(_entities_conn(), recompute=recompute, weeks=weeks)
+    )
 
 
 @router.get("/complexity/topics/daily")
@@ -1157,13 +1159,9 @@ async def complexity_topics_daily(
     """Per-day supertopic shares — the braid's substrate (PLAN_TIMELINE_UNIFIED.md E2)."""
     import asyncio
 
-    from ..core.state import get_db_connection
     from ..features.complexity.topics_daily import topics_daily
 
-    conn = get_db_connection()
-    if conn is None:
-        raise HTTPException(status_code=503, detail="database unavailable")
-    return await asyncio.to_thread(topics_daily, conn, days=days, top=top)
+    return await asyncio.to_thread(lambda: topics_daily(_entities_conn(), days=days, top=top))
 
 
 @router.get("/complexity/influence")
@@ -1177,20 +1175,17 @@ async def complexity_influence(
 ):
     import asyncio
 
-    from ..core.state import get_db_connection
     from ..features.complexity.engine import get_influence_threads
 
-    conn = get_db_connection()
-    if conn is None:
-        raise HTTPException(status_code=503, detail="database unavailable")
     return await asyncio.to_thread(
-        get_influence_threads,
-        conn,
-        recompute=recompute,
-        weeks=weeks,
-        top_k=top_k,
-        window_days=window_days,
-        target=target,
+        lambda: get_influence_threads(
+            _entities_conn(),
+            recompute=recompute,
+            weeks=weeks,
+            top_k=top_k,
+            window_days=window_days,
+            target=target,
+        )
     )
 
 
@@ -1283,7 +1278,7 @@ async def post_pack_backfill(
     from ..features.derivation.surfaces import run_pack_backfill
 
     try:
-        stats = await _asyncio.to_thread(run_pack_backfill, _entities_conn(), pack_id, limit)
+        stats = await _asyncio.to_thread(lambda: run_pack_backfill(_entities_conn(), pack_id, limit))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"pack_id": pack_id, **stats}

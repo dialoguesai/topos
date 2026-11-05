@@ -22,6 +22,17 @@ The machine-readable twin of each release is
   between the failure and the read of its error code. The worker now marks itself and resolves its own per-thread
   connection; injected adapters (tests, harnesses) are untouched, since their work never leaves the loop. The adapter
   bundle on a worker's handle is built once per thread.
+- **Every piece of work hopped off the event loop now runs on the worker thread's own database connection.** `[O]`
+  The fix above closed the query pipeline's hop; a sweep of the node's other 213 `asyncio.to_thread` and
+  `run_in_executor` calls found 24 more that handed the loop's connection to a worker, as an argument evaluated before
+  the hop or inside the closure the worker runs: the entity graph, graph search, graph activity, affinity recompute,
+  complexity (summary, timeline, topics, influence), pack backfill, Cypher query and tool-index routes and handlers,
+  the job-progress and disk-status routes, and the complexity-snapshot, derivation and fact-extraction enrichment
+  jobs — plus the derivation lane's first use of the derived-tables manager, which built it on the owner's handle, DDL
+  included, from a worker. Each now resolves its handle on the worker (`run_db_read` / `run_db_write` in the handlers,
+  a closure around the lane's own resolver in the routes and jobs). A test reads every hop in the package and fails on
+  a hand-off of that shape; fourteen sites are also driven against a file-backed owner connection to check which
+  handle the worker is given.
 
 ## [1.5.43] — 2026-11-04
 
