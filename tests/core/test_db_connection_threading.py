@@ -967,3 +967,120 @@ def test_defer_falls_back_inline_when_the_pending_check_raises():
             return _raise
 
     assert _defer_consolidation(_RaisingConn()) is False
+
+
+# --- only the owner thread touches the owner's handle ------------------------
+
+
+def _file_backed_owner_on_this_thread(tmp_path, monkeypatch, name: str = "engine.db"):
+    from topos.core import state
+
+    db = tmp_path / name
+    monkeypatch.setattr(state, "db_conn", None, raising=False)
+    monkeypatch.setattr(state, "_db_conn_path", None, raising=False)
+    monkeypatch.setattr(state, "_conn_owner_thread", None, raising=False)
+    monkeypatch.setattr(state, "_db_conn_described", None, raising=False)
+    monkeypatch.setattr(state, "_thread_state", threading.local(), raising=False)
+    monkeypatch.setattr(state, "_resolve_database_path_from_settings", lambda: db, raising=False)
+    owner = state.get_db_connection()
+    if owner is None:
+        pytest.skip("database could not be opened in this environment")
+    return owner
+
+
+def test_other_threads_run_no_statement_on_the_owners_handle(tmp_path, monkeypatch):
+    """``get_db_connection`` used to validate the owner's handle — ``PRAGMA
+    database_list`` and ``SELECT 1`` — from EVERY calling thread, under a lock the
+    owner's own statements never take. That is a statement on a Connection
+    another thread may be mid-execute on: the sharing the per-thread design
+    exists to stop, and the route by which the 2026-08-17 statement-cache
+    ``KeyError`` reached the owner's handle. Other threads take the handle as its
+    owner last validated it and open their own."""
+    from topos.core import state
+
+    owner = _file_backed_owner_on_this_thread(tmp_path, monkeypatch)
+    main_ident = threading.get_ident()
+    statements: list[tuple[int, str]] = []
+    owner.set_trace_callback(lambda sql: statements.append((threading.get_ident(), sql)))
+    try:
+        seen: dict[str, object] = {}
+
+        def worker() -> None:
+            first = state.get_db_connection()
+            second = state.get_db_connection()
+            seen["own"] = first is not None and first is not owner
+            seen["cached"] = first is second
+            seen["on_owner"] = [sql for ident, sql in statements if ident == threading.get_ident()]
+            state.close_thread_db_connection()
+
+        t = threading.Thread(target=worker, name="other-thread")
+        t.start()
+        t.join(10)
+
+        assert seen["own"], "another thread must get its own connection"
+        assert seen["cached"]
+        assert seen["on_owner"] == [], "a non-owner thread ran statements on the owner's handle"
+
+        # The owner still validates its own handle on its own thread.
+        statements.clear()
+        assert state.get_db_connection() is owner
+        assert any("SELECT 1" in sql for ident, sql in statements if ident == main_ident)
+    finally:
+        owner.set_trace_callback(None)
+
+
+def test_a_repointed_path_still_reaches_other_threads(tmp_path, monkeypatch):
+    """Path agreement is still checked on every call, from every thread: the
+    check compares paths and runs no statement, so skipping the owner-handle
+    probe loses nothing here."""
+    from topos.core import state
+
+    owner = _file_backed_owner_on_this_thread(tmp_path, monkeypatch)
+    second = tmp_path / "second.db"
+    monkeypatch.setattr(state, "_resolve_database_path_from_settings", lambda: second, raising=False)
+
+    seen: dict[str, object] = {}
+
+    def worker() -> None:
+        conn = state.get_db_connection()
+        seen["path"] = conn.execute("PRAGMA database_list").fetchone()[2]
+        seen["is_old_owner"] = conn is owner
+        state.close_thread_db_connection()
+
+    # The other thread notices first — before the owner thread has called again.
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(30)
+
+    assert seen["is_old_owner"] is False
+    assert Path(str(seen["path"])).resolve() == second.resolve()
+
+
+def test_an_injected_handle_with_a_stale_path_is_still_described(monkeypatch, tmp_path):
+    """A test that injects a new in-memory ``db_conn`` without resetting the path
+    (the case the PRAGMA probe was written for) must still be recognised from
+    another thread: the probe runs when the handle is not the one the path
+    describes, whichever thread asks."""
+    from topos.core import state
+
+    _file_backed_owner_on_this_thread(tmp_path, monkeypatch)  # a real owner, path set
+    mem = sqlite3.connect(":memory:", check_same_thread=False)
+    mem.row_factory = sqlite3.Row
+    mem.execute("CREATE TABLE marker (v INTEGER)")
+    mem.commit()
+    monkeypatch.setattr(state, "db_conn", mem, raising=False)  # stale _db_conn_path left behind
+
+    seen: dict[str, object] = {}
+
+    def worker() -> None:
+        conn = state.get_db_connection()
+        seen["shared"] = conn is mem
+        seen["marker"] = conn.execute("SELECT COUNT(*) FROM marker").fetchone()[0]
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(10)
+
+    assert seen["shared"] is True, "an in-memory handle must be shared, not reopened empty"
+    assert seen["marker"] == 0
+    assert state._db_conn_path is None

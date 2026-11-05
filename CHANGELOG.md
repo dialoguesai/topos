@@ -33,6 +33,13 @@ The machine-readable twin of each release is
   a closure around the lane's own resolver in the routes and jobs). A test reads every hop in the package and fails on
   a hand-off of that shape; fourteen sites are also driven against a file-backed owner connection to check which
   handle the worker is given.
+- **A thread that does not own the node's database connection no longer runs statements on it.** `[O]`
+  `get_db_connection()` validated the owner's handle — `PRAGMA database_list`, then `SELECT 1` — from every calling
+  thread, under a lock the owner's own statements never take, so a worker asking for its own connection first touched
+  the loop's. That is the sharing the per-thread design exists to prevent, and the route by which a corrupted statement
+  cache (17 Aug 2026) could reach the owner's handle. Other threads now take the owner's handle as its owner last
+  validated it and open their own; the path check that notices a re-pointed database runs as before, from every
+  thread, and a handle nobody has described yet (one a test injected) is still read once.
 
 ## [1.5.43] — 2026-11-04
 
