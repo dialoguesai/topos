@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Query work moved off the event loop now runs on the worker thread's own database connection.** `[O]` Since
+  8 Sep 2026 the query pipeline hands retrieval, the facts lanes and the session-store writes to a pool thread so the
+  loop keeps answering. The helper meant to give that thread its own handle first asked whether the work "stays on
+  the loop", a check that begins with `asyncio.get_running_loop()`; a pool thread has no loop, so there the answer was
+  always yes, and every offloaded read and write went through the event loop's connection while the loop went on
+  using it. A `sqlite3.Connection` has one transaction state, one statement cache and one last-error code. In the
+  4–5 Nov 2026 stress runs that sharing showed as a query artifact INSERT failing a constraint and holding the write
+  lock for 11.5 minutes (1.5.42), and as two session writes failing with "another row available" (1.5.43), which is
+  SQLite's SQLITE_ROW: a failing INSERT can only report it when another thread stepped a statement on the same handle
+  between the failure and the read of its error code. The worker now marks itself and resolves its own per-thread
+  connection; injected adapters (tests, harnesses) are untouched, since their work never leaves the loop. The adapter
+  bundle on a worker's handle is built once per thread.
+
 ## [1.5.43] — 2026-11-04
 
 ### Fixed
