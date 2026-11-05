@@ -442,5 +442,33 @@ def host_state() -> dict:
     return state
 
 
+#: The owner's node rebuilds both share indexes when its hourly interest refresh finds changes (`interest_refresh`
+#: with `rebuild_requested` > 0) until a `search_index_restore`; that takes 5–20 minutes of host CPU.
+LIVE_LEDGER = Path(".topos") / "permissions-v2" / "ledger.db"
+LIVE_ACTION_LOOKBACK_S = 30 * 60
+
+
+def live_node_actions(since: float, until: float, home: Optional[Path] = None) -> Optional[list[dict]]:
+    """The owner's node's system actions from 30 minutes before ``since`` to ``until`` (epoch seconds), read-only:
+    whether its own index rebuilds shared the host with a run. None when there is no ledger to read."""
+    ledger = (home or real_home()) / LIVE_LEDGER
+    if not ledger.exists():
+        return None
+    try:
+        conn = sqlite3.connect(f"file:{ledger}?mode=ro", uri=True)
+        try:
+            rows = conn.execute(
+                "SELECT recorded_at, json_extract(receipt_json, '$.action'), "
+                "json_extract(receipt_json, '$.rebuild_requested') FROM p2a_system_actions "
+                "WHERE recorded_at BETWEEN ? AND ? ORDER BY recorded_at",
+                (since - LIVE_ACTION_LOOKBACK_S, until)).fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return [{"at": time.strftime("%H:%M:%SZ", time.gmtime(at)), "in_run": at >= since, "action": action,
+             "rebuild_requested": rebuild} for at, action, rebuild in rows]
+
+
 if __name__ == "__main__":  # pragma: no cover - manual probe
     print(live_db_user_version(), file=sys.stderr)

@@ -39,7 +39,10 @@ logged nothing on any rig node.
    run (`stress_30.py`) or another load gate is running, if less than 10 GiB is free, or if the Mac is on battery
    (`--allow-battery` overrides). It reads the live database's `PRAGMA user_version` read-only, to compare after
    every run, and records the host's state (power, swap, load average, whether the owner's node, Dia, resident
-   local models and OrbStack are running) before and after each run.
+   local models and OrbStack are running) before and after each run. After each run it also reads the owner's
+   node's system actions from 30 minutes before the run to its end, read-only, from
+   `~/.topos/permissions-v2/ledger.db` (`p2a_system_actions`). An `interest_refresh` with `rebuild_requested` > 0
+   starts that node's share-index rebuilds, which hold the host's CPU until the `search_index_restore`.
 2. **Check the interpreter.** The candidate's `.venv` (Python 3.12, which `RELEASING.md` already asks for) must
    import `topos` from the candidate tree with the owner-database guard armed.
 3. **Seed a large invented database with the candidate's own schema** (`scripts/load_gate/seed.py`). It boots
@@ -238,6 +241,10 @@ connection or app launch was attempted.
 
 **Host state.** Each run's `host` block records it. The numbers above came from load averages of 2.6–8.0 and
 4.1–11.7 GB of swap, with the owner's node, Dia and OrbStack running and 0 or 1 local models resident.
+The owner's node's ledger, read afterwards for 21:35–22:15Z, shows no share-index rebuild inside any measured
+run: its `interest_refresh` (2 rebuilds) was at 21:19:18Z, `search_index_restore` at 21:24:56Z, the next refresh
+at 22:19:18Z. One `message_assessment_catchup` started at 22:05:23Z, 17 s before the stalled fixed-tree run. The
+scratch nodes run with permissions v2 off, so they keep no ledger and never rebuild a share index.
 
 The evidence (`load-gate.json` per series, stack dumps, the stalled run's node log) is in this Mac's shared
 session-notes folder under `load-gate-evidence-1105/`. It is not committed: the files are large and are only

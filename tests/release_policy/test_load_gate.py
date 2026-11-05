@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -221,6 +222,30 @@ class HeavyRunTests(unittest.TestCase):
             run.return_value.stdout = table
             hits = node.other_heavy_runs()
         self.assertEqual(sorted(hits), ["4242 run_any_to_any_release.py", "4343 stress_30.py"])
+
+
+class LiveNodeActionTests(unittest.TestCase):
+    def test_actions_in_and_just_before_the_run_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.assertIsNone(node.live_node_actions(0, 1, home=home))
+            ledger = home / node.LIVE_LEDGER
+            ledger.parent.mkdir(parents=True)
+            conn = sqlite3.connect(ledger)
+            conn.execute("CREATE TABLE p2a_system_actions (action_id TEXT, recorded_at REAL, receipt_json TEXT)")
+            start = 1_000_000.0
+            rows = [(start - 3600, {"action": "interest_refresh", "rebuild_requested": 2}),
+                    (start - 600, {"action": "interest_refresh", "rebuild_requested": 2}),
+                    (start + 60, {"action": "search_index_restore"}),
+                    (start + 900, {"action": "interest_refresh", "rebuild_requested": 0})]
+            conn.executemany("INSERT INTO p2a_system_actions VALUES (?, ?, ?)",
+                             [(str(i), at, json.dumps(r)) for i, (at, r) in enumerate(rows)])
+            conn.commit()
+            conn.close()
+            actions = node.live_node_actions(start, start + 300, home=home)
+        # The hour-old refresh is outside the look-back; the one after the run ended is not reported.
+        self.assertEqual([(a["action"], a["in_run"], a["rebuild_requested"]) for a in actions],
+                         [("interest_refresh", False, 2), ("search_index_restore", True, None)])
 
 
 if __name__ == "__main__":

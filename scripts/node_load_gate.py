@@ -30,10 +30,12 @@ import time
 
 try:
     from scripts.load_gate import drive, seed, verdict
-    from scripts.load_gate.node import ScratchNode, host_state, live_db_user_version, other_heavy_runs, real_home
+    from scripts.load_gate.node import (ScratchNode, host_state, live_db_user_version, live_node_actions,
+                                        other_heavy_runs, real_home)
 except ModuleNotFoundError:  # direct `python scripts/node_load_gate.py`
     from load_gate import drive, seed, verdict
-    from load_gate.node import ScratchNode, host_state, live_db_user_version, other_heavy_runs, real_home
+    from load_gate.node import (ScratchNode, host_state, live_db_user_version, live_node_actions, other_heavy_runs,
+                                real_home)
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTEXT = "release/load-gate"
@@ -94,6 +96,7 @@ def one_run(*, index: int, run_root: Path, args, seed_manifest: dict, live_befor
     started = time.monotonic()
     timings: dict = {}
     run: dict = {"index": index, "root": str(node.root), "host": {"before": host_state()}}
+    window_start = time.time()
     node.start()
     try:
         node.wait_serving()
@@ -116,6 +119,7 @@ def one_run(*, index: int, run_root: Path, args, seed_manifest: dict, live_befor
         if not args.keep:
             remove_database(node.db_path)
     run["host"]["after"] = host_state()
+    run["host"]["live_node_actions"] = live_node_actions(window_start, time.time())
     timings["total_s"] = round(time.monotonic() - started, 1)
     live_after = live_db_user_version()
     text = node.log_path.read_text(encoding="utf-8", errors="replace")
