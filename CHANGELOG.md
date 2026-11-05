@@ -9,6 +9,29 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **The owner's own word on a claim they typed answers the next check of it (owner's decision of 5 Nov 2026: "mark
+  it true, or false, or modify the truth of the claim ... then that information acts as a label that gets folded into
+  the topos' knowledge representation and can go to answer future claims").** `[O]` `[E:verify]` A new owner-class
+  type, `truth_own_claim_label`, with a `POST /api/local/truth_own_claim_label` route on the owner socket and the
+  truth door's refusal for every other caller before the payload is read: `{"statement", "label": "true"|"partly"|
+  "false", "note"?}` writes one `verified_claim` object (dimension `memory`, confidence 1.0 / 0.5 / 0.0, `created_by
+  = 'owner'`, `source: "claim_box"`, `speaker_kind: "owner"`, no source record), keyed by the normalised statement
+  (`own_claim:<sha256>`: case, spacing, quote marks and a final stop do not matter), so a second mark of the same
+  claim replaces the first; `{"statement", "label": null}` removes it; `{"statement"}` alone reads it. Owner-only with
+  no switch, as every label is (DR-49): never a shareable fact, never read by a share path, never indexed for search,
+  withheld from the table tools below the owner. `verify_claim` (v1, the `/v1/truth/verify-claim` door and the home
+  claim box) now reads these marks after the mode's aperture gate and before retrieval: a mark on the very statement
+  being checked answers it at once, with no retrieval and no model call (the `self` lane is the mark: true backs it
+  at 1.0, false contradicts it at 1.0, partly backs it at 0.5; the other lanes are empty; `_audit.judge` is
+  `owner_label`, `_audit.own_label` is `exact:<label>`), and a mark on a related claim (two shared distinctive words;
+  inside the aperture in fun mode) joins the self lane's evidence as one line the no-model judge reads with its
+  polarity ("the owner said this is not true: ..."), at most three, capped at the heuristic's 0.55 like any
+  corroboration. The answer carries the mark's stance only, never its note. Calibrate's card labels
+  (`truth_check:` keys) are not read here: the 27 Oct rule that those never feed back (`verify_v2.LABELS_AS_EVIDENCE`,
+  off) stands; these are the owner's declarations, made to be answered. Tests:
+  `tests/query/test_own_claim_label.py`. No migration.
+
 ## [1.5.44] — 2026-11-05
 
 ### Fixed

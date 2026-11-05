@@ -584,6 +584,42 @@ async def handle_truth_claim_label(message: Dict[str, Any]) -> Optional[Dict[str
         return _truth_error(req_id, "truth_lane_unavailable")
 
 
+@handles("truth_own_claim_label")
+async def handle_truth_own_claim_label(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The owner's own word on a claim they typed into the home claim box (owner's decision of 5 Nov 2026).
+    ``{"statement", "label": "true"|"partly"|"false", "note"?}`` -> ``{"ok": true, "label", "note", "labelled_at"}``
+    writes one owner-only ``verified_claim`` object keyed by the normalised statement (a second mark replaces the
+    first); ``{"statement", "label": null}`` removes it; ``{"statement"}`` alone reads it -> ``{"label", "note",
+    "labelled_at"}`` (``label`` null when none). The next ``verify_claim`` of that statement answers from the mark.
+    Owner class only at the truth door; fixed codes, never the input."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    refused = _truth_door_refusal(req_id, "truth_own_claim_label")
+    if refused:
+        return refused
+    payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
+    if payload is None:
+        return _truth_error(req_id, "invalid_truth_label")
+    from ...query.truth_checks import TruthRequestError, clear_own_claim_label, label_own_claim, own_claim_label
+    from .common import run_db_read, run_db_write
+
+    try:
+        if "label" not in payload:
+            result = await run_db_read(own_claim_label, payload.get("statement"))
+        elif payload.get("label") is None:
+            result = await run_db_write(clear_own_claim_label, payload.get("statement"))
+        else:
+            result = await run_db_write(label_own_claim, payload.get("statement"), payload.get("label"),
+                                        payload.get("note"))
+        return {"id": req_id, "status": "ok", "payload": result}
+    except TruthRequestError as exc:
+        return _truth_error(req_id, str(exc))
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("truth_own_claim_label", req_id, exc)
+        return _truth_error(req_id, "truth_lane_unavailable")
+
+
 # --- an app's reads (DISCLOSURE_RULES DR-61, DR-65, DR-66) --------------------------------------------------------
 # ``pack_facts`` (``query/pack_facts.py``): the facts of the packs a grant names, filtered for an agent.
 # ``message_context`` (``query/message_context.py``): the turns around a message. The owner's app, and an owner agent on
