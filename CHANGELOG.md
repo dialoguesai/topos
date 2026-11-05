@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.44] — 2026-11-05
+
 ### Fixed
 - **Query work moved off the event loop now runs on the worker thread's own database connection.** `[O]` Since
   8 Sep 2026 the query pipeline hands retrieval, the facts lanes and the session-store writes to a pool thread so the

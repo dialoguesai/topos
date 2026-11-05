@@ -1429,6 +1429,15 @@
       ]
     },
     {
+      "version": "1.5.44",
+      "summary": "Work the node moves off its event loop now runs on that worker thread's own database connection, so a background query write can no longer share the loop's connection and fail or hold the write lock.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "Covers the query pipeline's offloaded reads and writes, 24 other off-loop routes, handlers and enrichment jobs, and the connection check every thread ran on the main thread's handle."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
