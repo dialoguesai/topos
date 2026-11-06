@@ -10,6 +10,44 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Local first: the node runs without an account.** `[O]` A node with no `TOPOS_KEY` used to stop at
+  startup (a prompt in a terminal, exit 2 without one), so nothing could be collected before the person
+  paired a Dialogues account in the browser. Now a missing key outside a cloud runtime means
+  **local-only mode** (`topos/local_identity.py`): the node mints its own owner id (`local:…`) and a
+  UUID Topos id on first start, the owner socket and local ingestion run as before, and no control-plane
+  client, presence loop or stamp pin is started. `topos-node status` reports `mode: local`,
+  `control_plane: local_only` and exits 0 (`paired` stays false: no account). `topos-node setup`
+  without `--connect` skips the key and account steps and ends in `done_local`; `--connect` pairs an
+  account and restarts a node that was running local-only so it reads the key.
+- **Connecting an account later keeps everything.** The first `connection_info` that reaches a
+  local-only node moves its rows to the account in one transaction: every owner column, every
+  `dataset_id` prefix, the Topos id where the control plane assigned a new one, and the raw-file
+  folders; the report lands in `engine_config.rescope_report`. After that the "never rewrite
+  `user_id`" rule applies as before.
+- **`GET /api/local/owner/rescope-report`** on the owner socket serves that report (per-table row counts,
+  renamed raw folders, whether the Topos id changed, when) or `rescope_report: null` on a node that never
+  moved; counts and flags only, no id. The install QA's connect-later check reads it instead of opening the
+  database file.
+- **`topos-node import <file> [--source …]`** puts a file that is already on this computer into Topos
+  over the owner socket (default: a ChatGPT export; `--sources` lists the file sources, `--list` the
+  exports the node finds on its own). No account and no network.
+- **The interest refresh receipt tells the open month's churn from a real change.** `[O]` On the owner's node
+  (5 Nov 2026) every hourly `interest_refresh` while the owner browsed found changes (+5 to +13 inserted, as many
+  closed) and queued a full rebuild of both share indexes, 150 to 480 s each with a 15 to 22 s write-gate hold at
+  publish. Read against the stored objects, 55 of the day's 59 renewals were the open month's interests stored again
+  with the same label, month and strength band: only the counted visits behind the content revision had moved. The
+  receipt now carries `digest_only`, the number of such renewals (absent from receipts written before it). Nothing
+  else changes: the rebuild is still queued, because the sealed member binds that revision and a release refuses a
+  member whose object moved. Whether the open month should bind its band instead is the owner's call, written up in
+  the side-session notes of 5 Nov.
+- **A share index the sweep drops for a drifted browsing interest says what moved.** `[O]` Six times in three days
+  (3 to 5 Nov 2026) the daemon sweep dropped a share's whole index at the `interest` stage, and the line said only
+  that. One drop was the clustering job rewriting every cluster placement; another followed an embedding and a
+  placement, written minutes after a build, of visits that occurred before it. The `interest` stale line is now
+  followed by one fixed word for the first drifted member (`gone`, `label`, `band`, `visits`, `content` or
+  `assessment`; `interest_index.drift_word`), and the `index_stale` event carries it as `sub`, as NR188's words are
+  carried. Attribution only in itself (the drop is DR-70's, below): the verdict is unchanged, and no word carries a
+  label, an id or a count.
 - **The owner's own word on a claim they typed answers the next check of it (owner's decision of 5 Nov 2026: "mark
   it true, or false, or modify the truth of the claim ... then that information acts as a label that gets folded into
   the topos' knowledge representation and can go to answer future claims").** `[O]` `[E:verify]` A new owner-class
@@ -31,6 +69,24 @@ The machine-readable twin of each release is
   (`truth_check:` keys) are not read here: the 27 Oct rule that those never feed back (`verify_v2.LABELS_AS_EVIDENCE`,
   off) stands; these are the owner's declarations, made to be answered. Tests:
   `tests/query/test_own_claim_label.py`. No migration.
+
+### Changed
+- The Terminal approval window says "the Topos on this computer" instead of "your existing TOPOS
+  account", and carries `HOME` and `TOPOS_UDS_PATH` into the window so a sandboxed node approves
+  against its own database.
+- **A share index whose browsing interest drifted is narrowed to its other members, not dropped (DR-70).** `[O]`
+  Behind `TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS`, on by default (owner ruling of 5 Nov 2026, "Narrow on drift";
+  read only while `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS` is on): when the daemon sweep's `interest` step finds
+  interest members that are no longer the ones their build admitted, it adds exactly those members to NR188's withheld
+  set instead of failing the index. The sweep publishes the index without them, as it does for a member moved by new
+  data, the request path keeps answering from the rest, and the owed `members_narrowed` rebuild brings them back
+  re-derived. Nothing a recipient could read changes: every interest is decided again at the read's own clock, so a
+  drifted interest was already withheld at release; what changes is that the other members stay available instead of
+  waiting for the restore. On the owner's node on 5 Nov this drop took one share dark for ten minutes (seven answers
+  refused) after an embedding and a cluster placement landed for visits that occurred before the build. The `member
+  drift (interest: <word>)` line and the `index_stale` event (`sub`, `scope=member`) say which narrowing fired. Fail
+  closed as before: an error in the decision, a drift whose members cannot be told, or the switch off drops the whole
+  index. The pin is `test_interest_door.py::test_a_drifted_interest_is_withheld_and_the_undrifted_members_keep_serving`.
 
 ## [1.5.44] — 2026-11-05
 

@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import sqlite3
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -31,10 +32,12 @@ import pytest
 from tests.permissions_v2 import message_search_corpus as mc
 from tests.permissions_v2.interest_fixtures import NOW_US, at, cluster, install, month_of_visits, open_db, visit
 from tests.permissions_v2.message_search_harness import Node, owner
+from tests.permissions_v2.test_refresh_loop import Clock, loop_for
 from topos.permissions_v2 import capture_receipts as cr
 from topos.permissions_v2 import interest_family as fam
 from topos.permissions_v2 import interest_index as ii
 from topos.permissions_v2 import interest_review as ir
+from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.entity_boundary import EntityBoundary
 from topos.permissions_v2.evidence import EvidenceResolver, EvidenceReviewStore
 from topos.permissions_v2.opaque_ids import opaque_record_id
@@ -52,6 +55,7 @@ ANSWER = {"domains": ["hobbies"], "sensitivity": "none", "protected_content": "n
 # The recipient grant's shape of rule: every domain, sensitivity none or personal.
 DOMAINS = ["family", "finance", "health", "hobbies", "home", "plans", "relationships", "work"]
 FORBIDDEN = ("example.test", "Synthetic page", "https://", "browser:v", "tc_hobby", "interest:")
+NARROW_INTERESTS = "TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS"   # DR-70, on by default; five pins name it off
 
 
 @contextmanager
@@ -388,6 +392,7 @@ def test_a_second_label_with_an_off_limits_name_or_a_person_never_releases(site,
 def test_a_second_label_that_stops_passing_stops_releasing_at_once(site, tmp_path, monkeypatch):
     """Release decides again from the rows: a page that arrives after the build and makes the second label echo
     a title withholds the month at the next read, and the deep sweep drops the index."""
+    monkeypatch.setenv(NARROW_INTERESTS, "false")   # DR-70 off: 1.5.44's whole-index drop, the behaviour this pins
     _second_label(site, SECOND)
     _assess(site)
     node, state = _built(site, tmp_path, monkeypatch)
@@ -404,6 +409,7 @@ def test_with_the_second_label_switch_off_the_door_is_what_it_was(site, tmp_path
     """`TOPOS_PERMISSIONS_V2_INTEREST_RELABEL=off` with interests on: a stored second label stands in for
     nothing. The index is the one the node built before second labels: the same basis bytes with the switch on or
     off, no member for the bad label, and a member built while it was on stops releasing at the next read."""
+    monkeypatch.setenv(NARROW_INTERESTS, "false")   # DR-70 off: 1.5.44's whole-index drop, the behaviour this pins
     from topos.permissions_v2 import interest_relabel as rl
 
     def basis():
@@ -574,6 +580,7 @@ def test_a_visit_after_the_build_withholds_only_its_month_until_the_next_build(b
 
 
 def test_a_relabelled_cluster_releases_its_new_label_after_the_rebuild(browsing, tmp_path, monkeypatch):
+    monkeypatch.setenv(NARROW_INTERESTS, "false")   # DR-70 off: 1.5.44's whole-index drop, the behaviour this pins
     node, _state = _built(browsing, tmp_path, monkeypatch)
     with _db(browsing) as conn:
         cluster(conn, "tc_hobby", "sourdough / bread")
@@ -801,6 +808,61 @@ def test_a_changed_interest_never_releases_even_when_the_index_does_not_see_the_
     assert set(_interests(output)) == CHANGED[change]
 
 
+#: What the sweep says moved, per change the build saw (`interest_index.drift_word`), with the objects stored as the
+#: refresh stores them. `edited_visit`: the row keeps its receipt, but its revision is part of the counted visits'
+#: digest, so the month is built with another content revision; `receipt_revoked` leaves the months unproven and
+#: `new_person` withholds the label, so their objects are not built at all.
+DRIFT = {"relabel": "label", "backfilled_visit": "visits", "edited_visit": "visits", "receipt_revoked": "gone",
+         "reassessed": "assessment", "new_person": "gone"}
+
+
+@pytest.mark.parametrize("change", list(DRIFT))
+def test_the_sweep_says_what_moved_about_a_dropped_interest(browsing, tmp_path, monkeypatch, caplog, change):
+    """Attribution only (5 Nov 2026: six whole-index drops for `interest` in three days, none saying what had moved).
+    The `interest` stale line is followed by one fixed word for the first drifted member, and the `index_stale` event
+    carries it as `sub`, as NR188's words do. The verdict and the drop are the ones above; only the words are new."""
+    import logging
+    from topos.permissions_v2 import interest_family as fam
+    from topos.permissions_v2 import search_timing
+    caplog.set_level(logging.WARNING, logger="topos.permissions_v2.search_index")
+    monkeypatch.setenv(NARROW_INTERESTS, "false")   # DR-70 off: 1.5.44's whole-index drop, the behaviour this pins
+    events, original = [], search_timing.index_event
+
+    def record(stage, path, seconds=0.0, **fields):
+        events.append((stage, fields))
+        return original(stage, path, seconds, **fields)
+    monkeypatch.setattr(search_timing, "index_event", record)
+    node = _built_for(browsing, tmp_path, monkeypatch, change)
+    with _db(browsing) as conn:                                # stored as the refresh stores them, at the build's instant
+        fam.persist(conn, fam.build(conn, owner_id=OWNER, now_us=NOW * 1_000_000))
+    _change(browsing, node, change)
+    with owner():
+        assert node.index.sweep(now=node.now[0]) == 1
+    assert [r.getMessage() for r in caplog.records if "stale" in r.getMessage() or "drift" in r.getMessage()] == [
+        "message search index stale (interest)", f"message search index member drift (interest: {DRIFT[change]})"]
+    assert ("index_stale", {"reason": "interest", "sub": DRIFT[change]}) in events
+
+
+def test_the_drift_word_without_a_stored_object_says_content(browsing, tmp_path, monkeypatch):
+    """No stored object carries the sealed revision (the index was built between two refreshes, or the objects were
+    never stored): the part cannot be named, and the word is `content`, never a guess."""
+    from topos.permissions_v2 import interest_index
+    from topos.permissions_v2.entity_boundary import EntityBoundary
+    from topos.permissions_v2.search_index import unseal
+    node = _built_for(browsing, tmp_path, monkeypatch, "backfilled_visit")
+    key = node.index.keys.get("grant-search", create=False)
+    loaded = node.index.load("grant-search", _authority(node))
+    sealed = [unseal(key, member.opaque_id, member.sealed) for member in loaded.members]
+    sealed = [member for member in sealed if member.get("table") == "activity_events"]
+    assert len(sealed) == 2
+    _change(browsing, node, "backfilled_visit")
+    with _db(browsing) as conn:
+        boundary = EntityBoundary(conn)
+        assert interest_index.drift_word(conn, sealed, owner_id=OWNER, boundary=boundary) == "content"
+        unchanged = [member for member in sealed if member["record_id"].endswith("2026-08")]
+        assert interest_index.drift_word(conn, unchanged, owner_id=OWNER, boundary=boundary) is None
+
+
 @pytest.mark.parametrize("change", list(CHANGED))
 def test_a_request_withholds_a_change_and_the_sweep_drops_what_the_build_saw(browsing, tmp_path, monkeypatch, caplog,
                                                                               change):
@@ -811,6 +873,7 @@ def test_a_request_withholds_a_change_and_the_sweep_drops_what_the_build_saw(bro
     month rolling over) keeps the index, and the release keeps withholding it until the next build."""
     import logging
     caplog.set_level(logging.WARNING, logger="topos.permissions_v2.search_index")
+    monkeypatch.setenv(NARROW_INTERESTS, "false")   # DR-70 off: 1.5.44's whole-index drop, the behaviour this pins
     node = _built_for(browsing, tmp_path, monkeypatch, change)
     _change(browsing, node, change)
     output, refused = node.search_request("sourdough baking", k=10)
@@ -822,3 +885,177 @@ def test_a_request_withholds_a_change_and_the_sweep_drops_what_the_build_saw(bro
     assert index_path(root_for(browsing), "grant-search").exists() is not seen_at_build
     assert [r.getMessage() for r in caplog.records if "stale" in r.getMessage()] == (
         ["message search index stale (interest)"] if seen_at_build else [])
+
+
+# --- DR-70: a drifted interest is withheld on its own; the rest of the share keeps serving --------------------------
+#
+# Owner ruling of 5 Nov 2026 ("Narrow on drift"), after the hourly interest refresh had rebuilt both of the owner's share
+# indexes every hour and the daemon sweep had dropped a nine-minute-old index whole at the `interest` stage (seven
+# answers refused `search_index_stale` in the ten minutes until the restore). Behind
+# `TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS` (on by default; read only while NR188's `INDEX_NARROW_MEMBERS` is on):
+# the sweep's interest step adds exactly the drifted interest members to NR188's withheld set, the narrowed copy keeps
+# serving the others, and the owed `members_narrowed` rebuild brings them back re-derived. The five pins above that
+# name the switch off keep 1.5.44's whole-index drop. A drifted interest was never served between the drift and the
+# sweep: a recipient's read decides every interest again at its own clock (the CHANGED pins above).
+
+def _journal_built(path, tmp_path, monkeypatch):
+    """A share over one journal entry and two interest months (`_with_journal`), built, the objects stored as the
+    refresh stores them (for the drift word), and proven to release all three."""
+    node = _with_journal(path, tmp_path, monkeypatch)
+    assert _rebuild(node) == {"state": "ready", "member_count": 3}
+    with _db(path) as conn:
+        fam.persist(conn, fam.build(conn, owner_id=OWNER, now_us=NOW * 1_000_000))
+    output, refused = node.search_request("sourdough baking", k=10)
+    assert refused is None and set(_interests(output)) == {"2026-08", "2026-09"}
+    assert "journal_entry" in {record["kind"] for record in output["records"]}
+    return node
+
+
+def _index_members(node) -> dict:
+    """Every member of the share's index file now: opaque id -> the unsealed member."""
+    from topos.permissions_v2.search_index import unseal
+    key = node.index.keys.get("grant-search", create=False)
+    index = node.index._open(index_path(node.index.root, "grant-search"))
+    return {opaque: unseal(key, opaque, sealed) for opaque, sealed in index["sealed"]}
+
+
+def _months(members: dict) -> set:
+    return {member["record_id"][-7:] for member in members.values() if member.get("table") == "activity_events"}
+
+
+def _sweep_lines(node, caplog) -> tuple:
+    """One daemon sweep: what it removed, and its stale, drift, narrowed and unavailable lines in order."""
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="topos.permissions_v2.search_index"), owner():
+        removed = node.index.sweep(now=node.now[0])
+    words = ("stale", "drift", "narrowed", "unavailable")
+    return removed, [r.getMessage() for r in caplog.records if any(word in r.getMessage() for word in words)]
+
+
+def _events(monkeypatch) -> list:
+    """Every share-index event the node reports (search_timing.index_event), with its fields."""
+    from topos.permissions_v2 import search_timing
+    seen, original = [], search_timing.index_event
+
+    def record(stage, path, seconds=0.0, **fields):
+        seen.append((stage, dict(fields)))
+        return original(stage, path, seconds, **fields)
+    monkeypatch.setattr(search_timing, "index_event", record)
+    return seen
+
+
+def test_a_drifted_interest_is_withheld_and_the_undrifted_members_keep_serving(browsing, tmp_path, monkeypatch, caplog):
+    """THE DR-70 PIN (owner ruling of 5 Nov 2026): never delete or weaken it. Fail closed: the drifted interest is not
+    served before the sweep (the release re-derives it) nor after it (the narrowed copy no longer holds it). Available:
+    the undrifted interest and the journal entry keep answering through the sweep, which publishes the index without
+    the one drifted member, says the word once, and owes the refresh loop one rebuild, whose publish brings the
+    drifted month back re-derived."""
+    events = _events(monkeypatch)
+    node = _journal_built(browsing, tmp_path, monkeypatch)
+    loop = loop_for(node, Clock(node.now[0]))
+    loop.observe(node.index)                                       # the build's own publish, already seen
+    before = _index_members(node)
+    september = {opaque for opaque, member in before.items() if member.get("record_id", "").endswith("2026-09")}
+    assert len(september) == 1
+    _change(browsing, node, "backfilled_visit")                    # September's counted visits moved under the index
+    output, refused = node.search_request("sourdough baking", k=10)
+    assert refused is None and set(_interests(output)) == {"2026-08"}   # withheld at release already
+    removed, lines = _sweep_lines(node, caplog)
+    assert removed == 0 and lines == ["message search index member drift (interest: visits)",
+                                      "message search index narrowed (1 withheld)"]
+    assert ("index_stale", {"reason": "interest", "sub": "visits", "scope": "member"}) in events
+    assert ("index_rebuild", {"state": "narrowed", "members": 2}) in events
+    path = index_path(node.index.root, "grant-search")
+    assert path.exists() and set(_index_members(node)) == set(before) - september
+    output, refused = node.search_request("sourdough baking", k=10)
+    assert refused is None and set(_interests(output)) == {"2026-08"}
+    assert "journal_entry" in {record["kind"] for record in output["records"]}
+    assert _sweep_lines(node, caplog) == (0, [])                   # the narrowed index is current
+    loop.observe(node.index)
+    assert loop._pending["grant-search"]["causes"] == {"members_narrowed"}   # owes one rebuild, settles no restore
+    receipt = loop.run_pending()
+    assert receipt is not None and receipt.cause_classes == ["members_narrowed"]
+    assert receipt.grants[0].state == "ready" and "grant-search" not in loop._pending
+    assert set(_index_members(node)) >= set(before) - september and len(_index_members(node)) == 3
+    output, refused = node.search_request("sourdough baking", k=10)
+    assert refused is None and set(_interests(output)) == {"2026-08", "2026-09"}
+
+
+@pytest.mark.parametrize("change", list(DRIFT))
+def test_every_drift_the_build_saw_narrows_the_share_to_its_undrifted_members(browsing, tmp_path, monkeypatch, caplog,
+                                                                             change):
+    """Each drift class the sweep can see: exactly the drifted months are withheld (both when the label, the
+    assessment, the capture receipt or a person name moved; September alone when its visits did), the word is said
+    once, the file stays, and the request path answers from the journal entry and the undrifted months before the
+    sweep and after it."""
+    events = _events(monkeypatch)
+    node = _journal_built(browsing, tmp_path, monkeypatch)
+    before = _index_members(node)
+    _change(browsing, node, change)
+    output, refused = node.search_request("sourdough baking", k=10)
+    assert refused is None and set(_interests(output)) == CHANGED[change]
+    removed, lines = _sweep_lines(node, caplog)
+    withheld = 2 - len(CHANGED[change])
+    assert removed == 0 and lines == [f"message search index member drift (interest: {DRIFT[change]})",
+                                      f"message search index narrowed ({withheld} withheld)"]
+    assert ("index_stale", {"reason": "interest", "sub": DRIFT[change], "scope": "member"}) in events
+    after = _index_members(node)
+    assert set(after) < set(before) and len(before) - len(after) == withheld
+    assert _months(after) == CHANGED[change] and any(m.get("table") == "journal_entries" for m in after.values())
+    output, refused = node.search_request("sourdough baking", k=10)
+    assert refused is None and set(_interests(output)) == CHANGED[change]
+    assert "journal_entry" in {record["kind"] for record in output["records"]}
+
+
+@pytest.mark.parametrize("switch", [NARROW_INTERESTS, "TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS"],
+                         ids=["dr70_off", "nr188_off"])
+def test_with_either_narrowing_switch_off_a_drift_drops_the_whole_index_as_1_5_44(browsing, tmp_path, monkeypatch,
+                                                                                   caplog, switch):
+    """Off is one environment line, and DR-70 is read only while NR188's narrowing is on."""
+    monkeypatch.setenv(switch, "false")
+    node = _journal_built(browsing, tmp_path, monkeypatch)
+    _change(browsing, node, "backfilled_visit")
+    removed, lines = _sweep_lines(node, caplog)
+    assert removed == 1 and lines == ["message search index stale (interest)",
+                                      "message search index member drift (interest: visits)"]
+    assert not index_path(node.index.root, "grant-search").exists()
+
+
+def test_an_error_in_the_interest_decision_still_drops_the_whole_index(browsing, tmp_path, monkeypatch, caplog):
+    """Fail closed: what cannot be decided is not narrowed. The decision raising (a protection list too large to
+    check, an unreadable row) drops the whole index as `member_unavailable`, with the switch on."""
+    node = _journal_built(browsing, tmp_path, monkeypatch)
+
+    def refuses(*_args, **_kwargs):
+        raise PolicyError("message_protection_too_large")
+    monkeypatch.setattr(ii, "indexed_current", refuses)
+    removed, lines = _sweep_lines(node, caplog)
+    assert removed == 1 and lines == ["message search index stale (member_unavailable)"]
+    assert not index_path(node.index.root, "grant-search").exists()
+
+
+def test_a_false_verdict_whose_drifted_members_cannot_be_told_drops_the_whole_index(browsing, tmp_path, monkeypatch,
+                                                                                    caplog):
+    """Fail closed: a False verdict with every member found current again names no member to withhold, so the index
+    goes whole rather than serve on a verdict nothing can explain."""
+    from topos.permissions_v2.search_index import SearchIndexService
+    node = _journal_built(browsing, tmp_path, monkeypatch)
+    monkeypatch.setattr(SearchIndexService, "_interests_current", lambda self, *args, **kwargs: False)
+    removed, lines = _sweep_lines(node, caplog)
+    assert removed == 1 and lines == ["message search index stale (interest)"]
+    assert not index_path(node.index.root, "grant-search").exists()
+
+
+def test_with_the_kept_interest_verdict_on_a_drift_still_narrows_and_the_verdict_is_forgotten(browsing, tmp_path,
+                                                                                               monkeypatch, caplog):
+    """NR187 meets DR-70: a kept True verdict is proven again when the canonical database moved, the full decision
+    says which members drifted (`found`), the sweep narrows, and nothing is kept about the replaced file."""
+    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_SWEEP_INTEREST_VERDICT", "true")
+    node = _journal_built(browsing, tmp_path, monkeypatch)
+    path = index_path(node.index.root, "grant-search")
+    assert _sweep_lines(node, caplog) == (0, []) and _sweep_lines(node, caplog) == (0, [])
+    assert list(node.index._interest_kept) == [path.name]
+    _change(browsing, node, "backfilled_visit")
+    removed, lines = _sweep_lines(node, caplog)
+    assert removed == 0 and lines[-1] == "message search index narrowed (1 withheld)"
+    assert node.index._interest_kept == {} and _months(_index_members(node)) == {"2026-08"}

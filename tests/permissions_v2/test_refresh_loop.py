@@ -1296,6 +1296,34 @@ def test_a_kept_interest_time_that_is_old_from_the_future_or_unreadable_leaves_t
     assert loop.run_interests().cause_class == "interval"
 
 
+def test_a_renewal_inside_the_band_is_counted_as_digest_only_and_still_queues_the_rebuild(tmp_path, browsing, model):
+    """5 Nov 2026, the owner's node: every hourly refresh while the owner browsed closed and stored again 5 to 13
+    open-month interests with their label, month and band unchanged (only the counted visits had moved: 55 of 59
+    renewals that day), and each run queued a full rebuild of both shares. The receipt now says how many renewals
+    were of that kind. The rebuild is still queued: the sealed member binds the content revision, and a release
+    refuses a member whose object moved, so until the build the renewed interest is withheld."""
+    from tests.permissions_v2.interest_fixtures import NOW_US, at, visit
+    T = NOW_US // 1_000_000
+    clock = Clock(T)
+    loop, service = interest_grants_loop(tmp_path, browsing, clock, interests=True)
+    first = loop.run_interests()
+    assert (first.inserted, first.closed, first.digest_only, first.rebuild_requested) == (3, 0, 0, 1)
+    clock.now = T + 30
+    loop.run_pending()
+    conn = sqlite3.connect(str(browsing))
+    visit(conn, 300, at(9, 19, hour=11))                      # one more September visit, inside the low band
+    conn.commit()
+    conn.close()
+    clock.now = T + 3600
+    again = loop.run_interests()
+    assert (again.inserted, again.closed, again.unchanged, again.digest_only) == (1, 1, 2, 1)
+    assert again.rebuild_requested == 1 and set(loop._pending) == {"g-int"}
+    assert again.model_dump()["digest_only"] == 1
+    clock.now = T + 3630
+    loop.run_pending()
+    assert service.rebuilds == ["g-int", "g-int"]
+
+
 def test_with_the_interest_flag_off_no_rebuild_is_ever_requested(tmp_path, browsing, model):
     from tests.permissions_v2.interest_fixtures import NOW_US
     T = NOW_US // 1_000_000
@@ -1788,10 +1816,11 @@ def test_with_the_switch_off_the_refresh_is_what_it_was_before_second_labels(tmp
     assert (receipt.state, receipt.inserted, receipt.pending, receipt.assessed, receipt.budget_exhausted) == \
         ("complete", 3, 2, 2, False)
     assert (receipt.relabel_pending, receipt.relabel_calls, receipt.relabelled) == (None, None, None)
-    assert set(receipt.model_dump()) == OLD_RECEIPT_KEYS
+    # `digest_only` is the refresh's own count, under either switch; only the relabel counts are absent.
+    assert set(receipt.model_dump()) == OLD_RECEIPT_KEYS | {"digest_only"}
     assert len(model) == 2 and stored_interests(bad_label) == (3, 2) and relabel_table(bad_label) == ""
     clock.now = T + 3600
-    assert set(loop.run_interests().model_dump()) == OLD_RECEIPT_KEYS and len(model) == 2
+    assert set(loop.run_interests().model_dump()) == OLD_RECEIPT_KEYS | {"digest_only"} and len(model) == 2
 
 
 def test_with_the_interest_flag_off_no_second_label_is_ever_asked_for(tmp_path, bad_label, model, monkeypatch):
@@ -1916,6 +1945,10 @@ def test_receipts_with_the_new_causes_stay_readable_by_every_reader(tmp_path):
     counted = interest.model_copy(update={"relabel_pending": 2, "relabel_calls": 3, "relabelled": 1})
     assert set(counted.model_dump()) == OLD_RECEIPT_KEYS | {"relabel_pending", "relabel_calls", "relabelled"}
     assert InterestRefreshReceipt.model_validate(counted.model_dump()) == counted
+    # `digest_only` (the renewals that kept label, month and band) likewise: absent before it, read back as itself.
+    renewed = interest.model_copy(update={"digest_only": 4})
+    assert set(renewed.model_dump()) == OLD_RECEIPT_KEYS | {"digest_only"}
+    assert InterestRefreshReceipt.model_validate(renewed.model_dump()) == renewed
     receipts = [_catch_up(cause) for cause in ("revision_change", "proof_change", "budget_continuation")] + [interest]
     ledger = tmp_path / "copy" / "permissions-v2" / "ledger.db"
     ledger.parent.mkdir(parents=True)

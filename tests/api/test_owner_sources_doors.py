@@ -51,6 +51,7 @@ def _client(app):
 
 _DOORS = (
     ("/scope", "get"),
+    ("/rescope-report", "get"),
     (f"/sources/{SOURCE}", "get"),
     (f"/sources/{SOURCE}/preview", "post"),
     (f"/sources/{SOURCE}/enable", "post"),
@@ -93,7 +94,8 @@ def test_scope_answers_the_bound_identity(node) -> None:
     with _client(app) as client:
         response = client.get(BASE + "/scope")
     assert response.status_code == 200
-    assert response.json() == {"user_id": OWNER, "topos_id": TOPOS, "dataset_id": DATASET, "identity_source": "stored"}
+    assert response.json() == {"user_id": OWNER, "topos_id": TOPOS, "dataset_id": DATASET, "identity_source": "stored",
+                               "identity_mode": "account"}
 
 
 def test_scope_is_409_not_paired_without_an_identity(tmp_path, monkeypatch) -> None:
@@ -420,3 +422,58 @@ def test_reclassify_touches_is_a_counts_only_dry_run_unless_the_owner_applies(no
                               headers={"X-Topos-Owner-Confirm": write_owner_confirmation()})
         assert applied.status_code == 200, applied.text
         assert applied.json()["applied"] is True and applied.json()["cleared"] == 0
+
+
+# --- rescope report ------------------------------------------------------------
+
+
+def test_the_rescope_report_door_says_not_moved_on_a_node_that_never_moved(node) -> None:
+    """The install QA's connect-later check (c16) reads this door, never the database file: a 200 with a null
+    report means "this node never moved" and is told apart from a 404 (no door)."""
+    app, _conn, _reader = node
+    with _client(app) as client:
+        response = client.get(BASE + "/rescope-report")
+    assert response.status_code == 200, response.text
+    assert response.json() == {"identity_mode": "account", "rescope_report": None}
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_the_rescope_report_door_serves_the_stored_counts_and_nothing_else(node) -> None:
+    """After `local_identity.rescope_to_account` the report lives in engine_config as JSON; the door answers it
+    parsed, with the per-table counts c16 sums. Ids never appear: `previous_local_identity` stays behind."""
+    from topos.core.state import set_engine_config_value
+    from topos.local_identity import PREVIOUS_LOCAL_IDENTITY_KEY, RESCOPE_REPORT_KEY
+
+    app, conn, _reader = node
+    report = {"at": "2026-11-06T04:00:00+00:00", "topos_id_changed": True,
+              "tables": {"conversation_messages": 12, "user_ingestion_sources": 1}, "raw_folders_renamed": ["x"]}
+    set_engine_config_value(conn, RESCOPE_REPORT_KEY, json.dumps(report))
+    set_engine_config_value(conn, PREVIOUS_LOCAL_IDENTITY_KEY, json.dumps({"user_id": "local:abc", "topos_id": "t"}))
+    with _client(app) as client:
+        response = client.get(BASE + "/rescope-report")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["identity_mode"] == "account"
+    assert body["rescope_report"] == report
+    assert "local:abc" not in response.text
+    assert set(body) == {"identity_mode", "rescope_report"}
+
+    set_engine_config_value(conn, RESCOPE_REPORT_KEY, "{not json")
+    with _client(app) as client:
+        assert client.get(BASE + "/rescope-report").json()["rescope_report"] is None
+
+
+def test_an_enrolled_agent_reads_the_rescope_report_on_the_socket_only(node) -> None:
+    from topos.auth import resolve_request_principal
+    from topos.principal import OWNER_AGENT, Principal
+
+    app, _conn, _reader = node
+    app.dependency_overrides[resolve_request_principal] = lambda: Principal(OWNER_AGENT, "uds", client_id="agent-claude-code")
+    try:
+        with TestClient(app) as client:
+            assert client.get(BASE + "/rescope-report").status_code == 200
+        app.dependency_overrides[resolve_request_principal] = lambda: Principal(OWNER_AGENT, "local_http", client_id="agent-claude-code")
+        with TestClient(app) as client:
+            assert client.get(BASE + "/rescope-report").status_code == 403
+    finally:
+        app.dependency_overrides.pop(resolve_request_principal, None)
