@@ -26,10 +26,15 @@ class Computer:
         self.calls: list[tuple] = []
         self.enable_refusal: str | None = None
         self.approval_window_opens = True
+        #: `local` once a node started with no key (local_identity.py); `account` after pairing.
+        self.mode: str | None = None
+        self.supervisor: str | None = None
+        self.pid = 4242
 
     # --- what setup reads
     def status(self) -> dict:
-        return {"node": {"running": self.running}, "agents": list(self.agents), "sources": list(self.sources)}
+        return {"node": {"running": self.running, "supervisor": self.supervisor, "pid": self.pid},
+                "mode": self.mode, "agents": list(self.agents), "sources": list(self.sources)}
 
     def reusable_pending(self, record) -> bool:
         return bool(record) and record.get("state") == "pending"
@@ -51,6 +56,8 @@ class Computer:
         self.calls.append(("run_self", *args))
         if args[:2] in (["service", "install"], ["start", "--headless"]):
             self.running = True
+            # A node that starts with no key mints a local identity; with a key it joins the account.
+            self.mode = "account" if self.key else "local"
             return 0, {}
         if args[:2] == ["agents", "add"] and "--approved" in args:
             self.agents.append({"client": args[2], "revoked": False})
@@ -111,28 +118,74 @@ def side_effects(c: Computer) -> list[tuple]:
     return [call for call in c.calls if call[0] != "door" or call[1] != "GET"]
 
 
-def test_a_new_computer_is_set_up_with_two_human_stops(pc) -> None:
+def test_a_new_computer_is_set_up_locally_with_one_human_stop(pc) -> None:
+    """Local first: no account step at all. The node starts without a key, the person approves the agent once."""
     first = run()
+    assert (first["step"], first["exit_code"], first["human"]["action"]) == ("agent", 2, "approve_in_terminal")
+    assert first["mode"] == "local"
+    assert pc.running is True and pc.mode == "local"
+    assert [c for c in pc.calls if c[0] == "start_pairing"] == []  # nothing asked for an account
+    assert ("run_self", "service", "install", "--port", "8676") in pc.calls
+
+    pc.agents.append({"client": "claude-code", "revoked": False})  # the person said yes in Terminal
+    done = run()
+    assert (done["state"], done["exit_code"]) == ("done_local", 0)
+    assert done["done"] == ["node", "agent", "source"]
+    assert done["mode"] == "local"
+    assert done["connect"]["command"] == "topos-node setup --client claude-code --connect"
+    assert pc.sources == [{"source_id": "claude_code_sessions", "enabled": True, "paused": False}]
+    assert pc.key is False
+
+
+def test_connect_pairs_an_account_with_two_human_stops(pc) -> None:
+    first = run(connect=True)
     assert (first["step"], first["exit_code"], first["human"]["action"]) == ("key", 2, "approve_code")
     assert first["human"]["code"] == "ABCD-EFGH"
-    assert pc.running is False  # a node with no key exits at once: pairing comes first
+    assert pc.running is False  # the account steps come first when the person asked to connect
 
-    again = run()  # the agent re-runs while the person is still in the browser
+    again = run(connect=True)  # the agent re-runs while the person is still in the browser
     assert again["step"] == "key" and [c for c in pc.calls if c[0] == "start_pairing"] == [
         ("start_pairing", "claude-code", "create")]
 
     pc.approve()
-    confirm = run()
+    confirm = run(connect=True)
     assert (confirm["step"], confirm["exit_code"], confirm["human"]["action"]) == ("account", 2, "confirm_account")
     assert confirm["human"]["say"] == "Approved by j•••@example.com — is that you?"
     assert pc.running is False  # nothing reads the account before the person says yes
 
-    done = run(confirm_account=True)
+    done = run(connect=True, confirm_account=True)
     assert (done["state"], done["exit_code"]) == ("done", 0)
     assert done["done"] == ["key", "account", "node", "agent", "source"]
+    assert done["mode"] == "account"
     assert ("run_self", "service", "install", "--port", "8676") in pc.calls
     assert ("run_self", "agents", "add", "claude-code", "--approved", "--json") in pc.calls
     assert pc.sources == [{"source_id": "claude_code_sessions", "enabled": True, "paused": False}]
+
+
+def test_connecting_a_running_local_node_restarts_it_once_the_key_is_saved(pc) -> None:
+    """The node read no key at start; after pairing it must restart to reach the account and move its rows."""
+    pc.running, pc.mode, pc.supervisor = True, "local", "service"
+    pc.agents = [{"client": "claude-code", "revoked": False}]
+    pc.sources = [{"source_id": "claude_code_sessions", "enabled": True, "paused": False}]
+    pc.pairing = {"mode": "create", "state": "delivered", "masked_account": "j•••@example.com",
+                  "account_confirmed_at": "2026-11-05T00:00:00+00:00"}
+    pc.key = True
+
+    doc = run(connect=True)
+
+    assert (doc["state"], doc["exit_code"]) == ("done", 0)
+    assert ("run_self", "service", "install", "--port", "8676") in pc.calls  # the restart
+    assert pc.mode == "account"
+    assert any("restarted" in note for note in doc["notes"])
+
+
+def test_a_running_local_node_with_no_key_is_not_restarted_by_connect(pc) -> None:
+    pc.running, pc.mode, pc.supervisor = True, "local", "service"
+
+    doc = run(connect=True)
+
+    assert doc["step"] == "key"  # pairing first; the restart waits for the key
+    assert ("run_self", "service", "install", "--port", "8676") not in pc.calls
 
 
 def test_a_finished_setup_is_a_no_op(pc) -> None:
@@ -148,6 +201,14 @@ def test_a_finished_setup_is_a_no_op(pc) -> None:
 
 def test_plan_changes_nothing(pc) -> None:
     doc = run(plan=True)
+
+    assert (doc["state"], doc["step"], doc["exit_code"]) == ("planned", "node", 2)
+    assert doc["mode"] == "local"
+    assert pc.calls == [] and pc.pairing is None
+
+
+def test_plan_with_connect_starts_at_the_key(pc) -> None:
+    doc = run(plan=True, connect=True)
 
     assert (doc["state"], doc["step"], doc["exit_code"]) == ("planned", "key", 2)
     assert pc.calls == [] and pc.pairing is None
@@ -219,9 +280,17 @@ def test_a_first_connection_in_progress_asks_for_a_re_run(pc) -> None:
 def test_a_denied_pairing_exits_5(pc) -> None:
     pc.pairing = {"mode": "create", "state": "denied"}
 
-    doc = run()
+    doc = run(connect=True)
 
     assert (doc["state"], doc["exit_code"]) == ("failed", 5)
+
+
+def test_a_denied_pairing_does_not_stop_a_local_setup(pc) -> None:
+    pc.pairing = {"mode": "create", "state": "denied"}
+
+    doc = run()
+
+    assert doc["step"] == "agent" and doc["mode"] == "local"
 
 
 def test_a_paused_source_is_left_paused(pc) -> None:
@@ -237,7 +306,7 @@ def test_a_paused_source_is_left_paused(pc) -> None:
 
 
 def test_cli_output_never_carries_the_device_code(pc) -> None:
-    result = CliRunner().invoke(setup_cmd.setup_command, ["--client", "claude-code", "--json"])
+    result = CliRunner().invoke(setup_cmd.setup_command, ["--client", "claude-code", "--connect", "--json"])
 
     assert result.exit_code == 2
     assert "SECRET-DEVICE" not in result.output

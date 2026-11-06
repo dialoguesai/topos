@@ -93,7 +93,8 @@ def test_scope_answers_the_bound_identity(node) -> None:
     with _client(app) as client:
         response = client.get(BASE + "/scope")
     assert response.status_code == 200
-    assert response.json() == {"user_id": OWNER, "topos_id": TOPOS, "dataset_id": DATASET, "identity_source": "stored"}
+    assert response.json() == {"user_id": OWNER, "topos_id": TOPOS, "dataset_id": DATASET, "identity_source": "stored",
+                               "identity_mode": "account"}
 
 
 def test_scope_is_409_not_paired_without_an_identity(tmp_path, monkeypatch) -> None:

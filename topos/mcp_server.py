@@ -409,11 +409,15 @@ async def session_context(sock: NodeSocket, client: str, *, agents_dir: Optional
     scope = await owner_scope(sock, label)
     sources = await source_rows(sock, label, scope)
     cp = str(shell.get("control_plane") or "")
+    mode = (scope.get("identity_mode") if scope else None) or shell.get("identity_mode")
+    mode = mode if mode in ("local", "account") else None
     return {
         "user_id": scope.get("user_id") if scope else None,
         "topos_id": scope.get("topos_id") if scope else None,
-        "paired": scope is not None,
-        "control_plane": cp if cp in ("connected", "rejected", "degraded", "offline") else "offline",
+        # Linked to an account. A local-only node (`mode: local`) has a scope and answers, but is not paired.
+        "paired": scope is not None and mode != "local",
+        "mode": mode,
+        "control_plane": cp if cp in ("connected", "rejected", "degraded", "offline", "local_only") else "offline",
         "clock_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "scopes": [{"scope_id": e["scope_id"], "special_class": e["special_class"]} for e in registry_entries()],
         "sources": [

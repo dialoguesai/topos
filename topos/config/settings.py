@@ -415,9 +415,27 @@ class Settings(BaseSettings):
             return self
         if self.hosted_pool_lease_enabled and self.topos_control_plane_url:
             return self
-        raise ValueError(
-            "TOPOS_KEY is required unless HOSTED_POOL_LEASE_ENABLED=true and TOPOS_CONTROL_PLANE_URL is configured."
-        )
+        if is_cloud_runtime:
+            raise ValueError(
+                "TOPOS_KEY is required unless HOSTED_POOL_LEASE_ENABLED=true and TOPOS_CONTROL_PLANE_URL is configured."
+            )
+        # Local-only mode (local_identity.py): no key, no control-plane link. The
+        # node serves this computer with a locally minted identity until an
+        # account is connected; see `local_only`.
+        return self
+
+    @property
+    def local_only(self) -> bool:
+        """True when this node runs with no account: no key and no hosted lease.
+
+        Every control-plane client, presence loop and stamp pin is skipped; the
+        owner socket, local ingestion and local queries run as usual.
+        """
+        if self.topos_key:
+            return False
+        if self.hosted_pool_lease_enabled and self.topos_control_plane_url:
+            return False
+        return True
 
 
 settings = Settings()

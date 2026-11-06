@@ -40,6 +40,8 @@ class FakeNode:
         #: handler: the node's dict wrapped under ``detail``.
         self.wrap_401_in_detail = False
         self.paired = True
+        #: `account` (paired) or `local` (ids minted on this computer, no account; local_identity.py).
+        self.identity_mode = "account"
         self.control_plane = "connected"
         self.owner_key_persisted = True
         self.version = "9.9.9"
@@ -127,6 +129,7 @@ class FakeNode:
                     "owner_key_persisted": node.owner_key_persisted,
                     "topos_id_present": node.paired,
                     "user_id_present": node.paired,
+                    "identity_mode": node.identity_mode if node.paired else None,
                     **node.extra_status,
                 }
             )
@@ -138,7 +141,9 @@ class FakeNode:
                 return JSONResponse({"detail": "Not Found"}, status_code=404)
             if not node.paired:
                 return JSONResponse({"error": "not_paired"}, status_code=409)
-            return node._plant({"user_id": "user-1", "topos_id": "topos-1", "dataset_id": "user-1:topos:topos-1"})
+            user_id = "local:user-1" if node.identity_mode == "local" else "user-1"
+            return node._plant({"user_id": user_id, "topos_id": "topos-1", "dataset_id": f"{user_id}:topos:topos-1",
+                                "identity_mode": node.identity_mode})
 
         @app.get("/sources")
         async def sources():

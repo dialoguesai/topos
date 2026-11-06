@@ -555,7 +555,54 @@ async def startup_event() -> None:
                 logger.warning("Sanitization prewarm at startup failed (non-fatal): %s", prewarm_exc)
 
         _spawn_background(_prewarm_sanitization(), name="startup-prewarm-sanitization")
-    if settings.topos_control_plane_url:
+
+    if settings.local_only or settings.topos_control_plane_url:
+        # Dual-mint (install-flow invariant): ensure an owner key exists so the
+        # fabric's floors/stamps/tier resolution auto-activate on every node —
+        # fresh or upgraded — with no manual step. Set it on the live settings
+        # singleton too, so enforcement sees it THIS boot (settings loaded its
+        # env before this mint could run). Account or not: the owner key is local.
+        # A keyed node with NO control-plane URL is the test and dev configuration:
+        # it keeps the legacy TCP bearer's write pass (auth.require_owner_unless_legacy),
+        # so the mint stays off there exactly as it was.
+        from .owner_key import ensure_owner_key
+
+        _ok = ensure_owner_key()
+        if _ok and not getattr(settings, "topos_owner_key", None):
+            settings.topos_owner_key = _ok
+
+        # P4: the owner socket — kernel-gated (0600) owner_app lane, no secret. It
+        # used to start inside the control-plane block; a local-only node (no
+        # account yet) needs it just the same, for `topos-node status`, the agents
+        # and the plugin's MCP server.
+        from .uds import start_uds_server
+
+        start_uds_server(app)
+
+    if settings.local_only:
+        # No key, no lease: this Topos runs without an account (local_identity.py).
+        # Mint the local owner and Topos ids so ingestion and queries have a scope;
+        # `connection_info` moves the rows to the account when one is connected.
+        try:
+            from .local_identity import ensure_local_identity
+
+            def _mint_local_identity() -> None:
+                # Off the loop, on the worker thread's own connection: the write gate
+                # warns when a write is taken on the event loop (1.5.44).
+                from .core.state import close_thread_db_connection, get_db_connection
+
+                try:
+                    conn = get_db_connection()
+                    if conn is not None:
+                        ensure_local_identity(conn)
+                finally:
+                    close_thread_db_connection()
+
+            await asyncio.to_thread(_mint_local_identity)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Local identity at startup failed (non-fatal): %s", type(e).__name__)
+        logger.info("Local-only mode: no account connected; the control plane is not contacted.")
+    elif settings.topos_control_plane_url:
         if settings.hosted_pool_lease_enabled:
             try:
                 state.hosted_pool_lease_client = HostedPoolLeaseClient(
@@ -611,22 +658,6 @@ async def startup_event() -> None:
             from .core.handlers import dispatch_relay_message
 
             return await dispatch_relay_message(message)
-
-        # Dual-mint (install-flow invariant): ensure an owner key exists so the
-        # fabric's floors/stamps/tier resolution auto-activate on every node —
-        # fresh or upgraded — with no manual step. Set it on the live settings
-        # singleton too, so enforcement sees it THIS boot (settings loaded its
-        # env before this mint could run).
-        from .owner_key import ensure_owner_key
-
-        _ok = ensure_owner_key()
-        if _ok and not getattr(settings, "topos_owner_key", None):
-            settings.topos_owner_key = _ok
-
-        # P4: the owner socket — kernel-gated (0600) owner_app lane, no secret.
-        from .uds import start_uds_server
-
-        start_uds_server(app)
 
         # P5: pin the CP's stamp verification key on first boot (TOFU over the
         # same TLS channel the relay already trusts). Threaded: a slow or down
