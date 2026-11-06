@@ -4,15 +4,22 @@ An AI coding tool (Claude Code, Codex, Cursor) runs this once per turn until it
 exits 0. Every run reads where this computer stands and does the next steps it
 can do alone:
 
-1. **key** — no Topos key yet: start device pairing (the person signs in and
-   approves a code in the browser; the key lands in ``~/.topos/.env`` without
-   passing through this process's output). Pairing comes BEFORE starting the
-   node: a node with no key exits at once.
+Local first (``local_identity.py``): with no key and no ``--connect``, steps 1
+and 2 are skipped. The node starts without an account, mints its own identity,
+and the agent and source steps run against it; the result is ``done_local``
+(exit 0) with the command that connects an account later. ``--connect`` runs
+the pairing steps, then restarts a node that was running local-only so it
+picks up the key and moves its rows to the account (``connection_info``).
+
+1. **key** — ``--connect`` and no Topos key yet: start device pairing (the
+   person signs in and approves a code in the browser; the key lands in
+   ``~/.topos/.env`` without passing through this process's output).
 2. **account** — after a fresh pairing, the person confirms the masked account
    that approved ("is that you?") and the agent re-runs with
    ``--confirm-account``.
 3. **node** — not running: open Topos.app when it is installed, else install
-   the login service (``--no-service``: a detached headless start).
+   the login service (``--no-service``: a detached headless start). After a
+   ``--connect`` pairing, a node still running local-only is restarted.
 4. **agent** — this client is not enrolled: consume the pairing's approval when
    it named this client, else open the human-only approval prompt in Terminal
    (macOS) or start an add-agent pairing.
@@ -280,6 +287,66 @@ def _step_node(out: Outcome, *, service: bool, plan: bool, port: int) -> Optiona
     return None
 
 
+def _wait_for_node_down(timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _status()["node"]["running"]:
+            return True
+        time.sleep(1.0)
+    return False
+
+
+def _stop_pid(pid: int) -> None:
+    import os
+    import signal
+
+    os.kill(int(pid), signal.SIGTERM)
+
+
+def _step_restart_for_key(out: Outcome, *, service: bool, plan: bool, port: int) -> Optional[dict]:
+    """A node running local-only after a `--connect` pairing has a key on disk it never read: restart it.
+
+    The restart is what makes the node contact the control plane, receive
+    ``connection_info`` and move its rows to the account (local_identity.py).
+    """
+    status = _status()
+    node = status["node"]
+    if not node["running"] or status.get("mode") != "local" or not _has_key():
+        return None
+    if plan:
+        return out.result(state="planned", step="node", exit_code=EXIT_NEEDS_HUMAN,
+                          message="Topos runs without an account: after pairing, setup restarts it so it connects.")
+    supervisor = node.get("supervisor")
+    if supervisor == "topos_app":
+        return out.result(state="needs_human", step="node", exit_code=EXIT_NEEDS_HUMAN,
+                          human={"action": "restart_topos_app",
+                                 "say": "Quit Topos from the menu bar and open it again, so it connects to your "
+                                        "account. Then ask me to finish setting up Topos."},
+                          message="Topos.app supervises the node; only the person can restart it.")
+    if supervisor == "service" or service:
+        code, _doc = _run_self(["service", "install", "--port", str(port)], timeout=60)
+        restarted = code == 0
+    else:
+        restarted = False
+    if not restarted:
+        pid = node.get("pid")
+        try:
+            if pid:
+                _stop_pid(int(pid))
+        except (OSError, ValueError):
+            pass
+        if not _wait_for_node_down(30.0):
+            return out.result(state="failed", step="node", exit_code=EXIT_FAILED,
+                              message="Topos kept running and could not be restarted; restart it yourself, then run setup again.")
+        code, _doc = _run_self(["start", "--headless", "--port", str(port)], timeout=NODE_START_TIMEOUT_SECONDS + 10)
+        restarted = code in (0, 75)
+    if not restarted or not _wait_for_node(NODE_START_TIMEOUT_SECONDS):
+        return out.result(state="failed", step="node", exit_code=EXIT_NODE_DOWN,
+                          message="Topos would not restart with the key. See ~/.topos/logs/node.log, or run `topos-node doctor`.")
+    out.notes.append("restarted Topos so it connects to the account")
+    return None
+
+
 def _agent_state(client: str) -> str:
     for row in _status().get("agents") or []:
         if row.get("client") == client:
@@ -398,32 +465,60 @@ def _step_source(out: Outcome, *, plan: bool, backfill: str, skip: List[str]) ->
     return None
 
 
+def _connect_command(client: str) -> str:
+    return f"topos-node setup --client {client} --connect"
+
+
 def run_setup(*, client: str, plan: bool = False, confirm_account: bool = False, service: bool = True,
               open_terminal: bool = True, backfill: str = "all", skip: Optional[List[str]] = None,
-              port: Optional[int] = None) -> dict:
+              port: Optional[int] = None, connect: bool = False) -> dict:
     from topos.defaults import DEFAULT_NODE_PORT
 
     port = int(port or DEFAULT_NODE_PORT)
     out = Outcome(client)
     skip = list(skip or [])
-    for halt in (
-        lambda: _step_key(out, plan=plan),
-        lambda: None if plan else _step_account(out, confirm=confirm_account),
+    # Local first: no key and no --connect means the account steps are not run at
+    # all. The node starts without one and mints its own identity.
+    local = not connect and not _has_key()
+    steps = []
+    if not local:
+        steps += [
+            lambda: _step_key(out, plan=plan),
+            lambda: None if plan else _step_account(out, confirm=confirm_account),
+            lambda: _step_restart_for_key(out, service=service, plan=plan, port=port),
+        ]
+    else:
+        out.notes.append("no account connected: Topos runs locally; connect one later with "
+                         f"`{_connect_command(client)}`")
+    steps += [
         lambda: _step_node(out, service=service, plan=plan, port=port),
         lambda: _step_agent(out, plan=plan, open_terminal=open_terminal),
         lambda: _step_source(out, plan=plan, backfill=backfill, skip=skip),
-    ):
+    ]
+    for halt in steps:
         stop = halt()
         if stop is not None:
+            if local:
+                stop["mode"] = "local"
             return stop
+    extra: Dict[str, Any] = {"mode": "local" if local else "account"}
+    if local:
+        extra["connect"] = {"command": _connect_command(client),
+                            "say": "Topos runs on this computer without an account. Connecting one later adds "
+                                   "sharing, the web and phone apps and cloud sources; everything collected so "
+                                   "far moves with it."}
     if plan:
-        return out.result(state="done", step="done", exit_code=EXIT_OK, message="Nothing left to set up.")
-    extra: Dict[str, Any] = {}
+        return out.result(state="done", step="done", exit_code=EXIT_OK, extra=extra, message="Nothing left to set up.")
     if out.source_id:
         doc, _err = _owner_door("GET", f"/api/local/owner/sources/{out.source_id}")
         if isinstance(doc, dict):
             extra["processing"] = doc.get("processing")
             extra["last_sync_at"] = doc.get("last_sync_at")
+    if local:
+        return out.result(state="done_local", step="done", exit_code=EXIT_OK, extra=extra,
+                          message=f"{DISPLAY[client]} is connected to the Topos on this computer"
+                                  + (" and its history is a source." if out.source_id else ".")
+                                  + " No account is connected yet.")
     return out.result(state="done", step="done", exit_code=EXIT_OK, extra=extra,
                       message=f"{DISPLAY[client]} is connected to your Topos"
                               + (" and its history is a source." if out.source_id else "."))
@@ -452,16 +547,23 @@ def _human_lines(doc: dict) -> List[str]:
 @click.option("--no-service", is_flag=True, help="Start Topos in the background instead of as a login service.")
 @click.option("--no-open-terminal", is_flag=True, help="Approve the agent in the browser instead of a Terminal prompt.")
 @click.option("--port", type=int, default=None, help="Node port (default 8676). Topos.app is used only on the default port.")
+@click.option("--connect", is_flag=True,
+              help="Connect a Dialogues account (pair in the browser). Without it, Topos runs locally with no account.")
 @click.option("--json", "as_json", is_flag=True, help="Machine-readable output (never a key).")
 def setup_command(client: str, plan: bool, confirm_account: bool, backfill: str, skip: tuple,
-                  no_service: bool, no_open_terminal: bool, port: Optional[int], as_json: bool) -> None:
+                  no_service: bool, no_open_terminal: bool, port: Optional[int], connect: bool, as_json: bool) -> None:
     """Set up Topos for an AI coding tool in one re-runnable command.
+
+    With no account connected and no --connect, Topos runs on this computer
+    alone (exit 0, state done_local). --connect pairs an account; a node that
+    was running locally is restarted and its data moves to the account.
 
     Exit codes: 0 everything is set up · 2 a person needs to act (the output
     says what) · 1 a step failed · 4 Topos would not start · 5 pairing denied.
     """
     doc = run_setup(client=client, plan=plan, confirm_account=confirm_account, service=not no_service,
-                    open_terminal=not no_open_terminal, backfill=backfill, skip=list(skip), port=port)
+                    open_terminal=not no_open_terminal, backfill=backfill, skip=list(skip), port=port,
+                    connect=connect)
     if as_json:
         click.echo(json.dumps(doc, indent=2, sort_keys=True))
     else:

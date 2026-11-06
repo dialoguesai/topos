@@ -62,12 +62,18 @@ def _open_approval_terminal(client: str) -> bool:
     folder = Path(tempfile.mkdtemp(prefix="topos-agent-approval-"))
     script = folder / "Connect-to-TOPOS.command"
     command = shlex.join([sys.executable, "-m", "topos.cli", "agents", "add", client])
-    # Only paths cross into the new terminal's environment, never credentials.
-    path_env = {k: os.environ[k] for k in ("TOPOS_ENV_FILE", "TOPOS_DATABASE_PATH") if os.environ.get(k)}
+    # Only paths cross into the new terminal's environment, never credentials. HOME and the
+    # socket path too, so a sandboxed node (scripts/local/fresh-node-sandbox.sh) approves
+    # against ITS database, not the real ~/.topos.
+    path_env = {
+        k: os.environ[k]
+        for k in ("TOPOS_ENV_FILE", "TOPOS_DATABASE_PATH", "TOPOS_UDS_PATH", "HOME")
+        if os.environ.get(k)
+    }
     exports = "".join(f"export {k}={shlex.quote(v)}\n" for k, v in path_env.items())
     script.write_text(
         '#!/bin/sh\ntrap \'rm -f -- "$0"\' EXIT\n' + exports +
-        'printf "\\nConnect your coding tool to your existing TOPOS account\\n\\n"\n' + command +
+        'printf "\\nConnect your coding tool to the Topos on this computer\\n\\n"\n' + command +
         '\nresult=$?\nif [ "$result" -eq 0 ]; then\n'
         'printf "\\nConnected. Return to your coding assistant to finish verification.\\n"\n'
         'else\nprintf "\\nConnection was not approved or could not finish. Return to your assistant.\\n"\nfi\n'

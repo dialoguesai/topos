@@ -189,6 +189,7 @@ def test_the_scope_comes_from_the_stored_topos_id_when_nothing_is_bound(node, mo
     arm(monkeypatch, node)
     assert resolve_owner_scope(node) == {
         "user_id": OWNER, "topos_id": TOPOS, "dataset_id": DATASET, "identity_source": "stored",
+        "identity_mode": "account",
     }
 
 
