@@ -182,6 +182,17 @@ async def local_truth_claim_label(
     return await _owner_truth_door(request, response, principal, "truth_claim_label")
 
 
+@router.post("/truth_own_claim_label")
+async def local_truth_own_claim_label(
+    request: Request,
+    response: Response,
+    principal=Depends(_truth_door("truth_own_claim_label")),  # noqa: B008
+) -> dict:
+    """The owner's own mark on a claim they typed. Body: {"statement": "...", "label": "true"|"partly"|"false",
+    "note": "..."}; {"statement", "label": null} removes it; {"statement"} reads it."""
+    return await _owner_truth_door(request, response, principal, "truth_own_claim_label")
+
+
 @router.post("/truth_prompts")
 async def local_truth_prompts(
     body: dict = Body(default_factory=dict),

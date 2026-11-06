@@ -1089,3 +1089,109 @@ def _cited(conn: sqlite3.Connection, refs_json: Any) -> Iterable[Dict[str, Any]]
             continue
         yield {"source": found["source"], "date": ref.get("date"), "role": ref.get("role"),
                "snippet": " ".join(found["text"].split())[:SNIPPET_CHARS]}
+
+
+# --- the owner's own word on a claim they typed (the claim box, owner's decision of 5 Nov 2026) ----------------------
+# A claim the owner types into the home claim box, marked true, partly or false with an optional note ("true, but
+# only for the summer"), is the owner's own judgement of their own statement: one ``verified_claim`` object, as a
+# Calibrate card's label writes, keyed by the normalised statement so a second mark replaces the first, with no
+# source record (``source: "claim_box"``, ``speaker_kind: "owner"``, no refs) and ``disclosure: owner_only`` like
+# every label (DR-49: never a shareable fact, never read by a share path, never indexed for search). Unlike a card's
+# label it is MEANT to answer the next check of the same claim (``verify.verify_claim``): the owner marked it so that
+# their Topos answers that way. The 27 Oct rule that Calibrate card labels never feed back (``verify_v2.LABELS_AS_
+# EVIDENCE``) is untouched: those labels grade the lane; these are the owner's declarations.
+OWN_CLAIM_SOURCE = "claim_box"
+OWN_CLAIM_KEY_PREFIX = "own_claim:"
+#: The most of the owner's own marks one check reads beside retrieval (``verify_claim``), newest first.
+OWN_CLAIM_LABELS_READ = 500
+
+
+def normalize_claim(statement: Any) -> str:
+    """The statement as the key sees it: one case, one space, no quote marks or trailing stops, curly apostrophes
+    straight. "I moved to Denver in 2021." and "i moved to denver in 2021" are one claim."""
+    text = " ".join(str(statement or "").replace("\u2019", "'").replace("\u2018", "'").split()).lower()
+    text = text.strip("\"'\u201c\u201d ")
+    return text.rstrip(".!? ").strip()
+
+
+def own_claim_key(statement: Any) -> str:
+    import hashlib
+
+    return OWN_CLAIM_KEY_PREFIX + hashlib.sha256(normalize_claim(statement).encode("utf-8")).hexdigest()[:40]
+
+
+def _own_claim_statement(statement: Any) -> str:
+    if not isinstance(statement, str):
+        raise TruthRequestError("invalid_truth_label")
+    cleaned = " ".join(statement.split())
+    if not normalize_claim(cleaned) or len(cleaned) > STATEMENT_CHARS:
+        raise TruthRequestError("invalid_truth_label")
+    return cleaned
+
+
+def _own_claim_note(note: Any) -> Optional[str]:
+    if note is not None and not isinstance(note, str):
+        raise TruthRequestError("invalid_truth_label")
+    return " ".join((note or "").split())[:MAX_NOTE_CHARS] or None
+
+
+def label_own_claim(conn: sqlite3.Connection, statement: Any, label: Any, note: Any = None) -> Dict[str, Any]:
+    """The owner's mark on a claim they typed: one ``verified_claim`` object keyed by the normalised statement, so a
+    second mark of the same claim (in any spelling of case, spaces or final stop) replaces the first. Fixed codes."""
+    if label not in LABELS:
+        raise TruthRequestError("invalid_truth_label")
+    claim = _own_claim_statement(statement)
+    note = _own_claim_note(note)
+    now = now_utc().isoformat()
+    payload = {"claim": claim, "label": label, "note": note, "speaker_kind": "owner", "source": OWN_CLAIM_SOURCE,
+               "disclosure": "owner_only"}
+    with with_db_write():
+        _write_verified_claim(conn, own_claim_key(claim), payload, LABEL_CONFIDENCE[label], [], now, now)
+        commit_connection(conn)
+    return {"ok": True, "label": label, "note": note, "labelled_at": now}
+
+
+def clear_own_claim_label(conn: sqlite3.Connection, statement: Any) -> Dict[str, Any]:
+    """Removes the owner's mark on a claim, as a dismissal removes a card's; nothing else changes."""
+    claim = _own_claim_statement(statement)
+    with with_db_write():
+        conn.execute("DELETE FROM signal_objects WHERE object_type=? AND object_key=? AND created_by='owner'",
+                     (OBJECT_TYPE, own_claim_key(claim)))
+        commit_connection(conn)
+    return {"ok": True, "label": None, "note": None, "labelled_at": None}
+
+
+def own_claim_label(conn: sqlite3.Connection, statement: Any) -> Dict[str, Any]:
+    """The owner's current mark on a claim, or ``label: None``. A read: no table is created, no gate is taken."""
+    claim = _own_claim_statement(statement)
+    try:
+        row = conn.execute(
+            "SELECT payload_json, COALESCE(updated_at, created_at) FROM signal_objects WHERE object_type=? "
+            "AND object_key=? AND valid_to IS NULL AND created_by='owner'", (OBJECT_TYPE, own_claim_key(claim))).fetchone()
+    except sqlite3.OperationalError:
+        row = None
+    if row is None:
+        return {"label": None, "note": None, "labelled_at": None}
+    payload = json.loads(row[0] or "{}")
+    return {"label": payload.get("label"), "note": payload.get("note"), "labelled_at": row[1]}
+
+
+def own_claim_labels(conn: sqlite3.Connection, limit: int = OWN_CLAIM_LABELS_READ) -> List[Dict[str, Any]]:
+    """Every open mark the owner made in the claim box, newest first: ``{key, claim, label, note, labelled_at}``.
+    Only the owner's own (``created_by = 'owner'``, the claim-box key), never a card's label; none on a node without
+    the table."""
+    try:
+        rows = conn.execute(
+            "SELECT object_key, payload_json, COALESCE(updated_at, created_at) FROM signal_objects "
+            "WHERE object_type=? AND valid_to IS NULL AND created_by='owner' AND object_key LIKE ? "
+            "ORDER BY COALESCE(updated_at, created_at) DESC LIMIT ?",
+            (OBJECT_TYPE, OWN_CLAIM_KEY_PREFIX + "%", int(limit))).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    out = []
+    for key, payload_json, at in rows:
+        payload = json.loads(payload_json or "{}")
+        if payload.get("label") in LABELS and payload.get("claim"):
+            out.append({"key": key, "claim": str(payload["claim"]), "label": payload["label"],
+                        "note": payload.get("note"), "labelled_at": at})
+    return out

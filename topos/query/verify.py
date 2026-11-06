@@ -145,6 +145,61 @@ def _prefix_match(token: str, other: str) -> bool:
     return len(token) >= 5 and len(other) >= 5 and token[:4] == other[:4]
 
 
+_SELF_LANE = "self"
+#: The most of the owner's related marks one check shows the judge (the exact one answers alone).
+_OWN_LABELS_SHOWN = 3
+_OWN_LABEL_MATCH_TOKENS = 2
+
+
+def _label_stance(label: str) -> Dict[str, Any]:
+    """The owner's mark as a lane: true backs it outright, false contradicts it outright, partly backs it at the
+    inbound lane's own confidence for a partial (0.5)."""
+    if label == "false":
+        return {"stance": "contradicts", "confidence": 1.0}
+    return {"stance": "supports", "confidence": 1.0 if label == "true" else 0.5}
+
+
+def _own_label_text(label: str, claim: str, note: Optional[str]) -> str:
+    """The mark as one line of self-lane evidence. Worded so the no-model judge reads its polarity: a false mark
+    carries a negation cue, a true one none."""
+    lead = {"true": "the owner confirmed this is true", "partly": "the owner said this is only partly true",
+            "false": "the owner said this is not true"}[label]
+    text = f"{lead}: {claim}"
+    return f"{text} ({note})" if note else text
+
+
+def _own_claim_evidence(conn: sqlite3.Connection, statement: str, mode: VerifyMode) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """(the label of the owner's mark on this exact statement, or None; the owner's marks on related claims as
+    self-lane entries). Exact is by the claim box's own key (case, spacing and a final stop do not matter); related
+    shares at least _OWN_LABEL_MATCH_TOKENS distinctive tokens. In a gated mode a related claim must sit inside the
+    aperture, as a fact must; the exact one is the statement itself, which the gate already passed."""
+    from .truth_checks import own_claim_key, own_claim_labels
+
+    rows = own_claim_labels(conn)
+    if not rows:
+        return None, []
+    key = own_claim_key(statement)
+    for row in rows:
+        if row["key"] == key:
+            return row["label"], []
+    claim_tokens = set(_content_tokens(statement))
+    related: List[Dict[str, Any]] = []
+    for row in rows:
+        if len(related) >= _OWN_LABELS_SHOWN:
+            break
+        tokens = set(_content_tokens(row["claim"]))
+        shared = sum(1 for token in claim_tokens if any(_prefix_match(token, other) for other in tokens))
+        if shared < _OWN_LABEL_MATCH_TOKENS:
+            continue
+        if mode.topic_gate:
+            claim_category, claim_safe = categorize(row["claim"])
+            if not claim_safe or claim_category not in mode.allowed_categories:
+                continue
+        related.append({"text": _own_label_text(row["label"], row["claim"], row.get("note")),
+                        "value": row["claim"], "hinted": False, "own_label": row["label"]})
+    return None, related
+
+
 def _neutral_lanes(mode: VerifyMode) -> Dict[str, Dict[str, Any]]:
     return {lane: {"stance": "no_evidence", "confidence": 0.0} for lane in mode.lanes}
 
@@ -373,6 +428,22 @@ def verify_claim(
             return _neutral("out_of_aperture")
     audit["category"] = category
 
+    # --- The owner's own word (the claim box, owner's decision of 5 Nov 2026) ----------
+    # A mark the owner made on this very statement answers it at once, with no retrieval
+    # and no model call: the self lane is the label, every other lane is empty. The
+    # aperture ran first, so in fun mode a sensitive claim stays neutral whatever its
+    # mark. A mark on a related claim (two shared distinctive words) joins the self
+    # lane's evidence below, worded so the heuristic judge reads its polarity.
+    own_exact, own_related = _own_claim_evidence(conn, statement, resolved)
+    audit["own_label"] = f"exact:{own_exact}" if own_exact else (f"related:{len(own_related)}" if own_related else "none")
+    if own_exact:
+        audit["judge"] = "owner_label"
+        audit["evidence_counts"] = {lane: 0 for lane in resolved.lanes}
+        lanes = _neutral_lanes(resolved)
+        lanes[_SELF_LANE if _SELF_LANE in lanes else resolved.lanes[0]] = _label_stance(own_exact)
+        audit["timings_ms"]["verify_total"] = round((time.perf_counter() - started) * 1000, 3)
+        return {"mode": resolved.name, "category": category, "lanes": lanes, "abstained": False, "_audit": audit}
+
     # --- Evidence (facts only in v1; a mode's aperture applied per fact) --------------
     retrieval_started = time.perf_counter()
     _phase("retrieval")
@@ -383,6 +454,8 @@ def verify_claim(
     hinted_predicates = _hinted_predicates(statement)
 
     lane_entries: Dict[str, List[Dict[str, Any]]] = {lane: [] for lane in resolved.lanes}
+    if own_related and _SELF_LANE in lane_entries:
+        lane_entries[_SELF_LANE].extend(own_related)
     seen_object_ids: set = set()
     candidates = list(store.search(tokens, limit=50))
     candidates += _facts_by_predicates(store, hinted_predicates)
