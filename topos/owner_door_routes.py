@@ -360,6 +360,7 @@ OWNER_AGENT_ROUTES: Tuple[Tuple[str, str], ...] = (
     ("GET", "/sources/{source_id}/settings"),
     ("GET", "/v1/shell/status"),
     ("GET", "/api/local/owner/scope"),
+    ("GET", "/api/local/owner/rescope-report"),
     ("GET", "/api/local/owner/sources/{source_id}"),
 )
 

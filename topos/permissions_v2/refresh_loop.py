@@ -312,12 +312,18 @@ class InterestRefreshReceipt(StrictModel):
     relabel_pending: Number | None = None   # clusters owed a second label when the refresh began
     relabel_calls: Number | None = None     # model calls made for them
     relabelled: Number | None = None        # second labels every label check accepted
+    # Of `closed`, the objects stored again with the label, month and band the closed row had: only the counted
+    # visits behind the content revision moved (`interest_family.persist`). Such a run still queues the rebuild
+    # (the sealed member binds that revision, and a release refuses a member whose object moved), so this count is
+    # how a reader tells the hourly churn of the open month from a new, changed or gone interest. Absent from every
+    # receipt written before it.
+    digest_only: Number | None = None
 
     @model_serializer(mode="wrap")
     def _without_counts_that_were_not_taken(self, handler):
         data = handler(self)
         if isinstance(data, dict):
-            for key in ("relabel_pending", "relabel_calls", "relabelled"):
+            for key in ("relabel_pending", "relabel_calls", "relabelled", "digest_only"):
                 if data.get(key) is None:
                     data.pop(key, None)
         return data
@@ -1381,7 +1387,7 @@ class RefreshLoop:
         if self._worker_object().running():
             return None  # the owner's own pass; the interval brings this back once it is done
         self._note_interest_run(now)
-        counts = dict(inserted=0, closed=0, unchanged=0, pending=0, assessed=0, unresolved=0, short=False)
+        counts = dict(inserted=0, closed=0, unchanged=0, digest_only=0, pending=0, assessed=0, unresolved=0, short=False)
         if self.settings.relabels:
             counts.update(relabel_pending=0, relabel_calls=0, relabelled=0)
         try:
@@ -1482,7 +1488,7 @@ class RefreshLoop:
             stored = self._canonical_write(service, lambda conn: fam.persist(conn, built))
             # Both stores add up; `unchanged` stays the first store's (what this refresh found and left as it was).
             counts.update(inserted=counts["inserted"] + stored["inserted"], closed=counts["closed"] + stored["closed"],
-                          pending=counts["pending"] + len(fresh))
+                          digest_only=counts["digest_only"] + stored["digest_only"], pending=counts["pending"] + len(fresh))
             return self._assess_interest_labels(service, fresh, budget, counts, spent)
 
     def _interest_snapshot(self, service, opt_outs) -> tuple:
