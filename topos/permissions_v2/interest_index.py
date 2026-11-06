@@ -42,6 +42,8 @@ index) and releases with :func:`release`. :class:`InterestRecord` restates §3's
 """
 from __future__ import annotations
 
+import json
+import sqlite3
 from typing import Annotated, Literal, Optional
 
 from pydantic import StringConstraints
@@ -271,6 +273,76 @@ def indexed_current(conn, sealed_members, *, owner_id: str, boundary, opt_outs: 
             if digest(assessment.model_dump()) == binding.get("assessment_revision"):
                 current.add(sealed["record_id"])
     return frozenset(current)
+
+
+#: Attribution only (the sweep's `index_stale` event, as NR188's fixed words): what moved about the first sealed
+#: interest member that is no longer the member its build admitted. Never a label, an id or a count.
+DRIFT_WORDS = ("gone", "label", "band", "visits", "content", "assessment")
+
+
+def _stored_parts(conn, record_id: str, content_revision) -> Optional[dict]:
+    """The stored object (`interest_family.persist`) of this interest at this content revision, if the node holds one:
+    its label revision and band name what moved. None when the table or such a row is absent."""
+    try:
+        rows = conn.execute("SELECT payload_json FROM signal_objects WHERE signal_dimension=? AND object_type=? "
+                            "AND object_key=?", (fam.SIGNAL_DIMENSION, fam.OBJECT_TYPE, record_id)).fetchall()
+    except sqlite3.Error:
+        return None
+    for (payload,) in rows:
+        try:
+            data = json.loads(payload or "{}")
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("content_revision") == content_revision:
+            return data
+    return None
+
+
+def drift_word(conn, sealed_members, *, owner_id: str, boundary, opt_outs: frozenset = frozenset()) -> Optional[str]:
+    """One fixed word (``DRIFT_WORDS``) for the first sealed interest member that :func:`indexed_current` would not
+    keep on ``conn``'s snapshot, decided as it decides them: at the member's own ``built_at``, with no policy.
+
+    ``gone``: its cluster-month is no longer built at that instant (a deterministic check withholds it, or it no
+    longer qualifies). ``label``, ``band``, ``visits``: it is built but its content revision moved, and the stored
+    object that carried the sealed revision says which part: the label revision, the strength band, or else the
+    month's counted visits (or its completeness). ``content``: moved, but no stored object carries the sealed
+    revision, so the part cannot be named. ``assessment``: the object is as built, but its label's assessment is
+    gone, no longer qualifies or is not the one admitted. None when every member is still current, or the flag is
+    off. Measured on the owner's node (5 Nov 2026): the sweep dropped a share's whole index for the `interest` stage
+    six times in three days, and nothing said what had moved; the words make the next one readable. Attribution
+    only: nothing here decides anything, and no word carries content."""
+    if not enabled():
+        return None
+    wanted: dict = {}
+    for sealed in sealed_members:
+        binding = _binding(sealed)
+        if binding is None or type(binding.get("built_at")) is not int:
+            continue
+        wanted.setdefault(binding["built_at"], []).append(sealed)
+    context_revision, _terms = ir.context(boundary)
+    shared = snapshot(conn)
+    for instant, group in wanted.items():
+        result = fam.build(conn, owner_id=owner_id, now_us=_now_us(instant), boundary=boundary, opt_outs=opt_outs,
+                           clusters=sorted({sealed["interest"]["cluster_id"] for sealed in group}), snapshot=shared)
+        built = {obj.interest_id: obj for obj in result.objects}
+        for sealed in group:
+            binding = sealed["interest"]
+            obj = built.get(sealed["record_id"])
+            if obj is None:
+                return "gone"
+            if obj.content_revision != binding.get("content_revision"):
+                stored = _stored_parts(conn, sealed["record_id"], binding.get("content_revision"))
+                if stored is None:
+                    return "content"
+                if stored.get("label_revision") != obj.label_revision:
+                    return "label"
+                if stored.get("strength") != obj.band:
+                    return "band"
+                return "visits"
+            assessment = ir.current(conn, owner_id=owner_id, obj=obj, context_revision=context_revision)
+            if not ir.qualifies(assessment) or digest(assessment.model_dump()) != binding.get("assessment_revision"):
+                return "assessment"
+    return None
 
 
 def member_current(conn, sealed: dict, *, owner_id: str, policy, now: int, boundary,

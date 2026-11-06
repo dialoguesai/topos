@@ -9,6 +9,40 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **The interest refresh receipt tells the open month's churn from a real change.** `[O]` On the owner's node
+  (5 Nov 2026) every hourly `interest_refresh` while the owner browsed found changes (+5 to +13 inserted, as many
+  closed) and queued a full rebuild of both share indexes, 150 to 480 s each with a 15 to 22 s write-gate hold at
+  publish. Read against the stored objects, 55 of the day's 59 renewals were the open month's interests stored again
+  with the same label, month and strength band: only the counted visits behind the content revision had moved. The
+  receipt now carries `digest_only`, the number of such renewals (absent from receipts written before it). Nothing
+  else changes: the rebuild is still queued, because the sealed member binds that revision and a release refuses a
+  member whose object moved. Whether the open month should bind its band instead is the owner's call, written up in
+  the side-session notes of 5 Nov.
+- **A share index the sweep drops for a drifted browsing interest says what moved.** `[O]` Six times in three days
+  (3 to 5 Nov 2026) the daemon sweep dropped a share's whole index at the `interest` stage, and the line said only
+  that. One drop was the clustering job rewriting every cluster placement; another followed an embedding and a
+  placement, written minutes after a build, of visits that occurred before it. The `interest` stale line is now
+  followed by one fixed word for the first drifted member (`gone`, `label`, `band`, `visits`, `content` or
+  `assessment`; `interest_index.drift_word`), and the `index_stale` event carries it as `sub`, as NR188's words are
+  carried. Attribution only in itself (the drop is DR-70's, below): the verdict is unchanged, and no word carries a
+  label, an id or a count.
+
+### Changed
+- **A share index whose browsing interest drifted is narrowed to its other members, not dropped (DR-70).** `[O]`
+  Behind `TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS`, on by default (owner ruling of 5 Nov 2026, "Narrow on drift";
+  read only while `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS` is on): when the daemon sweep's `interest` step finds
+  interest members that are no longer the ones their build admitted, it adds exactly those members to NR188's withheld
+  set instead of failing the index. The sweep publishes the index without them, as it does for a member moved by new
+  data, the request path keeps answering from the rest, and the owed `members_narrowed` rebuild brings them back
+  re-derived. Nothing a recipient could read changes: every interest is decided again at the read's own clock, so a
+  drifted interest was already withheld at release; what changes is that the other members stay available instead of
+  waiting for the restore. On the owner's node on 5 Nov this drop took one share dark for ten minutes (seven answers
+  refused) after an embedding and a cluster placement landed for visits that occurred before the build. The `member
+  drift (interest: <word>)` line and the `index_stale` event (`sub`, `scope=member`) say which narrowing fired. Fail
+  closed as before: an error in the decision, a drift whose members cannot be told, or the switch off drops the whole
+  index. The pin is `test_interest_door.py::test_a_drifted_interest_is_withheld_and_the_undrifted_members_keep_serving`.
+
 ## [1.5.44] — 2026-11-05
 
 ### Fixed
