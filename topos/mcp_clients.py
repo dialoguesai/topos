@@ -50,6 +50,11 @@ TOKEN_PREFIX = "tpk_"
 AGENT_LABEL_PREFIX = "tpa_"
 AGENT_CLIENT_ID_PREFIX = "agent-"
 AGENT_PRINCIPAL_CLASS = "owner_agent"
+#: The owner's local pushers (``local_pushers.py``) share the table the same way: row
+#: ``pusher-<app>``, class ``local_pusher``, key ``tpw_<app>.<40 hex>``. Kept apart here
+#: so a ``tpk_`` token never resolves to one and Connected apps never lists or revokes one.
+PUSHER_CLIENT_ID_PREFIX = "pusher-"
+PUSHER_PRINCIPAL_CLASS = "local_pusher"
 #: The coding tools and their display names. Any other slug is an app, shown as itself (the name is recorded as claimed).
 AGENT_DISPLAY_NAMES = {
     "claude-code": "Claude Code",
@@ -216,6 +221,8 @@ def mint_client_token(
     cid = normalize_client_id(client_id)
     if cid.startswith(AGENT_CLIENT_ID_PREFIX):
         raise ValueError(f"client_id prefix {AGENT_CLIENT_ID_PREFIX!r} is reserved for approved agents")
+    if cid.startswith(PUSHER_CLIENT_ID_PREFIX):
+        raise ValueError(f"client_id prefix {PUSHER_CLIENT_ID_PREFIX!r} is reserved for local pushers")
     name = str(display_name or "").strip() or cid
     token = f"{TOKEN_PREFIX}{cid}.{secrets.token_hex(20)}"
     ensure_mcp_clients_table(conn)
@@ -264,8 +271,8 @@ def verify_client_token(conn: sqlite3.Connection, presented: str) -> Optional[Di
         return None
     if not row or row.get("revoked_at"):
         return None
-    if row.get("principal_class") == AGENT_PRINCIPAL_CLASS:
-        return None  # an agent row is never a tpk client, whatever its hash says
+    if row.get("principal_class") != "third_party":
+        return None  # an agent or pusher row is never a tpk client, whatever its hash says
     if not secrets.compare_digest(str(row.get("token_hash") or ""), _hash_token(token)):
         return None
     _touch_last_used(conn, cid)
@@ -435,11 +442,12 @@ def get_client(conn: sqlite3.Connection, client_id: str) -> Optional[Dict[str, A
 
 def list_clients(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     """Rows for the Settings UI — token hashes never leave the engine. Agents
-    (``principal_class = 'owner_agent'``) have their own list, ``list_agents``."""
+    (``principal_class = 'owner_agent'``) have their own list, ``list_agents``; local
+    pushers (``'local_pusher'``, ``local_pushers.py``) have ``list_pushers``."""
     ensure_mcp_clients_table(conn)
     cur = conn.execute(
         f"SELECT client_id, display_name, principal_class, created_at, last_used_at,"
-        f" revoked_at FROM {MCP_CLIENTS_TABLE} WHERE principal_class != '{AGENT_PRINCIPAL_CLASS}'"
+        f" revoked_at FROM {MCP_CLIENTS_TABLE} WHERE principal_class NOT IN ('{AGENT_PRINCIPAL_CLASS}', '{PUSHER_PRINCIPAL_CLASS}')"
         f" ORDER BY created_at"
     )
     cols = [d[0] for d in cur.description]
@@ -454,7 +462,8 @@ def revoke_client(conn: sqlite3.Connection, client_id: str) -> bool:
     with with_db_write():
         cur = conn.execute(
             f"UPDATE {MCP_CLIENTS_TABLE} SET revoked_at = ? "
-            f"WHERE client_id = ? AND principal_class != '{AGENT_PRINCIPAL_CLASS}' AND revoked_at IS NULL",
+            f"WHERE client_id = ? AND principal_class NOT IN ('{AGENT_PRINCIPAL_CLASS}', '{PUSHER_PRINCIPAL_CLASS}')"
+            f" AND revoked_at IS NULL",
             (_now(), cid),
         )
         commit_connection(conn)
@@ -485,8 +494,8 @@ def request_elevation(
         raise ValueError("scope_id is required")
     ensure_mcp_clients_table(conn)
     client = get_client(conn, cid)
-    if client is None or client.get("principal_class") == AGENT_PRINCIPAL_CLASS:
-        # An agent reads by ruling D1, not by a consent record: nothing to elevate.
+    if client is None or client.get("principal_class") != "third_party":
+        # An agent reads by ruling D1, not by a consent record, and a local pusher never reads: nothing to elevate.
         raise ValueError(f"unknown client {cid!r} — enroll it first")
     existing = active_elevation(conn, client_id=cid, scope_id=scope)
     if existing is not None:

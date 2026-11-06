@@ -10,6 +10,8 @@ import threading
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.local_pushers import LocalPusherCORS
+
 from .__version__ import __version__
 from .api import (
     agent_dispatch as agent_dispatch_routes,
@@ -28,6 +30,7 @@ from .api import (
     ingestion_compat as ingestion_compat_routes,
     ingestion_api as ingestion_routes,
     ingestion_sources as ingestion_sources_routes,
+    local_pushers as local_pusher_routes,
     permissions_ai_chat_capture as permissions_ai_chat_capture_routes,
     permissions_capture_receipts as permissions_capture_receipts_routes,
     permissions_source_installs as permissions_source_installs_routes,
@@ -138,6 +141,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Outermost: the pusher doors answer CORS for the exact extension origins the owner enrolled
+# (api/local_pushers.py), read per request; every other path and origin falls through to the above.
+app.add_middleware(LocalPusherCORS)
 
 app.include_router(health_routes.router)
 app.include_router(shell_routes.router)
@@ -164,6 +170,7 @@ app.include_router(signal_routes.router, prefix="/v1")
 app.include_router(connected_apps_routes.router, prefix="/v1")
 app.include_router(ingestion_routes.router, prefix="/v1")
 app.include_router(ingestion_sources_routes.router)
+app.include_router(local_pusher_routes.router)  # local pushers: batch write + me (local_pushers.py)
 app.include_router(permissions_ingestion_routes.router)
 app.include_router(permissions_identity_routes.router)
 app.include_router(permissions_ai_chat_capture_routes.router)
