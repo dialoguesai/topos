@@ -24,6 +24,10 @@ The machine-readable twin of each release is
   `dataset_id` prefix, the Topos id where the control plane assigned a new one, and the raw-file
   folders; the report lands in `engine_config.rescope_report`. After that the "never rewrite
   `user_id`" rule applies as before.
+- **`GET /api/local/owner/rescope-report`** on the owner socket serves that report (per-table row counts,
+  renamed raw folders, whether the Topos id changed, when) or `rescope_report: null` on a node that never
+  moved; counts and flags only, no id. The install QA's connect-later check reads it instead of opening the
+  database file.
 - **`topos-node import <file> [--source …]`** puts a file that is already on this computer into Topos
   over the owner socket (default: a ChatGPT export; `--sources` lists the file sources, `--list` the
   exports the node finds on its own). No account and no network.

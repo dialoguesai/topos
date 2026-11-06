@@ -5,6 +5,8 @@ Every answer is counts, flags, ids and stamps; no transcript text leaves the nod
 
 ``GET /api/local/owner/scope`` → ``{user_id, topos_id, dataset_id}`` from the bound identity (else
 the stored ``topos_id``), or 409 ``not_paired``.
+``GET /api/local/owner/rescope-report`` → ``{identity_mode, rescope_report}``: the counts-only report of
+the move from the local identity to an account, or ``null`` when the node never moved.
 ``POST /api/local/owner/sources/{id}/preview {skip: [dir…]}`` → counts only, nothing written.
 ``POST …/enable {skip: [], backfill: "all"|"30d"}`` → the canonical install row, the settings row,
 an hourly schedule (``interval_hours=1``) and the backfill job; 409 with the plain sentence when
@@ -22,6 +24,7 @@ never the enrolled agent — because it widens what can be shared.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, Dict, Optional
 
@@ -107,6 +110,35 @@ async def owner_scope(principal=Depends(resolve_request_principal)):
     if scope is None:
         return _refusal(409, NOT_PAIRED, NOT_PAIRED_SENTENCE)
     return JSONResponse(scope, headers=_NO_STORE)
+
+
+@router.get("/rescope-report")
+async def owner_rescope_report(principal=Depends(resolve_request_principal)):
+    """The report of the one move from the local identity to an account (``local_identity.rescope_to_account``):
+    row updates per table, the renamed raw folders, whether the Topos id changed, and when. Counts and flags
+    only; no id and no row leaves the node. A node that never moved answers ``rescope_report: null`` with its
+    mode, so a caller can tell "not moved yet" from "no such door" (a 404). The install QA's connect-later
+    check reads this instead of opening the database file."""
+    _owner(principal, reads=True)
+    from topos.core.state import get_engine_config_value
+    from topos.local_identity import RESCOPE_REPORT_KEY, identity_mode
+
+    def _read():
+        conn = _conn()
+        return identity_mode(conn), get_engine_config_value(conn, RESCOPE_REPORT_KEY)
+
+    try:
+        mode, stored = await asyncio.to_thread(_read)
+    except Exception:  # noqa: BLE001 -- no path or exception text leaves the node
+        raise HTTPException(503, "owner_scope_unavailable", headers=_NO_STORE) from None
+    report = None
+    if stored:
+        try:
+            parsed = json.loads(stored) if isinstance(stored, str) else stored
+            report = parsed if isinstance(parsed, dict) else None
+        except ValueError:
+            report = None
+    return JSONResponse({"identity_mode": mode, "rescope_report": report}, headers=_NO_STORE)
 
 
 @router.get("/sources/{source_id}")
