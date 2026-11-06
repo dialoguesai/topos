@@ -31,6 +31,11 @@ logger = logging.getLogger("topos.config.facts_llm")
 
 ENGINE_CONFIG_KEY_FACTS_LLM_MODEL = "facts_llm_model"
 ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER = "facts_llm_provider"
+#: The per-pack pass's last deferral (JSON: reason, at, batches), written by the derivation
+#: job when a batch could not run and cleared by the next batch that could. Before 6 Nov 2026
+#: a deferral was one WARNING line per batch: a picked provider whose weights never loaded
+#: looked, from the app, exactly like one that was working.
+ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL = "derivation_last_deferral"
 
 #: Not an LLM: the per-pack pass runs Topos Facts (features.derivation.topos_facts) for the
 #: packs it knows. Every LLM reader of this config sees the local default chain instead,
@@ -76,6 +81,20 @@ def facts_classifier_version(conn: Optional[sqlite3.Connection]) -> str:
         return ""
     model = device_facts_llm_model(conn)
     return model if model in TOPOS_FACTS_MODELS else "v0.1"
+
+
+def derivation_deferral(conn: Optional[sqlite3.Connection]) -> Optional[Dict[str, Any]]:
+    """The standing deferral of the per-pack pass, or None when its last batch ran."""
+    import json
+
+    raw = _read_engine_config_value(conn, ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL)
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return {"reason": str(raw), "at": None, "batches": None}
+    return value if isinstance(value, dict) else None
 
 
 def resolve_facts_llm_model(settings: Any, conn: Optional[sqlite3.Connection] = None) -> str:
@@ -221,5 +240,7 @@ def effective_config_for_api(settings: Any, conn: Optional[sqlite3.Connection]) 
         "query_model": str(getattr(settings, "ollama_query_model", "") or "").strip(),
         # The LLM still serving the triple pass and the packs routed to it ("" when none).
         "llm_model": llm_model,
+        # None, or {reason, at, batches}: the pass is not running with this pick.
+        "deferral": derivation_deferral(conn),
         "available_models": available,
     }

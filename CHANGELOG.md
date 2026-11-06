@@ -88,6 +88,26 @@ The machine-readable twin of each release is
   closed as before: an error in the decision, a drift whose members cannot be told, or the switch off drops the whole
   index. The pin is `test_interest_door.py::test_a_drifted_interest_is_withheld_and_the_undrifted_members_keep_serving`.
 
+### Fixed
+- **The Topos Facts encoders stay resident between derivation batches.** `[E:derivation]` The model cache's LRU
+  budget (3 slots) is sized for the small enrichment encoders, and every ingest chunk cycles more of them through
+  it (privacy filter, embeddings, NER, emotion, sentiment) than it holds, so the ~5 GiB Topos Facts encoders were
+  evicted and reloaded on every batch: 8 loads in 8 batches on an isolated node, 6 Nov 2026. The slot is now
+  pinned outside that budget for the run and released when the owner picks another provider or after
+  `TOPOS_FACTS_IDLE_SEC` unused (default 300 s, Ollama's own keep-alive, by a timer that does not wait for the
+  next pipeline: an idle node holds no model). The small encoders keep their full budget.
+- **The per-pack pass no longer holds SQLite's write lock across model calls.** `[E:derivation]` The job writes
+  on its own connection, outside the write gate, and committed once per record; in WAL the first write takes the
+  lock at execute time, so it was held across every extraction and verifier call of the record. The pipeline's
+  `claim_next_job` then took the gate and blocked on SQLite with every gated writer queued behind it: held 160 s
+  with waited=0, 383–3,017 s per 50-record run (5–6 Nov 2026, isolated node). The job now commits before each
+  model call; the lock is held for the write bursts only.
+- **A deferred pack batch is visible beyond one WARNING line.** `[E:derivation]` A picked Facts provider whose
+  weights could not load, or an unavailable verifier, deferred every batch with one log line each, and the app's
+  Facts extraction row showed the pick as if it were running. The job now records `{reason, at, batches}` under
+  `engine_config["derivation_last_deferral"]`, cleared by the next batch that runs, and `GET /v1/facts-llm-config`
+  returns it as `deferral`; the pipeline sees the batch as deferred (debt row, envelope), as it does the goals job.
+
 ## [1.5.44] — 2026-11-05
 
 ### Fixed

@@ -133,3 +133,138 @@ def test_classifier_output_goes_through_the_llm_parser(node_db, llm_calls, monke
     run_derivation_batch(node_db, [ROW], stats=stats)
     assert stats.get("parse_rejects", 0) >= 2
     assert "work.career" not in _facts(node_db)
+
+
+@pytest.fixture
+def model_cache():
+    from topos.engine.model_cache import get_model_cache, reset_model_cache_for_tests
+    reset_model_cache_for_tests()
+    yield get_model_cache()
+    reset_model_cache_for_tests()
+
+
+def test_the_encoders_load_once_and_stay_resident_across_batches(model_cache, monkeypatch, tmp_path):
+    """Measured 6 Nov 2026 on an isolated node: the encoders (about 5 GiB float32) loaded once
+    per derivation batch, 8 of 8, because every ingest chunk cycles more small encoders through
+    the cache than its LRU budget holds. The slot is pinned: one load, resident until released."""
+    from topos.engine.model_cache import ModelSlot
+    from topos.features.derivation import topos_facts as tf
+    built = []
+
+    class FakeEncoders:
+        def __init__(self, gate_dir, reader_dir, device):
+            built.append(device)
+
+    monkeypatch.setattr(tf, "ToposFacts", FakeEncoders)
+    monkeypatch.setattr(tf, "_local_dir", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(tf, "resolve_device", lambda preferred=None: "cpu")
+    first = tf.load()
+    for slot in (ModelSlot.PRIVACY_FILTER, ModelSlot.EMBEDDING, ModelSlot.NER, ModelSlot.EMOTION):
+        model_cache.acquire(slot, slot.value, lambda s=slot: s.value)   # a chunk's enrichment jobs
+    model_cache.trim_to_budget()                                         # the end-of-pipeline flush
+    assert tf.load() is first and built == ["cpu"]
+    assert model_cache.pinned_slots() == ["topos_facts"]
+    tf.release()
+    assert "topos_facts" not in model_cache.resident_slots()
+    tf.release()                                                         # absent: a no-op
+
+
+def test_the_encoders_release_themselves_after_the_idle_time(model_cache, monkeypatch, tmp_path):
+    """The owner's rule (6 Nov 2026): Topos idle holds no model. The release does not wait
+    for the next pipeline's cache trim; a timer drops the pin once the idle time has passed."""
+    import time
+    from topos.features.derivation import topos_facts as tf
+    monkeypatch.setattr(tf, "ToposFacts", lambda gate_dir, reader_dir, device: object())
+    monkeypatch.setattr(tf, "_local_dir", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(tf, "resolve_device", lambda preferred=None: "cpu")
+    monkeypatch.setenv(tf.ENV_IDLE, "0.2")
+    tf.load()
+    time.sleep(0.1)
+    tf.load()                                           # a second batch re-arms the timer
+    time.sleep(0.15)
+    assert "topos_facts" in model_cache.resident_slots()  # 0.15 s since the last load: still held
+    deadline = time.monotonic() + 2
+    while "topos_facts" in model_cache.resident_slots() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert "topos_facts" not in model_cache.resident_slots()
+
+
+def test_picking_another_provider_releases_the_encoders(node_db, llm_calls, monkeypatch):
+    released = []
+    monkeypatch.setattr("topos.features.derivation.topos_facts.release", lambda: released.append(True))
+    run_derivation_batch(node_db, [ROW], stats={})
+    assert released == [True]
+
+
+def test_idle_seconds_reads_the_env(monkeypatch):
+    from topos.features.derivation import topos_facts as tf
+    monkeypatch.delenv(tf.ENV_IDLE, raising=False)
+    assert tf.idle_seconds() == tf.DEFAULT_IDLE_SEC == 300.0   # Ollama's keep-alive: idle holds no model
+    monkeypatch.setenv(tf.ENV_IDLE, "0")
+    assert tf.idle_seconds() == 0.0
+    monkeypatch.setenv(tf.ENV_IDLE, "nonsense")
+    assert tf.idle_seconds() == tf.DEFAULT_IDLE_SEC
+
+
+def test_a_deferral_is_recorded_where_the_facts_config_reads_it(node_db, llm_calls, monkeypatch):
+    """Before: one WARNING per deferred batch, and the app's Facts extraction row showed the pick
+    as if it were running. Now the config carries {reason, at, batches} until a batch runs."""
+    from topos.config.facts_llm import derivation_deferral
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load",
+                        lambda: (_ for _ in ()).throw(OSError("no cached weights")))
+    _pick_topos_facts(node_db)
+    run_derivation_batch(node_db, [ROW], stats={})
+    run_derivation_batch(node_db, [ROW], stats={})
+    standing = derivation_deferral(node_db)
+    assert standing["reason"].startswith("topos_facts_unavailable") and standing["batches"] == 2
+    assert standing["at"][:4].isdigit()
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load", lambda: StubClassifier())
+    run_derivation_batch(node_db, [ROW], stats={})
+    assert derivation_deferral(node_db) is None
+
+
+def test_a_deferred_batch_reaches_the_pipeline_as_a_deferral(monkeypatch):
+    """The pipeline's deferral path records a debt row and an envelope for a job that returns
+    `_deferred`, as the goals job does; a plain stats row was a success with 0 written."""
+    import asyncio
+    from topos.enrichment.jobs.canonical import derivation_job as dj
+
+    def deferred_batch(conn, rows, *, cancel=None, stats=None):
+        stats["deferred"] = "topos_facts_unavailable: no cached weights"
+        return 0
+
+    monkeypatch.setattr(dj, "run_derivation_batch", deferred_batch)
+    monkeypatch.setattr(dj, "get_db_connection", lambda: object())
+    out = asyncio.run(dj.DerivationJob().enrich([ROW]))
+    assert out[0]["_deferred"] is True and out[0]["error"].startswith("topos_facts_unavailable")
+    monkeypatch.setattr(dj, "run_derivation_batch", lambda conn, rows, *, cancel=None, stats=None: 3)
+    assert asyncio.run(dj.DerivationJob().enrich([ROW])) == [{"derivation_written": 3}]
+
+
+def test_no_write_transaction_spans_a_model_call(node_db, monkeypatch):
+    """The job writes on its own connection, outside the write gate, and committed once per
+    record: SQLite's write lock was held across every extraction and verifier call of the
+    record, and the pipeline's claim_next_job then held the gate up to 160 s blocked on it
+    (5-6 Nov 2026, isolated node). Every model call must now start with the lock released."""
+    from topos.engine.backends import ollama
+    held_open = []
+    goal = json.dumps({"assertions": [{"predicate": "asp.goal", "value": {"goal": "run a marathon"},
+                                       "about": "owner", "confidence": 0.8, "quote": "run a marathon"}]})
+    verify = json.dumps({"supported": True, "about": "owner", "fields_ok": True, "reason": "stated"})
+
+    def fake(self, model, prompt, **kw):
+        if node_db.in_transaction:
+            held_open.append(prompt[:40])
+        if "Respond with exactly" in prompt:
+            return {"text": "ok"}
+        return {"text": verify if "strict fact-checker" in prompt else goal}
+
+    monkeypatch.setattr(ollama.OllamaAdapter, "_generate", fake)
+    monkeypatch.setattr("topos.features.facts.llm_extract._resolved_extraction_model", lambda s, c: "stub-9b")
+    stub = StubClassifier()
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load", lambda: stub)
+    _pick_topos_facts(node_db)
+    stats = {}
+    run_derivation_batch(node_db, [ROW], stats=stats)
+    assert stats["written"] >= 1 and stub.calls == ["work.career"]
+    assert held_open == []
