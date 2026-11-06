@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.45] — 2026-11-06
+
 ### Added
 - **Local first: the node runs without an account.** `[O]` A node with no `TOPOS_KEY` used to stop at
   startup (a prompt in a terminal, exit 2 without one), so nothing could be collected before the person
