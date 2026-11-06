@@ -33,7 +33,8 @@ EXIT_NOT_PAIRED = 3
 EXIT_NODE_DOWN = 4
 EXIT_REJECTED = 5
 
-CP_STATES = ("connected", "rejected", "degraded", "offline", "unknown")
+#: `local_only`: the node runs without an account and never contacts the control plane.
+CP_STATES = ("connected", "rejected", "degraded", "offline", "unknown", "local_only")
 
 #: Binary resolution, the Topos.app order (CONTRACTS §4).
 BINARY_CANDIDATES = (
@@ -308,13 +309,24 @@ def _collect() -> tuple:
     if running:
         topos_id = (scope.get("topos_id") if scope else None) or (str(shell.get("topos_id")).strip() if shell.get("topos_id") else None)
         user_id_present = bool(shell.get("user_id_present")) if "user_id_present" in shell else bool(scope and scope.get("user_id"))
+        mode = (scope.get("identity_mode") if scope else None) or shell.get("identity_mode")
     else:
         topos_id = _engine_config_value("topos_id")
         user_id_present = _engine_config_value("user_id") is not None
-    paired = bool(topos_id)
+        mode = _engine_config_value("identity_mode")
+        if mode is None and user_id_present:
+            from topos.local_identity import is_local_owner_id
+
+            mode = "local" if is_local_owner_id(_engine_config_value("user_id")) else "account"
+    mode = mode if mode in ("local", "account") else None
+    # `paired` keeps its meaning: linked to an account. A local-only node has ids but no account.
+    local_only = mode == "local"
+    paired = bool(topos_id) and not local_only
 
     cp = str(shell.get("control_plane") or "") if running else ""
     control_plane = cp if cp in CP_STATES else "unknown"
+    if running and local_only and control_plane == "unknown":
+        control_plane = "local_only"
     update = shell.get("update") if isinstance(shell.get("update"), dict) else {}
     outdated = bool(update.get("available")) if running else False
     latest = str(update.get("latest")) if outdated and update.get("latest") else None
@@ -327,9 +339,10 @@ def _collect() -> tuple:
         exit_code = EXIT_NODE_DOWN
     elif control_plane == "rejected":
         exit_code = EXIT_REJECTED
-    elif not paired:
+    elif not paired and not local_only:
         exit_code = EXIT_NOT_PAIRED
     else:
+        # A local-only node is healthy: it has an identity and answers; it simply has no account yet.
         exit_code = EXIT_OK
 
     return {
@@ -342,6 +355,8 @@ def _collect() -> tuple:
             "supervisor": _supervisor(shell, pid) if running else None,
         },
         "paired": paired,
+        # `local` (ids minted here, no account), `account` (paired), or None (no identity yet).
+        "mode": mode,
         "topos_id": str(topos_id) if topos_id else None,
         "user_id_present": user_id_present,
         "control_plane": control_plane,
@@ -364,9 +379,12 @@ def _status_lines(snapshot: dict) -> list[str]:
         lines.append(f"Topos {node['version']} is running (pid {node['pid']}, kept alive by {who}).")
     else:
         lines.append(f"Topos is not running (this binary is {node['version']}).")
-    lines.append(
-        "Paired with Topos " + (snapshot["topos_id"] or "") if snapshot["paired"] else "Not paired yet."
-    )
+    if snapshot["paired"]:
+        lines.append("Paired with Topos " + (snapshot["topos_id"] or ""))
+    elif snapshot.get("mode") == "local":
+        lines.append("Running without an account (local-only). Connect one with `topos-node pair`.")
+    else:
+        lines.append("Not paired yet.")
     lines.append(f"Control plane: {snapshot['control_plane']}.")
     if snapshot["outdated"]:
         lines.append(f"A newer node is published: {snapshot['latest_version']}.")
@@ -431,7 +449,8 @@ def doctor_findings(snapshot: dict, *, secret_sightings: int = 0) -> list[dict]:
         )
     if snapshot["control_plane"] == "rejected":
         add("key_rejected", "The control plane rejects this node's key.", "Pair again: `topos-node pair`.")
-    if not snapshot["paired"]:
+    if not snapshot["paired"] and snapshot.get("mode") != "local":
+        # A local-only node is not a finding: it has an identity and answers; `status` says how to connect.
         add("not_paired", "This computer is not paired with a Topos.", "Run `topos-node pair`.")
     if snapshot["outdated"]:
         add(

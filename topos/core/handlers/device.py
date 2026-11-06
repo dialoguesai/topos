@@ -59,6 +59,31 @@ def _persist_topos_id(conn, topos_id: str) -> bool:
     logger.debug("[PIPELINE:CONNECTION] Stored topos_id=%s from control plane.", topos_id[:8])
     return True
 
+
+def _adopt_account_identity(conn, user_id: str, topos_id: str) -> bool:
+    """Move a local-only node's rows to the account that just connected (local_identity.py).
+
+    True when the rewrite ran. False when this node is not in local mode — then the
+    caller keeps the stored ids, the rule for every other mismatch.
+    """
+    from ...local_identity import IDENTITY_MODE_LOCAL, RescopeRefused, identity_mode, rescope_to_account
+
+    try:
+        if identity_mode(conn) != IDENTITY_MODE_LOCAL:
+            return False
+        report = rescope_to_account(conn, user_id=user_id, topos_id=topos_id or None)
+    except RescopeRefused as exc:
+        logger.warning("[PIPELINE:CONNECTION] local identity not moved: %s", exc)
+        return False
+    except Exception as exc:  # noqa: BLE001 — a failed rewrite rolled back; the node stays local
+        logger.error("[PIPELINE:CONNECTION] moving the local identity to the account failed: %s", type(exc).__name__)
+        return False
+    logger.info(
+        "[PIPELINE:CONNECTION] Local identity moved to the account: %d tables, topos id %s.",
+        len(report.get("tables") or {}), "changed" if report.get("topos_id_changed") else "kept",
+    )
+    return True
+
 # --- key rotation (CONTRACTS §3; L8 payload) --------------------------------------------------------------
 #: `key_rotated` arrives ONCE over the old key's socket:
 #: ``{"topos_id", "topos_key": "tpn_<40 hex>", "grace_seconds", "revoke_at": <ISO 8601 UTC>}``.
@@ -274,11 +299,19 @@ async def handle_connection_info(message: Dict[str, Any]) -> Optional[Dict[str, 
         """
     payload = message.get("payload") or {}
     auth_user_id = payload.get("user_id") or message.get("user_id")
+    incoming_topos_id = str(payload.get("topos_id") or message.get("topos_id") or "").strip()
     if auth_user_id:
         conn = hub.get_db_connection()
         if conn:
             existing_user_id = get_user_id(conn)
-            
+
+            if existing_user_id and existing_user_id != auth_user_id and _adopt_account_identity(
+                conn, auth_user_id, incoming_topos_id
+            ):
+                # Local-first: the rows were written under an identity minted on this
+                # computer; the first account connection moves them, once.
+                existing_user_id = auth_user_id
+
             if not existing_user_id:
                 # Engine started but no user_id yet - link to authenticated user
                 store_user_id(conn, auth_user_id)

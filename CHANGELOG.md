@@ -10,6 +10,23 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Local first: the node runs without an account.** `[O]` A node with no `TOPOS_KEY` used to stop at
+  startup (a prompt in a terminal, exit 2 without one), so nothing could be collected before the person
+  paired a Dialogues account in the browser. Now a missing key outside a cloud runtime means
+  **local-only mode** (`topos/local_identity.py`): the node mints its own owner id (`local:…`) and a
+  UUID Topos id on first start, the owner socket and local ingestion run as before, and no control-plane
+  client, presence loop or stamp pin is started. `topos-node status` reports `mode: local`,
+  `control_plane: local_only` and exits 0 (`paired` stays false: no account). `topos-node setup`
+  without `--connect` skips the key and account steps and ends in `done_local`; `--connect` pairs an
+  account and restarts a node that was running local-only so it reads the key.
+- **Connecting an account later keeps everything.** The first `connection_info` that reaches a
+  local-only node moves its rows to the account in one transaction: every owner column, every
+  `dataset_id` prefix, the Topos id where the control plane assigned a new one, and the raw-file
+  folders; the report lands in `engine_config.rescope_report`. After that the "never rewrite
+  `user_id`" rule applies as before.
+- **`topos-node import <file> [--source …]`** puts a file that is already on this computer into Topos
+  over the owner socket (default: a ChatGPT export; `--sources` lists the file sources, `--list` the
+  exports the node finds on its own). No account and no network.
 - **The interest refresh receipt tells the open month's churn from a real change.** `[O]` On the owner's node
   (5 Nov 2026) every hourly `interest_refresh` while the owner browsed found changes (+5 to +13 inserted, as many
   closed) and queued a full rebuild of both share indexes, 150 to 480 s each with a 15 to 22 s write-gate hold at
@@ -29,6 +46,9 @@ The machine-readable twin of each release is
   label, an id or a count.
 
 ### Changed
+- The Terminal approval window says "the Topos on this computer" instead of "your existing TOPOS
+  account", and carries `HOME` and `TOPOS_UDS_PATH` into the window so a sandboxed node approves
+  against its own database.
 - **A share index whose browsing interest drifted is narrowed to its other members, not dropped (DR-70).** `[O]`
   Behind `TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS`, on by default (owner ruling of 5 Nov 2026, "Narrow on drift";
   read only while `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS` is on): when the daemon sweep's `interest` step finds
