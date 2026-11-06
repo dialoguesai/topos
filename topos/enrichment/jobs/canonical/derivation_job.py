@@ -27,7 +27,9 @@ import asyncio
 import json as _json
 import logging
 import os
+import sqlite3
 import threading
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
@@ -180,6 +182,32 @@ def _ledger_write(conn, *, stage, pack, rec, a, model, vmodel, written_id=None):
          a.get("verifier_status"), a.get("verifier_reason"), written_id))
 
 
+def _note_deferral(conn, reason: str) -> None:
+    """Record why the batch could not run where the facts config reads it (one row, counted),
+    so a picked provider that never loads is visible in the app, not only in the node log."""
+    from ....config.facts_llm import ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL, derivation_deferral
+    prior = derivation_deferral(conn) or {}
+    batches = prior.get("batches") if isinstance(prior.get("batches"), int) else 0
+    value = _json.dumps({"reason": reason, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                         "batches": batches + 1})
+    try:
+        conn.execute("INSERT OR REPLACE INTO engine_config (key, value) VALUES (?, ?)",
+                     (ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL, value))
+        conn.commit()
+    except sqlite3.Error:
+        logger.debug("derivation: could not record the deferral", exc_info=True)
+
+
+def _clear_deferral(conn) -> None:
+    from ....config.facts_llm import ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL
+    try:
+        cur = conn.execute("DELETE FROM engine_config WHERE key = ?", (ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL,))
+        if cur.rowcount:
+            conn.commit()
+    except sqlite3.Error:
+        logger.debug("derivation: could not clear the deferral", exc_info=True)
+
+
 def _bump_yield(conn, pack_id, **cols):
     import datetime as _dt
     day = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
@@ -260,8 +288,23 @@ def run_derivation_batch(
     vmodel = verifier_model()
     adapter = OllamaAdapter()
 
+    def settle():
+        """Commit before a model call so no write transaction spans it.
+
+        This job writes on its own connection, outside the write gate, and used to commit
+        once per record. In WAL the first write takes SQLite's write lock at execute time,
+        so the lock was held across every extraction and verifier call of the record (up
+        to 11 packs, 9-20 s each). The pipeline's claim_next_job then took the gate and
+        blocked on SQLite, and every gated writer queued behind it: measured 5-6 Nov 2026
+        on an isolated node, claim_next_job held 160 s with waited=0, 383-3,017 s per
+        50-record run. The lock is now held for the write bursts only (milliseconds).
+        """
+        if conn.in_transaction:
+            conn.commit()
+
     def llm(m: str, prompt: str, n: int = 900, *, pack_id=None,
             phase="extraction", mode="ingest") -> str:
+        settle()
         if pack_id is not None:
             from ....features.derivation.processing import measured_generate
             return measured_generate(conn, adapter, m, prompt, pack_id=pack_id,
@@ -282,21 +325,26 @@ def run_derivation_batch(
         except Exception as exc:  # noqa: BLE001
             st["deferred"] = f"verifier_unavailable: {exc}"[:120]
             logger.warning("derivation deferred: verifier %s unavailable (%s)", vmodel, exc)
+            _note_deferral(conn, st["deferred"])
             return 0
 
     # Topos Facts (owner opt-in under Node functions → Facts extraction): the packs it
     # knows skip the LLM call; ROUTED_TO_LLM and unknown packs keep `model`. A pick that
     # cannot load defers the batch, like an unavailable verifier: nothing is marked done.
     from ....config.facts_llm import facts_classifier_version
+    from ....features.derivation import topos_facts as _tf
     tf_model = None
     if facts_classifier_version(conn):
-        from ....features.derivation import topos_facts as _tf
         try:
             tf_model = _tf.load()
         except Exception as exc:  # noqa: BLE001
             st["deferred"] = f"topos_facts_unavailable: {exc}"[:120]
             logger.warning("derivation deferred: Topos Facts unavailable (%s)", exc)
+            _note_deferral(conn, st["deferred"])
             return 0
+    else:
+        _tf.release()                    # another provider picked: the encoders go
+    _clear_deferral(conn)
 
     filters = {pid: PackPrefilter(pk) for pid, pk in all_packs.items()}
     writer = DerivationWriter(conn, model=model)
@@ -305,6 +353,7 @@ def run_derivation_batch(
     def pack_raw(pack, rec, mode):
         """(raw output, extract model) for one record and pack: Topos Facts or the LLM."""
         if tf_model is not None and _tf.routes_to_classifier(pack.pack, tf_model):
+            settle()
             return _tf.raw_output(tf_model, pack.pack, rec["text"]), _tf.MODEL_ID
         raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec)),
                   pack_id=pack.pack, mode=mode)
@@ -744,4 +793,8 @@ class DerivationJob(BaseEnrichmentJob):
             cancel.set()
             raise
         logger.info("derivation batch: %s written, stats=%s", written, stats)
+        if stats.get("deferred"):
+            # The pipeline's deferral path (debt row, envelope), as for the goals job: the
+            # records were not marked done, and a retry finds them.
+            return [{"_deferred": True, "error": str(stats["deferred"]), "derivation_written": 0, **stats}]
         return [{"derivation_written": written, **stats}]

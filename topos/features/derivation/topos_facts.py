@@ -54,6 +54,12 @@ ROUTED_TO_LLM = frozenset({"aspirations.goals"})
 ENV_GATE = "TOPOS_FACTS_GATE"        # local directory: never contacts a network
 ENV_READER = "TOPOS_FACTS_READER"
 ENV_DEVICE = "TOPOS_FACTS_DEVICE"    # cpu (default) | auto | mps | cuda
+ENV_IDLE = "TOPOS_FACTS_IDLE_SEC"    # release the encoders after this long unused; 0 = never
+#: Ollama's own keep-alive for the local models (5 min): an idle node holds no model (owner,
+#: 6 Nov 2026), so the pin outlives a batch by no more than the LLMs it runs beside.
+DEFAULT_IDLE_SEC = 300.0
+_release_timer: Optional[threading.Timer] = None
+_timer_lock = threading.Lock()
 
 _WEIGHTS = ["config.json", "model.safetensors", "tokenizer.json", "tokenizer_config.json"]
 _ABOUT = "__about"
@@ -88,7 +94,7 @@ def _local_dir(env: str, repo: str, revision: str, extra: Sequence[str] = ()) ->
 
 
 class ToposFacts:
-    """Both encoders and the pack spec, loaded once per process through the model cache."""
+    """Both encoders and the pack spec, resident through the model cache (see ``load``)."""
 
     def __init__(self, gate_dir: Path, reader_dir: Path, device: str) -> None:
         import torch
@@ -214,8 +220,25 @@ class ToposFacts:
         return out
 
 
+def idle_seconds() -> float:
+    """How long the encoders stay resident after their last batch (``TOPOS_FACTS_IDLE_SEC``)."""
+    raw = os.environ.get(ENV_IDLE)
+    try:
+        return max(0.0, float(raw)) if raw not in (None, "") else DEFAULT_IDLE_SEC
+    except ValueError:
+        return DEFAULT_IDLE_SEC
+
+
 def load() -> ToposFacts:
-    """The resident model, loading it on first use (download once, then the HF cache)."""
+    """The resident model, loading it on first use (download once, then the HF cache).
+
+    Pinned in the model cache: the cache's LRU budget is sized for the small enrichment
+    encoders, which every ingest chunk cycles through, so an entry that joins that rotation
+    is evicted between derivation batches. Measured 6 Nov 2026 on an isolated node: 8 loads
+    in 8 batches, about 5 GiB of float32 each time. Pinned, the encoders load once and stay
+    until the owner picks another provider (``release``) or they sit idle ``idle_seconds``;
+    a timer armed here releases them then, whether or not another pipeline runs.
+    """
     from ...engine.model_cache import ModelSlot, get_model_cache
 
     device = resolve_device()
@@ -226,8 +249,48 @@ def load() -> ToposFacts:
         logger.info("Topos Facts %s loading on %s", VERSION, device)
         return ToposFacts(gate, reader, device)
 
-    handle, _ = get_model_cache().acquire(ModelSlot.TOPOS_FACTS, f"{MODEL_ID}@{device}", _load)
+    idle = idle_seconds()
+    handle, _ = get_model_cache().acquire(ModelSlot.TOPOS_FACTS, f"{MODEL_ID}@{device}", _load,
+                                          pinned=True, pin_idle_sec=idle)
+    _arm_release(idle)
     return handle
+
+
+def _arm_release(idle: float) -> None:
+    """One daemon timer, re-armed on every ``load``: after ``idle`` seconds without a load it
+    drops the encoders (``trim_to_budget`` only runs after a pipeline, so without this a
+    pinned model would wait for the next ingest to be released)."""
+    global _release_timer
+    if idle <= 0:
+        return
+    with _timer_lock:
+        if _release_timer is not None:
+            _release_timer.cancel()
+        _release_timer = threading.Timer(idle, _release_if_idle, args=(idle,))
+        _release_timer.daemon = True
+        _release_timer.start()
+
+
+def _release_if_idle(idle: float) -> None:
+    from ...engine.model_cache import ModelSlot, get_model_cache
+
+    unused = get_model_cache().idle_for(ModelSlot.TOPOS_FACTS)
+    if unused is None:
+        return
+    if unused + 0.01 >= idle:
+        release()
+    else:                                  # loaded again since the timer was armed
+        _arm_release(idle - unused)
+
+
+def release() -> None:
+    """Drop the resident encoders (the owner picked another provider). A no-op when absent."""
+    from ...engine.model_cache import ModelSlot, get_model_cache
+
+    cache = get_model_cache()
+    if ModelSlot.TOPOS_FACTS.value in cache.resident_slots():
+        cache.evict_slot(ModelSlot.TOPOS_FACTS)
+        logger.info("Topos Facts %s released", VERSION)
 
 
 def routes_to_classifier(pack_id: str, model: Optional[ToposFacts]) -> bool:
