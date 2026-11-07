@@ -9,6 +9,19 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **A local request held until its caller's deadline is no longer sent.** When the node held a request for a busy
+  local model until the caller's own limit ran out, it sent the request anyway with half a second to answer. No node
+  call to the 9B on the owner's host has answered that fast (fastest 0.71 s, 4 to 7 Nov), so each one timed out on
+  the way and the host logged the hang-up as a 500 on `/api/chat`. In the 1.5.45 stress run two 25 s background calls
+  went out that way after 25.0 and 25.1 s behind a share's answer. All 71 of the host's `/api/chat` 500s from 4 to 7
+  Nov were node calls that hung up before an answer; most of the rest were 20 s background calls to the 27B that ran
+  out while it generated, which this does not change. Now a request the node has held is sent only while at least
+  0.5 s of its caller's limit is left (`SEND_MIN_SECONDS`); past that the caller gets `HoldExpired`, a `TimeoutError`,
+  and the host gets nothing. Verification maps it to `ModelUnavailable("deadline")`, as its other model failures. A
+  request the node never held goes as its caller sent it, whatever is left of the caller's deadline. Shell status
+  adds `not_sent`.
+
 ## [1.5.45] — 2026-11-06
 
 ### Added

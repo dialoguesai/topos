@@ -175,8 +175,11 @@ class LocalChat:
         answers once it is ready. Raises ``ModelUnavailable`` like a chat call."""
         # At the serving context, so the chat calls that follow find the model loaded as they ask for it.
         started = time.monotonic()
-        with local_serving.request({"model": self.model, "keep_alive": keep_alive}, limit=timeout) as body:
-            _post_json(self._base + "/api/generate", body, {}, timeout - (time.monotonic() - started))
+        try:
+            with local_serving.request({"model": self.model, "keep_alive": keep_alive}, limit=timeout) as body:
+                _post_json(self._base + "/api/generate", body, {}, timeout - (time.monotonic() - started))
+        except local_serving.HoldExpired:  # the node held it until the deadline and sent nothing
+            raise ModelUnavailable("deadline") from None
 
     def __call__(self, system: str, user: str, schema: Dict[str, Any], timeout: float, usage: Usage) -> Dict[str, Any]:
         # Kept questions Wave 2 (OFF2N): on a background path (the owner's inbound truth lane runs as a pipeline job,
@@ -194,8 +197,11 @@ class LocalChat:
             body["options"]["num_predict"] = int(cap)
         # Held by the node at most what is left of the deadline, and the time held comes off the request's own.
         started = time.monotonic()
-        with local_serving.request(body, limit=timeout) as body:
-            reply = _post_json(self._base + "/api/chat", body, {}, timeout - (time.monotonic() - started))
+        try:
+            with local_serving.request(body, limit=timeout) as body:
+                reply = _post_json(self._base + "/api/chat", body, {}, timeout - (time.monotonic() - started))
+        except local_serving.HoldExpired:  # the node held it until the deadline and sent nothing
+            raise ModelUnavailable("deadline") from None
         usage.add(reply.get("prompt_eval_count"), reply.get("eval_count"))
         try:
             return _parse(reply["message"]["content"])

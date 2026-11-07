@@ -43,7 +43,9 @@ requests ended 499 after 8m20s and 8m30s). So the node now does its own scheduli
    behind finishes the one request it is running, goes idle and is unloaded. The waiting request is then served,
    and the held ones go next. A waiting request holds only work of its own priority or lower: a routine waiting never
    holds the owner's chat or an answer. A hold for a switch ends at ``HOLD_LIMIT``; a hold for the model's own slot at
-   ``SLOT_LIMIT``; both at the limit the caller passes for its own deadline. The node keeps
+   ``SLOT_LIMIT``. Both end at the limit the caller passes for its own deadline, and then the request is not sent at
+   all: once less than ``SEND_MIN_SECONDS`` of that limit is left, the caller gets ``HoldExpired``, a
+   ``TimeoutError``, and the host gets nothing. The node keeps
    moving through its models as its requests need them; it never pins one.
    ``TOPOS_LOCAL_MODEL_SLOTS`` sets the per-model limit (0: no limit and no hold).
 
@@ -148,6 +150,13 @@ HOLD_LIMIT = 120.0
 #: Long enough for a queue of home chat replies (300 s each at most), short enough that a count that never came down
 #: cannot stop a model for good.
 SLOT_LIMIT = 600.0
+#: A request is sent only while at least this much of its caller's own limit is left. Past that the node does not
+#: send it, and the caller gets ``HoldExpired``. Before this rule, a request held for its whole limit was sent anyway
+#: with this much as its timeout. In the 1.5.45 stress run (7 Nov), two of the node's 25 s background calls to the 9B
+#: were held 25.0 and 25.1 s for its slot and sent that way. Both timed out on the way, and the host logged each as a
+#: 500 on /api/chat, its code for a client that hung up. No node call to the 9B on the owner's host answered in under
+#: 0.71 s (4 to 7 Nov), so a request with less than this left could not have been answered.
+SEND_MIN_SECONDS = 0.5
 #: Priorities, lowest first served first. LIVE: the owner's own requests and answers. UNWATCHED: generation nobody
 #: watches stream (a routine's step). BACKGROUND: work the node marked as background.
 LIVE, UNWATCHED, BACKGROUND = 0, 1, 2
@@ -194,9 +203,15 @@ _sized_at = float("-inf")
 #: lowered_context: requests that asked for more than CONTEXT and did not need it (home chat's 81,920).
 #: raised_context: times a model moved up a step. switch_holds: requests held so a request waiting for another model
 #: could be served; held_s_max their longest. recycles: models unloaded for growing past GROWTH_LIMIT.
+#: not_sent: requests whose hold used up their caller's limit, so the node never sent them (HoldExpired).
 _stats: Dict[str, Any] = {"releases": 0, "last_release": None, "lowered_context": 0, "kept_larger_context": 0,
                           "raised_context": 0, "switch_holds": 0, "held_s_max": 0.0, "recycles": 0,
-                          "last_recycle": None}
+                          "last_recycle": None, "not_sent": 0}
+
+
+class HoldExpired(TimeoutError):
+    """A local request the node did not send: while it was held, less than ``SEND_MIN_SECONDS`` of its caller's own
+    limit was left. Nothing reached the host. A ``TimeoutError``, as the call would have ended had it been sent."""
 
 
 def model_key(name: str) -> str:
@@ -326,13 +341,19 @@ def _waiters(now: float) -> List[Tuple[str, bool]]:
                                                      for name, c in loaded)]
 
 
-def _admit(token: int, now: float, limit: Optional[float]) -> Tuple[bool, bool]:
+def _admit(token: int, now: float, limit: Optional[float], *, waited: bool = True) -> Tuple[bool, bool]:
     """Whether a held request may be sent now, and whether a model switch is what holds it. Call with ``_lock``.
-    ``limit`` is the caller's own (None: none); the hold for a slot also ends at SLOT_LIMIT, for a switch at
-    HOLD_LIMIT."""
+    ``limit`` is the caller's own (None: none). A request the node has already held (``waited``) is not sent once
+    less than SEND_MIN_SECONDS of its limit is left: raises ``HoldExpired``. One it has not held yet goes as its
+    caller sent it. The hold for a slot also ends at SLOT_LIMIT, for a switch at HOLD_LIMIT, and the request is then
+    sent."""
     model, priority, arrived = _held[token]
     held = now - arrived
-    if SLOTS <= 0 or (limit is not None and held >= limit) or held >= SLOT_LIMIT:
+    if SLOTS <= 0:
+        return True, False
+    if waited and limit is not None and limit - held < SEND_MIN_SECONDS:
+        raise HoldExpired(f"held {held:.1f} s of a {limit:.1f} s limit")
+    if held >= SLOT_LIMIT:
         return True, False
     if model in _recycling or sum(1 for m, _, _, _ in _in_flight.values() if m == model) >= SLOTS:
         return False, False
@@ -359,6 +380,8 @@ class _Ticket:
         self.priority = _priority()
         self.arrived = time.monotonic()
         self.switch = False
+        #: Whether the node has held it at least once: only then is it the node's hold that can use up its limit.
+        self.waited = False
         self.sent: Optional[float] = None
 
     def hold(self) -> None:
@@ -370,17 +393,30 @@ class _Ticket:
         if self.unload:
             return True
         now = time.monotonic()
+        held = now - self.arrived
         with _lock:
-            admitted, switch = _admit(self.token, now, self.limit)
-            self.switch = self.switch or switch
+            try:
+                admitted, switch = _admit(self.token, now, self.limit, waited=self.waited)
+            except HoldExpired:
+                # Out of its caller's time: no longer held, never sent.
+                _held.pop(self.token, None)
+                _stats["not_sent"] += 1
+                admitted, expired = False, True
+            else:
+                expired = False
+                self.switch = self.switch or switch
+                self.waited = self.waited or not admitted
             if admitted:
                 _held.pop(self.token, None)
                 _in_flight[self.token] = (self.model, self.context, now, self.priority)
                 self.sent = now
-                held = now - self.arrived
                 if self.switch:
                     _stats["switch_holds"] += 1
                 _stats["held_s_max"] = max(_stats["held_s_max"], round(held, 1))
+        if expired:
+            _log.info("local model %s: a request held %.1f s had %.1f s of its caller's %.1f s left; not sent",
+                      self.model, held, max(0.0, self.limit - held), self.limit)
+            raise HoldExpired(f"held {held:.1f} s of a {self.limit:.1f} s limit")
         if admitted and self.switch and held >= 1.0:
             _log.info("local model switch: held a request to %s %.1f s", self.model, held)
         return admitted
@@ -422,7 +458,8 @@ def request(body: Dict[str, Any], *, limit: Optional[float] = None):
     """Prepare a local request, hold it until the node may send it (``_admit``), and count it in flight until it
     ends, however it ends. For a blocking call. On a thread that runs an event loop it is never held, because a wait
     there would stop that loop; it is still counted. ``limit`` caps the hold (see ``_admit`` for the defaults): a caller
-    with a deadline passes what is left of it, and takes the time held off its own timeout."""
+    with a deadline passes what is left of it, and takes the time held off its own timeout. Raises ``HoldExpired``,
+    without entering the body, once less than ``SEND_MIN_SECONDS`` of ``limit`` is left: nothing is sent."""
     ticket = _Ticket(body, limit)
     ticket.hold()
     error = None
@@ -475,10 +512,11 @@ def _deadline(kwargs: Dict[str, Any]) -> Optional[float]:
 
 
 def _rest(kwargs: Dict[str, Any], limit: Optional[float], started: float) -> Dict[str, Any]:
-    """The call's own timeout less the time the node held it, so a hold never stretches the caller's deadline."""
+    """The call's own timeout less the time the node held it, so a hold never stretches the caller's deadline. A
+    request is admitted only with SEND_MIN_SECONDS of its limit left, so the floor only covers the moment between."""
     if limit is None:
         return kwargs
-    return {**kwargs, "timeout": max(0.5, limit - (time.monotonic() - started))}
+    return {**kwargs, "timeout": max(SEND_MIN_SECONDS, limit - (time.monotonic() - started))}
 
 
 async def post_async(http, url: str, *, json: Dict[str, Any], **kwargs):

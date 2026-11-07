@@ -34,7 +34,7 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(ls, "_sized_at", float("-inf"))
     monkeypatch.setattr(ls, "_stats", {"releases": 0, "last_release": None, "lowered_context": 0,
                                        "kept_larger_context": 0, "raised_context": 0, "switch_holds": 0,
-                                       "held_s_max": 0.0, "recycles": 0, "last_recycle": None})
+                                       "held_s_max": 0.0, "recycles": 0, "last_recycle": None, "not_sent": 0})
 
 
 def test_every_caller_context_becomes_the_one_serving_context():
@@ -302,7 +302,8 @@ def test_a_model_being_unloaded_for_growth_holds_new_requests_to_it_only():
     ls._held[2] = (SMALL, ls.LIVE, 0.0)
     assert ls._admit(1, 1.0, None) == (False, False)
     assert ls._admit(2, 1.0, None) == (True, False)
-    assert ls._admit(1, 1.0, 0.5) == (True, False)    # never past the caller's own limit
+    with pytest.raises(ls.HoldExpired):               # never past the caller's own limit, and then not sent
+        ls._admit(1, 1.0, 1.2)
 
 
 def test_the_watchdog_reads_sizes_with_nothing_waiting_and_unloads_the_grown_9b(monkeypatch):
@@ -402,10 +403,36 @@ def test_a_stale_reading_of_the_host_holds_nothing():
     assert ls._admit(2, now=ls._LOADED_FRESH_SECONDS + 1.0, limit=120.0)[0] is True
 
 
-def test_no_request_is_held_past_its_limit():
+def test_no_request_is_held_past_its_limit_and_none_is_sent_after_it():
     ls._in_flight[1] = (BIG, 32768, 0.0, ls.LIVE)
     _hold(2, BIG, arrived=0.0)
-    assert ls._admit(2, now=30.0, limit=30.0) == (True, False)
+    assert ls._admit(2, now=29.0, limit=30.0) == (False, False)      # a second left: still held for its slot
+    # Its caller's limit used up (all but less than SEND_MIN_SECONDS): the hold ends, and the request is not sent.
+    with pytest.raises(ls.HoldExpired):
+        ls._admit(2, now=29.6, limit=30.0)
+    with pytest.raises(ls.HoldExpired):
+        ls._admit(2, now=30.0, limit=30.0)
+
+
+def test_a_slot_that_frees_with_too_little_of_the_limit_left_sends_nothing():
+    # 7 Nov 16:23Z: a 25 s background call held 24.0 s behind a share's 38 s answer on the 9B. Sent with the 0.97 s
+    # left it would have been a real try; with less than SEND_MIN_SECONDS left it could not have been answered.
+    _hold(2, MID, arrived=0.0)
+    assert ls._admit(2, now=24.03, limit=25.0) == (True, False)
+    with pytest.raises(ls.HoldExpired):
+        ls._admit(2, now=24.6, limit=25.0)
+
+
+def test_a_request_the_node_never_held_goes_with_whatever_its_caller_left_it():
+    # Only the node's own hold can use up a caller's limit. A call that arrives with little time left and finds its
+    # slot free is sent as its caller asked: the caller owns that deadline (answer_release cancels it in flight).
+    _hold(2, MID, arrived=0.0)
+    assert ls._admit(2, now=0.0, limit=0.03, waited=False) == (True, False)
+    ls._held.clear()
+    entered = []
+    with ls.request({"model": MID, "prompt": "x"}, limit=0.03):
+        entered.append(True)
+    assert entered == [True] and ls.status()["not_sent"] == 0
 
 
 def test_one_models_held_requests_go_the_owners_first_then_by_arrival():
@@ -471,7 +498,8 @@ def test_the_switch_end_to_end(monkeypatch):
     assert ls.status()["switch_holds"] == 1
 
 
-def test_a_post_held_by_the_node_takes_the_time_held_off_its_own_timeout():
+def test_a_post_held_by_the_node_takes_the_time_held_off_its_own_timeout(monkeypatch):
+    monkeypatch.setattr(ls, "POLL_SECONDS", 0.01)
     ls._in_flight[1] = (BIG, 32768, ls.time.monotonic(), ls.LIVE)
     sent = {}
 
@@ -481,11 +509,62 @@ def test_a_post_held_by_the_node_takes_the_time_held_off_its_own_timeout():
             return "ok"
 
     async def run():
-        return await ls.post_async(Http(), "http://host/api/chat", json={"model": BIG, "prompt": "x"}, timeout=0.3)
+        async def first_ends():
+            await asyncio.sleep(0.3)
+            ls._in_flight.pop(1)
+
+        ending = asyncio.create_task(first_ends())
+        answer = await ls.post_async(Http(), "http://host/api/chat", json={"model": BIG, "prompt": "x"}, timeout=2.0)
+        await ending
+        return answer
 
     assert asyncio.run(run()) == "ok"
-    # Held its whole 0.3 s behind the running 27B request, then sent at the floor of half a second.
-    assert sent["timeout"] == 0.5
+    # Held about 0.3 s behind the running 27B request, then sent with what was left of its 2 s.
+    assert 1.5 < sent["timeout"] < 1.75
+
+
+def test_a_post_whose_hold_uses_up_its_callers_timeout_is_never_sent(monkeypatch):
+    """1.5.45 stress, 7 Nov 16:12Z and 16:36Z: two of the node's 25 s background calls to the 9B were held 25.0 and
+    25.1 s for its slot, then sent anyway with half a second (the old floor). Both timed out on the way, and the host
+    logged each as a 500 on /api/chat (its code for a client that hung up). Now the caller gets its timeout and the
+    host gets nothing."""
+    monkeypatch.setattr(ls, "POLL_SECONDS", 0.01)
+    ls._in_flight[1] = (MID, 8192, ls.time.monotonic(), ls.LIVE)     # the 9B's one slot, busy for the whole wait
+    sent = []
+
+    class Http:
+        async def post(self, url, *, json, timeout):
+            sent.append(timeout)
+            return "ok"
+
+    async def run():
+        return await ls.post_async(Http(), "http://host/api/chat", json={"model": MID, "prompt": "x"}, timeout=0.8)
+
+    started = ls.time.monotonic()
+    with pytest.raises(TimeoutError):
+        asyncio.run(run())
+    assert sent == []
+    # It gave up once less than SEND_MIN_SECONDS of the 0.8 s was left, not after it.
+    assert ls.time.monotonic() - started < 0.8
+    assert ls._held == {} and list(ls._in_flight) == [1]
+    assert ls.status()["not_sent"] == 1
+
+
+def test_a_blocking_request_out_of_time_never_reaches_its_body(monkeypatch):
+    monkeypatch.setattr(ls, "POLL_SECONDS", 0.01)
+    ls._in_flight[1] = (MID, 8192, ls.time.monotonic(), ls.LIVE)
+    entered = []
+    with pytest.raises(ls.HoldExpired):
+        with ls.request({"model": MID, "prompt": "x"}, limit=0.6):
+            entered.append(True)
+    assert entered == []
+    assert ls._held == {} and list(ls._in_flight) == [1]
+
+
+def test_a_request_without_a_limit_is_never_given_up():
+    ls._in_flight[1] = (MID, 8192, 0.0, ls.LIVE)
+    _hold(2, MID, arrived=0.0)
+    assert ls._admit(2, now=300.0, limit=None) == (False, False)
 
 
 def test_with_diagnostics_on_a_request_is_a_content_free_span(monkeypatch):
@@ -552,7 +631,8 @@ def test_a_slot_hold_outlasts_the_switch_limit_until_the_callers_deadline_or_the
     _hold(2, BIG, arrived=0.0)
     # 150 s behind the 27B's one running reply: still held, because sending it would only queue it on the host.
     assert ls._admit(2, now=150.0, limit=None) == (False, False)
-    assert ls._admit(2, now=150.0, limit=100.0) == (True, False)      # its caller's own deadline ends it
+    with pytest.raises(ls.HoldExpired):                                 # its caller's own deadline ends it
+        ls._admit(2, now=150.0, limit=100.0)
     assert ls._admit(2, now=ls.SLOT_LIMIT, limit=None) == (True, False)
 
 
