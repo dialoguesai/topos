@@ -9,6 +9,17 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **The owner socket no longer drops a request that reuses an idle connection.** `[O]` uvicorn closes an idle
+  keep-alive connection after 5 s, and httpx keeps a pooled connection for reuse for the same 5 s. A client that
+  reused one just under 5 s idle sent its request on a connection the node was closing, and got "Server disconnected
+  without sending a response" with nothing in the node log. All 17 dropped owner-socket requests in the stress runs of
+  1.5.36 to 1.5.45 (Moments and verify_claim reads) went out 4.96 to 4.99 s after a request on the same client ended;
+  the stress harness reads Moments every 5 s. The owner socket now keeps an idle connection 75 s
+  (`uds.KEEP_ALIVE_SECONDS`), so a pooled client lets go of it first. On a bare uvicorn socket with the server's
+  keep-alive equal to the client's idle expiry, 10 of 100 reuses at just under it failed this way; with the server's
+  longer, none did.
+
 ## [1.5.45] — 2026-11-06
 
 ### Added
