@@ -9,6 +9,14 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **`topos-node import` reaches the node's ingestion routes.** `[O]` In 1.5.45 the default import (a ChatGPT
+  export) and `--list` sent `/ingestion/upload-local-path` and `/ingestion/local-exports`, but the node serves both
+  under `/v1`, so every import of the default source answered "Topos refused the import (http_404)". Proven on an
+  isolated scratch node on 7 Nov: the CLI's path got 404, the `/v1` path with an owner confirmation imported the
+  file. Other file sources (`/sources/{id}/ingest`) were not affected. A new test drives the command past its
+  terminal guard (terminal and prompt patched) and checks every path it sends against the app's own routes.
+
 ## [1.5.45] — 2026-11-06
 
 ### Added

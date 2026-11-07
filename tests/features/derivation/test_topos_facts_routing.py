@@ -223,6 +223,61 @@ def test_a_deferral_is_recorded_where_the_facts_config_reads_it(node_db, llm_cal
     assert derivation_deferral(node_db) is None
 
 
+def test_an_unavailable_verifier_is_recorded_as_the_standing_deferral(node_db, monkeypatch):
+    """The other reason a batch defers (verify mode "required", the verifier's probe fails) goes to the same
+    record: named, counted per batch, nothing extracted or marked done, and cleared by the next batch that runs.
+    The record names the latest reason and counts every deferred batch since the last one that ran."""
+    from topos.config.facts_llm import derivation_deferral
+    from topos.engine.backends import ollama
+
+    verifier_up = {"now": False}
+    extracted = []
+    goal = json.dumps({"assertions": [{"predicate": "asp.goal", "value": {"goal": "run a marathon"},
+                                       "about": "owner", "confidence": 0.8, "quote": "run a marathon"}]})
+    verify = json.dumps({"supported": True, "about": "owner", "fields_ok": True, "reason": "stated"})
+
+    def fake(self, model, prompt, **kw):
+        if "Respond with exactly" in prompt or "strict fact-checker" in prompt:
+            if not verifier_up["now"]:
+                raise RuntimeError("model not found")
+            return {"text": "ok" if "Respond with exactly" in prompt else verify}
+        extracted.append(prompt)
+        return {"text": goal}
+
+    monkeypatch.setattr(ollama.OllamaAdapter, "_generate", fake)
+    monkeypatch.setattr("topos.features.facts.llm_extract._resolved_extraction_model", lambda s, c: "stub-9b")
+    monkeypatch.delenv("TOPOS_DERIVATION_VERIFY", raising=False)          # "required", the default
+
+    stats = {}
+    assert run_derivation_batch(node_db, [ROW], stats=stats) == 0
+    assert stats["deferred"].startswith("verifier_unavailable")
+    standing = derivation_deferral(node_db)
+    assert standing["reason"].startswith("verifier_unavailable") and standing["batches"] == 1
+    assert standing["at"][:4].isdigit()
+    assert extracted == []
+    assert node_db.execute("SELECT COUNT(*) FROM derivation_progress").fetchone()[0] == 0
+
+    # Topos Facts picked and unable to load: the verifier probe runs first and still defers, so the reason stays.
+    _pick_topos_facts(node_db)
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load",
+                        lambda: (_ for _ in ()).throw(OSError("no cached weights")))
+    run_derivation_batch(node_db, [ROW], stats={})
+    standing = derivation_deferral(node_db)
+    assert standing["reason"].startswith("verifier_unavailable") and standing["batches"] == 2
+
+    # The verifier back, Topos Facts still unable to load: the reason moves on and the count carries.
+    verifier_up["now"] = True
+    run_derivation_batch(node_db, [ROW], stats={})
+    standing = derivation_deferral(node_db)
+    assert standing["reason"].startswith("topos_facts_unavailable") and standing["batches"] == 3
+
+    # Both able to run: the batch runs and the record goes.
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load", lambda: StubClassifier())
+    run_derivation_batch(node_db, [ROW], stats={})
+    assert derivation_deferral(node_db) is None
+    assert extracted                                                        # the goals pack reached the LLM
+
+
 def test_a_deferred_batch_reaches_the_pipeline_as_a_deferral(monkeypatch):
     """The pipeline's deferral path records a debt row and an envelope for a job that returns
     `_deferred`, as the goals job does; a plain stats row was a success with 0 written."""
