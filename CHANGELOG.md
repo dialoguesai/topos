@@ -9,6 +9,16 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Naming the graph's communities no longer holds SQLite's write lock across model calls.** `[E:entities]` The
+  rebuild's stable-naming pass recorded each community's name (or refreshed a matched one) without committing it,
+  then asked the local model to name the next community, so every naming call after the first ran inside an open
+  write transaction: up to 60 calls of up to 45 s each. The rebuild runs in a child process that the node's write
+  gate does not reach, so the node's writers waited on the lock while holding the gate. In the 1.5.45 ingest
+  benchmark (7 Nov) a job claim held the gate 18.4 s that way and two more claims waited 14.6 s behind it; the hold
+  ended 13 ms before the rebuild child finished. Each name write now takes its own short gated hold and commits
+  before the next model call.
+
 ## [1.5.45] — 2026-11-06
 
 ### Added
