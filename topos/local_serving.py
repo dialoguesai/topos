@@ -26,8 +26,8 @@ So two rules, each with its own switch:
    reload.
 2. ``release_blocked``, run by ``watchdog``: once a node request has waited ``WAIT_SECONDS`` for a model the host has
    not loaded, unload each loaded model that no node request is using. That is the eviction the host's scheduler
-   failed to make. A model a node request is generating on is never unloaded. A client outside the node (an app
-   calling the host itself) can lose its loaded model this way; it pays one reload, never an error.
+   failed to make. A model a node request is generating on is never unloaded. Since rule 6, only a model this node
+   has used since the host loaded it; one only another client has used is left alone.
    ``TOPOS_LOCAL_MODEL_RELEASE_AFTER_S`` sets the wait (15 s), and 0 turns the watchdog off.
 
 The candidate stress run of 3 Nov (topos#250) showed the second half of the problem. The host runs one request at a
@@ -80,6 +80,21 @@ into. ``/api/ps`` does report the grown size (12.7 GB mid-run). So, 5:
    On the live node, background work kept the 9B busy, and it grew 6.9 GiB in 50 s (to 15.2 GiB) before it did. The
    runner grew about 0.2 GiB per request, 2 GiB in one to two minutes of steady use. This reads only the sizes the host reports; a llama-server model never grows, so only a growing runner
    trips it. ``TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB`` sets the limit (2,048), and 0 turns it off.
+
+The 1.5.45 runs of 7 Nov put scratch and bench nodes beside the live one, all on one host. Each node's watchdog judged
+"idle" and "grown" from its own requests, and the host's ``/api/ps`` shows no client's requests at all. So a scratch
+node that never sent the 9B a request unloaded it for growth twice (14:58:49 and 15:01:10, Chicago); the second time
+the live node had a request generating on it, which the host let finish, and the live node then logged the same
+recycle as its own. Node logs counted each such recycle once per node. And the live node, waiting for the 27B, unloaded
+the 9B as idle three times in 40 s (15:03:27, 15:03:45, 15:04:07) with no request of its own on it; the last came 11 s
+after another client had reloaded it. So, 6:
+
+6. ``_used``: both watchdog rules act only on models this node has sent a request to since the host loaded them. A
+   model leaves ``_used`` when a reading of the host no longer lists it, no node request is on it, and the node has
+   sent it nothing since that reading began; a load after that is another client's until the node sends to it again.
+   On the owner's own host this means Topos no longer unloads a model only another app has used, however long a node
+   request waits behind it or however far it grew. A node that restarts starts with ``_used`` empty: a model its
+   previous process left loaded is the host's to evict until the node sends it a request.
 
 This module counts requests and sends unloads. It reads no prompt and logs no content, only model names, contexts,
 counts and seconds. With the node's opt-in diagnostics on (docs/OBSERVABILITY.md), each request is also a
@@ -189,6 +204,8 @@ _sizes: Dict[Tuple[str, Optional[int]], int] = {}
 _recycling: set = set()
 #: Models past GROWTH_LIMIT waiting for the request they are running to end: (name, bytes grown, held since).
 _draining: Dict[str, Tuple[str, int, float]] = {}
+#: Models this node has sent a request to since the host loaded them, and when it last did (monotonic): rule 6.
+_used: Dict[str, float] = {}
 #: When the watchdog last read the host's sizes (monotonic).
 _sized_at = float("-inf")
 #: lowered_context: requests that asked for more than CONTEXT and did not need it (home chat's 81,920).
@@ -376,6 +393,7 @@ class _Ticket:
             if admitted:
                 _held.pop(self.token, None)
                 _in_flight[self.token] = (self.model, self.context, now, self.priority)
+                _used[self.model] = now
                 self.sent = now
                 held = now - self.arrived
                 if self.switch:
@@ -437,6 +455,7 @@ def request(body: Dict[str, Any], *, limit: Optional[float] = None):
                     if not ticket.unload:
                         ticket.sent = time.monotonic()
                         _in_flight[ticket.token] = (ticket.model, ticket.context, ticket.sent, ticket.priority)
+                        _used[ticket.model] = ticket.sent
             ticket.opened(span)
             try:
                 yield ticket.body
@@ -511,15 +530,17 @@ def _matches(model: str, context: Optional[int], loaded: Dict[str, Any]) -> bool
 
 def release_blocked(loaded: Iterable[Dict[str, Any]], requests: Iterable[Tuple[str, Optional[int], float]],
                     now: float, *, wait_seconds: float = None, released_at: Dict[str, float] = None,
-                    cooldown: float = COOLDOWN_SECONDS) -> Tuple[List[str], float]:
+                    cooldown: float = COOLDOWN_SECONDS, used: Optional[Iterable[str]] = None) -> Tuple[List[str], float]:
     """The loaded models to unload now, and the longest wait that called for it.
 
     ``loaded`` is the host's ``/api/ps`` list; ``requests`` the node's in-flight (model, context, started). A request
     waits for a load when no loaded model matches its model and context. Once one has waited ``wait_seconds``, every
-    loaded model that no in-flight request matches is unloaded, except one released within ``cooldown``."""
+    loaded model that no in-flight request matches is unloaded, except one released within ``cooldown`` and, when
+    ``used`` is given, one whose key it does not name (rule 6: a model only another client has used)."""
     wait_seconds = WAIT_SECONDS if wait_seconds is None else wait_seconds
     released_at = {} if released_at is None else released_at
     loaded, requests = list(loaded), list(requests)
+    used = None if used is None else set(used)
     waiting = [now - started for model, context, started in requests
                if now - started >= wait_seconds and not any(_matches(model, context, m) for m in loaded)]
     if not waiting:
@@ -528,6 +549,8 @@ def release_blocked(loaded: Iterable[Dict[str, Any]], requests: Iterable[Tuple[s
     for entry in loaded:
         name = str(entry.get("name") or entry.get("model") or "")
         if any(_matches(model, context, entry) for model, context, _ in requests):
+            continue
+        if used is not None and model_key(name) not in used:
             continue
         if now - released_at.get(model_key(name), float("-inf")) < cooldown:
             continue
@@ -565,12 +588,31 @@ def grown_models(loaded: Iterable[Dict[str, Any]], sizes: Dict[Tuple[str, Option
     return grown
 
 
+def _ours() -> set:
+    """The models this node has used since the host loaded them (rule 6): ``_used`` and any it has a request on.
+    Call with ``_lock``."""
+    return set(_used) | {m for m, _, _, _ in _in_flight.values()}
+
+
+def _forget_unloaded(listed: set, asked_at: float) -> None:
+    """After a reading of the host, begun at ``asked_at``, that lists the models ``listed``: forget each model it no
+    longer lists that no node request is on and the node has sent nothing to since ``asked_at``, so its next load is
+    not taken for this node's. A request on a model the host does not list is waiting for its load, and one sent
+    after the reading began may be what loads it next: both keep it. Call with ``_lock``."""
+    busy = {m for m, _, _, _ in _in_flight.values()}
+    for key in [k for k, sent in _used.items() if k not in listed and k not in busy and sent < asked_at]:
+        del _used[key]
+
+
 def _mark_grown(loaded: List[Dict[str, Any]], now: float) -> None:
-    """Hold new requests to each model ``grown_models`` names, so the one it is running finishes and it goes idle."""
+    """Hold new requests to each model ``grown_models`` names that this node uses, so the one it is running finishes
+    and it goes idle. Sizes are tracked for every loaded model, so one the node starts using later is measured from
+    the smallest size the node has seen it at in that load."""
     with _lock:
+        ours = _ours()
         for name, grew in grown_models(loaded, _sizes):
             key = model_key(name)
-            if key not in _recycling:
+            if key in ours and key not in _recycling:
                 _recycling.add(key)
                 _draining[key] = (name, grew, now)
 
@@ -619,13 +661,16 @@ async def _check_once(client, base_url: str) -> List[str]:
     sizing = GROWTH_LIMIT > 0 and now - _sized_at >= GROWTH_PERIOD
     if not blocked and not sizing:
         return recycled
+    asked_at = time.monotonic()
     response = await client.get(base_url + "/api/ps", timeout=5)
     loaded = (response.json() or {}).get("models") or []
     now = time.monotonic()
     with _lock:
         _loaded = ([(model_key(str(m.get("name") or m.get("model") or "")), m.get("context_length")) for m in loaded],
                    now)
+        _forget_unloaded({name for name, _ in _loaded[0]}, asked_at)
         released_at = dict(_released_at)
+        ours = _ours()
     if GROWTH_LIMIT > 0:
         _sized_at = now
         _mark_grown(loaded, now)
@@ -633,7 +678,7 @@ async def _check_once(client, base_url: str) -> List[str]:
     if WAIT_SECONDS <= 0 or not blocked:
         return recycled
     names, waited = release_blocked([m for m in loaded if str(m.get("name") or m.get("model") or "") not in recycled],
-                                    in_flight(), now, released_at=released_at)
+                                    in_flight(), now, released_at=released_at, used=ours)
     for name in names:
         await client.post(base_url + "/api/generate", json={"model": name, "keep_alive": 0}, timeout=10)
         with _lock:
@@ -665,13 +710,15 @@ async def watchdog(base_url: str, *, period: float = PERIOD_SECONDS) -> None:
 
 
 def status() -> Dict[str, Any]:
-    """For the shell status: the serving context, the watchdog's wait, and what it has done. Counts only."""
+    """For the shell status: the serving context, the watchdog's wait, and what it has done. Counts and model names
+    only. ``models_in_use``: the models the watchdog may unload (rule 6)."""
     now = time.monotonic()
     with _lock:
         requests = list(_in_flight.values())
         held = list(_held.values())
         stats = dict(_stats)
         contexts = dict(_contexts)
+        using = sorted(_ours())
     return {
         "context": CONTEXT or None,
         "contexts": contexts,
@@ -682,5 +729,6 @@ def status() -> Dict[str, Any]:
         "longest_in_flight_s": round(max((now - s for _, _, s, _ in requests), default=0.0), 1),
         "held": len(held),
         "longest_held_s": round(max((now - a for _, _, a in held), default=0.0), 1),
+        "models_in_use": using,
         **stats,
     }

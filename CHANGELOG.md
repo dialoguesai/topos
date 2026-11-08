@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **The local model watchdog unloads only models this node uses.** `[O]` Both of its rules (unload an idle model a
+  node request is stuck behind; unload a model that grew 2 GiB past its load size) judged "idle" and "grown" from the
+  node's own requests, and the model host reports no client's requests. On 7 Nov, with scratch and bench nodes beside
+  the live one on one host, a scratch node that never used the 9B unloaded it for growth twice, and the live node
+  unloaded the 9B as idle three times in 40 s while another client used it. Node logs also counted each shared
+  recycle once per node. Now both rules act only on a model this node has sent a request to since the host loaded
+  it; a model drops out once the host no longer lists it and nothing of the node's is on it. On a one-node host,
+  Topos no longer unloads a model only another app has used, and after a restart a model the previous process left
+  loaded is the host's to evict until the node sends it a request. The shell status lists the models the watchdog
+  may unload (`local_serving.models_in_use`).
+
 ## [1.5.45] — 2026-11-06
 
 ### Added
