@@ -1449,6 +1449,17 @@
       ]
     },
     {
+      "version": "1.5.46",
+      "summary": "The browser extension can write into a node with no account with its own loopback key; topos-node import reaches the node's ingestion routes again; graph naming no longer holds SQLite's write lock across model calls; a local model request held past its caller's deadline is not sent; the owner socket keeps idle connections past a pooled client's expiry; and the local model watchdog unloads only models this node uses.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "Local pushers: `topos-node pushers add <app> --sources ... --origin chrome-extension://<id>` asks the owner once on a terminal and prints the app's key once; POST /sources/{source_id}/ingest/batch takes that key over loopback only, writes as the owner's capture app, refuses a source the owner did not name (403 source_not_allowed) and answers a repeated write_id with deduplicated: true.",
+        "The owner socket keeps an idle keep-alive connection 75 s (uds.KEEP_ALIVE_SECONDS); the TCP port keeps uvicorn's 5 s.",
+        "local_serving: a request the node held with under 0.5 s of its caller's limit left raises HoldExpired and is not sent (shell status not_sent); the growth recycle and the idle release act only on models this node has sent a request to since the host loaded them (shell status models_in_use)."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
