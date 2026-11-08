@@ -58,6 +58,20 @@ The machine-readable twin of each release is
 ## [1.5.45] — 2026-11-06
 
 ### Added
+- **Local pushers: the browser extension writes into a local-first node directly.** `[O]` An app on this
+  computer that pushes rows (the Dialogues browser extension first) used to reach the node only through
+  the control plane, which stamped the writer, checked which sources the app may write, deduplicated by
+  `write_id` and answered CORS. A node with no account now does those four itself
+  (`topos/local_pushers.py`, `api/local_pushers.py`): `topos-node pushers add <app> --sources … --origin
+  chrome-extension://<id>` asks the owner once on a terminal and prints the app's key (`tpw_<app>.…`) once;
+  `POST /sources/{source_id}/ingest/batch` takes that key over loopback only, writes the batch as the owner's
+  capture app (`writer_class = owner_app`, `writer_app_id = <app>`, the stamp the control plane gives the
+  same app) under the node's own dataset, refuses a source the owner did not name (403 `source_not_allowed`),
+  and answers a repeated `write_id` (body or `Idempotency-Key`) with `deduplicated: true` and no second write.
+  CORS on the pusher doors is answered for the exact enrolled extension origins and never for a wildcard.
+  The key opens nothing else: every other route 401s it. `pushers list` / `pushers disconnect` manage it;
+  `GET /local-pushers/me` says what a key is good for. Connecting an account later moves the pushed rows
+  with everything else.
 - **Local first: the node runs without an account.** `[O]` A node with no `TOPOS_KEY` used to stop at
   startup (a prompt in a terminal, exit 2 without one), so nothing could be collected before the person
   paired a Dialogues account in the browser. Now a missing key outside a cloud runtime means
