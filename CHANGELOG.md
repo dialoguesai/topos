@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.46] — 2026-11-08
+
 ### Added
 - **Local pushers: the browser extension writes into a local-first node directly.** `[O]` An app on this
   computer that pushes rows (the Dialogues browser extension first) used to reach the node only through
