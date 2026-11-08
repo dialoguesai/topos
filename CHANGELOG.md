@@ -9,8 +9,6 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
-## [1.5.45] — 2026-11-06
-
 ### Added
 - **Local pushers: the browser extension writes into a local-first node directly.** `[O]` An app on this
   computer that pushes rows (the Dialogues browser extension first) used to reach the node only through
@@ -26,6 +24,56 @@ The machine-readable twin of each release is
   The key opens nothing else: every other route 401s it. `pushers list` / `pushers disconnect` manage it;
   `GET /local-pushers/me` says what a key is good for. Connecting an account later moves the pushed rows
   with everything else.
+
+### Fixed
+- **Naming the graph's communities no longer holds SQLite's write lock across model calls.** `[E:entities]` The
+  rebuild's stable-naming pass recorded each community's name (or refreshed a matched one) without committing it,
+  then asked the local model to name the next community, so every naming call after the first ran inside an open
+  write transaction: up to 60 calls of up to 45 s each. The rebuild runs in a child process that the node's write
+  gate does not reach, so the node's writers waited on the lock while holding the gate. In the 1.5.45 ingest
+  benchmark (7 Nov) a job claim held the gate 18.4 s that way and two more claims waited 14.6 s behind it; the hold
+  ended 13 ms before the rebuild child finished. Each name write now takes its own short gated hold and commits
+  before the next model call.
+- **A local request held until its caller's deadline is no longer sent.** When the node held a request for a busy
+  local model until the caller's own limit ran out, it sent the request anyway with half a second to answer. No node
+  call to the 9B on the owner's host has answered that fast (fastest 0.71 s, 4 to 7 Nov), so each one timed out on
+  the way and the host logged the hang-up as a 500 on `/api/chat`. In the 1.5.45 stress run two 25 s background calls
+  went out that way after 25.0 and 25.1 s behind a share's answer. All 71 of the host's `/api/chat` 500s from 4 to 7
+  Nov were node calls that hung up before an answer; most of the rest were 20 s background calls to the 27B that ran
+  out while it generated, which this does not change. Now a request the node has held is sent only while at least
+  0.5 s of its caller's limit is left (`SEND_MIN_SECONDS`); past that the caller gets `HoldExpired`, a `TimeoutError`,
+  and the host gets nothing. Verification maps it to `ModelUnavailable("deadline")`, as its other model failures. A
+  request the node never held goes as its caller sent it, whatever is left of the caller's deadline. Shell status
+  adds `not_sent`.
+- **The owner socket no longer drops a request that reuses an idle connection.** `[O]` uvicorn closes an idle
+  keep-alive connection after 5 s, and httpx keeps a pooled connection for reuse for the same 5 s. A client that
+  reused one just under 5 s idle sent its request on a connection the node was closing, and got "Server disconnected
+  without sending a response" with nothing in the node log. All 17 dropped owner-socket requests in the stress runs of
+  1.5.36 to 1.5.45 (Moments and verify_claim reads) went out 4.96 to 4.99 s after a request on the same client ended;
+  the stress harness reads Moments every 5 s. The owner socket now keeps an idle connection 75 s
+  (`uds.KEEP_ALIVE_SECONDS`), so a pooled client lets go of it first. On a bare uvicorn socket with the server's
+  keep-alive equal to the client's idle expiry, 10 of 100 reuses at just under it failed this way; with the server's
+  longer, none did.
+- **`topos-node import` reaches the node's ingestion routes.** `[O]` In 1.5.45 the default import (a ChatGPT
+  export) and `--list` sent `/ingestion/upload-local-path` and `/ingestion/local-exports`, but the node serves both
+  under `/v1`, so every import of the default source answered "Topos refused the import (http_404)". Proven on an
+  isolated scratch node on 7 Nov: the CLI's path got 404, the `/v1` path with an owner confirmation imported the
+  file. Other file sources (`/sources/{id}/ingest`) were not affected. A new test drives the command past its
+  terminal guard (terminal and prompt patched) and checks every path it sends against the app's own routes.
+- **The local model watchdog unloads only models this node uses.** `[O]` Both of its rules (unload an idle model a
+  node request is stuck behind; unload a model that grew 2 GiB past its load size) judged "idle" and "grown" from the
+  node's own requests, and the model host reports no client's requests. On 7 Nov, with scratch and bench nodes beside
+  the live one on one host, a scratch node that never used the 9B unloaded it for growth twice, and the live node
+  unloaded the 9B as idle three times in 40 s while another client used it. Node logs also counted each shared
+  recycle once per node. Now both rules act only on a model this node has sent a request to since the host loaded
+  it; a model drops out once the host no longer lists it and nothing of the node's is on it. On a one-node host,
+  Topos no longer unloads a model only another app has used, and after a restart a model the previous process left
+  loaded is the host's to evict until the node sends it a request. The shell status lists the models the watchdog
+  may unload (`local_serving.models_in_use`).
+
+## [1.5.45] — 2026-11-06
+
+### Added
 - **Local first: the node runs without an account.** `[O]` A node with no `TOPOS_KEY` used to stop at
   startup (a prompt in a terminal, exit 2 without one), so nothing could be collected before the person
   paired a Dialogues account in the browser. Now a missing key outside a cloud runtime means

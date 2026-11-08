@@ -29,6 +29,11 @@ EXIT_NEEDS_HUMAN = 2
 EXIT_NODE_DOWN = 4
 
 CHATGPT_SOURCE = "chatgpt_file_ingestion"
+#: The ingestion routes are mounted under ``/v1`` (``app.py``). In 1.5.45 the CLI posted them without it, so the
+#: default import and ``--list`` both got 404 (7 Nov 2026); tests/cli/test_import_cmd.py now checks every path the
+#: command sends against the app's own routes.
+LOCAL_EXPORTS_PATH = "/v1/ingestion/local-exports"
+UPLOAD_LOCAL_PATH = "/v1/ingestion/upload-local-path"
 
 _JSON_OPTION = click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 
@@ -93,7 +98,7 @@ def import_command(path: Optional[Path], source_id: str, list_exports: bool, sho
     sock = _socket()
     if list_exports:
         try:
-            found = sock.request_sync("GET", "/ingestion/local-exports")
+            found = sock.request_sync("GET", LOCAL_EXPORTS_PATH)
         except NodeDown:
             _fail("Topos isn't running — say \"start Topos\".", as_json=as_json, code=EXIT_NODE_DOWN)
         except NodeRefused as exc:
@@ -124,7 +129,7 @@ def import_command(path: Optional[Path], source_id: str, list_exports: bool, sho
     confirm = {"X-Topos-Owner-Confirm": write_owner_confirmation()}
     try:
         if source_id == CHATGPT_SOURCE:
-            result = sock.request_sync("POST", "/ingestion/upload-local-path",
+            result = sock.request_sync("POST", UPLOAD_LOCAL_PATH,
                                        json_body={"dataset_id": dataset_id, "file_path": str(resolved)},
                                        headers=confirm)
         else:

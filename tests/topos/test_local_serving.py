@@ -31,10 +31,11 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(ls, "_sizes", {})
     monkeypatch.setattr(ls, "_recycling", set())
     monkeypatch.setattr(ls, "_draining", {})
+    monkeypatch.setattr(ls, "_used", {})
     monkeypatch.setattr(ls, "_sized_at", float("-inf"))
     monkeypatch.setattr(ls, "_stats", {"releases": 0, "last_release": None, "lowered_context": 0,
                                        "kept_larger_context": 0, "raised_context": 0, "switch_holds": 0,
-                                       "held_s_max": 0.0, "recycles": 0, "last_recycle": None})
+                                       "held_s_max": 0.0, "recycles": 0, "last_recycle": None, "not_sent": 0})
 
 
 def test_every_caller_context_becomes_the_one_serving_context():
@@ -167,6 +168,7 @@ def test_the_watchdog_check_sends_one_unload_and_reports_it(monkeypatch):
     clock = iter([100.0])
     monkeypatch.setattr(ls.time, "monotonic", lambda: next(clock, 100.0))
     ls._in_flight[1] = (SMALL, 32768, 60.0, ls.LIVE)
+    ls._used[BIG] = 20.0   # the node's own 27B request, ended before the llama3.2 one was sent
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -253,6 +255,7 @@ def test_a_grown_model_with_a_request_on_it_is_held_until_that_request_ends_then
 
 
 def test_while_a_grown_model_drains_new_requests_to_it_are_held():
+    ls._used[MID] = 0.0
     ls._sizes[(MID, 8192)] = int(8.4 * GIB)
     ls._mark_grown([_sized(MID, 8192, 10.6)], now=0.0)
     ls._held[1] = (MID, ls.LIVE, 0.0)
@@ -302,7 +305,8 @@ def test_a_model_being_unloaded_for_growth_holds_new_requests_to_it_only():
     ls._held[2] = (SMALL, ls.LIVE, 0.0)
     assert ls._admit(1, 1.0, None) == (False, False)
     assert ls._admit(2, 1.0, None) == (True, False)
-    assert ls._admit(1, 1.0, 0.5) == (True, False)    # never past the caller's own limit
+    with pytest.raises(ls.HoldExpired):               # never past the caller's own limit, and then not sent
+        ls._admit(1, 1.0, 1.2)
 
 
 def test_the_watchdog_reads_sizes_with_nothing_waiting_and_unloads_the_grown_9b(monkeypatch):
@@ -318,6 +322,7 @@ def test_the_watchdog_reads_sizes_with_nothing_waiting_and_unloads_the_grown_9b(
     now = [100.0]
     monkeypatch.setattr(ls, "time", type("Clock", (), {"monotonic": staticmethod(lambda: now[0]),
                                                        "time": staticmethod(ls.time.time)}))
+    ls._used[MID] = 99.0   # the node's own background request on the 9B, just ended
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -334,6 +339,110 @@ def test_the_watchdog_reads_sizes_with_nothing_waiting_and_unloads_the_grown_9b(
     assert status["last_recycle"]["grew_mib"] == (int(10.6 * GIB) - int(8.4 * GIB)) // 2**20
     assert status["releases"] == 0 and ls._recycling == set() and (MID, 8192) not in ls._sizes
     assert status["recycle_growth_mib"] == 2048
+
+
+# Several clients on one host (rule 6). 7 Nov: scratch and bench nodes ran beside the live node, and each node's
+# watchdog unloaded models only the others were using, since the host reports no client's requests.
+
+
+def test_a_send_makes_its_model_this_nodes_however_it_is_sent_and_an_unload_does_not():
+    with ls.request({"model": MID, "prompt": "x"}):
+        pass
+
+    async def on_a_loop():
+        with ls.request({"model": SMALL, "prompt": "x"}):
+            pass
+        async with ls.request_async({"model": BIG, "prompt": "x"}):
+            pass
+
+    asyncio.run(on_a_loop())
+    with ls.request({"model": "qwen3.5:27b", "keep_alive": 0}):
+        pass
+    assert set(ls._used) == {MID, SMALL, BIG}
+    assert ls.status()["models_in_use"] == sorted([MID, SMALL, BIG])
+
+
+def test_a_model_only_another_client_has_used_is_never_released():
+    loaded, requests = [_ps(BIG, 16384), _ps(MID, 8192)], [(SMALL, 8192, 0.0)]
+    assert ls.release_blocked(loaded, requests, now=45.0, used={SMALL, BIG})[0] == [BIG]
+    assert ls.release_blocked(loaded, requests, now=45.0, used={SMALL}) == ([], 45.0)
+
+
+def _listing(models, sent):
+    """A host whose /api/ps lists ``models[0]`` at each reading and which records each unload."""
+    def handler(request):
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": models[0]})
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"done": True, "done_reason": "unload"})
+    return handler
+
+
+def test_waiting_for_the_27b_the_node_leaves_the_9b_another_client_is_using(monkeypatch):
+    # 7 Nov 15:03-15:04: the live node waited for the 27B with no request of its own on the 9B, and unloaded the 9B
+    # as idle three times in 40 s while another client used it.
+    models, sent = [[_sized(MID, 8192, 8.4)]], []
+
+    def wait_for_the_27b():
+        ls._in_flight[1] = (BIG, 16384, 0.0, ls.LIVE)
+
+    def use_the_9b():
+        ls._used[MID] = 60.0     # the node's own 9B request in this load, ended
+
+    out = _checks(monkeypatch, _listing(models, sent), [(0.0, wait_for_the_27b), (17.0, lambda: None),
+                                                         (35.0, lambda: None), (57.0, lambda: None),
+                                                         (62.0, use_the_9b)])
+    assert out == [[], [], [], [], [MID]]
+    assert sent == [{"model": MID, "keep_alive": 0}] and ls.status()["releases"] == 1
+
+
+def test_a_node_never_recycles_a_model_it_has_not_used_since_its_load(monkeypatch):
+    # 7 Nov 14:58:49 and 15:01:10: a scratch node that never sent the 9B a request unloaded it for growth twice.
+    sizes, sent = [8.4], []
+
+    def grow():
+        sizes[0] = 10.6
+
+    def use_the_9b():
+        ls._used[MID] = 30.0
+
+    out = _checks(monkeypatch, _host(sizes, sent), [(0.0, lambda: None), (10.0, grow), (20.0, lambda: None),
+                                                    (30.0, use_the_9b)])
+    # Not held for growth while it was not the node's, and measured all along: once the node uses it, it is past the
+    # limit from the load size the node saw, and recycled.
+    assert out == [[], [], [], [MID]]
+    assert sent == [{"model": MID, "keep_alive": 0}] and ls.status()["recycles"] == 1
+
+
+def test_a_model_the_host_unloaded_is_not_this_nodes_until_it_sends_to_it_again(monkeypatch):
+    # The node used the 9B; the host unloaded it; another client loaded it again and grew it.
+    models, sent = [[_sized(MID, 8192, 8.4)]], []
+
+    def used():
+        ls._used[MID] = 0.0
+
+    def gone():
+        models[0] = []
+
+    def back():
+        models[0] = [_sized(MID, 8192, 8.4)]
+
+    def grown():
+        models[0] = [_sized(MID, 8192, 10.6)]
+
+    out = _checks(monkeypatch, _listing(models, sent), [(0.0, used), (10.0, gone), (20.0, back), (30.0, grown)])
+    assert out == [[], [], [], []] and sent == []
+    assert ls.status()["models_in_use"] == [] and ls._draining == {}
+
+
+def test_a_request_sent_during_a_reading_or_waiting_for_its_load_keeps_its_model():
+    ls._used[MID] = 10.5                               # sent after the reading began at 10.0
+    ls._used[SMALL] = 2.0
+    ls._in_flight[1] = (SMALL, 8192, 2.0, ls.LIVE)     # still waiting for llama3.2 to load
+    ls._used[BIG] = 2.0                                # used earlier, and the host no longer lists it
+    with ls._lock:
+        ls._forget_unloaded(set(), asked_at=10.0)
+    assert set(ls._used) == {MID, SMALL}
 
 
 _POST = re.compile(r'(/api/chat|/api/generate)"')
@@ -402,10 +511,36 @@ def test_a_stale_reading_of_the_host_holds_nothing():
     assert ls._admit(2, now=ls._LOADED_FRESH_SECONDS + 1.0, limit=120.0)[0] is True
 
 
-def test_no_request_is_held_past_its_limit():
+def test_no_request_is_held_past_its_limit_and_none_is_sent_after_it():
     ls._in_flight[1] = (BIG, 32768, 0.0, ls.LIVE)
     _hold(2, BIG, arrived=0.0)
-    assert ls._admit(2, now=30.0, limit=30.0) == (True, False)
+    assert ls._admit(2, now=29.0, limit=30.0) == (False, False)      # a second left: still held for its slot
+    # Its caller's limit used up (all but less than SEND_MIN_SECONDS): the hold ends, and the request is not sent.
+    with pytest.raises(ls.HoldExpired):
+        ls._admit(2, now=29.6, limit=30.0)
+    with pytest.raises(ls.HoldExpired):
+        ls._admit(2, now=30.0, limit=30.0)
+
+
+def test_a_slot_that_frees_with_too_little_of_the_limit_left_sends_nothing():
+    # 7 Nov 16:23Z: a 25 s background call held 24.0 s behind a share's 38 s answer on the 9B. Sent with the 0.97 s
+    # left it would have been a real try; with less than SEND_MIN_SECONDS left it could not have been answered.
+    _hold(2, MID, arrived=0.0)
+    assert ls._admit(2, now=24.03, limit=25.0) == (True, False)
+    with pytest.raises(ls.HoldExpired):
+        ls._admit(2, now=24.6, limit=25.0)
+
+
+def test_a_request_the_node_never_held_goes_with_whatever_its_caller_left_it():
+    # Only the node's own hold can use up a caller's limit. A call that arrives with little time left and finds its
+    # slot free is sent as its caller asked: the caller owns that deadline (answer_release cancels it in flight).
+    _hold(2, MID, arrived=0.0)
+    assert ls._admit(2, now=0.0, limit=0.03, waited=False) == (True, False)
+    ls._held.clear()
+    entered = []
+    with ls.request({"model": MID, "prompt": "x"}, limit=0.03):
+        entered.append(True)
+    assert entered == [True] and ls.status()["not_sent"] == 0
 
 
 def test_one_models_held_requests_go_the_owners_first_then_by_arrival():
@@ -471,7 +606,8 @@ def test_the_switch_end_to_end(monkeypatch):
     assert ls.status()["switch_holds"] == 1
 
 
-def test_a_post_held_by_the_node_takes_the_time_held_off_its_own_timeout():
+def test_a_post_held_by_the_node_takes_the_time_held_off_its_own_timeout(monkeypatch):
+    monkeypatch.setattr(ls, "POLL_SECONDS", 0.01)
     ls._in_flight[1] = (BIG, 32768, ls.time.monotonic(), ls.LIVE)
     sent = {}
 
@@ -481,11 +617,62 @@ def test_a_post_held_by_the_node_takes_the_time_held_off_its_own_timeout():
             return "ok"
 
     async def run():
-        return await ls.post_async(Http(), "http://host/api/chat", json={"model": BIG, "prompt": "x"}, timeout=0.3)
+        async def first_ends():
+            await asyncio.sleep(0.3)
+            ls._in_flight.pop(1)
+
+        ending = asyncio.create_task(first_ends())
+        answer = await ls.post_async(Http(), "http://host/api/chat", json={"model": BIG, "prompt": "x"}, timeout=2.0)
+        await ending
+        return answer
 
     assert asyncio.run(run()) == "ok"
-    # Held its whole 0.3 s behind the running 27B request, then sent at the floor of half a second.
-    assert sent["timeout"] == 0.5
+    # Held about 0.3 s behind the running 27B request, then sent with what was left of its 2 s.
+    assert 1.5 < sent["timeout"] < 1.75
+
+
+def test_a_post_whose_hold_uses_up_its_callers_timeout_is_never_sent(monkeypatch):
+    """1.5.45 stress, 7 Nov 16:12Z and 16:36Z: two of the node's 25 s background calls to the 9B were held 25.0 and
+    25.1 s for its slot, then sent anyway with half a second (the old floor). Both timed out on the way, and the host
+    logged each as a 500 on /api/chat (its code for a client that hung up). Now the caller gets its timeout and the
+    host gets nothing."""
+    monkeypatch.setattr(ls, "POLL_SECONDS", 0.01)
+    ls._in_flight[1] = (MID, 8192, ls.time.monotonic(), ls.LIVE)     # the 9B's one slot, busy for the whole wait
+    sent = []
+
+    class Http:
+        async def post(self, url, *, json, timeout):
+            sent.append(timeout)
+            return "ok"
+
+    async def run():
+        return await ls.post_async(Http(), "http://host/api/chat", json={"model": MID, "prompt": "x"}, timeout=0.8)
+
+    started = ls.time.monotonic()
+    with pytest.raises(TimeoutError):
+        asyncio.run(run())
+    assert sent == []
+    # It gave up once less than SEND_MIN_SECONDS of the 0.8 s was left, not after it.
+    assert ls.time.monotonic() - started < 0.8
+    assert ls._held == {} and list(ls._in_flight) == [1]
+    assert ls.status()["not_sent"] == 1
+
+
+def test_a_blocking_request_out_of_time_never_reaches_its_body(monkeypatch):
+    monkeypatch.setattr(ls, "POLL_SECONDS", 0.01)
+    ls._in_flight[1] = (MID, 8192, ls.time.monotonic(), ls.LIVE)
+    entered = []
+    with pytest.raises(ls.HoldExpired):
+        with ls.request({"model": MID, "prompt": "x"}, limit=0.6):
+            entered.append(True)
+    assert entered == []
+    assert ls._held == {} and list(ls._in_flight) == [1]
+
+
+def test_a_request_without_a_limit_is_never_given_up():
+    ls._in_flight[1] = (MID, 8192, 0.0, ls.LIVE)
+    _hold(2, MID, arrived=0.0)
+    assert ls._admit(2, now=300.0, limit=None) == (False, False)
 
 
 def test_with_diagnostics_on_a_request_is_a_content_free_span(monkeypatch):
@@ -552,7 +739,8 @@ def test_a_slot_hold_outlasts_the_switch_limit_until_the_callers_deadline_or_the
     _hold(2, BIG, arrived=0.0)
     # 150 s behind the 27B's one running reply: still held, because sending it would only queue it on the host.
     assert ls._admit(2, now=150.0, limit=None) == (False, False)
-    assert ls._admit(2, now=150.0, limit=100.0) == (True, False)      # its caller's own deadline ends it
+    with pytest.raises(ls.HoldExpired):                                 # its caller's own deadline ends it
+        ls._admit(2, now=150.0, limit=100.0)
     assert ls._admit(2, now=ls.SLOT_LIMIT, limit=None) == (True, False)
 
 
