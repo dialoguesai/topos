@@ -31,6 +31,7 @@ def _fresh(monkeypatch):
     monkeypatch.setattr(ls, "_sizes", {})
     monkeypatch.setattr(ls, "_recycling", set())
     monkeypatch.setattr(ls, "_draining", {})
+    monkeypatch.setattr(ls, "_used", {})
     monkeypatch.setattr(ls, "_sized_at", float("-inf"))
     monkeypatch.setattr(ls, "_stats", {"releases": 0, "last_release": None, "lowered_context": 0,
                                        "kept_larger_context": 0, "raised_context": 0, "switch_holds": 0,
@@ -167,6 +168,7 @@ def test_the_watchdog_check_sends_one_unload_and_reports_it(monkeypatch):
     clock = iter([100.0])
     monkeypatch.setattr(ls.time, "monotonic", lambda: next(clock, 100.0))
     ls._in_flight[1] = (SMALL, 32768, 60.0, ls.LIVE)
+    ls._used[BIG] = 20.0   # the node's own 27B request, ended before the llama3.2 one was sent
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -253,6 +255,7 @@ def test_a_grown_model_with_a_request_on_it_is_held_until_that_request_ends_then
 
 
 def test_while_a_grown_model_drains_new_requests_to_it_are_held():
+    ls._used[MID] = 0.0
     ls._sizes[(MID, 8192)] = int(8.4 * GIB)
     ls._mark_grown([_sized(MID, 8192, 10.6)], now=0.0)
     ls._held[1] = (MID, ls.LIVE, 0.0)
@@ -319,6 +322,7 @@ def test_the_watchdog_reads_sizes_with_nothing_waiting_and_unloads_the_grown_9b(
     now = [100.0]
     monkeypatch.setattr(ls, "time", type("Clock", (), {"monotonic": staticmethod(lambda: now[0]),
                                                        "time": staticmethod(ls.time.time)}))
+    ls._used[MID] = 99.0   # the node's own background request on the 9B, just ended
 
     async def run():
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
@@ -335,6 +339,110 @@ def test_the_watchdog_reads_sizes_with_nothing_waiting_and_unloads_the_grown_9b(
     assert status["last_recycle"]["grew_mib"] == (int(10.6 * GIB) - int(8.4 * GIB)) // 2**20
     assert status["releases"] == 0 and ls._recycling == set() and (MID, 8192) not in ls._sizes
     assert status["recycle_growth_mib"] == 2048
+
+
+# Several clients on one host (rule 6). 7 Nov: scratch and bench nodes ran beside the live node, and each node's
+# watchdog unloaded models only the others were using, since the host reports no client's requests.
+
+
+def test_a_send_makes_its_model_this_nodes_however_it_is_sent_and_an_unload_does_not():
+    with ls.request({"model": MID, "prompt": "x"}):
+        pass
+
+    async def on_a_loop():
+        with ls.request({"model": SMALL, "prompt": "x"}):
+            pass
+        async with ls.request_async({"model": BIG, "prompt": "x"}):
+            pass
+
+    asyncio.run(on_a_loop())
+    with ls.request({"model": "qwen3.5:27b", "keep_alive": 0}):
+        pass
+    assert set(ls._used) == {MID, SMALL, BIG}
+    assert ls.status()["models_in_use"] == sorted([MID, SMALL, BIG])
+
+
+def test_a_model_only_another_client_has_used_is_never_released():
+    loaded, requests = [_ps(BIG, 16384), _ps(MID, 8192)], [(SMALL, 8192, 0.0)]
+    assert ls.release_blocked(loaded, requests, now=45.0, used={SMALL, BIG})[0] == [BIG]
+    assert ls.release_blocked(loaded, requests, now=45.0, used={SMALL}) == ([], 45.0)
+
+
+def _listing(models, sent):
+    """A host whose /api/ps lists ``models[0]`` at each reading and which records each unload."""
+    def handler(request):
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": models[0]})
+        sent.append(json.loads(request.content))
+        return httpx.Response(200, json={"done": True, "done_reason": "unload"})
+    return handler
+
+
+def test_waiting_for_the_27b_the_node_leaves_the_9b_another_client_is_using(monkeypatch):
+    # 7 Nov 15:03-15:04: the live node waited for the 27B with no request of its own on the 9B, and unloaded the 9B
+    # as idle three times in 40 s while another client used it.
+    models, sent = [[_sized(MID, 8192, 8.4)]], []
+
+    def wait_for_the_27b():
+        ls._in_flight[1] = (BIG, 16384, 0.0, ls.LIVE)
+
+    def use_the_9b():
+        ls._used[MID] = 60.0     # the node's own 9B request in this load, ended
+
+    out = _checks(monkeypatch, _listing(models, sent), [(0.0, wait_for_the_27b), (17.0, lambda: None),
+                                                         (35.0, lambda: None), (57.0, lambda: None),
+                                                         (62.0, use_the_9b)])
+    assert out == [[], [], [], [], [MID]]
+    assert sent == [{"model": MID, "keep_alive": 0}] and ls.status()["releases"] == 1
+
+
+def test_a_node_never_recycles_a_model_it_has_not_used_since_its_load(monkeypatch):
+    # 7 Nov 14:58:49 and 15:01:10: a scratch node that never sent the 9B a request unloaded it for growth twice.
+    sizes, sent = [8.4], []
+
+    def grow():
+        sizes[0] = 10.6
+
+    def use_the_9b():
+        ls._used[MID] = 30.0
+
+    out = _checks(monkeypatch, _host(sizes, sent), [(0.0, lambda: None), (10.0, grow), (20.0, lambda: None),
+                                                    (30.0, use_the_9b)])
+    # Not held for growth while it was not the node's, and measured all along: once the node uses it, it is past the
+    # limit from the load size the node saw, and recycled.
+    assert out == [[], [], [], [MID]]
+    assert sent == [{"model": MID, "keep_alive": 0}] and ls.status()["recycles"] == 1
+
+
+def test_a_model_the_host_unloaded_is_not_this_nodes_until_it_sends_to_it_again(monkeypatch):
+    # The node used the 9B; the host unloaded it; another client loaded it again and grew it.
+    models, sent = [[_sized(MID, 8192, 8.4)]], []
+
+    def used():
+        ls._used[MID] = 0.0
+
+    def gone():
+        models[0] = []
+
+    def back():
+        models[0] = [_sized(MID, 8192, 8.4)]
+
+    def grown():
+        models[0] = [_sized(MID, 8192, 10.6)]
+
+    out = _checks(monkeypatch, _listing(models, sent), [(0.0, used), (10.0, gone), (20.0, back), (30.0, grown)])
+    assert out == [[], [], [], []] and sent == []
+    assert ls.status()["models_in_use"] == [] and ls._draining == {}
+
+
+def test_a_request_sent_during_a_reading_or_waiting_for_its_load_keeps_its_model():
+    ls._used[MID] = 10.5                               # sent after the reading began at 10.0
+    ls._used[SMALL] = 2.0
+    ls._in_flight[1] = (SMALL, 8192, 2.0, ls.LIVE)     # still waiting for llama3.2 to load
+    ls._used[BIG] = 2.0                                # used earlier, and the host no longer lists it
+    with ls._lock:
+        ls._forget_unloaded(set(), asked_at=10.0)
+    assert set(ls._used) == {MID, SMALL}
 
 
 _POST = re.compile(r'(/api/chat|/api/generate)"')
