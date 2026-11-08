@@ -302,6 +302,7 @@
   "truth_claim_cards",
   "truth_claim_label",
   "truth_inbound_settings",
+  "truth_own_claim_label",
   "truth_prompts",
   "truth_seed_fact",
   "truth_weekly_stats",

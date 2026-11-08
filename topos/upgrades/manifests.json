@@ -1438,6 +1438,17 @@
       ]
     },
     {
+      "version": "1.5.45",
+      "summary": "A node with no account runs local-only and moves its rows to the account when one is connected later; a share index whose browsing interest drifted is narrowed to its other members instead of dropped; the owner's own mark on a claim they typed answers the next check of it; and the Topos Facts encoders stay resident between derivation batches without holding SQLite's write lock across model calls.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "Local-only mode starts when no TOPOS_KEY is set outside a cloud runtime; the first connection_info that reaches such a node moves every owner column, dataset_id prefix and raw-file folder to the account in one transaction and records the report under engine_config.rescope_report (owner socket: GET /api/local/owner/rescope-report).",
+        "DR-70 (TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS, on by default): drifted interest members join the withheld set and the index publishes without them; the switch off, an error in the decision, or members that cannot be told still drop the whole index.",
+        "The Topos Facts encoders are pinned outside the model cache's LRU budget for a run and released after TOPOS_FACTS_IDLE_SEC unused (default 300 s) by a timer, so an idle node holds no model; the per-pack pass commits before each model call."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

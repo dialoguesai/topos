@@ -161,7 +161,11 @@ VOWN = {**VHIGH, P + "INDEX_NARROW_OWN_ROW_EDITS": True}
 #: owner lane on, bound and unbound alike, with its built slots, cap and types unchanged; and the yield rule's kill
 #: switch (OD-13: background pauses for the owner's own chat), on bound and unbound alike. 64 + 1 = 65.
 VOFF2 = {**VOWN, P + "OWNER_LANE": True, P + "BACKGROUND_YIELDS_TO_OWNER": True}
-TABLE = {**V166, **VOFF2}
+#: DR-70 (5 Nov 2026, widens DR-31; the owner's ruling "Narrow on drift"): a browsing interest that is no longer the
+#: member its build admitted is withheld on its own instead of its whole share index going; on bound and unbound
+#: alike, read only while INDEX_NARROW_MEMBERS is on. 65 + 1 = 66.
+VDR70 = {**VOFF2, P + "INDEX_NARROW_INTERESTS": True}
+TABLE = {**V166, **VDR70}
 
 
 @pytest.fixture(autouse=True)
@@ -299,8 +303,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 65
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 64
+    assert len(switches.SWITCHES) == len(TABLE) == 66
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 65
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -390,6 +394,20 @@ def test_the_nr188_narrow_members_switch_is_on_bound_or_not_and_off_is_one_envir
     name = P + "INDEX_NARROW_MEMBERS"
     item = switches.lookup(name)
     assert item.unbound == item.bound == V188[name] is True
+    assert switches.on(name) is True
+    monkeypatch.setenv(name, "false")
+    assert switches.on(name) is False
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+def test_the_dr70_narrow_interests_switch_is_on_bound_or_not_and_off_is_one_environment_line(bound, state, monkeypatch):
+    """DR-70: on with nothing set, bound or not (owner ruling of 5 Nov 2026), read without an `is_bound()` stat; off
+    (1.5.44: a drifted interest removes the whole index) is one environment line. Read only while INDEX_NARROW_MEMBERS
+    is on."""
+    state(bound)
+    name = P + "INDEX_NARROW_INTERESTS"
+    item = switches.lookup(name)
+    assert item.unbound == item.bound == VDR70[name] is True
     assert switches.on(name) is True
     monkeypatch.setenv(name, "false")
     assert switches.on(name) is False

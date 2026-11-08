@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.45] — 2026-11-06
+
 ### Added
 - **Local pushers: the browser extension writes into a local-first node directly.** `[O]` An app on this
   computer that pushes rows (the Dialogues browser extension first) used to reach the node only through
@@ -38,14 +40,89 @@ The machine-readable twin of each release is
   `dataset_id` prefix, the Topos id where the control plane assigned a new one, and the raw-file
   folders; the report lands in `engine_config.rescope_report`. After that the "never rewrite
   `user_id`" rule applies as before.
+- **`GET /api/local/owner/rescope-report`** on the owner socket serves that report (per-table row counts,
+  renamed raw folders, whether the Topos id changed, when) or `rescope_report: null` on a node that never
+  moved; counts and flags only, no id. The install QA's connect-later check reads it instead of opening the
+  database file.
 - **`topos-node import <file> [--source …]`** puts a file that is already on this computer into Topos
   over the owner socket (default: a ChatGPT export; `--sources` lists the file sources, `--list` the
   exports the node finds on its own). No account and no network.
+- **The interest refresh receipt tells the open month's churn from a real change.** `[O]` On the owner's node
+  (5 Nov 2026) every hourly `interest_refresh` while the owner browsed found changes (+5 to +13 inserted, as many
+  closed) and queued a full rebuild of both share indexes, 150 to 480 s each with a 15 to 22 s write-gate hold at
+  publish. Read against the stored objects, 55 of the day's 59 renewals were the open month's interests stored again
+  with the same label, month and strength band: only the counted visits behind the content revision had moved. The
+  receipt now carries `digest_only`, the number of such renewals (absent from receipts written before it). Nothing
+  else changes: the rebuild is still queued, because the sealed member binds that revision and a release refuses a
+  member whose object moved. Whether the open month should bind its band instead is the owner's call, written up in
+  the side-session notes of 5 Nov.
+- **A share index the sweep drops for a drifted browsing interest says what moved.** `[O]` Six times in three days
+  (3 to 5 Nov 2026) the daemon sweep dropped a share's whole index at the `interest` stage, and the line said only
+  that. One drop was the clustering job rewriting every cluster placement; another followed an embedding and a
+  placement, written minutes after a build, of visits that occurred before it. The `interest` stale line is now
+  followed by one fixed word for the first drifted member (`gone`, `label`, `band`, `visits`, `content` or
+  `assessment`; `interest_index.drift_word`), and the `index_stale` event carries it as `sub`, as NR188's words are
+  carried. Attribution only in itself (the drop is DR-70's, below): the verdict is unchanged, and no word carries a
+  label, an id or a count.
+- **The owner's own word on a claim they typed answers the next check of it (owner's decision of 5 Nov 2026: "mark
+  it true, or false, or modify the truth of the claim ... then that information acts as a label that gets folded into
+  the topos' knowledge representation and can go to answer future claims").** `[O]` `[E:verify]` A new owner-class
+  type, `truth_own_claim_label`, with a `POST /api/local/truth_own_claim_label` route on the owner socket and the
+  truth door's refusal for every other caller before the payload is read: `{"statement", "label": "true"|"partly"|
+  "false", "note"?}` writes one `verified_claim` object (dimension `memory`, confidence 1.0 / 0.5 / 0.0, `created_by
+  = 'owner'`, `source: "claim_box"`, `speaker_kind: "owner"`, no source record), keyed by the normalised statement
+  (`own_claim:<sha256>`: case, spacing, quote marks and a final stop do not matter), so a second mark of the same
+  claim replaces the first; `{"statement", "label": null}` removes it; `{"statement"}` alone reads it. Owner-only with
+  no switch, as every label is (DR-49): never a shareable fact, never read by a share path, never indexed for search,
+  withheld from the table tools below the owner. `verify_claim` (v1, the `/v1/truth/verify-claim` door and the home
+  claim box) now reads these marks after the mode's aperture gate and before retrieval: a mark on the very statement
+  being checked answers it at once, with no retrieval and no model call (the `self` lane is the mark: true backs it
+  at 1.0, false contradicts it at 1.0, partly backs it at 0.5; the other lanes are empty; `_audit.judge` is
+  `owner_label`, `_audit.own_label` is `exact:<label>`), and a mark on a related claim (two shared distinctive words;
+  inside the aperture in fun mode) joins the self lane's evidence as one line the no-model judge reads with its
+  polarity ("the owner said this is not true: ..."), at most three, capped at the heuristic's 0.55 like any
+  corroboration. The answer carries the mark's stance only, never its note. Calibrate's card labels
+  (`truth_check:` keys) are not read here: the 27 Oct rule that those never feed back (`verify_v2.LABELS_AS_EVIDENCE`,
+  off) stands; these are the owner's declarations, made to be answered. Tests:
+  `tests/query/test_own_claim_label.py`. No migration.
 
 ### Changed
 - The Terminal approval window says "the Topos on this computer" instead of "your existing TOPOS
   account", and carries `HOME` and `TOPOS_UDS_PATH` into the window so a sandboxed node approves
   against its own database.
+- **A share index whose browsing interest drifted is narrowed to its other members, not dropped (DR-70).** `[O]`
+  Behind `TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS`, on by default (owner ruling of 5 Nov 2026, "Narrow on drift";
+  read only while `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS` is on): when the daemon sweep's `interest` step finds
+  interest members that are no longer the ones their build admitted, it adds exactly those members to NR188's withheld
+  set instead of failing the index. The sweep publishes the index without them, as it does for a member moved by new
+  data, the request path keeps answering from the rest, and the owed `members_narrowed` rebuild brings them back
+  re-derived. Nothing a recipient could read changes: every interest is decided again at the read's own clock, so a
+  drifted interest was already withheld at release; what changes is that the other members stay available instead of
+  waiting for the restore. On the owner's node on 5 Nov this drop took one share dark for ten minutes (seven answers
+  refused) after an embedding and a cluster placement landed for visits that occurred before the build. The `member
+  drift (interest: <word>)` line and the `index_stale` event (`sub`, `scope=member`) say which narrowing fired. Fail
+  closed as before: an error in the decision, a drift whose members cannot be told, or the switch off drops the whole
+  index. The pin is `test_interest_door.py::test_a_drifted_interest_is_withheld_and_the_undrifted_members_keep_serving`.
+
+### Fixed
+- **The Topos Facts encoders stay resident between derivation batches.** `[E:derivation]` The model cache's LRU
+  budget (3 slots) is sized for the small enrichment encoders, and every ingest chunk cycles more of them through
+  it (privacy filter, embeddings, NER, emotion, sentiment) than it holds, so the ~5 GiB Topos Facts encoders were
+  evicted and reloaded on every batch: 8 loads in 8 batches on an isolated node, 6 Nov 2026. The slot is now
+  pinned outside that budget for the run and released when the owner picks another provider or after
+  `TOPOS_FACTS_IDLE_SEC` unused (default 300 s, Ollama's own keep-alive, by a timer that does not wait for the
+  next pipeline: an idle node holds no model). The small encoders keep their full budget.
+- **The per-pack pass no longer holds SQLite's write lock across model calls.** `[E:derivation]` The job writes
+  on its own connection, outside the write gate, and committed once per record; in WAL the first write takes the
+  lock at execute time, so it was held across every extraction and verifier call of the record. The pipeline's
+  `claim_next_job` then took the gate and blocked on SQLite with every gated writer queued behind it: held 160 s
+  with waited=0, 383–3,017 s per 50-record run (5–6 Nov 2026, isolated node). The job now commits before each
+  model call; the lock is held for the write bursts only.
+- **A deferred pack batch is visible beyond one WARNING line.** `[E:derivation]` A picked Facts provider whose
+  weights could not load, or an unavailable verifier, deferred every batch with one log line each, and the app's
+  Facts extraction row showed the pick as if it were running. The job now records `{reason, at, batches}` under
+  `engine_config["derivation_last_deferral"]`, cleared by the next batch that runs, and `GET /v1/facts-llm-config`
+  returns it as `deferral`; the pipeline sees the batch as deferred (debt row, envelope), as it does the goals job.
 
 ## [1.5.44] — 2026-11-05
 
