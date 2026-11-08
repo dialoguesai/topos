@@ -38,6 +38,12 @@ The machine-readable twin of each release is
   (`uds.KEEP_ALIVE_SECONDS`), so a pooled client lets go of it first. On a bare uvicorn socket with the server's
   keep-alive equal to the client's idle expiry, 10 of 100 reuses at just under it failed this way; with the server's
   longer, none did.
+- **`topos-node import` reaches the node's ingestion routes.** `[O]` In 1.5.45 the default import (a ChatGPT
+  export) and `--list` sent `/ingestion/upload-local-path` and `/ingestion/local-exports`, but the node serves both
+  under `/v1`, so every import of the default source answered "Topos refused the import (http_404)". Proven on an
+  isolated scratch node on 7 Nov: the CLI's path got 404, the `/v1` path with an owner confirmation imported the
+  file. Other file sources (`/sources/{id}/ingest`) were not affected. A new test drives the command past its
+  terminal guard (terminal and prompt patched) and checks every path it sends against the app's own routes.
 
 ## [1.5.45] — 2026-11-06
 
