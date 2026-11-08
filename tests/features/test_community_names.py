@@ -149,3 +149,71 @@ def test_rebuild_reuses_history_without_llm(tmp_path, monkeypatch):
     label2 = _json.loads(conn.execute("SELECT metadata_json FROM entities WHERE entity_id='t0'")
                          .fetchone()[0] or "{}").get("community_label")
     assert label2 == "Topos Build"
+
+
+def test_no_name_write_is_left_open_across_a_naming_call(tmp_path, monkeypatch):
+    """1.5.45 ingest cell, 7 Nov: the node's ``claim_next_job`` held its write gate 18.4 s (and two more claims waited
+    14.6 s behind it) waiting for SQLite's write lock, which the graph rebuild's child process held while it named
+    communities. The name it recorded for one community stayed uncommitted while the model named the next ones, so
+    every naming call after the first ran inside an open write transaction (up to 60 calls of up to 45 s each)."""
+    import sqlite3
+
+    from topos.features.entities.maintenance import compute_communities
+
+    monkeypatch.setenv("TOPOS_COMMUNITY_NAMING", "on")
+    db = tmp_path / "g4.db"
+    conn = sqlite3.connect(db)
+    other = sqlite3.connect(db, timeout=0)     # another writer, as the node's job claim is to the rebuild's child
+    calls = []
+
+    class FakeAdapter:
+        def _generate(self, m, prompt, **kw):
+            try:
+                other.execute("BEGIN IMMEDIATE")
+                other.execute("ROLLBACK")
+                writable = True
+            except sqlite3.OperationalError:
+                writable = False
+            calls.append((conn.in_transaction, writable))
+            return {"text": f"Circle {len(calls)}"}
+
+    from topos.engine.backends import ollama
+    monkeypatch.setattr(ollama, "OllamaAdapter", FakeAdapter)
+    monkeypatch.setattr(
+        "topos.features.entities.community_naming.resolve_naming_model", lambda c: "stub")
+    conn.executescript(
+        """
+        CREATE TABLE entities (entity_id TEXT PRIMARY KEY, entity_type TEXT,
+          canonical_name TEXT, normalized_name TEXT, aliases_json TEXT,
+          is_self INTEGER DEFAULT 0, mention_count INTEGER DEFAULT 0,
+          metadata_json TEXT, created_at TEXT, updated_at TEXT);
+        CREATE TABLE entity_edges (edge_id TEXT PRIMARY KEY, src_entity_id TEXT,
+          dst_entity_id TEXT, edge_type TEXT, weight REAL, evidence_count INTEGER,
+          last_event_at TEXT, valid_from TEXT, valid_to TEXT, metadata_json TEXT);
+        """
+    )
+    from topos.storage.db.migrations.community_names_v1 import apply_community_names_v1_up
+    apply_community_names_v1_up(conn)
+    # Three triangles with no edge between them: three communities, each a new core, so three naming calls.
+    names = ["Topos", "Control Plane", "Horos", "Garden", "Kitchen", "Porch", "Choir", "Organ", "Hymnal"]
+    for i, name in enumerate(names):
+        conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name)"
+                     " VALUES (?, 'topic', ?, lower(?))", (f"t{i}", name, name))
+    for base in (0, 3, 6):
+        for i in range(3):
+            conn.execute("INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type, weight)"
+                         " VALUES (?, ?, ?, 'co_occurrence', 3.0)",
+                         (f"e{base + i}", f"t{base + i}", f"t{base + (i + 1) % 3}"))
+    conn.commit()
+
+    compute_communities(conn)
+
+    assert len(calls) == 3
+    assert calls == [(False, True)] * 3, "a naming call ran with a write transaction open"
+    assert conn.execute("SELECT COUNT(*) FROM community_names").fetchone()[0] == 3
+    # A second rebuild matches the stored names: no model call, and the matches it records are committed too.
+    compute_communities(conn)
+    assert len(calls) == 3
+    assert not conn.in_transaction
+    other.close()
+    conn.close()
