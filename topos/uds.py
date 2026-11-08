@@ -529,7 +529,7 @@ _SUPERVISE_INTERVAL_S = 20.0
 #: connection idle just under 5 s by its clock while the server closes it at 5 s by its own, and the request lands on
 #: a closing socket: the client gets "Server disconnected without sending a response" (httpx ``RemoteProtocolError``)
 #: and the node logs nothing. All 17 dropped owner-socket requests in the stress runs of 1.5.36 to 1.5.45 (1 to 7 Nov
-#: 2026; Moments and verify_claim reads, 11 to 87 ms each) went out 4.96 to 4.99 s after a request on the same client
+#: 2026; app reads and verify_claim reads, 11 to 87 ms each) went out 4.96 to 4.99 s after a request on the same client
 #: ended. Kept well past httpx's 5 s, so a pooled client closes an idle connection before the node does. An idle
 #: connection costs one descriptor, and uvicorn closes idle connections at once on shutdown.
 KEEP_ALIVE_SECONDS = 75
