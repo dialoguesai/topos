@@ -189,6 +189,8 @@ CENSUS: Tuple[RouteRule, ...] = (
     _o("POST", "/sources/{source_id}/contacts/auto-resolve", "contact-name curation; no share, grant or delete"),
     _o("PUT", "/sources/{source_id}/contacts/{contact_id}", "contact-name curation; no share, grant or delete"),
     _d("POST", "/sources/{source_id}/ingest", "writes records under the owner's name: a planting door"),
+    # api/local_pushers.py — the extension reaches this over TCP with its own key; on the owner socket it is the same door
+    _d("POST", "/sources/{source_id}/ingest/batch", "writes a batch of records under the owner's name: a planting door"),
     _d("PUT", "/sources/{source_id}/settings", "sync_schedule and proof_standing are changes; enabled/posture/exclude_spam pass",
        _settings_keys_open),
     _d("POST", "/sources/{source_id}/sync", "source_sync of a non-transcript source (Q3: needs a confirmation)"),
