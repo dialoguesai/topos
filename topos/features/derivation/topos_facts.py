@@ -293,6 +293,28 @@ def release() -> None:
         logger.info("Topos Facts %s released", VERSION)
 
 
+def known_packs_offline() -> Optional[frozenset]:
+    """The packs the pinned spec lists, read from the spec file alone: no weights, no network, no
+    model held. None when the spec is not on this computer yet (never downloaded), or cannot be
+    read. For a plan that names the extractor before anything runs; `routes_to_classifier` with
+    the loaded model stays the rule a run follows."""
+    try:
+        override = os.environ.get(ENV_GATE)
+        if override:
+            path: Optional[Path] = Path(override) / SPEC_FILE
+        else:
+            from huggingface_hub import try_to_load_from_cache
+
+            cached = try_to_load_from_cache(GATE_REPO, SPEC_FILE, revision=GATE_REVISION)
+            path = Path(cached) if isinstance(cached, str) else None
+        if path is None or not path.is_file():
+            return None
+        return frozenset(json.loads(path.read_text())["packs"])
+    except Exception:  # noqa: BLE001 -- a plan must not fail on an unreadable cache
+        logger.debug("Topos Facts spec not readable offline", exc_info=True)
+        return None
+
+
 def routes_to_classifier(pack_id: str, model: Optional[ToposFacts]) -> bool:
     """Does this pack go to Topos Facts? Only when it is on, knows the pack, and the pack
     is not one the owner kept on the LLM."""

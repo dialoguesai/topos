@@ -48,21 +48,30 @@ PACKS = {
     "message": f"key={PLANTED}",
 }
 WAITING = {JOY: 1204, EVENTS: 96}
+LLM = "local-9b"
+CLASSIFIER = "topos-facts-v0.1"
+VERIFIER = "local/verifier-27B:Q2"
+#: Who reads each pack once the owner has picked Topos Facts: its spec lists life.events and not moments.joy.
+READERS = {EVENTS: CLASSIFIER, JOY: LLM}
 
 
 def _batch(index: int, processed: int, **more: int) -> Dict[str, Any]:
     return {"index": index, "processed": processed, "assertions": processed * 2, "accepted": processed,
             "written": max(processed - 1, 0), "quarantined": 1 if processed else 0, "llm_errors": 0,
-            "elapsed_s": 61.0 * processed, **more}
+            "elapsed_s": 61.0 * processed, "extract_s": 1.0 * processed, "verify_s": 59.0 * processed, **more}
 
 
 def _snap(state: str, packs: List[Dict[str, Any]], *, reason: Optional[str] = None, run_id: str = "bfr_1",
-          until_done: bool = True, limit: int = 200) -> Dict[str, Any]:
+          until_done: bool = True, limit: int = 200, since: Optional[str] = None) -> Dict[str, Any]:
     rows = [{"pack_id": p["pack_id"], "state": p.get("state", "waiting"), "error": p.get("error"),
+             "extract_model": READERS.get(p["pack_id"]) if p.get("batches") or p.get("current") else None,
+             "verify_model": VERIFIER if p.get("batches") or p.get("current") else None,
              "batches": p.get("batches", []), "current": p.get("current"), "note": PLANTED} for p in packs]
     totals = {key: sum(b[key] for p in rows for b in p["batches"])
-              for key in ("processed", "assertions", "accepted", "written", "quarantined", "llm_errors")}
+              for key in ("processed", "assertions", "accepted", "written", "quarantined", "llm_errors",
+                          "extract_s", "verify_s")}
     return {"run": {"run_id": run_id, "state": state, "reason": reason, "limit": limit, "until_done": until_done,
+                    "since": since,
                     "started_at": "2026-11-10T09:00:00Z", "finished_at": None, "elapsed_s": 7384.0,
                     "pack_ids": [p["pack_id"] for p in rows], "packs": rows, "totals": totals, "planted": PLANTED}}
 
@@ -82,7 +91,9 @@ class _Socket:
 
     def __init__(self, *, before: Optional[Dict[str, Any]] = None, status: Optional[List[Any]] = None,
                  answers: Optional[Dict[tuple, Any]] = None, packs: Optional[Dict[str, Any]] = None,
-                 waiting: Optional[Dict[str, int]] = None, started: bool = False) -> None:
+                 waiting: Optional[Dict[str, int]] = None, started: bool = False,
+                 provider: str = "llm", spec_on_disk: bool = True, truncated: bool = False) -> None:
+        self.provider, self.spec_on_disk, self.truncated = provider, spec_on_disk, truncated
         self.calls: List[Dict[str, Any]] = []
         self.before = before if before is not None else {"run": None}
         self.status = list(status if status is not None else [FINISHED])
@@ -105,14 +116,30 @@ class _Socket:
             return self.packs
         if (method, path) == ("GET", packs_cmd.PLAN_PATH):
             asked = list((params or {}).get("pack_id") or [])
+
+            def route(pid: str) -> Dict[str, Any]:
+                if self.provider != "topos_facts" or READERS.get(pid) == LLM:
+                    return {"extract_route": "llm", "extract_model": LLM}
+                if not self.spec_on_disk:
+                    return {"extract_route": "unknown", "extract_model": None}
+                return {"extract_route": "classifier", "extract_model": CLASSIFIER}
+
+            picked = self.provider == "topos_facts"
             return {"packs": [{"pack_id": pid, "title": pid, "known": True, "enabled": True,
-                               "waiting": self.waiting.get(pid, 0), "planted": PLANTED} for pid in asked],
-                    "history_window": 20000, "history_records": 31000,
-                    "total_waiting": sum(self.waiting.get(pid, 0) for pid in asked)}
+                               "waiting": self.waiting.get(pid, 0), "planted": PLANTED, **route(pid)}
+                              for pid in asked],
+                    "since": (params or {}).get("since"), "history_window": 20000, "history_records": 31000,
+                    "history_truncated": self.truncated,
+                    "total_waiting": sum(self.waiting.get(pid, 0) for pid in asked),
+                    "extraction": {"provider": self.provider, "llm_model": LLM,
+                                   "classifier_model": CLASSIFIER if picked else None,
+                                   "classifier_spec_on_disk": self.spec_on_disk if picked else None,
+                                   "note": PLANTED},
+                    "verify_model": VERIFIER}
         if (method, path) == ("POST", packs_cmd.RUNS_PATH):
             self.started = True
             return _snap("running", [{"pack_id": pid} for pid in json_body["pack_ids"]],
-                         until_done=json_body["until_done"], limit=json_body["limit"])
+                         until_done=json_body["until_done"], limit=json_body["limit"], since=json_body["since"])
         if (method, path) == ("GET", packs_cmd.CURRENT_PATH):
             if not self.started:
                 return self.before
@@ -176,26 +203,40 @@ def _posts(out) -> List[Dict[str, Any]]:
 
 def test_it_shows_the_plan_asks_once_and_sends_one_confirmed_start(cli):
     out = cli("backfill", "--pack", JOY, "--pack", EVENTS, "--pack", JOY, "--until-done",
-              socket=_Socket(status=[WORKING, HALF, FINISHED]))
+              socket=_Socket(provider="topos_facts", status=[WORKING, HALF, FINISHED]))
     assert out.code == packs_cmd.EXIT_OK, out.out
     assert out.prompts == ["Run it?"] and out.tokens == ["confirm-token"]
     assert out.sock.sent()[:4] == [("GET", packs_cmd.PACKS_PATH), ("GET", packs_cmd.CURRENT_PATH),
                                    ("GET", packs_cmd.PLAN_PATH), ("POST", packs_cmd.RUNS_PATH)]
     assert out.calls[2]["params"] == {"pack_id": [JOY, EVENTS]}
     (start,) = _posts(out)
-    assert start["json"] == {"pack_ids": [JOY, EVENTS], "limit": 200, "until_done": True}
+    assert start["json"] == {"pack_ids": [JOY, EVENTS], "limit": 200, "until_done": True, "since": None}
     assert start["headers"] == {"X-Topos-Owner-Confirm": "confirm-token"}
-    # the plan, before the question
+    # the plan, before the question: what, how much, which model reads, which model checks
     plan = out.out.split("life.events:")[0]
-    assert "moments.joy    1,204 records waiting" in plan and "life.events       96 records waiting" in plan
+    assert f"moments.joy    1,204 records waiting   read by {LLM}" in plan
+    assert f"life.events       96 records waiting   read by {CLASSIFIER}" in plan
     assert "2 packs, 1,300 records waiting (counted over the newest 20,000 journal entries" in plan
     assert "Batches of 200 records, one pack after another, until each pack is done." in plan
-    assert "22.8 s per extraction call that is about 8h 14m of model time" in plan
-    # each batch once, as it finished, then the totals
-    assert out.out.count("  batch 1: 96 processed, 192 assertions, 96 accepted, 95 written, 1 quarantined, 1h 37m") == 1
+    assert f"Verification: every fact found is checked by {VERIFIER}, one call each" in plan
+    assert "The verifier's 30-day average is 8.0 s per call" in plan
+    # each batch once, as it finished, with the two times apart; then the totals
+    assert out.out.count("  batch 1: 96 processed, 192 assertions, 96 accepted, 95 written, 1 quarantined, 1h 37m "
+                         "(extraction 1m 36s, verification 1h 34m)") == 1
     assert out.out.count("  batch 1: 200 processed") == 1 and out.out.count("  batch 2: 4 processed") == 1
     assert out.out.index("life.events:") < out.out.index("moments.joy:")
-    assert "Done: 300 processed, 600 assertions, 300 accepted, 297 written, 3 quarantined in 2h 03m." in out.out
+    assert out.out.count(f"  read by {CLASSIFIER}, checked by {VERIFIER}") == 1, "what the run actually used"
+    assert ("Done: 300 processed, 600 assertions, 300 accepted, 297 written, 3 quarantined in 2h 03m "
+            "(extraction 5m 00s, verification 4h 55m).") in out.out
+
+
+def test_with_nothing_picked_the_plan_names_the_local_model_for_every_pack(cli):
+    out = cli("backfill", "--all-enabled", "--until-done", "--detach")
+    assert f"life.events       96 records waiting   read by {LLM}" in out.out
+    assert f"moments.joy    1,204 records waiting   read by {LLM}" in out.out
+    assert f"Extraction: the local model {LLM} reads every record, one call each." in out.out
+    assert "22.8 s per extraction call, the 1,300 records on the local model are about 8h 14m." in out.out
+    assert "Topos Facts" not in out.out, "nothing is said about a model the owner has not picked"
 
 
 def test_one_batch_per_pack_is_the_default_and_says_what_it_leaves(cli):
@@ -203,7 +244,7 @@ def test_one_batch_per_pack_is_the_default_and_says_what_it_leaves(cli):
               socket=_Socket(status=[_snap("done", [{"pack_id": JOY, "state": "done", "batches": [_batch(1, 100)]}],
                                            until_done=False, limit=100)]))
     assert out.code == packs_cmd.EXIT_OK, out.out
-    assert _posts(out)[0]["json"] == {"pack_ids": [JOY, EVENTS], "limit": 100, "until_done": False}
+    assert _posts(out)[0]["json"] == {"pack_ids": [JOY, EVENTS], "limit": 100, "until_done": False, "since": None}
     assert "One batch of up to 100 records per pack, one pack after another: 196 records this run." in out.out
     assert "That was one batch per pack. --until-done reads the rest." in out.out
 
@@ -232,11 +273,12 @@ def test_there_is_no_flag_that_answers_for_the_person(cli):
         out = cli("backfill", "--all-enabled", flag)
         assert out.code == 2 and out.calls == [] and out.tokens == [], flag
     options = {opt for param in packs_cmd.packs_backfill.params for opt in param.opts}
-    assert options == {"--pack", "--all-enabled", "--limit", "--until-done", "--detach"}
+    assert options == {"--pack", "--all-enabled", "--limit", "--until-done", "--since", "--detach"}
 
 
 @pytest.mark.parametrize("args", [(), ("--pack", JOY, "--all-enabled"), ("--pack", "Not A Pack"),
-                                  ("--all-enabled", "--limit", "0"), ("--all-enabled", "--limit", "1001")])
+                                  ("--all-enabled", "--limit", "0"), ("--all-enabled", "--limit", "1001"),
+                                  ("--all-enabled", "--since", "April"), ("--all-enabled", "--since", "2026-13-01")])
 def test_a_command_that_does_not_say_what_to_run_is_a_usage_error(cli, args):
     out = cli("backfill", *args)
     assert out.code == 2 and out.calls == [] and out.prompts == []
@@ -291,6 +333,63 @@ def test_detach_starts_the_run_and_returns(cli):
     out = cli("backfill", "--all-enabled", "--until-done", "--detach")
     assert out.code == packs_cmd.EXIT_OK and "Started (bfr_1)." in out.out
     assert out.sock.sent()[-1] == ("POST", packs_cmd.RUNS_PATH) and out.tokens == ["confirm-token"]
+
+
+# ----------------------------------------------------------------------------- how far back, and which model
+
+
+def test_since_is_shown_in_the_plan_counted_by_the_node_and_sent_with_the_start(cli):
+    out = cli("backfill", "--all-enabled", "--until-done", "--since", "2026-04-01")
+    assert out.code == packs_cmd.EXIT_OK, out.out
+    assert out.out.splitlines()[0] == "Fact-pack backfill, records dated 2026-04-01 or later"
+    assert "and the newest 20,000 messages dated 2026-04-01 or later)." in out.out
+    assert out.calls[2]["params"] == {"pack_id": [EVENTS, JOY], "since": "2026-04-01"}
+    assert _posts(out)[0]["json"] == {"pack_ids": [EVENTS, JOY], "limit": 200, "until_done": True,
+                                      "since": "2026-04-01"}
+    assert out.prompts == ["Run it?"] and out.tokens == ["confirm-token"], "one yes for the whole job"
+
+
+def test_the_plan_names_topos_facts_for_the_packs_it_reads_and_the_llm_for_the_rest(cli):
+    out = cli("backfill", "--all-enabled", "--until-done", socket=_Socket(provider="topos_facts"))
+    plan = out.out.split("life.events:")[0]
+    assert f"life.events       96 records waiting   read by {CLASSIFIER}" in plan
+    assert f"moments.joy    1,204 records waiting   read by {LLM}" in plan
+    assert (f"Extraction: Topos Facts ({CLASSIFIER}) reads 1 pack, 96 records; "
+            f"the local model {LLM} reads 1 pack, 1,204 records.") in plan
+    assert f"Verification: every fact found is checked by {VERIFIER}" in plan
+    assert "22.8 s per extraction call, the 1,204 records on the local model are about 7h 37m." in plan
+    assert "Topos Facts has no measured time on this node yet; the run reports it per batch." in plan
+    assert plan.index("Extraction:") < plan.index("Verification:") < len(plan)
+    assert out.prompts == ["Run it?"]
+
+
+def test_one_batch_each_counts_only_this_runs_records_per_model(cli):
+    out = cli("backfill", "--all-enabled", "--limit", "100", socket=_Socket(provider="topos_facts"))
+    assert (f"Extraction: Topos Facts ({CLASSIFIER}) reads 1 pack, 96 records; "
+            f"the local model {LLM} reads 1 pack, 100 records.") in out.out
+    assert "the 100 records on the local model are about 38m 00s." in out.out
+
+
+def test_a_pack_list_that_is_not_on_disk_yet_is_said_plainly(cli):
+    out = cli("backfill", "--all-enabled", socket=_Socket(provider="topos_facts", spec_on_disk=False))
+    assert f"life.events       96 records waiting   read by {CLASSIFIER} if it knows this pack, else {LLM}" in out.out
+    assert f"moments.joy    1,204 records waiting   read by {LLM}" in out.out
+    assert "its pack list is not on this computer yet" in out.out
+    assert "records on the local model are about" not in out.out, "no estimate for a split it cannot know"
+
+
+def test_more_history_than_a_backfill_walks_is_said_before_the_yes(cli):
+    out = cli("backfill", "--all-enabled", socket=_Socket(truncated=True))
+    assert "records older than the newest 20,000 of each kind are not counted and not reached." in out.out
+    assert "not counted" not in cli("backfill", "--all-enabled").out
+
+
+def test_a_pick_that_could_not_load_is_reported_as_nothing_read(cli):
+    failed = _snap("failed", [{"pack_id": EVENTS, "state": "failed", "error": "topos_facts_unavailable"},
+                              {"pack_id": JOY}], reason="topos_facts_unavailable")
+    out = cli("backfill", "--all-enabled", "--until-done", socket=_Socket(provider="topos_facts", status=[failed]))
+    assert out.code == packs_cmd.EXIT_FAILED
+    assert "Topos Facts is picked for facts on this node and could not load, so nothing was read" in out.out
 
 
 # ----------------------------------------------------------------------------- following
@@ -375,11 +474,15 @@ def test_status_reads_the_run_and_needs_no_terminal(cli):
     out = cli("status", tty=False, socket=_Socket(before=HALF))
     assert out.code == 0 and out.sock.sent() == [("GET", packs_cmd.CURRENT_PATH)]
     assert "Run bfr_1: running, started 2026-11-10 09:00:00 UTC, 2h 03m." in out.out
-    assert f"  {EVENTS}: done, 1 batch: 96 processed" in out.out
+    assert (f"  {EVENTS}: done, 1 batch: 96 processed, 192 assertions, 96 accepted, 95 written, 1 quarantined "
+            f"(extraction 1m 36s, verification 1h 34m); read by {CLASSIFIER}") in out.out
     assert f"  {JOY}: running, 1 batch: 200 processed" in out.out and "batch 2 in flight, 3 so far" in out.out
+    assert "Total: 296 processed" in out.out and "(extraction 4m 56s, verification 4h 51m)." in out.out
     doc = json.loads(cli("status", "--json", tty=False, socket=_Socket(before=HALF)).out)
-    assert doc["run"]["state"] == "running" and set(doc["run"]["packs"][0]) == {"pack_id", "state", "error", "batches",
-                                                                               "current"}
+    assert doc["run"]["state"] == "running" and set(doc["run"]["packs"][0]) == {
+        "pack_id", "state", "error", "batches", "current", "extract_model", "verify_model"}
+    dated = cli("status", tty=False, socket=_Socket(before=_snap("running", [{"pack_id": JOY}], since="2026-04-01")))
+    assert "records dated 2026-04-01 or later." in dated.out
 
 
 def test_status_follow_watches_a_working_run_to_its_end(cli):

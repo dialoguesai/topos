@@ -27,6 +27,7 @@ import asyncio
 import json as _json
 import logging
 import os
+import re
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -541,39 +542,52 @@ def retire_role_skipped_progress(conn, all_packs, posture_for) -> int:
     return len(stale)
 
 
+_SINCE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 #: history records drip-processed per batch — the dark delta self-heals without
 #: a scheduler; a fresh enablement's history closes over days, or immediately
 #: via the owner's backfill control.
 CATCHUP_PER_BATCH = 25
 
 
-def _iter_history(conn, limit=2000, posture_for=None):
+def _iter_history(conn, limit=2000, posture_for=None, since=None):
+    """The newest `limit` journal entries and the newest `limit` messages, newest first.
+
+    `since` (a `YYYY-MM-DD` date) keeps only records dated on or after it: an owner's backfill
+    back to a date they chose stops there instead of walking the whole window. The stamps are ISO
+    text, so the comparison is the text's own order."""
     import sqlite3 as _sqlite3
     if posture_for is None:
         from ....features.provenance.posture import make_posture_resolver
         posture_for = make_posture_resolver(conn)
+    since = str(since or "").strip()
+    if since and not _SINCE_RE.match(since):
+        raise ValueError("since must be a YYYY-MM-DD date")
+    args = (since,) if since else ()
     def _rows(sql):
         try:
-            return conn.execute(sql).fetchall()
+            return conn.execute(sql, args).fetchall()
         except _sqlite3.OperationalError:
             return []
     out = []
     for tbl, rid, text, at, role in _rows(
             f"SELECT 'journal_entries', entry_id, content, entry_at, 'authored'"
             f" FROM journal_entries WHERE content IS NOT NULL AND LENGTH(content)>15"
+            f"{' AND entry_at >= ?' if since else ''}"
             f" ORDER BY entry_at DESC LIMIT {int(limit)}"):
         out.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
                     "date": str(at or "")[:10], "role": role or "authored", "source_id": ""})
+    msg_since = " AND event_at >= ?" if since else ""
     msg_rows = _rows(
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role,"
             f" CASE WHEN COALESCE(is_from_self,0)=1 THEN NULL ELSE sender_id END,"
             f" is_from_self, sender_id, sender_type, source_id, dataset_id, conversation_id"
-            f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
+            f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15{msg_since}"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")
     if not msg_rows:
         msg_rows = [tuple(r) + (None,) * 7 for r in _rows(
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role"
-            f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
+            f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15{msg_since}"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")]
     # The SENDER of each observed row, from the record — the label an any_with_label pack
     # carries into the prompt so a self-statement lands on the speaker's own node.

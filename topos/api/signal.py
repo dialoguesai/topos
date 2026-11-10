@@ -1279,7 +1279,7 @@ async def post_pack_backfill(
     import asyncio as _asyncio
 
     from ..features.derivation.backfill_runs import BackfillBusy, single_batch
-    from ..features.derivation.surfaces import run_pack_backfill
+    from ..features.derivation.surfaces import BackfillDeferred, run_pack_backfill
 
     try:
         with single_batch():
@@ -1287,15 +1287,19 @@ async def post_pack_backfill(
     except BackfillBusy as busy:
         raise HTTPException(status_code=409, detail={
             "error": busy.code, "message": "A backfill run is already working; wait for it or stop it."}) from busy
+    except BackfillDeferred as deferred:
+        # The owner picked Topos Facts and its weights cannot load: nothing was read or marked.
+        raise HTTPException(status_code=503, detail={
+            "error": deferred.code, "message": "The facts model that is picked could not load."}) from deferred
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"pack_id": pack_id, **stats}
 
 
 # --- one confirmed backfill RUN (features/derivation/backfill_runs.py) -------------------------
-# The owner's yes on a terminal (or the app) authorises a run: these packs, this batch size, one
-# batch each or until done. The node then works through it itself; the caller follows it by
-# reading `runs/current`. Only the start is a change; the plan and the status are counts.
+# The owner's yes on a terminal (or the app) authorises a run: these packs, back to this date, this
+# batch size, one batch each or until done. The node then works through it itself; the caller follows
+# it by reading `runs/current`. Only the start is a change; the plan and the status are counts.
 
 
 def _backfill_refusal(status: int, code: str, message: str):
@@ -1319,16 +1323,21 @@ def _confirmed_owner_socket() -> bool:
 @router.get("/derivation/backfill/plan")
 async def get_backfill_plan(
     pack_id: list[str] = Query(default=[]),
+    since: Optional[str] = Query(default=None, max_length=10),
     _api_key: str = Depends(require_api_key),
 ):
-    """What a backfill of these packs would do: records waiting per pack, counted with each pack's
-    own role gate and prefilter over the window a backfill walks. Counts only; nothing runs."""
+    """What a backfill of these packs would do: records waiting per pack (dated `since` or later,
+    when given), counted with each pack's own role gate and prefilter over the window a backfill
+    walks, and the model that would read each pack. Counts and model names; nothing runs."""
     import asyncio as _asyncio
 
-    from ..features.derivation.backfill_runs import backfill_plan
+    from ..features.derivation import backfill_runs as runs
 
     asked = [str(p) for p in pack_id][:500]
-    return await _asyncio.to_thread(lambda: backfill_plan(_entities_conn(), asked))
+    try:
+        return await _asyncio.to_thread(lambda: runs.backfill_plan(_entities_conn(), asked, since))
+    except runs.BackfillRefused as refused:
+        return _backfill_refusal(400, refused.code, str(refused))
 
 
 @router.post("/derivation/backfill/runs")
@@ -1336,7 +1345,7 @@ async def post_backfill_run(
     body: Dict[str, Any] = Body(...),
     _api_key: str = Depends(require_api_key),
 ):
-    """Start the one backfill run: `{pack_ids: [...], limit: 1..1000, until_done: bool}`.
+    """Start the one backfill run: `{pack_ids: [...], limit: 1..1000, until_done: bool, since: "YYYY-MM-DD"|null}`.
 
     202 with the run's snapshot. 403 `owner_confirmation_required` unless the caller is the app or
     presents the owner's confirmation on the socket; 409 `backfill_already_running` while a run or a
@@ -1349,14 +1358,15 @@ async def post_backfill_run(
 
     if not _confirmed_owner_socket():
         return _backfill_refusal(403, "owner_confirmation_required", OWNER_CONFIRMATION_MESSAGE)
-    if not isinstance(body, dict) or set(body) - {"pack_ids", "limit", "until_done"} \
+    if not isinstance(body, dict) or set(body) - {"pack_ids", "limit", "until_done", "since"} \
             or not isinstance(body.get("until_done", False), bool):
-        return _backfill_refusal(400, "backfill_plan_invalid", "body is {pack_ids, limit, until_done}")
+        return _backfill_refusal(400, "backfill_plan_invalid", "body is {pack_ids, limit, until_done, since}")
     limit = body.get("limit", runs.DEFAULT_BATCH_LIMIT)
     try:
+        since = runs.validate_since(body.get("since"))
         ordered = await _asyncio.to_thread(
             lambda: runs.validate_plan(_entities_conn(), body.get("pack_ids"), limit))
-        run = runs.start_run(ordered, limit, bool(body.get("until_done", False)))
+        run = runs.start_run(ordered, limit, bool(body.get("until_done", False)), since=since)
     except runs.BackfillRefused as refused:
         status = {"unknown_pack": 404, "pack_not_enabled": 409}.get(refused.code, 400)
         return _backfill_refusal(status, refused.code, str(refused))
@@ -1370,7 +1380,8 @@ async def post_backfill_run(
 @router.get("/derivation/backfill/runs/current")
 async def get_backfill_run(_api_key: str = Depends(require_api_key)):
     """The active run, else the last one this node process finished, else `{"run": null}`.
-    States, counts per batch and stamps; no record text or ids."""
+    States, counts and seconds per batch (extraction and verification apart), the model that read and
+    the model that checked each pack, and stamps; no record text or ids."""
     from ..features.derivation import backfill_runs as runs
 
     return {"run": runs.current()}

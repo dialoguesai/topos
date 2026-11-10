@@ -1,7 +1,9 @@
 """One owner-confirmed fact-pack backfill run (`features/derivation/backfill_runs`, the run routes in `api/signal`).
 
-protects: the owner's yes on a terminal authorises ONE run that the node works through itself, pack after pack and
-batch after batch, and nothing else can start one. On the owner socket the start route is refused 403
+protects: the owner's yes on a terminal authorises ONE run (these packs, back to this date, read by the extractor
+the owner has picked for facts) that the node works through itself, pack after pack and batch after batch, and nothing
+else can start one. A pack Topos Facts knows is read by it and never by the LLM when the owner picked it; a pick that
+cannot load defers with nothing marked done; extraction and verification time are reported apart. On the owner socket the start route is refused 403
 ``owner_confirmation_required`` without the app or a live confirmation token, the token is good for one start, and
 the route refuses over TCP and with the socket gate switched off too. A run never overlaps another run or one of the
 app's single batches; it stops between records, keeps every finished record, and a rerun resumes from
@@ -45,6 +47,8 @@ HITS = (1, 2, 4, 5, 7, 8)
 
 VERDICT = json.dumps({"supported": True, "about": "owner", "fields_ok": True, "reason": "stated"})
 COUNT_KEYS = {"processed", "assertions", "accepted", "written", "quarantined", "llm_errors"}
+TIME_KEYS = {"extract_s", "verify_s"}
+BATCH_KEYS = COUNT_KEYS | TIME_KEYS | {"index", "elapsed_s"}
 
 
 def _open(path) -> sqlite3.Connection:
@@ -60,6 +64,7 @@ def node(tmp_path):
     apply_all_migrations(conn)
     conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json, is_self)"
                  " VALUES ('ent_owner','person','Owner','owner','[]',1)")
+    conn.execute("CREATE TABLE IF NOT EXISTS engine_config (key TEXT PRIMARY KEY, value TEXT)")
     seed_pack_registry(conn, bundled_pack_dir())
     conn.execute("UPDATE pack_registry SET enabled=0")
     conn.execute("UPDATE pack_registry SET enabled=1 WHERE pack_id IN (?, ?)", (JOY, EVENTS))
@@ -160,7 +165,7 @@ def test_a_stop_ends_the_batch_between_records_and_a_rerun_resumes(node, model) 
     first = surfaces.run_pack_backfill(node.conn, JOY, limit=10, on_record=seen.append,
                                        should_stop=lambda: len(seen) >= 2)
     assert first["stopped"] is True and first["processed"] == 2
-    assert [s["processed"] for s in seen] == [1, 2] and set(seen[-1]) >= COUNT_KEYS
+    assert [s["processed"] for s in seen] == [1, 2] and set(seen[-1]) >= COUNT_KEYS | TIME_KEYS
     assert model.entries() == [8, 7], "newest first, and nothing past the stop"
     marked = {r[0] for r in node.conn.execute("SELECT key FROM derivation_progress WHERE key LIKE ?", (f"{JOY}@%",))}
     assert {k.rsplit(":", 1)[1] for k in marked} == {"j9", "j8", "j7"}, "the finished records, and the one passed over"
@@ -208,10 +213,12 @@ def test_the_count_before_the_yes_is_what_a_backfill_then_reaches(node, model) -
     assert model.extract == [] and model.verify == [], "and asks no model"
     rows = {row["pack_id"]: row for row in plan["packs"]}
     assert list(rows) == [JOY, EVENTS, OFF, "no.such_pack"], "in the order asked, without repeats"
-    assert rows[JOY] == {"pack_id": JOY, "title": rows[JOY]["title"], "known": True, "enabled": True, "waiting": 6}
+    assert rows[JOY] == {"pack_id": JOY, "title": rows[JOY]["title"], "known": True, "enabled": True, "waiting": 6,
+                         "extract_route": "llm", "extract_model": "stub-model"}
     assert rows[OFF]["known"] is True and rows[OFF]["enabled"] is False and rows[OFF]["waiting"] is None
-    assert rows["no.such_pack"] == {"pack_id": "no.such_pack", "title": "no.such_pack", "known": False,
-                                    "enabled": False, "waiting": None}
+    assert (rows["no.such_pack"]["known"], rows["no.such_pack"]["enabled"], rows["no.such_pack"]["waiting"]) == (
+        False, False, None)
+    assert plan["since"] is None and plan["history_truncated"] is False
     assert plan["history_window"] == surfaces.BACKFILL_HISTORY_WINDOW and plan["history_records"] == 10
     assert plan["total_waiting"] == rows[JOY]["waiting"] + rows[EVENTS]["waiting"]
 
@@ -241,19 +248,23 @@ class _Script:
     def __init__(self, waiting: Dict[str, int]) -> None:
         self.waiting = dict(waiting)
         self.calls: List[tuple] = []
+        self.since: List[Optional[str]] = []
         self.inflight = 0
         self.most = 0
         self.hold = threading.Event()
         self.hold.set()
         self.lock = threading.Lock()
 
-    def __call__(self, pack_id, limit, should_stop, on_record) -> Dict[str, Any]:
+    def __call__(self, pack_id, limit, should_stop, on_record, since=None) -> Dict[str, Any]:
         with self.lock:
             self.inflight += 1
             self.most = max(self.most, self.inflight)
             self.calls.append((pack_id, limit))
+            self.since.append(since)
         try:
-            stats = {"processed": 0, "assertions": 0, "accepted": 0, "written": 0, "quarantined": 0, "llm_errors": 0}
+            stats = {"processed": 0, "assertions": 0, "accepted": 0, "written": 0, "quarantined": 0, "llm_errors": 0,
+                     "extract_s": 0.0, "verify_s": 0.0, "extract_model": f"reader-of-{pack_id}",
+                     "verify_model": "stub-verifier"}
             while stats["processed"] < limit and self.waiting[pack_id] > 0:
                 while not self.hold.is_set() and not should_stop():
                     time.sleep(0.002)
@@ -264,6 +275,8 @@ class _Script:
                 stats["assertions"] += 2
                 stats["accepted"] += 1
                 stats["written"] += 1
+                stats["extract_s"] += 0.5
+                stats["verify_s"] += 2.0
                 on_record(dict(stats))
             return stats
         finally:
@@ -281,7 +294,11 @@ def test_packs_run_one_after_another_batch_after_batch_until_each_is_done() -> N
         ("a.one", "done", [2, 2, 1]), ("b.two", "done", [2, 2, 0])]
     assert [b["index"] for b in snap["packs"][0]["batches"]] == [1, 2, 3]
     assert snap["totals"] == {"processed": 9, "assertions": 18, "accepted": 9, "written": 9, "quarantined": 0,
-                              "llm_errors": 0}
+                              "llm_errors": 0, "extract_s": 4.5, "verify_s": 18.0}, "the two times, apart"
+    assert [(b["extract_s"], b["verify_s"]) for b in snap["packs"][0]["batches"]] == [(1.0, 4.0), (1.0, 4.0), (0.5, 2.0)]
+    assert [(p["extract_model"], p["verify_model"]) for p in snap["packs"]] == [
+        ("reader-of-a.one", "stub-verifier"), ("reader-of-b.two", "stub-verifier")]
+    assert snap["since"] is None and set(script.since) == {None}
     assert runs.current() == snap, "the last run stays readable after it ends"
 
 
@@ -298,14 +315,15 @@ def test_the_status_carries_states_counts_and_stamps_only() -> None:
     run = runs.start_run(["a.one"], 2, True, run_batch=script)
     _until(lambda: run.snapshot()["packs"][0]["current"] is not None, "the first batch")
     live = run.snapshot()
-    assert set(live) == {"run_id", "state", "reason", "pack_ids", "limit", "until_done", "started_at",
+    assert set(live) == {"run_id", "state", "reason", "pack_ids", "limit", "until_done", "since", "started_at",
                          "finished_at", "elapsed_s", "packs", "totals"}
-    assert set(live["packs"][0]) == {"pack_id", "state", "error", "batches", "current"}
-    assert set(live["packs"][0]["current"]) == COUNT_KEYS | {"index", "elapsed_s"}
+    assert set(live["packs"][0]) == {"pack_id", "state", "error", "batches", "current", "extract_model",
+                                     "verify_model"}
+    assert set(live["packs"][0]["current"]) == BATCH_KEYS
     assert live["state"] == "running" and live["packs"][0]["state"] == "running"
     script.hold.set()
     done = _wait(run)
-    assert all(set(b) == COUNT_KEYS | {"index", "elapsed_s"} for b in done["packs"][0]["batches"])
+    assert all(set(b) == BATCH_KEYS for b in done["packs"][0]["batches"])
 
 
 def test_a_stop_ends_the_run_between_records_and_leaves_the_rest_waiting() -> None:
@@ -346,7 +364,7 @@ def test_one_run_at_a_time_and_never_beside_a_single_batch() -> None:
 def test_a_model_that_is_down_ends_the_run_instead_of_spinning() -> None:
     asked: List[str] = []
 
-    def down(pack_id, limit, should_stop, on_record):
+    def down(pack_id, limit, should_stop, on_record, since=None):
         errors = 0
         while errors < limit:
             if should_stop():
@@ -364,7 +382,7 @@ def test_a_model_that_is_down_ends_the_run_instead_of_spinning() -> None:
 
 
 def test_scattered_model_errors_do_not_end_the_run() -> None:
-    def flaky(pack_id, limit, should_stop, on_record):
+    def flaky(pack_id, limit, should_stop, on_record, since=None):
         errors = 0
         for n in range(1, 13):
             errors += n % 2                          # every other record fails; never two in a row
@@ -387,7 +405,7 @@ def test_the_run_yields_to_the_owners_requests_between_records(monkeypatch) -> N
 def test_a_pack_switched_off_after_the_yes_is_skipped_and_the_rest_run() -> None:
     script = _Script({"b.two": 1})
 
-    def run_batch(pack_id, limit, should_stop, on_record):
+    def run_batch(pack_id, limit, should_stop, on_record, since=None):
         if pack_id == "a.one":
             raise ValueError("pack a.one is not enabled")
         return script(pack_id, limit, should_stop, on_record)
@@ -398,7 +416,7 @@ def test_a_pack_switched_off_after_the_yes_is_skipped_and_the_rest_run() -> None
 
 
 def test_an_unexpected_batch_error_fails_the_run_and_its_text_stays_in_the_log() -> None:
-    def boom(pack_id, limit, should_stop, on_record):
+    def boom(pack_id, limit, should_stop, on_record, since=None):
         raise RuntimeError("database is locked while reading a private sentence")
 
     snap = _wait(runs.start_run(["a.one", "b.two"], 2, True, run_batch=boom))
@@ -424,10 +442,11 @@ def test_a_node_that_is_going_down_stops_the_run() -> None:
 
 def test_a_run_over_a_real_history_with_the_stub_model(node, model) -> None:
     """The default shape end to end: each batch is `run_pack_backfill` on the worker thread's own connection."""
-    def run_batch(pack_id, limit, should_stop, on_record):
+    def run_batch(pack_id, limit, should_stop, on_record, since=None):
         conn = _open(node.path)
         try:
-            return surfaces.run_pack_backfill(conn, pack_id, limit, should_stop=should_stop, on_record=on_record)
+            return surfaces.run_pack_backfill(conn, pack_id, limit, should_stop=should_stop, on_record=on_record,
+                                              since=since)
         finally:
             conn.close()
 
@@ -658,7 +677,7 @@ def test_the_dispatcher_door_refuses_a_single_batch_beside_a_run(node, monkeypat
 # ----------------------------------------------------------------------------- the command, over a real socket
 
 
-def test_the_command_end_to_end_over_a_real_owner_socket(node, monkeypatch) -> None:
+def test_the_command_end_to_end_over_a_real_owner_socket(node, model, monkeypatch) -> None:
     """`topos-node packs backfill` against the mounted routes behind the socket wrapper on a real unix socket: the
     real client, the real confirmation file, the real gate. Only the person (a patched terminal and prompt) and the
     batches (the scripted runner) are stand-ins."""
@@ -681,7 +700,8 @@ def test_the_command_end_to_end_over_a_real_owner_socket(node, monkeypatch) -> N
     pipe = SimpleNamespace(isatty=lambda: False)
     monkeypatch.setattr(click, "confirm", lambda text, **kw: prompts.append(text) or True)
     monkeypatch.setattr(packs_cmd, "POLL_S", 0.02)
-    args = ["backfill", "--pack", JOY, "--pack", EVENTS, "--limit", "2", "--until-done"]
+    monkeypatch.setenv("TOPOS_DERIVATION_VERIFIER_MODEL", "stub-verifier")
+    args = ["backfill", "--pack", JOY, "--pack", EVENTS, "--limit", "2", "--until-done", "--since", "2026-10-15"]
 
     with serve_fake_node(SimpleNamespace(app=uds.UDSChannelApp(app)), socket_path):
         # What a coding agent with a shell can do: call the route, or run the command without a terminal.
@@ -701,10 +721,268 @@ def test_the_command_end_to_end_over_a_real_owner_socket(node, monkeypatch) -> N
 
     assert result.exit_code == packs_cmd.EXIT_OK, result.output
     assert prompts == ["Run it?"]
-    assert re.search(rf"^  {re.escape(JOY)} +6 records waiting$", result.output, re.M), result.output
-    assert script.calls == [(JOY, 2), (JOY, 2), (EVENTS, 2)]
+    assert "Fact-pack backfill, records dated 2026-10-15 or later" in result.output
+    assert re.search(rf"^  {re.escape(JOY)} +3 records waiting   read by stub-model$", result.output, re.M), result.output
+    assert "Extraction: the local model stub-model reads every record, one call each." in result.output
+    assert "Verification: every fact found is checked by stub-verifier" in result.output
+    assert result.output.index("Verification:") < result.output.index(f"{JOY}:"), "the models are named before the yes"
+    assert script.calls == [(JOY, 2), (JOY, 2), (EVENTS, 2)] and set(script.since) == {"2026-10-15"}
     assert result.output.count("  batch 1: 2 processed, 4 assertions, 2 accepted, 2 written, 0 quarantined") == 1
+    assert "(extraction 1s, verification 4s)" in result.output
     assert "Done: 4 processed, 8 assertions, 4 accepted, 4 written, 0 quarantined" in result.output
+    assert "(extraction 2s, verification 8s)." in result.output
     assert not uds.owner_confirmation_path().exists(), "the one confirmation was spent on the one start"
     assert listing.exit_code == 0 and f"{JOY}" in listing.output and "2 of " in listing.output
     assert status.exit_code == 0 and ": done" in status.output
+
+
+# ----------------------------------------------------------------------------- how far back (--since)
+
+
+def test_since_walks_only_records_dated_on_or_after_it_and_leaves_the_rest_for_later(node, model) -> None:
+    """The entries are dated 10 to 19 October; `since` the 15th keeps j5..j9, three of which the prefilter passes."""
+    stats = surfaces.run_pack_backfill(node.conn, JOY, limit=10, since="2026-10-15")
+    assert stats["processed"] == 3 and sorted(model.entries()) == [5, 7, 8]
+    marked = {r[0].rsplit(":", 1)[1] for r in node.conn.execute(
+        "SELECT key FROM derivation_progress WHERE key LIKE ?", (f"{JOY}@%",))}
+    assert marked == {"j5", "j6", "j7", "j8", "j9"}, "nothing older than the date was read or marked"
+    assert surfaces.run_pack_backfill(node.conn, JOY, limit=10, since="2026-10-15")["processed"] == 0
+    model.extract.clear()
+    assert surfaces.run_pack_backfill(node.conn, JOY, limit=10)["processed"] == 3
+    assert sorted(model.entries()) == [1, 2, 4], "a later backfill without the date reaches the older records"
+
+
+def test_the_count_uses_the_same_date(node, model) -> None:
+    plan = runs.backfill_plan(node.conn, [JOY], since="2026-10-15")
+    assert plan["since"] == "2026-10-15" and plan["packs"][0]["waiting"] == 3 and plan["history_records"] == 5
+    assert runs.backfill_plan(node.conn, [JOY])["packs"][0]["waiting"] == 6
+    assert runs.backfill_plan(node.conn, [JOY], since="2027-01-01")["total_waiting"] == 0
+    for bad in ("April", "2026-4-1", "2026-13-01", "2026-04-01T00:00:00", 20260401):
+        with pytest.raises(runs.BackfillRefused) as refused:
+            runs.backfill_plan(node.conn, [JOY], since=bad)
+        assert refused.value.code == "backfill_plan_invalid", bad
+    assert runs.validate_since(None) is None and runs.validate_since("") is None
+    assert runs.validate_since("2026-04-01") == "2026-04-01"
+
+
+def test_the_date_applies_to_messages_too_and_a_bad_one_never_reaches_sql(node) -> None:
+    from topos.enrichment.jobs.canonical.derivation_job import _iter_history
+
+    node.conn.execute("CREATE TABLE IF NOT EXISTS conversation_messages (message_id TEXT PRIMARY KEY,"
+                      " conversation_id TEXT, content TEXT, event_at TEXT, actor_role TEXT, is_from_self INTEGER,"
+                      " sender_id TEXT, sender_type TEXT, source_id TEXT, dataset_id TEXT)")
+    for mid, when in (("old", "2026-03-31 23:59:59"), ("edge", "2026-04-01T00:00:00Z"), ("new", "2026-06-02T08:00:00Z")):
+        node.conn.execute("INSERT INTO conversation_messages VALUES (?, 'c1', ?, ?, 'authored', 1, 'self', 'human',"
+                          " 'imessage', 'd')", (mid, f"a message long enough to be read ({mid})", when))
+    node.conn.commit()
+    since = {r["record_id"] for r in _iter_history(node.conn, limit=50, since="2026-04-01")}
+    assert {"edge", "new"} <= since and "old" not in since
+    assert {r["record_id"] for r in _iter_history(node.conn, limit=50)} >= {"old", "edge", "new", "j0"}
+    with pytest.raises(ValueError):
+        _iter_history(node.conn, limit=50, since="2026-04-01' OR '1'='1")
+
+
+def test_a_run_carries_its_date_to_every_batch() -> None:
+    script = _Script({"a.one": 3, "b.two": 1})
+    snap = _wait(runs.start_run(["a.one", "b.two"], 2, True, since="2026-04-01", run_batch=script))
+    assert snap["state"] == "done" and snap["since"] == "2026-04-01"
+    assert script.since == ["2026-04-01"] * 3
+
+
+def test_more_history_than_the_window_is_said_not_hidden(node, model, monkeypatch) -> None:
+    monkeypatch.setattr(surfaces, "BACKFILL_HISTORY_WINDOW", 4)
+    plan = runs.backfill_plan(node.conn, [JOY])
+    assert plan["history_truncated"] is True and plan["history_window"] == 4 and plan["history_records"] == 4
+    assert runs.backfill_plan(node.conn, [JOY], since="2026-10-17")["history_truncated"] is False
+
+
+# ----------------------------------------------------------------------------- the extractor the owner picked
+
+
+class _Classifier:
+    """Topos Facts, stubbed (no weights, no network): it knows the packs it is told it knows."""
+
+    def __init__(self, knows=(JOY,), conn: Optional[sqlite3.Connection] = None, delay: float = 0.0) -> None:
+        self._knows, self.calls, self.held = set(knows), [], []
+        self.conn, self.delay = conn, delay
+
+    def knows(self, pack_id: str) -> bool:
+        return pack_id in self._knows
+
+    def extract(self, pack_id: str, text: str) -> List[Dict[str, Any]]:
+        self.calls.append(pack_id)
+        if self.conn is not None:
+            self.held.append(self.conn.in_transaction)
+        if self.delay:
+            time.sleep(self.delay)
+        n = int(re.search(r"\(entry (\d+)\)", text).group(1))
+        return [{"predicate": "moment.peak", "value": {"kind": "alive", "description": f"lake day number {n}"},
+                 "confidence": 0.97, "about": "owner"}]
+
+
+def _pick_topos_facts(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT OR REPLACE INTO engine_config (key, value) VALUES ('facts_llm_provider', 'topos_facts')")
+    conn.execute("INSERT OR REPLACE INTO engine_config (key, value) VALUES ('facts_llm_model', 'v0.1')")
+    conn.commit()
+
+
+def _extractors(conn: sqlite3.Connection) -> set:
+    return {json.loads(r[0])["extractor"]["model"] for r in conn.execute(
+        "SELECT payload_json FROM signal_objects WHERE object_type='fact' AND ontology_id IS NOT NULL")}
+
+
+def test_a_pack_topos_facts_knows_is_read_by_it_and_never_by_the_llm(node, model, monkeypatch) -> None:
+    """Before this the backfill never looked at the owner's pick: it always called the local extraction model."""
+    stub = _Classifier(conn=node.conn, delay=0.01)
+    loads: List[int] = []
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load", lambda: loads.append(1) or stub)
+    monkeypatch.setenv("TOPOS_DERIVATION_VERIFIER_MODEL", "stub-verifier")
+    _pick_topos_facts(node.conn)
+    seen: List[Dict[str, Any]] = []
+    stats = surfaces.run_pack_backfill(node.conn, JOY, limit=10, on_record=seen.append)
+    assert stub.calls == [JOY] * 6 and model.extract == [], "six records, six classifier reads, no LLM extraction"
+    assert not any(stub.held), "no write transaction is open while the classifier reads"
+    assert len(model.verify) == stats["assertions"] == 6, "every assertion still goes to the verifier"
+    assert stats["extract_model"] == "topos-facts-v0.1" and stats["verify_model"] == "stub-verifier"
+    assert stats["extract_s"] >= 0.05 and stats["verify_s"] >= 0.0 and isinstance(stats["verify_s"], float)
+    assert seen[-1]["extract_model"] == "topos-facts-v0.1" and seen[-1]["extract_s"] > 0
+    assert stats["written"] >= 1 and _extractors(node.conn) == {"topos-facts-v0.1"}
+    hits, llm_calls = node.conn.execute(
+        "SELECT SUM(prefilter_hits), SUM(llm_calls) FROM pack_yield WHERE pack_id=?", (JOY,)).fetchone()
+    assert (hits, llm_calls or 0) == (6, 0), "a classifier read is a prefilter hit and not an LLM call"
+    assert len(loads) >= 6, "the encoders are touched per record, so a long batch does not let them go idle"
+
+
+def test_a_pack_outside_its_spec_and_the_one_kept_on_the_llm_stay_on_the_llm(node, model, monkeypatch) -> None:
+    stub = _Classifier(knows=("aspirations.goals",))
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load", lambda: stub)
+    _pick_topos_facts(node.conn)
+    stats = surfaces.run_pack_backfill(node.conn, JOY, limit=10)
+    assert stub.calls == [] and len(model.extract) == 6 and stats["extract_model"] == "stub-model"
+    assert _extractors(node.conn) == {"stub-model"}
+    node.conn.execute("UPDATE pack_registry SET enabled=1 WHERE pack_id='aspirations.goals'")
+    node.conn.commit()
+    goals = surfaces.run_pack_backfill(node.conn, "aspirations.goals", limit=10)
+    assert goals["extract_model"] == "stub-model" and stub.calls == [], "ROUTED_TO_LLM, whatever the spec lists"
+
+
+def test_nothing_picked_means_the_classifier_is_never_loaded(node, model, monkeypatch) -> None:
+    def boom():
+        raise AssertionError("Topos Facts must not load unless the owner picked it")
+
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load", boom)
+    stats = surfaces.run_pack_backfill(node.conn, JOY, limit=10)
+    assert stats["processed"] == 6 and stats["extract_model"] == "stub-model" and len(model.extract) == 6
+
+
+def test_a_pick_that_cannot_load_defers_the_batch_and_marks_nothing(node, model, monkeypatch) -> None:
+    from topos.config.facts_llm import derivation_deferral, facts_classifier_version
+
+    def offline():
+        raise OSError("no network and no cached weights")
+
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load", offline)
+    _pick_topos_facts(node.conn)
+    with pytest.raises(surfaces.BackfillDeferred) as deferred:
+        surfaces.run_pack_backfill(node.conn, JOY, limit=10)
+    assert deferred.value.code == "topos_facts_unavailable"
+    assert model.extract == [] and model.verify == [], "it does not fall back to the LLM behind the owner's pick"
+    assert node.conn.execute("SELECT COUNT(*) FROM derivation_progress").fetchone()[0] == 0
+    assert derivation_deferral(node.conn)["reason"].startswith("topos_facts_unavailable")
+    assert facts_classifier_version(node.conn) == "v0.1", "the pick itself is the owner's and is left alone"
+
+
+def test_a_run_ends_when_the_pick_cannot_load(node, model, monkeypatch) -> None:
+    import topos.core.state as state
+
+    def offline():
+        raise OSError("no network and no cached weights")
+
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load", offline)
+    monkeypatch.setattr(state, "get_db_connection", lambda: node.conn)
+    _pick_topos_facts(node.conn)
+    snap = _wait(runs.start_run([JOY, EVENTS], 4, True))
+    assert snap["state"] == "failed" and snap["reason"] == "topos_facts_unavailable"
+    assert [(p["state"], p["error"]) for p in snap["packs"]] == [("failed", "topos_facts_unavailable"),
+                                                                 ("waiting", None)]
+    assert model.extract == [] and snap["totals"]["processed"] == 0
+
+
+def test_the_plan_names_the_model_that_would_read_each_pack_without_loading_one(node, model, monkeypatch) -> None:
+    from topos.features.derivation import topos_facts
+
+    def boom():
+        raise AssertionError("a plan loads no model")
+
+    monkeypatch.setattr(topos_facts, "load", boom)
+    monkeypatch.setenv("TOPOS_DERIVATION_VERIFIER_MODEL", "stub-verifier")
+    node.conn.execute("UPDATE pack_registry SET enabled=1 WHERE pack_id='aspirations.goals'")
+    node.conn.commit()
+    asked = [JOY, EVENTS, "aspirations.goals"]
+
+    def routes(plan):
+        return {row["pack_id"]: (row["extract_route"], row["extract_model"]) for row in plan["packs"]}
+
+    plain = runs.backfill_plan(node.conn, asked)
+    assert set(routes(plain).values()) == {("llm", "stub-model")} and plain["verify_model"] == "stub-verifier"
+    assert plain["extraction"] == {"provider": "llm", "llm_model": "stub-model", "classifier_model": None,
+                                   "classifier_spec_on_disk": None}
+
+    _pick_topos_facts(node.conn)
+    monkeypatch.setattr(topos_facts, "known_packs_offline", lambda: frozenset({EVENTS, "aspirations.goals"}))
+    picked = runs.backfill_plan(node.conn, asked)
+    assert routes(picked) == {JOY: ("llm", "stub-model"), EVENTS: ("classifier", "topos-facts-v0.1"),
+                              "aspirations.goals": ("llm", "stub-model")}
+    assert picked["extraction"] == {"provider": "topos_facts", "llm_model": "stub-model",
+                                    "classifier_model": "topos-facts-v0.1", "classifier_spec_on_disk": True}
+
+    monkeypatch.setattr(topos_facts, "known_packs_offline", lambda: None)
+    unread = runs.backfill_plan(node.conn, asked)
+    assert routes(unread) == {JOY: ("unknown", None), EVENTS: ("unknown", None),
+                              "aspirations.goals": ("llm", "stub-model")}
+    assert unread["extraction"]["classifier_spec_on_disk"] is False
+
+    monkeypatch.setenv("TOPOS_DERIVATION_VERIFY", "off")
+    assert runs.backfill_plan(node.conn, asked)["verify_model"] is None
+
+
+def test_the_spec_is_read_from_disk_alone(tmp_path, monkeypatch) -> None:
+    from topos.features.derivation import topos_facts
+
+    monkeypatch.setenv(topos_facts.ENV_GATE, str(tmp_path))
+    assert topos_facts.known_packs_offline() is None, "no spec file on this computer"
+    (tmp_path / topos_facts.SPEC_FILE).write_text(json.dumps({"packs": {"life.events": {}, "work.career": {}}}))
+    assert topos_facts.known_packs_offline() == frozenset({"life.events", "work.career"})
+    (tmp_path / topos_facts.SPEC_FILE).write_text("not json")
+    assert topos_facts.known_packs_offline() is None
+
+
+# ----------------------------------------------------------------------------- the routes carry both
+
+
+def test_the_routes_take_the_date_and_refuse_a_bad_one(door, model) -> None:
+    with door.socket() as client:
+        plan = client.get(BASE + "/plan", params=[("pack_id", JOY), ("since", "2026-10-15")])
+        assert plan.status_code == 200 and plan.json()["packs"][0]["waiting"] == 3 and plan.json()["since"] == "2026-10-15"
+        assert plan.json()["packs"][0]["extract_model"] == "stub-model"
+        bad = client.get(BASE + "/plan", params=[("pack_id", JOY), ("since", "April")])
+        assert bad.status_code == 400 and bad.json()["error"] == "backfill_plan_invalid"
+        refused = client.post(BASE + "/runs", json={"pack_ids": [JOY], "since": "last spring"}, headers=_yes())
+        assert refused.status_code == 400 and refused.json()["error"] == "backfill_plan_invalid"
+        assert runs.current() is None
+        started = client.post(BASE + "/runs", json={"pack_ids": [JOY], "limit": 2, "until_done": True,
+                                                    "since": "2026-10-15"}, headers=_yes())
+        assert started.status_code == 202 and started.json()["run"]["since"] == "2026-10-15"
+    assert _settle()["state"] == "done" and set(door.script.since) == {"2026-10-15"}
+
+
+def test_the_apps_single_batch_says_so_when_the_pick_cannot_load(door, node, model, monkeypatch) -> None:
+    def offline():
+        raise OSError("no network and no cached weights")
+
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load", offline)
+    _pick_topos_facts(node.conn)
+    with door.socket() as client:
+        response = client.post(f"/v1/signal/derivation/packs/{JOY}/backfill", json={"limit": 2}, headers=_yes())
+    assert response.status_code == 503 and response.json()["detail"]["error"] == "topos_facts_unavailable"
+    assert model.extract == [] and node.conn.execute("SELECT COUNT(*) FROM derivation_progress").fetchone()[0] == 0
