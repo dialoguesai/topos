@@ -119,9 +119,17 @@ async def handle_run_pack_backfill(message):
     pack_id = str(payload.get("pack_id") or "").strip()
     limit = min(int(payload.get("limit") or 200), 1000)
     try:
-        from ...features.derivation.surfaces import run_pack_backfill
+        from ...features.derivation.backfill_runs import BackfillBusy, single_batch
+        from ...features.derivation.surfaces import BackfillDeferred, run_pack_backfill
         from .common import run_db_write
-        stats = await run_db_write(run_pack_backfill, pack_id, limit)
+        try:
+            # Never beside a confirmed run (backfill_runs): one backfill on the local models at a time.
+            with single_batch():
+                stats = await run_db_write(run_pack_backfill, pack_id, limit)
+        except BackfillBusy as busy:
+            return {"id": req_id, "status": "error", "error": busy.code}
+        except BackfillDeferred as deferred:
+            return {"id": req_id, "status": "error", "error": deferred.code}
         return {"id": req_id, "status": "ok", "payload": {"status": "ok", "pack_id": pack_id, **stats}}
     except ValueError as exc:
         return {"id": req_id, "status": "error", "error": str(exc)}

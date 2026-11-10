@@ -5,9 +5,13 @@ the two transports can never drift."""
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def list_packs(conn: sqlite3.Connection, *, time_zone: str = "UTC") -> Dict[str, Any]:
@@ -272,9 +276,26 @@ def resolve_pack_offer(conn: sqlite3.Connection, offer_id: str, action: str) -> 
     return {"offer_id": offer_id, "pack_id": pack_id, "kind": kind, "action": action}
 
 
+#: How far back one backfill walks: the newest N journal entries and the newest N messages
+#: (`_iter_history`). `backfill_runs.backfill_plan` counts over the same window, so the number
+#: the owner is shown before a run is the number the run can reach.
+BACKFILL_HISTORY_WINDOW = 20000
+
+
+class BackfillDeferred(RuntimeError):
+    """The batch could not run and nothing was marked done; `code` says why (a plain word)."""
+
+    def __init__(self, code: str, message: str = "") -> None:
+        self.code = code
+        super().__init__(message or code)
+
+
 def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, *,
                       records: Optional[List[Dict[str, Any]]] = None,
-                      use_prefilter: bool = True) -> Dict[str, Any]:
+                      use_prefilter: bool = True,
+                      should_stop: Optional[Callable[[], bool]] = None,
+                      on_record: Optional[Callable[[Dict[str, Any]], None]] = None,
+                      since: Optional[str] = None) -> Dict[str, Any]:
     """Owner-initiated history backfill for ONE enabled pack (the lens catalog's
     backfill control). Bounded by `limit` prefilter-HIT records per invocation —
     a huge history closes over a few presses (or the drip catch-up finishes it).
@@ -287,9 +308,37 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     commitment ledger's promise-shaped owner messages, 118 of 7,011, where the pack's
     descriptor prefilter passes 2,816 — must not pay the pack's cost for the rest; and a
     record the caller did not feed is left UNMARKED in `derivation_progress`, so the
-    ordinary history walk can still reach it later."""
+    ordinary history walk can still reach it later.
+
+    `should_stop` is asked before each record: a true answer ends the batch there, with
+    every finished record committed and marked (`stopped: True` in the stats), and the tail
+    (run stamp, embedding of what was written) still runs. `on_record` is called with the
+    running counts after each prefilter-hit record, the ones whose extraction call failed
+    included (`llm_errors`); a multi-batch run (`backfill_runs`) reads its progress and its
+    model-failure streak from it.
+
+    `since` (`YYYY-MM-DD`) walks only records dated on or after it; older ones are neither read
+    nor marked, so a later backfill without it can still reach them.
+
+    The extractor is the ingest job's (`derivation_job.pack_raw`): when the owner has picked Topos
+    Facts (Node functions → Facts extraction) a pack it knows is read by the classifier and never
+    by the LLM; `topos_facts.ROUTED_TO_LLM` and packs outside its spec keep the local extraction
+    model; with nothing picked every pack is the LLM's. A pick whose weights cannot load defers
+    the batch as it does there: the reason is recorded where the facts config reads it, nothing is
+    marked done, and `BackfillDeferred("topos_facts_unavailable")` is raised. Before this the
+    backfill never looked at the pick and always called the LLM. Every assertion still goes to the
+    verifier. The stats carry the two models (`extract_model`, `verify_model`) and the wall time
+    spent in each (`extract_s`, `verify_s`), so a caller can report them apart.
+
+    No write transaction is open during a model call (`settle`, as in the ingest job since
+    topos#271): the marks of the records the prefilter passed over, and the measurement row
+    of the call before, are committed first. Without that the backfill held SQLite's write
+    lock across every extraction and verifier call of a batch."""
     from ...enrichment.jobs.canonical.derivation_job import (
-        _bump_yield, _iter_history, _ledger_write, _verify_mode, retire_role_skipped_progress)
+        _bump_yield, _iter_history, _ledger_write, _note_deferral, _verify_mode,
+        retire_role_skipped_progress)
+    from ...config.facts_llm import facts_classifier_version
+    from . import topos_facts as _tf
     from ..provenance.posture import make_posture_resolver
     from .packs import load_packs
     from .prefilter import PackPrefilter
@@ -321,21 +370,69 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     vmodel = verifier_model()
     adapter = OllamaAdapter()
 
+    def settle():
+        if getattr(conn, "in_transaction", False):
+            conn.commit()   # no write transaction spans a model call (see the docstring)
+
     def llm(m, prompt, n=900, *, phase="extraction"):
         from .processing import measured_generate
+        settle()
         return measured_generate(conn, adapter, m, prompt, pack_id=pack_id,
                                  phase=phase, mode="backfill", n=n)
 
+    by_classifier = False
+    if facts_classifier_version(conn):
+        try:
+            by_classifier = _tf.routes_to_classifier(pack_id, _tf.load())
+        except Exception as exc:  # noqa: BLE001
+            reason = f"topos_facts_unavailable: {exc}"[:120]
+            logger.warning("pack backfill deferred: Topos Facts unavailable (%s)", exc)
+            _note_deferral(conn, reason)
+            raise BackfillDeferred("topos_facts_unavailable", reason) from exc
+    extract_model = _tf.MODEL_ID if by_classifier else model
+
+    def extract(rec):
+        """The pack's raw output for one record: Topos Facts or the LLM."""
+        if by_classifier:
+            settle()
+            # load() again, not a kept handle: a cache hit that keeps the encoders' idle clock
+            # fresh through a long batch, so they are not released and reloaded in the middle.
+            raw = _tf.raw_output(_tf.load(), pack_id, rec["text"])
+            _bump_yield(conn, pack_id, prefilter_hits=1)
+            return raw
+        raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"],
+                                      speaker=str(rec.get("speaker") or ""),
+                                      speaker_entity_id=str(rec.get("speaker_entity_id") or ""),
+                                      recipient=str(rec.get("recipient") or ""),
+                                      recipient_entity_id=str(rec.get("recipient_entity_id") or ""),
+                                      recipient_key=str(rec.get("recipient_key") or "")))
+        _bump_yield(conn, pack_id, llm_calls=1, prefilter_hits=1)
+        return raw
+
     verify_mode = _verify_mode()
     pf = PackPrefilter(pack)
-    writer = DerivationWriter(conn, model=model)
+    writer = DerivationWriter(conn, model=extract_model)
     posture_for = make_posture_resolver(conn)
     retire_role_skipped_progress(conn, load_packs(pack_dir), posture_for)
     done = {r[0] for r in conn.execute("SELECT key FROM derivation_progress")}
-    stats = {"processed": 0, "assertions": 0, "accepted": 0, "written": 0, "quarantined0": writer.stats.get("quarantined", 0)}
-    source = records if records is not None else _iter_history(conn, limit=20000, posture_for=posture_for)
+    stats = {"processed": 0, "assertions": 0, "accepted": 0, "written": 0, "llm_errors": 0,
+             "extract_s": 0.0, "verify_s": 0.0,
+             "extract_model": extract_model, "verify_model": vmodel if verify_mode != "off" else None,
+             "quarantined0": writer.stats.get("quarantined", 0)}
+
+    def _report():
+        if on_record is not None:
+            settle()   # a failed call's measurement row: the callback may wait (owner_requests.pace)
+            on_record({**{k: v for k, v in stats.items() if k != "quarantined0"},
+                       "quarantined": writer.stats.get("quarantined", 0) - stats["quarantined0"]})
+
+    source = records if records is not None else _iter_history(
+        conn, limit=BACKFILL_HISTORY_WINDOW, posture_for=posture_for, since=since)
     for rec in source:
         if stats["processed"] >= limit:
+            break
+        if should_stop is not None and should_stop():
+            stats["stopped"] = True
             break
         key = f"{pack_id}@{pack.version}:{rec['table']}:{rec['record_id']}"
         if key in done:
@@ -345,16 +442,17 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
             continue
         stats["processed"] += 1
         rec = addressing_for(pack, rec)
+        began = time.perf_counter()
         try:
-            raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"],
-                                          speaker=str(rec.get("speaker") or ""),
-                                          speaker_entity_id=str(rec.get("speaker_entity_id") or ""),
-                                          recipient=str(rec.get("recipient") or ""),
-                                          recipient_entity_id=str(rec.get("recipient_entity_id") or ""),
-                                          recipient_key=str(rec.get("recipient_key") or "")))
-            _bump_yield(conn, pack_id, llm_calls=1, prefilter_hits=1)
+            raw = extract(rec)
         except Exception:  # noqa: BLE001
+            # Left unmarked, so a later batch asks again; counted, so a run can tell a model
+            # that is down from a history that is done.
+            stats["extract_s"] += time.perf_counter() - began
+            stats["llm_errors"] += 1
+            _report()
             continue
+        stats["extract_s"] += time.perf_counter() - began
         valid, _rej = parse_output(
             raw, pack, record_text=rec["text"],
             grounded_exempt=(rec.get("recipient"), rec.get("speaker")),
@@ -366,6 +464,7 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
         _bump_yield(conn, pack_id, assertions=len(valid))
         for a in valid:
             if verify_mode != "off":
+                began = time.perf_counter()
                 try:
                     verdict = parse_verdict(llm(vmodel, build_verify_prompt(
                         rec["text"], rec["role"], rec["date"],
@@ -373,12 +472,13 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                         lens_note=lens_note_for(pack), label_note=label_note_for(rec)), n=250, phase="verification"))
                 except Exception:  # noqa: BLE001
                     verdict = None
+                stats["verify_s"] += time.perf_counter() - began
                 a = apply_verdict(a, verdict)
             else:
                 a = dict(a); a["verifier_status"] = "skipped"
             if a.get("verifier_status") == "rejected":
                 _ledger_write(conn, stage="backfill", pack=pack, rec=rec, a=a,
-                              model=model, vmodel=vmodel)
+                              model=extract_model, vmodel=vmodel)
                 continue
             stats["accepted"] += 1
             _bump_yield(conn, pack_id, accepted=1)
@@ -395,12 +495,14 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                 stats["written"] += 1
                 _bump_yield(conn, pack_id, written=1)
             _ledger_write(conn, stage="backfill", pack=pack, rec=rec, a=a,
-                          model=model, vmodel=vmodel,
+                          model=extract_model, vmodel=vmodel,
                           written_id=out.get("object_id") if stored else None)
         conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
         conn.commit()
+        _report()
     conn.commit()
     stats["quarantined"] = writer.stats.get("quarantined", 0) - stats.pop("quarantined0")
+    stats["extract_s"], stats["verify_s"] = round(stats["extract_s"], 3), round(stats["verify_s"], 3)
 
     # A backfill IS a run. Without this the registry keeps last_run_at NULL and
     # the lens card reads "never run" over a pack that just wrote facts —
