@@ -471,6 +471,7 @@ def run_derivation_batch(
                               written_id=out.get("object_id") if stored else None)
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
         conn.commit()
+        _yield_to_owner()
 
     _drip_catchup(conn, packs=packs, filters=filters, pack_raw=pack_raw, judge=judge,
                   writer_for=writer_for, owner=owner, done=done, st=st, cancel=cancel,
@@ -489,6 +490,19 @@ def run_derivation_batch(
             if v:
                 st[f"w_{k}"] = st.get(f"w_{k}", 0) + v
     return written
+
+
+def _yield_to_owner() -> None:
+    """Between records, with the record's writes committed: let a pending owner request go first.
+
+    A batch is a model call or more per (record, pack) pair, minutes of work on the local models,
+    and it ran end to end without looking up. The other long background work on the node waits
+    here (`core.owner_requests.pace`), and the owner's backfill run does between its records
+    (`backfill_runs`); the ingest batch and its history catch-up now do the same. It returns at
+    once when no owner request is pending."""
+    from ....core import owner_requests
+
+    owner_requests.pace()
 
 
 #: derivation_progress row that says the one-time retirement below has run on this node.
@@ -673,6 +687,7 @@ def _drip_catchup(conn, *, packs, filters, pack_raw, judge, writer_for, owner, d
             if budget <= 0:
                 break
         conn.commit()
+        _yield_to_owner()
 
 
 def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, st, cancel,

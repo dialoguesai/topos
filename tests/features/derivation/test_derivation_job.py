@@ -199,3 +199,44 @@ def test_backfill_records_real_model_and_mode(node_db, monkeypatch):
     monkeypatch.setattr('topos.features.signal.derived_index.index_derived_objects', lambda *a, **kw: {})
     run_pack_backfill(node_db, 'work.career', records=[{'record_id': 'old', 'text': ROW['content'], 'table': 'conversation_messages', 'role': 'authored', 'date': '2026-08-01', 'source_id': 'imessage'}], use_prefilter=False)
     assert node_db.execute('SELECT pack_id,model,phase,mode FROM derivation_processing').fetchall() == [('work.career', 'backfill-9b', 'extraction', 'backfill')]
+
+
+# --- fact packs on new records as they arrive (10 Nov 2026) ----------------------------------------
+# Measured on a live node that day: the job is registered, but no message or journal source
+# lists it, so enabled packs had read 0 of October's 128 journal entries and no message since
+# 16 Sep. The switch that attaches it to a source already existed; these pin that it works for
+# a message source, that the catalog names it in the owner's words, and that a batch waits for
+# the owner between records.
+
+def test_fact_packs_are_named_and_attach_to_a_message_source(node_db):
+    from topos.enrichment.catalog import COST_HIGH, LANE_CANONICAL, get_catalog_entry
+    from topos.enrichment.source_overrides import (effective_canonical_enrichment_jobs,
+                                                   set_source_enrichment_override,
+                                                   togglable_lanes_for_job)
+    from topos.sources.registry import REGISTRY
+
+    entry = get_catalog_entry("derivation")
+    assert entry is not None and entry.title == "Fact packs" and entry.cost_tier == COST_HIGH
+    assert "fact packs" in entry.description.lower() and LANE_CANONICAL in entry.lanes
+    assert togglable_lanes_for_job("derivation") == [LANE_CANONICAL]
+
+    imessage = REGISTRY["imessage"]
+    assert "derivation" not in effective_canonical_enrichment_jobs(imessage, conn=node_db)   # off until asked
+    set_source_enrichment_override("imessage", "derivation", True, conn=node_db)
+    assert "derivation" in effective_canonical_enrichment_jobs(imessage, conn=node_db)
+    set_source_enrichment_override("imessage", "derivation", None, conn=node_db)
+    assert "derivation" not in effective_canonical_enrichment_jobs(imessage, conn=node_db)
+
+
+def test_batch_yields_to_the_owner_between_records_with_nothing_open(node_db, monkeypatch):
+    from topos.core import owner_requests
+    from topos.engine.backends import ollama
+    monkeypatch.setattr(ollama.OllamaAdapter, "_generate", _stub_llm(json.dumps({"assertions": []})))
+    monkeypatch.setattr("topos.features.facts.llm_extract._resolved_extraction_model",
+                        lambda s, c: "stub-9b")
+    open_at_yield = []
+    monkeypatch.setattr(owner_requests, "pace", lambda **kw: open_at_yield.append(node_db.in_transaction) or 0.0)
+    rows = [dict(ROW, message_id=f"m{i}") for i in range(3)]
+    run_derivation_batch(node_db, rows, stats={})
+    assert len(open_at_yield) == 3            # once after each record
+    assert open_at_yield == [False] * 3       # and never inside a write transaction
