@@ -1272,16 +1272,118 @@ async def post_pack_backfill(
     limit: int = Body(200, embed=True, ge=1, le=1000),
     _api_key: str = Depends(require_api_key),
 ):
-    """Bounded owner-initiated history backfill (lens catalog control)."""
+    """Bounded owner-initiated history backfill (lens catalog control): one batch, held open.
+
+    Refused 409 `backfill_already_running` while a confirmed run is working through its packs
+    (`backfill_runs`): a run and a single batch never share the local models."""
     import asyncio as _asyncio
 
+    from ..features.derivation.backfill_runs import BackfillBusy, single_batch
     from ..features.derivation.surfaces import run_pack_backfill
 
     try:
-        stats = await _asyncio.to_thread(lambda: run_pack_backfill(_entities_conn(), pack_id, limit))
+        with single_batch():
+            stats = await _asyncio.to_thread(lambda: run_pack_backfill(_entities_conn(), pack_id, limit))
+    except BackfillBusy as busy:
+        raise HTTPException(status_code=409, detail={
+            "error": busy.code, "message": "A backfill run is already working; wait for it or stop it."}) from busy
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"pack_id": pack_id, **stats}
+
+
+# --- one confirmed backfill RUN (features/derivation/backfill_runs.py) -------------------------
+# The owner's yes on a terminal (or the app) authorises a run: these packs, this batch size, one
+# batch each or until done. The node then works through it itself; the caller follows it by
+# reading `runs/current`. Only the start is a change; the plan and the status are counts.
+
+
+def _backfill_refusal(status: int, code: str, message: str):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse({"error": code, "message": message}, status_code=status,
+                        headers={"Cache-Control": "no-store"})
+
+
+def _confirmed_owner_socket() -> bool:
+    """The request came over the owner socket from a peer that may change things: the app, the dev
+    proxy on a node that allows it, or a confirmation the owner just gave on a terminal. The socket
+    layer's gate already asked this for the route (`owner_door_routes`: dangerous); asking again here
+    keeps a run's start closed over TCP, where that gate does not run, and with the split flag off."""
+    from ..uds import current_socket_peer, current_transport, peer_may_change
+
+    peer = current_socket_peer()
+    return current_transport() == "uds" and peer is not None and peer_may_change(peer)
+
+
+@router.get("/derivation/backfill/plan")
+async def get_backfill_plan(
+    pack_id: list[str] = Query(default=[]),
+    _api_key: str = Depends(require_api_key),
+):
+    """What a backfill of these packs would do: records waiting per pack, counted with each pack's
+    own role gate and prefilter over the window a backfill walks. Counts only; nothing runs."""
+    import asyncio as _asyncio
+
+    from ..features.derivation.backfill_runs import backfill_plan
+
+    asked = [str(p) for p in pack_id][:500]
+    return await _asyncio.to_thread(lambda: backfill_plan(_entities_conn(), asked))
+
+
+@router.post("/derivation/backfill/runs")
+async def post_backfill_run(
+    body: Dict[str, Any] = Body(...),
+    _api_key: str = Depends(require_api_key),
+):
+    """Start the one backfill run: `{pack_ids: [...], limit: 1..1000, until_done: bool}`.
+
+    202 with the run's snapshot. 403 `owner_confirmation_required` unless the caller is the app or
+    presents the owner's confirmation on the socket; 409 `backfill_already_running` while a run or a
+    single batch is in flight; 404 `unknown_pack` / 409 `pack_not_enabled` / 400 for a plan that
+    cannot run. Nothing in the body can widen a run that is already going."""
+    import asyncio as _asyncio
+
+    from ..features.derivation import backfill_runs as runs
+    from ..uds import OWNER_CONFIRMATION_MESSAGE
+
+    if not _confirmed_owner_socket():
+        return _backfill_refusal(403, "owner_confirmation_required", OWNER_CONFIRMATION_MESSAGE)
+    if not isinstance(body, dict) or set(body) - {"pack_ids", "limit", "until_done"} \
+            or not isinstance(body.get("until_done", False), bool):
+        return _backfill_refusal(400, "backfill_plan_invalid", "body is {pack_ids, limit, until_done}")
+    limit = body.get("limit", runs.DEFAULT_BATCH_LIMIT)
+    try:
+        ordered = await _asyncio.to_thread(
+            lambda: runs.validate_plan(_entities_conn(), body.get("pack_ids"), limit))
+        run = runs.start_run(ordered, limit, bool(body.get("until_done", False)))
+    except runs.BackfillRefused as refused:
+        status = {"unknown_pack": 404, "pack_not_enabled": 409}.get(refused.code, 400)
+        return _backfill_refusal(status, refused.code, str(refused))
+    except runs.BackfillBusy as busy:
+        return _backfill_refusal(409, busy.code, "A backfill is already running; follow it or stop it first.")
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse({"run": run.snapshot()}, status_code=202, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/derivation/backfill/runs/current")
+async def get_backfill_run(_api_key: str = Depends(require_api_key)):
+    """The active run, else the last one this node process finished, else `{"run": null}`.
+    States, counts per batch and stamps; no record text or ids."""
+    from ..features.derivation import backfill_runs as runs
+
+    return {"run": runs.current()}
+
+
+@router.post("/derivation/backfill/runs/current/stop")
+async def post_backfill_run_stop(_api_key: str = Depends(require_api_key)):
+    """Ask the active run to stop after the record in hand. Stopping starts nothing and unmarks
+    nothing, so it needs no confirmation; a rerun resumes from `derivation_progress`."""
+    from ..features.derivation import backfill_runs as runs
+
+    stopping = runs.stop()
+    return {"stopping": stopping is not None, "run": stopping or runs.current()}
 
 
 @router.put("/entities/communities/{community_id}/name")

@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 
 def list_packs(conn: sqlite3.Connection, *, time_zone: str = "UTC") -> Dict[str, Any]:
@@ -272,9 +272,17 @@ def resolve_pack_offer(conn: sqlite3.Connection, offer_id: str, action: str) -> 
     return {"offer_id": offer_id, "pack_id": pack_id, "kind": kind, "action": action}
 
 
+#: How far back one backfill walks: the newest N journal entries and the newest N messages
+#: (`_iter_history`). `backfill_runs.backfill_plan` counts over the same window, so the number
+#: the owner is shown before a run is the number the run can reach.
+BACKFILL_HISTORY_WINDOW = 20000
+
+
 def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, *,
                       records: Optional[List[Dict[str, Any]]] = None,
-                      use_prefilter: bool = True) -> Dict[str, Any]:
+                      use_prefilter: bool = True,
+                      should_stop: Optional[Callable[[], bool]] = None,
+                      on_record: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     """Owner-initiated history backfill for ONE enabled pack (the lens catalog's
     backfill control). Bounded by `limit` prefilter-HIT records per invocation —
     a huge history closes over a few presses (or the drip catch-up finishes it).
@@ -287,7 +295,19 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     commitment ledger's promise-shaped owner messages, 118 of 7,011, where the pack's
     descriptor prefilter passes 2,816 — must not pay the pack's cost for the rest; and a
     record the caller did not feed is left UNMARKED in `derivation_progress`, so the
-    ordinary history walk can still reach it later."""
+    ordinary history walk can still reach it later.
+
+    `should_stop` is asked before each record: a true answer ends the batch there, with
+    every finished record committed and marked (`stopped: True` in the stats), and the tail
+    (run stamp, embedding of what was written) still runs. `on_record` is called with the
+    running counts after each prefilter-hit record, the ones whose extraction call failed
+    included (`llm_errors`); a multi-batch run (`backfill_runs`) reads its progress and its
+    model-failure streak from it.
+
+    No write transaction is open during a model call (`settle`, as in the ingest job since
+    topos#271): the marks of the records the prefilter passed over, and the measurement row
+    of the call before, are committed first. Without that the backfill held SQLite's write
+    lock across every extraction and verifier call of a batch."""
     from ...enrichment.jobs.canonical.derivation_job import (
         _bump_yield, _iter_history, _ledger_write, _verify_mode, retire_role_skipped_progress)
     from ..provenance.posture import make_posture_resolver
@@ -323,6 +343,8 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
 
     def llm(m, prompt, n=900, *, phase="extraction"):
         from .processing import measured_generate
+        if getattr(conn, "in_transaction", False):
+            conn.commit()   # settle: no write transaction spans a model call (see the docstring)
         return measured_generate(conn, adapter, m, prompt, pack_id=pack_id,
                                  phase=phase, mode="backfill", n=n)
 
@@ -332,10 +354,23 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     posture_for = make_posture_resolver(conn)
     retire_role_skipped_progress(conn, load_packs(pack_dir), posture_for)
     done = {r[0] for r in conn.execute("SELECT key FROM derivation_progress")}
-    stats = {"processed": 0, "assertions": 0, "accepted": 0, "written": 0, "quarantined0": writer.stats.get("quarantined", 0)}
-    source = records if records is not None else _iter_history(conn, limit=20000, posture_for=posture_for)
+    stats = {"processed": 0, "assertions": 0, "accepted": 0, "written": 0, "llm_errors": 0,
+             "quarantined0": writer.stats.get("quarantined", 0)}
+
+    def _report():
+        if on_record is not None:
+            if getattr(conn, "in_transaction", False):
+                conn.commit()   # a failed call's measurement row: the callback may wait (owner_requests.pace)
+            on_record({**{k: v for k, v in stats.items() if k != "quarantined0"},
+                       "quarantined": writer.stats.get("quarantined", 0) - stats["quarantined0"]})
+
+    source = records if records is not None else _iter_history(
+        conn, limit=BACKFILL_HISTORY_WINDOW, posture_for=posture_for)
     for rec in source:
         if stats["processed"] >= limit:
+            break
+        if should_stop is not None and should_stop():
+            stats["stopped"] = True
             break
         key = f"{pack_id}@{pack.version}:{rec['table']}:{rec['record_id']}"
         if key in done:
@@ -354,6 +389,10 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                                           recipient_key=str(rec.get("recipient_key") or "")))
             _bump_yield(conn, pack_id, llm_calls=1, prefilter_hits=1)
         except Exception:  # noqa: BLE001
+            # Left unmarked, so a later batch asks again; counted, so a run can tell a model
+            # that is down from a history that is done.
+            stats["llm_errors"] += 1
+            _report()
             continue
         valid, _rej = parse_output(
             raw, pack, record_text=rec["text"],
@@ -399,6 +438,7 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                           written_id=out.get("object_id") if stored else None)
         conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
         conn.commit()
+        _report()
     conn.commit()
     stats["quarantined"] = writer.stats.get("quarantined", 0) - stats.pop("quarantined0")
 

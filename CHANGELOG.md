@@ -9,6 +9,53 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **`topos-node packs`: list fact packs and backfill their history from a terminal.** `[O]` A pack's history
+  from before it was switched on is read only when the owner asks, and the only way to ask was the app's
+  Data → Fact packs page: one press per batch of 200 records per pack, the request held open for the batch.
+  `topos-node packs backfill --pack ID … | --all-enabled [--limit N] [--until-done] [--detach]` prints the plan
+  (which packs, how many records wait for each, the batch size, and the model time at this node's 30-day
+  average per extraction call), asks `[y/N]` on the terminal, and starts one run. `packs list` shows every
+  pack (switched on, facts held, last run); `packs status [--follow]` shows the run; `packs stop` stops it.
+  - *What the yes authorises.* The owner's confirmation is one token, good for one request and at most 600 s,
+    and one batch of 200 records takes over an hour on the local models. So the yes authorises a run, not a
+    request: `POST /v1/signal/derivation/backfill/runs {pack_ids, limit, until_done}` takes the token once and
+    the node works through the plan itself on its own thread (`features/derivation/backfill_runs.py`), pack
+    after pack, batch after batch, each batch the same `run_pack_backfill` the app's control calls. The plan is
+    fixed at the yes; nothing can be added to a run. The route is `dangerous` in the owner socket's census, and
+    it checks the confirmed socket peer itself as well, so it is also refused over TCP and with
+    `TOPOS_OWNER_DOOR_SPLIT` off. There is no flag that answers for the person and no dispatcher message
+    type for a run: without a terminal the command exits 2 having sent nothing.
+  - *What bounds a run.* One run at a time. It lives in the node process only: a restart ends it and nothing
+    restarts it. It stops after the record in hand on Ctrl-C, on `packs stop`
+    (`POST …/backfill/runs/current/stop`, which needs no confirmation because it starts nothing) and on node
+    shutdown, and between records it yields to the owner's own requests (`owner_requests.pace`). Every finished
+    record is already keyed in `derivation_progress`, so the same command later picks up where the run
+    stopped. Five extraction calls failing in a row end the run (`model_unavailable`): a failed record stays
+    unmarked, so a run against a model that is down would otherwise never end.
+  - *The count before the yes.* `GET /v1/signal/derivation/backfill/plan?pack_id=…` counts the records a
+    backfill would reach: the same history window (the newest 20,000 journal entries and 20,000 messages),
+    each pack's role gate and its own prefilter, less what `derivation_progress` holds. It reads only. On a
+    scratch database of 40,000 records it took 1.2 s for 17 packs.
+  - *Status.* `GET …/backfill/runs/current` answers states, counts per batch (processed, assertions, accepted,
+    written, quarantined, model errors, seconds) and stamps; no record text or ids.
+
+### Changed
+- **The app's single backfill batch is refused while a confirmed run is working.** `[O]`
+  `POST /v1/signal/derivation/packs/{pack_id}/backfill` and the `run_pack_backfill` message answer
+  `backfill_already_running` (409 on the route) during a `topos-node packs backfill` run, and a run does not
+  start while a single batch is in flight, so a run never shares the local models with another backfill. Two
+  single batches from the app may still overlap, as before.
+
+### Fixed
+- **A backfill batch no longer holds SQLite's write lock across model calls.** `[E:derivation]` `run_pack_backfill`
+  marked the records its prefilter passed over without committing, then called the extraction model for the
+  next record; the call's own measurement row then stayed uncommitted across the verifier calls. The ingest job
+  stopped doing this in 1.5.45 (topos#271); the backfill path, which the app's control uses, did not. On a
+  scratch database with a stub model, 36 of the 60 model calls of a 30-record batch ran inside an open write
+  transaction; now none do (the batch commits before each call). At that rate a run of hundreds of batches
+  would have held the lock, and kept the node's other writers waiting, for over half of its model calls.
+
 ## [1.5.46] — 2026-11-08
 
 ### Added

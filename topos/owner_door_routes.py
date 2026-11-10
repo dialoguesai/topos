@@ -313,6 +313,12 @@ CENSUS: Tuple[RouteRule, ...] = (
     _d("POST", "/v1/signal/derivation/offers/resolve", "signal: derivation pack offers"),
     _d("PUT", "/v1/signal/derivation/packs/{pack_id}", "signal: derivation pack configuration"),
     _d("POST", "/v1/signal/derivation/packs/{pack_id}/backfill", "signal: derivation"),
+    # One confirmed backfill RUN (features/derivation/backfill_runs.py): starting it puts hours of local-model
+    # work on the node and writes facts, so it needs the app or the owner's yes on a terminal, and the route
+    # checks the confirmed peer itself as well. Stopping one starts nothing and unmarks nothing.
+    _d("POST", "/v1/signal/derivation/backfill/runs", "signal: starts a multi-batch derivation run"),
+    _o("POST", "/v1/signal/derivation/backfill/runs/current/stop",
+       "stops the active backfill run between records; never starts one, and a rerun resumes"),
     _d("PUT", "/v1/signal/entities/communities/{community_id}/name", "signal: entity curation"),
     _d("POST", "/v1/signal/entities/graph/rebuild", "signal: rebuilds the entity graph"),
     _d("DELETE", "/v1/signal/entities/{entity_id}/blackhole", "signal_unblackhole_entity (Off-limits)"),

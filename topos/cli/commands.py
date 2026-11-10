@@ -790,6 +790,7 @@ from topos.cli.service_cmd import service_group  # noqa: E402
 from topos.cli.setup_cmd import setup_command  # noqa: E402
 from topos.cli.truth_cmd import truth_group  # noqa: E402
 from topos.cli.import_cmd import import_command  # noqa: E402
+from topos.cli.packs_cmd import packs_group  # noqa: E402
 
 main.add_command(reprocess_command)
 main.add_command(profile_group)
@@ -806,6 +807,7 @@ main.add_command(service_group)
 main.add_command(setup_command)
 main.add_command(truth_group)
 main.add_command(import_command)
+main.add_command(packs_group)
 
 
 if __name__ == "__main__":
