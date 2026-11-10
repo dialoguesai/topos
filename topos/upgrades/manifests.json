@@ -1460,6 +1460,17 @@
       ]
     },
     {
+      "version": "1.5.47",
+      "summary": "topos-node packs list, backfill, status and stop read fact packs' history from a terminal: one yes on the terminal starts one run the node works through itself. A backfill can stop at a date, uses the facts extractor the owner picked, and no longer holds SQLite's write lock across model calls.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "`topos-node packs backfill (--pack ID ... | --all-enabled) [--since YYYY-MM-DD] [--limit N] [--until-done] [--detach]` prints the plan and asks [y/N] once on a terminal; without a terminal it exits 2 and sends nothing. POST /v1/signal/derivation/backfill/runs starts the run with a single-use owner confirmation, on the owner socket only (403 owner_confirmation_required otherwise, over TCP included); GET .../backfill/plan and GET .../backfill/runs/current are reads; POST .../backfill/runs/current/stop needs no confirmation.",
+        "One run at a time, in the node process only: a restart ends it and the same command resumes from derivation_progress. While a run works, the app's single-batch backfill answers 409 backfill_already_running.",
+        "A backfill (the app's button included) now takes the ingest job's route: Topos Facts reads the packs it knows when the owner picked it, the local extraction model reads the rest; a pick that cannot load defers the batch (503 topos_facts_unavailable) with nothing marked done."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
