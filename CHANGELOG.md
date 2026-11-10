@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.47] — 2026-11-10
+
 ### Added
 - **`topos-node packs`: list fact packs and backfill their history from a terminal.** `[O]` A pack's history
   from before it was switched on is read only when the owner asks, and the only way to ask was the app's
