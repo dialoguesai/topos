@@ -75,6 +75,10 @@ class FakeNode:
             "get_sources": {"status": "ok", "sources": []},
         }
         self.door_results: dict[tuple[str, str], tuple[int, dict[str, Any]]] = {}
+        #: ``GET /api/local/owner/sources`` rows; None answers 404 (a node that predates the list door).
+        self.sources_listing: Optional[list[dict[str, Any]]] = None
+        #: ``GET /api/local/owner/sources/{id}`` bodies; an id that is not here answers 404.
+        self.source_status: dict[str, dict[str, Any]] = {}
         self.app = self._build()
 
     # ------------------------------------------------------------------ app
@@ -158,10 +162,26 @@ class FakeNode:
                 return {"status": "error", "error": "unknown source_id"}
             return node._plant({"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **found})
 
+        @app.get("/api/local/owner/sources")
+        async def owner_sources_list():
+            node.calls.append({"route": "sources_list"})
+            if node.sources_listing is None:
+                return JSONResponse({"detail": "Not Found"}, status_code=404)
+            return node._plant({"sources": [dict(row) for row in node.sources_listing]})
+
+        @app.get("/api/local/owner/sources/{source_id}")
+        async def owner_source_status(source_id: str):
+            node.calls.append({"route": "source_status", "source_id": source_id})
+            found = node.source_status.get(source_id)
+            if found is None:
+                return JSONResponse({"detail": "unknown_source"}, status_code=404)
+            return node._plant(dict(found))
+
         @app.post("/api/local/owner/sources/{source_id}/{action}")
         async def door(source_id: str, action: str, request: Request):
             body = await request.json() if int(request.headers.get("content-length") or 0) else {}
-            node.calls.append({"route": "door", "source_id": source_id, "action": action, "body": body})
+            node.calls.append({"route": "door", "source_id": source_id, "action": action, "body": body,
+                               "confirm": request.headers.get("x-topos-owner-confirm")})
             if not node.paired:
                 return JSONResponse({"error": "not_paired"}, status_code=409)
             if (source_id, action) in node.door_results:

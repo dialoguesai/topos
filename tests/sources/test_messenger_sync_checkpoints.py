@@ -272,14 +272,19 @@ def test_reader_sees_messages_still_only_in_the_wal(tmp_path: Path, monkeypatch:
 
 @pytest.fixture
 def signal_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> sqlite3.Connection:
-    """A plaintext Signal-shaped database read through a stand-in for pysqlcipher3.
+    """A plaintext Signal-shaped database read through a stand-in for the SQLCipher binding.
 
-    The cipher PRAGMAs are unknown to plain SQLite, which ignores them.
+    The cipher PRAGMAs are unknown to plain SQLite, which ignores them. Every name the reader tries
+    (``signal_reader.SQLCIPHER_BINDINGS``) is stood in for, so an installed real binding is never the
+    one that opens this plaintext file.
     """
-    fake = types.ModuleType("pysqlcipher3")
-    fake.dbapi2 = sqlite3  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "pysqlcipher3", fake)
-    monkeypatch.setitem(sys.modules, "pysqlcipher3.dbapi2", sqlite3)
+    from topos.ingestion.sources.signal_reader import SQLCIPHER_BINDINGS
+
+    for name in SQLCIPHER_BINDINGS:
+        fake = types.ModuleType(name)
+        fake.dbapi2 = sqlite3  # type: ignore[attr-defined]
+        monkeypatch.setitem(sys.modules, name, fake)
+        monkeypatch.setitem(sys.modules, f"{name}.dbapi2", sqlite3)
     path = tmp_path / "signal.sqlite"
     monkeypatch.setenv("SIGNAL_DB_PATH", str(path))
     conn = sqlite3.connect(str(path))

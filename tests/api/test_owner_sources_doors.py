@@ -132,11 +132,15 @@ def test_preview_is_counts_only_and_writes_nothing(node) -> None:
     assert conn.execute("SELECT name FROM sqlite_master WHERE name LIKE 'raw_chat_messages_claude%'").fetchall() == []
 
 
-def test_preview_and_the_doors_refuse_an_unknown_or_non_ai_source(node) -> None:
+def test_preview_and_the_doors_refuse_a_source_the_setup_catalog_does_not_name(node) -> None:
+    """A registry source with no door here (a cloud connector's) and a word that is no source at all are both
+    404. iMessage, Signal and the extensions' sources have their own answers:
+    ``test_owner_sources_messenger_doors.py``."""
     app, _conn, _reader = node
     with _client(app) as client:
-        assert client.post(BASE + "/sources/imessage/preview", json={}).status_code == 404
+        assert client.post(BASE + "/sources/gmail_messages/preview", json={}).status_code == 404
         assert client.post(BASE + "/sources/nonsense/enable", json={}).status_code == 404
+        assert client.get(BASE + "/sources/nonsense").status_code == 404
 
 
 # --- enable --------------------------------------------------------------------
