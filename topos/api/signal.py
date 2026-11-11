@@ -1275,13 +1275,16 @@ async def post_pack_backfill(
     """Bounded owner-initiated history backfill (lens catalog control): one batch, held open.
 
     Refused 409 `backfill_already_running` while a confirmed run is working through its packs
-    (`backfill_runs`): a run and a single batch never share the local models."""
+    (`backfill_runs`): a run and a single batch never share the local models. An automatic catch-up
+    run is not a reason to refuse: it is asked to stop after the record in hand and this batch waits
+    for it (`yield_to_owner`), on a worker thread."""
     import asyncio as _asyncio
 
-    from ..features.derivation.backfill_runs import BackfillBusy, single_batch
+    from ..features.derivation.backfill_runs import BackfillBusy, single_batch, yield_to_owner
     from ..features.derivation.surfaces import BackfillDeferred, run_pack_backfill
 
     try:
+        await _asyncio.to_thread(yield_to_owner)
         with single_batch():
             stats = await _asyncio.to_thread(lambda: run_pack_backfill(_entities_conn(), pack_id, limit))
     except BackfillBusy as busy:
@@ -1375,6 +1378,47 @@ async def post_backfill_run(
     from fastapi.responses import JSONResponse
 
     return JSONResponse({"run": run.snapshot()}, status_code=202, headers={"Cache-Control": "no-store"})
+
+
+# --- the standing switch: keep the switched-on packs current (features/derivation/auto_catchup.py) ---
+# Reading it is a read. Setting it is the owner's: it lets the node start runs by itself from then on.
+
+
+@router.get("/derivation/backfill/auto")
+async def get_backfill_auto(_api_key: str = Depends(require_api_key)):
+    """The automatic catch-up: on or off, its two periods, how the last automatic look ended and when
+    the next may start. State words, stamps and counts; nothing runs and no model is loaded."""
+    import asyncio as _asyncio
+
+    from ..features.derivation import auto_catchup as auto
+
+    return await _asyncio.to_thread(lambda: auto.describe(_entities_conn()))
+
+
+@router.put("/derivation/backfill/auto")
+async def put_backfill_auto(
+    body: Dict[str, Any] = Body(...),
+    _api_key: str = Depends(require_api_key),
+):
+    """Turn the automatic catch-up on or off: `{enabled: bool, quiet_s?: int, min_gap_s?: int}`.
+
+    403 `owner_confirmation_required` unless the caller is the app or presents the owner's confirmation
+    on the socket, for off as for on: the setting is the owner's. 400 `auto_catchup_invalid` for a body
+    that is not that. Answers the same body as the read."""
+    import asyncio as _asyncio
+
+    from ..features.derivation import auto_catchup as auto
+    from ..uds import OWNER_CONFIRMATION_MESSAGE
+
+    if not _confirmed_owner_socket():
+        return _backfill_refusal(403, "owner_confirmation_required", OWNER_CONFIRMATION_MESSAGE)
+    if not isinstance(body, dict) or set(body) - {"enabled", "quiet_s", "min_gap_s"} or "enabled" not in body:
+        return _backfill_refusal(400, auto.AutoRefused.code, "body is {enabled, quiet_s, min_gap_s}")
+    try:
+        return await _asyncio.to_thread(lambda: auto.set_switch(
+            _entities_conn(), body["enabled"], quiet_s=body.get("quiet_s"), min_gap_s=body.get("min_gap_s")))
+    except auto.AutoRefused as refused:
+        return _backfill_refusal(400, refused.code, str(refused))
 
 
 @router.get("/derivation/backfill/runs/current")
