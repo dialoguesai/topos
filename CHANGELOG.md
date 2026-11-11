@@ -12,6 +12,7 @@ The machine-readable twin of each release is
 ## [1.5.49] — 2026-11-10
 
 ### Added
+- **Provisional self-coherence measurements for the owner dashboard.** `[O]` A versioned, read-only literal-claim comparison reports aligned groups, potential tensions and coverage over a rolling 30-day window. Missing comparisons remain unknown; failures and owner corrections do not count as contradictions. Each group receives one vote. The home client can display these aggregates without a schema migration or changes to claim verification. See `docs/dashboard-measurements.md` for the formula and limits.
 - **Explicit grants for every bundled fact category.** `[P] [O]` New versioned consent covers all 30 categories, 237 pack predicates and the 12 known legacy predicates, including sensitive and inferred facts when selected. Structured values, dependent facts and named people use the same source permission and owner-protection checks. Previews and final responses enforce the selected categories and fact types. Existing v1 grants keep their original scope. Requires the matching control-plane and web release; no pack is enabled and no grant is widened automatically.
 
 
