@@ -1275,3 +1275,21 @@ Prepared on the separate 1.5.48 candidate (`fe964dbf`, PR #280), preserving its 
 The legacy `scripts/run_release_eval.py` scorecard is **FAIL**, retained in `eval_reports/1.5.49.json`: the negotiation/minimality harness it imports was removed by `0f969868` (N8, retirement of old sharing doors). Its privacy pytest leg completed with 382 passes and two existing expected failures; unauthorized-access and canary-extraction probes measured zero leaks (6 and 270 probes), and deny p95 was 0.2 ms. Missing negotiation measurements are not a passing metric. Earlier interrupted helper attempts are retained locally and are not claimed as results. The completed run used scratch data, the owner-database tripwire and an unavailable local-model endpoint, consistent with its deterministic lane.
 
 The procedure of record, `RELEASING.md`, and current `just eval-release` use the exact-tree six-pair Rig D gate. That gate and selected CI are still pending for this candidate. The other release's owner waiver does not cover this tree. No production deployment or tag has been made by this task at this point.
+
+
+### 1.5.49 release integration follow-up (11 Nov 2026 UTC)
+
+Full release CI found stale protocol/declaration schema exports, census source pins
+and fixtures that still treated non-work categories as unsupported. Regenerated the
+v2 schema exports, reviewed the census mirrors and carried the projection revision
+contract into its member records. Ontology-switch fixtures now use unsupported future
+categories; the no-app-special-case guard validates the catalog as literal data.
+Targeted integration rerun: 293 passed. The first corrected CI attempt exposed one
+remaining KnowledgeDeclaration schema export. The legacy read-budget freeze now
+strips the new knowledge-only ExpandedFacts definition when comparing its original
+protocol alternatives; its pinned legacy hash is unchanged. Related schema, signing,
+budget and census checks: 104 passed.
+The 53ce26ea sharing attempt was stopped before completion because that schema fix
+changes the exact release tree; it is diagnostic, not passing release evidence.
+Full CI and a fresh sharing rig remain required; no deployment claimed. Prior offline
+and real-model comparison limitations remain unchanged.
