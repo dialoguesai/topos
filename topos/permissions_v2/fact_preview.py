@@ -1,11 +1,18 @@
 """Owner-only grant-specific candidates. Release reuses the same qualifier."""
+import json
+
 from .canonical import PolicyError
+from .expanded_facts import ExpandedFacts, PACKS
 from .evidence import _json, _key
 from .knowledge_projections import candidates, fact_projection
 from .predicate_classes import scalar
-from .selective_facts import ontology_of
+from .selective_facts import catalog_ontology_of as ontology_of
 
 REASONS = {
+    "fact_assertion_unselected": "This stated or extracted/inferred fact type is not selected",
+    "fact_classification_unknown": "This fact has no known sensitivity classification",
+    "fact_projection_unsupported": "This fact does not match its registered value schema or owner",
+    "fact_not_current": "This fact is closed, future-dated or has unknown validity",
     "eligible": "Passes this grant's current protections",
     "owner_only": "Kept private by its producer or owner",
     "fact_ontology_unselected": "This ontology is not selected",
@@ -56,9 +63,18 @@ def preview(walk, identities):
                                 "excerpt": native[_key(identity)]["content"][:240]})
         except PolicyError as exc:
             code = exc.code if exc.code in REASONS else "could_not_check"
-        value = scalar(payload.get("predicate"), payload)
-        items.append({"fact_id": fid, "ontology_id": oid, "predicate": payload.get("predicate") or "unknown",
-            "statement": projected.content if code == "eligible" else value or "Unsupported structured fact", "assertion": "inferred" if
-                payload.get("altitude") in ("inferred", "predicted") or row.get("altitude") in ("inferred", "predicted") else "owner_stated",
+        predicate = payload.get("predicate") if isinstance(payload.get("predicate"), str) else "unknown"
+        value = scalar(predicate, payload)
+        expanded = isinstance(walk.policy.search.selective_facts, ExpandedFacts)
+        if expanded and value is None and oid in PACKS:
+            from .expanded_fact_projection import stored_value
+            try:
+                stored = stored_value(oid, {**payload, "predicate": predicate})
+                value = stored if isinstance(stored, str) else json.dumps(stored, ensure_ascii=False, sort_keys=True)
+            except PolicyError:
+                pass
+        items.append({"fact_id": fid, "ontology_id": oid, "predicate": predicate,
+            "statement": projected.content if code == "eligible" else value or "Unsupported structured fact", "assertion": projected.fields["assertion"] if code == "eligible" else "inferred" if
+                expanded or payload.get("altitude") in ("inferred", "predicted") or row.get("altitude") in ("inferred", "predicted") else "owner_stated",
             "eligible": code == "eligible", "reason": code, "reason_text": REASONS[code], "sources": sources})
     return items

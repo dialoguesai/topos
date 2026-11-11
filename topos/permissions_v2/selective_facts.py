@@ -1,7 +1,7 @@
 """Frozen ontology consent vocabulary. Mirrored by the control plane.
 
-An ontology is identity, never proof of ownership or permission. The first
-admission is deliberately small: supported stated work predicates only.
+An ontology is identity, never proof of ownership or permission. The frozen v1
+contract below remains work-only; new consent uses the all-category v2 contract.
 """
 import sqlite3
 from typing import Annotated, Literal
@@ -10,6 +10,7 @@ from pydantic import Field, field_validator, model_validator
 
 from .canonical import PolicyError, digest
 from .contract import Hash, Identifier, StrictModel
+from .expanded_facts import ExpandedFacts, selection as selection_v2
 
 VERSION = "selective-facts/v1"
 VOCABULARY = "fact-ontology-vocabulary/v1"
@@ -63,6 +64,15 @@ class SelectiveFacts(StrictModel):
         return self
 
 
+# The discriminator prevents a v1 document from acquiring v2 behavior.
+FactSelection = Annotated[SelectiveFacts | ExpandedFacts, Field(discriminator="version")]
+
+def parse_selection(raw):
+    if isinstance(raw, dict) and raw.get("version") == "selective-facts/v2":
+        return ExpandedFacts.parse(raw)
+    return SelectiveFacts.parse(raw)
+
+
 def selection(ontology_ids, excluded_fact_ids=()):
     return {"version": VERSION, "vocabulary": VOCABULARY, "catalog_digest": CATALOG_DIGEST,
         "ontologies": [{"ontology_id": oid, "revision": SEMANTICS[oid]["revision"],
@@ -73,7 +83,7 @@ def selection(ontology_ids, excluded_fact_ids=()):
 UNAVAILABLE = {'admin.legal': ('Legal and administration', 'special_category'), 'aspirations.goals': ('Goals and aspirations', 'unsupported_grounding'), 'behavior.habits': ('Habits', 'inferred_or_owner_only'), 'behavior.preferences': ('Preferences', 'inferred_or_owner_only'), 'beliefs.civic': ('Civic beliefs', 'special_category'), 'beliefs.spiritual': ('Spiritual beliefs', 'special_category'), 'communication.style': ('Communication style', 'inferred_or_owner_only'), 'community.membership': ('Community membership', 'special_category'), 'craft.tooling': ('Tools and craft', 'unsupported_grounding'), 'expertise.knowledge': ('Knowledge and expertise', 'unsupported_grounding'), 'finances.economics': ('Finances', 'special_category'), 'health.lifestyle': ('Health and lifestyle', 'special_category'), 'health.mental': ('Mental health', 'special_category'), 'health.physical': ('Physical health', 'special_category'), 'household.pets': ('Household and pets', 'unsupported_grounding'), 'identity.core': ('Identity', 'special_category'), 'interests.taste': ('Interests and taste', 'unsupported_grounding'), 'life.events': ('Life events', 'unsupported_grounding'), 'narrative.self': ('Personal narrative', 'inferred_or_owner_only'), 'net.capability': ('Capabilities', 'inferred_or_owner_only'), 'net.character': ('Character', 'inferred_or_owner_only'), 'obligations.commitments': ('Commitments', 'unsupported_grounding'), 'personality.traits': ('Personality', 'inferred_or_owner_only'), 'places.mobility': ('Places and travel', 'unsupported_grounding'), 'possessions.assets': ('Possessions', 'special_category'), 'relationships.social': ('Social relationships', 'third_party_subject'), 'values.motivation': ('Values and motivations', 'special_category')}
 
 
-def catalog():
+def legacy_catalog():
     """Owner-only, data-independent availability. No private count or existence signal."""
     return {"version": VERSION, "vocabulary": VOCABULARY, "catalog_digest": CATALOG_DIGEST,
         "ontologies": [{"ontology_id": "work.career", "title": "Work and career",
@@ -112,7 +122,18 @@ def enabled_revision(conn):
     the index that is there keeps serving; an ontology outside this release shares nothing either way and never
     moves it. No index basis binds it: an index is never refused because of a switch."""
     enabled = enabled_ontologies(conn)
-    return sorted(oid for oid in SEMANTICS if oid in enabled)
+    from .expanded_facts import SEMANTICS as expanded_semantics
+    return sorted(oid for oid in expanded_semantics if oid in enabled)
+
+
+def catalog():
+    from .expanded_facts import catalog as expanded_catalog
+    return expanded_catalog()
+
+
+def catalog_ontology_of(row, payload):
+    from .expanded_facts import ontology_of as expanded_ontology
+    return expanded_ontology(row, payload)
 
 
 def ontology_of(row, payload):
@@ -140,6 +161,9 @@ def ontology_of(row, payload):
 
 def authorize(row, payload, policy):
     declaration = getattr(policy.search, "selective_facts", None)
+    if isinstance(declaration, ExpandedFacts):
+        from .expanded_facts import authorize as expanded_authorize
+        return expanded_authorize(row, payload, policy)
     if declaration is None:
         raise PolicyError("fact_selection_required")
     if row["object_id"] in declaration.excluded_fact_ids:
@@ -177,7 +201,7 @@ def validate_output(policy, output):
     for fact in raw.get("records", raw.get("sources", [])):
         if fact.get("kind") != "fact":
             continue
-        if (declaration is None or fact.get("assertion") != "owner_stated"
+        if (declaration is None or fact.get("assertion") not in (declaration.assertions if isinstance(declaration, ExpandedFacts) else ["owner_stated"])
                 or not any(item.ontology_id == fact.get("ontology_id")
                            and fact.get("predicate") in item.predicates for item in declaration.ontologies)
                 or not fact.get("citations")
