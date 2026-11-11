@@ -1,4 +1,5 @@
-"""Owner socket: the AI-coding-tool sources (CONTRACTS.md §2.8).
+"""Owner socket: the sources a person turns on by id — the AI coding tools (CONTRACTS.md §2.8),
+iMessage and Signal Desktop, and the browser extensions' sources.
 
 On the node's owner socket only (the 0600 UDS; no bearer, no relay), like ``source_retention``.
 Every answer is counts, flags, ids and stamps; no transcript text leaves the node.
@@ -19,6 +20,17 @@ and never from the body.
 ``POST …/reclassify-touches {apply?: bool}`` → re-judge stored replies under the read / system-touch rule
 (owner ruling 20 Oct 2026): counts only; ``apply`` clears the flag where no read came first. Owner only —
 never the enrolled agent — because it widens what can be shared.
+
+**By id, beyond the coding tools** (``sources/setup_catalog.py``). ``GET /api/local/owner/sources`` lists
+every source that can be turned on from a terminal with its state. The five verbs above also answer for
+``imessage`` and ``signal`` (``ingestion/messenger_setup.py``): ``pause`` stops reading and is open;
+``preview {backfill}`` (counts only, nothing written), ``enable {backfill}``, ``resume`` and ``sync`` open
+other people's words, so the socket refuses them 403 ``owner_confirmation_required`` without the Topos app or
+a confirmation the person gave on a terminal (``owner_door_routes.MESSENGER_RULES``). A refusal that needs the
+person (Full Disk Access, no Signal reader, a Keychain request not allowed) is 409 with its code and the
+plain sentence. The extensions' sources (``browser_visits``, ``browser_events``, ``chatgpt_ui_conversation``)
+have a status and nothing to enable here: an extension is connected by ``topos-node pushers add`` on a
+terminal, and the verbs answer 409 ``extension_source`` saying so.
 """
 
 from __future__ import annotations
@@ -40,6 +52,8 @@ router = APIRouter(prefix="/api/local/owner", tags=["sources-owner"])
 _NO_STORE = {"Cache-Control": "no-store"}
 _PREVIEW_FIELDS = frozenset({"skip"})
 _ENABLE_FIELDS = frozenset({"skip", "backfill"})
+_MESSENGER_FIELDS = frozenset({"backfill"})
+EXTENSION_SOURCE = "extension_source"
 _SYNC_FIELDS = frozenset({"session_path"})
 _RECLASSIFY_FIELDS = frozenset({"apply"})
 
@@ -76,6 +90,136 @@ def _ai_source(source_id: str) -> str:
     if sid not in SOURCE_ID_TO_TOOL:
         raise HTTPException(404, "unknown_source", headers=_NO_STORE)
     return sid
+
+
+def _kind(source_id: str) -> str:
+    """``coding_history``, ``messages`` or ``extension`` for a source the setup catalog names; 404 otherwise."""
+    from topos.sources.setup_catalog import kind_of
+
+    kind = kind_of(str(source_id or "").strip())
+    if kind is None:
+        raise HTTPException(404, "unknown_source", headers=_NO_STORE)
+    return kind
+
+
+#: The messenger verbs that open a message store: the person's, on a terminal, or the app's.
+_MESSENGER_CONFIRMED_VERBS = frozenset({"preview", "enable", "resume", "sync"})
+
+
+def _confirmed_owner_socket() -> bool:
+    """The request came over the owner socket from a peer that may change things: the app, the dev proxy on
+    a node that allows it, or a confirmation a person just gave on a terminal. The socket layer's gate already
+    asked this for the route (``owner_door_routes.MESSENGER_RULES``); asking again here keeps a messenger
+    source closed with the split flag off, where that gate does not run (the fact-pack backfill does the same,
+    ``api/signal._confirmed_owner_socket``)."""
+    from topos.uds import current_socket_peer, current_transport, peer_may_change
+
+    peer = current_socket_peer()
+    return current_transport() == "uds" and peer is not None and peer_may_change(peer)
+
+
+def _extension_refusal(source_id: str) -> JSONResponse:
+    from topos.sources.setup_catalog import BY_ID
+
+    entry = BY_ID[source_id]
+    return _refusal(
+        409, EXTENSION_SOURCE,
+        f"{entry.name} is written by a browser extension. Add the extension, then run "
+        f"`topos-node pushers add {entry.app} --sources {','.join(entry.app_sources)}` in your own terminal.",
+    )
+
+
+def _messenger_backfill(body: Dict[str, Any]) -> str:
+    from topos.ingestion.messenger_setup import BACKFILL_CHOICES
+
+    backfill = body.get("backfill", "30d")
+    if not isinstance(backfill, str) or backfill not in BACKFILL_CHOICES:
+        raise HTTPException(400, "owner_sources_payload_invalid", headers=_NO_STORE)
+    return backfill
+
+
+async def _messenger(run, *, what: str) -> JSONResponse:
+    """Run one messenger_setup call off the loop and turn its refusal into the door's 409."""
+    from topos.ingestion.messenger_setup import MessengerRefused
+
+    try:
+        result = await asyncio.to_thread(run)
+    except MessengerRefused as exc:
+        return _refusal(exc.status, exc.code, exc.message)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc), headers=_NO_STORE) from None
+    except Exception as exc:  # noqa: BLE001 -- the kind only; no path, row or exception text leaves the node
+        logger.warning("%s failed: %s", what, type(exc).__name__)
+        raise HTTPException(503, "owner_sources_unavailable", headers=_NO_STORE) from None
+    return JSONResponse(result, headers=_NO_STORE)
+
+
+def _start_worker() -> None:
+    from topos.core.state import get_db_connection
+    from topos.pipeline.job_runner import start_pipeline_worker
+
+    start_pipeline_worker(get_db_connection)
+
+
+def _describe_extension(conn, source_id: str) -> Dict[str, Any]:
+    """Whether the extension that writes this source is connected to this node. Flags and stamps only."""
+    from topos import local_pushers
+    from topos.sources.setup_catalog import BY_ID
+
+    entry = BY_ID[source_id]
+    row = next(
+        (r for r in local_pushers.list_pushers(conn)
+         if r.get("app") == entry.app and not r.get("revoked_at") and source_id in (r.get("sources") or [])),
+        None,
+    )
+    return {
+        "source_id": source_id, "display_name": entry.name, "kind": entry.kind, "app": entry.app,
+        "app_sources": list(entry.app_sources), "install_url": entry.install_url,
+        "connected": row is not None, "enabled": row is not None,
+        "connected_at": row.get("created_at") if row else None,
+        "last_write_at": row.get("last_used_at") if row else None,
+    }
+
+
+def _describe_any(conn, source_id: str, kind: str) -> Dict[str, Any]:
+    from topos.sources.setup_catalog import KIND_CODING_HISTORY, KIND_MESSAGES
+
+    if kind == KIND_CODING_HISTORY:
+        from topos.ingestion.ai_tool_sync import describe_ai_tool_source
+
+        return {"kind": kind, **describe_ai_tool_source(conn, source_id)}
+    if kind == KIND_MESSAGES:
+        from topos.ingestion.messenger_setup import describe_messenger_source
+
+        return describe_messenger_source(conn, source_id)
+    return _describe_extension(conn, source_id)
+
+
+def _list_entry(conn, entry) -> Dict[str, Any]:
+    """One row of ``GET /sources``: the catalog's words and the few state fields a setup step reads."""
+    from topos.sources.setup_catalog import KIND_CODING_HISTORY, KIND_MESSAGES
+
+    row: Dict[str, Any] = entry.public()
+    try:
+        if entry.kind == KIND_CODING_HISTORY:
+            from topos.ingestion.ai_tool_sync import source_state
+
+            state = source_state(conn, entry.source_id)
+            row.update({k: state.get(k) for k in ("enabled", "paused", "last_sync_at", "last_error")})
+        elif entry.kind == KIND_MESSAGES:
+            from topos.ingestion.messenger_setup import messenger_state, readiness
+
+            state = messenger_state(conn, entry.source_id)
+            ready = readiness(entry.source_id)
+            row.update({k: state.get(k) for k in ("enabled", "paused", "last_sync_at", "last_error")})
+            row.update({"ready": ready["ready"], "needs": ready["code"]})
+        else:
+            state = _describe_extension(conn, entry.source_id)
+            row.update({k: state.get(k) for k in ("enabled", "connected", "connected_at", "last_write_at")})
+    except Exception as exc:  # noqa: BLE001 -- one unreadable source never empties the list
+        logger.warning("sources list: %s unreadable (%s)", entry.source_id, type(exc).__name__)
+        row.update({"enabled": None, "state_unavailable": True})
+    return row
 
 
 def _skip_list(body: Dict[str, Any]) -> list:
@@ -141,22 +285,89 @@ async def owner_rescope_report(principal=Depends(resolve_request_principal)):
     return JSONResponse({"identity_mode": mode, "rescope_report": report}, headers=_NO_STORE)
 
 
-@router.get("/sources/{source_id}")
-async def source_status(source_id: str, principal=Depends(resolve_request_principal)):
-    _owner(principal, reads=True)
-    sid = _ai_source(source_id)
-    from topos.ingestion.ai_tool_sync import describe_ai_tool_source
+@router.get("/sources")
+async def sources_list(principal=Depends(resolve_request_principal)):
+    """Every source that can be turned on from a terminal, by id, with its state. Owner only: the list says
+    which of the owner's apps and message stores exist on this computer."""
+    _owner(principal)
+    from topos.sources.setup_catalog import CATALOG
+
+    def run() -> Dict[str, Any]:
+        conn = _conn()
+        return {"sources": [_list_entry(conn, entry) for entry in CATALOG]}
 
     try:
-        status = await asyncio.to_thread(lambda: describe_ai_tool_source(_conn(), sid))
+        listing = await asyncio.to_thread(run)
+    except Exception:  # noqa: BLE001
+        raise HTTPException(503, "owner_sources_unavailable", headers=_NO_STORE) from None
+    return JSONResponse(listing, headers=_NO_STORE)
+
+
+@router.get("/sources/{source_id}")
+async def source_status(source_id: str, principal=Depends(resolve_request_principal)):
+    kind = _kind(source_id)
+    from topos.sources.setup_catalog import KIND_CODING_HISTORY
+
+    # The enrolled coding agent reads the status of the transcript sources (CONTRACTS §1.2); whether the
+    # owner's Messages or an extension is connected is the owner's to read.
+    _owner(principal, reads=kind == KIND_CODING_HISTORY)
+    sid = str(source_id).strip()
+    try:
+        status = await asyncio.to_thread(lambda: _describe_any(_conn(), sid, kind))
     except Exception:  # noqa: BLE001
         raise HTTPException(503, "owner_sources_unavailable", headers=_NO_STORE) from None
     return JSONResponse(status, headers=_NO_STORE)
 
 
+async def _other_kind(source_id: str, action: str, payload: Optional[dict]) -> Optional[JSONResponse]:
+    """The verb for a messenger or an extension source, or None for a coding tool (and for an id the catalog
+    does not name, which the coding-tool path answers 404).
+
+    ``preview``, ``enable``, ``resume`` and ``sync`` of a messenger source reach here only past the socket's
+    dangerous-door gate (``owner_door_routes.MESSENGER_RULES``): the Topos app, or a confirmation the person gave on a terminal.
+    """
+    from topos.sources.setup_catalog import KIND_EXTENSION, KIND_MESSAGES, kind_of
+
+    sid = str(source_id or "").strip()
+    kind = kind_of(sid)
+    if kind == KIND_EXTENSION:
+        return _extension_refusal(sid)
+    if kind != KIND_MESSAGES:
+        return None
+    if action in _MESSENGER_CONFIRMED_VERBS and not _confirmed_owner_socket():
+        from topos.uds import OWNER_CONFIRMATION_MESSAGE
+
+        return _refusal(403, "owner_confirmation_required", OWNER_CONFIRMATION_MESSAGE)
+    from topos.ingestion import messenger_setup
+
+    if action == "preview":
+        backfill = _messenger_backfill(_body(payload, _MESSENGER_FIELDS))
+        return await _messenger(lambda: messenger_setup.preview_messenger_source(_conn(), sid, backfill=backfill),
+                                what=f"preview {sid}")
+    if action == "enable":
+        backfill = _messenger_backfill(_body(payload, _MESSENGER_FIELDS))
+        response = await _messenger(lambda: messenger_setup.enable_messenger_source(_conn(), sid, backfill=backfill),
+                                    what=f"enable {sid}")
+        if response.status_code == 200:
+            _start_worker()
+        return response
+    if action == "pause":
+        return await _messenger(lambda: messenger_setup.set_messenger_enabled(_conn(), sid, False), what=f"pause {sid}")
+    if action == "resume":
+        return await _messenger(lambda: messenger_setup.set_messenger_enabled(_conn(), sid, True), what=f"resume {sid}")
+    _body(payload, frozenset())
+    response = await _messenger(lambda: messenger_setup.sync_messenger_source(_conn(), sid), what=f"sync {sid}")
+    if response.status_code == 200:
+        _start_worker()
+    return response
+
+
 @router.post("/sources/{source_id}/preview")
 async def preview(source_id: str, payload: Optional[dict] = Body(None), principal=Depends(resolve_request_principal)):
     _owner(principal)
+    routed = await _other_kind(source_id, "preview", payload)
+    if routed is not None:
+        return routed
     sid = _ai_source(source_id)
     body = _body(payload, _PREVIEW_FIELDS)
     skip = _skip_list(body)
@@ -174,6 +385,9 @@ async def preview(source_id: str, payload: Optional[dict] = Body(None), principa
 @router.post("/sources/{source_id}/enable")
 async def enable(source_id: str, payload: Optional[dict] = Body(None), principal=Depends(resolve_request_principal)):
     _owner(principal)
+    routed = await _other_kind(source_id, "enable", payload)
+    if routed is not None:
+        return routed
     sid = _ai_source(source_id)
     body = _body(payload, _ENABLE_FIELDS)
     skip = _skip_list(body)
@@ -226,12 +440,18 @@ async def _set_paused(source_id: str, paused: bool) -> JSONResponse:
 @router.post("/sources/{source_id}/pause")
 async def pause(source_id: str, principal=Depends(resolve_request_principal)):
     _owner(principal)
+    routed = await _other_kind(source_id, "pause", None)
+    if routed is not None:
+        return routed
     return await _set_paused(_ai_source(source_id), True)
 
 
 @router.post("/sources/{source_id}/resume")
 async def resume(source_id: str, principal=Depends(resolve_request_principal)):
     _owner(principal)
+    routed = await _other_kind(source_id, "resume", None)
+    if routed is not None:
+        return routed
     return await _set_paused(_ai_source(source_id), False)
 
 
@@ -262,6 +482,9 @@ async def reclassify_touches(source_id: str, payload: Optional[dict] = Body(None
 @router.post("/sources/{source_id}/sync")
 async def sync(source_id: str, payload: Optional[dict] = Body(None), principal=Depends(resolve_request_principal)):
     _owner(principal)
+    routed = await _other_kind(source_id, "sync", payload)
+    if routed is not None:
+        return routed
     sid = _ai_source(source_id)
     body = _body(payload, _SYNC_FIELDS)
     session_path = body.get("session_path")

@@ -9,6 +9,52 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **`topos-node sources`: iMessage, Signal and the browser extensions' sources, by the id the app uses.** `[O]`
+  A node with no account could turn on only its coding tool's own history: `sources enable` served the three
+  transcript sources and answered 404 for everything else, because the web app turns Messages and Signal on
+  through the control plane. A setup prompt that says "also set up iMessage" had nothing to call.
+  `topos-node sources list` now shows every source that can be turned on from a terminal (id, name, on or off,
+  what is missing), and `preview` / `enable` / `pause` / `resume` / `sync` take `imessage`, `signal`,
+  `browser_visits`, `browser_events` and `chatgpt_ui_conversation` as well. The word may be the registry id, the
+  name the app shows, or what a person types ("iMessage Sync", "Browser History Plugin", "ChatGPT Shadow"):
+  `sources/setup_catalog.py` is the one table, pinned to the registry by `tests/sources/test_setup_catalog.py`.
+  - *iMessage and Signal ask the person.* They hold other people's words. `enable` shows how many messages
+    there are and how many the chosen window (`--backfill 30d | all`) would read, says what is kept and that a
+    connected coding assistant can then read it, and asks `[y/N]` on the terminal. The owner-socket doors
+    (`POST /api/local/owner/sources/{imessage|signal}/{preview,enable,resume,sync}`) are `dangerous` in the
+    census and check the confirmed peer themselves, so they are refused without the Topos app or that yes, with
+    `TOPOS_OWNER_DOOR_SPLIT` off too. Without a terminal (a coding agent's shell) the command exits 2 with
+    `human.say`, having counted nothing; `enable --open-terminal` opens the window where the question waits, as
+    `agents add --open-terminal` does. `pause` needs no confirmation: it only stops reading.
+  - *A source this process cannot read is refused before anything is written*, with a code and one sentence:
+    `full_disk_access_needed` (macOS gives Messages only to a process with Full Disk Access; a node run as a
+    background service does not have it until the person grants it), `messages_not_found`, `signal_not_found`,
+    `signal_reader_missing`, `signal_key_unavailable`. No install row, settings row, schedule or job exists
+    after a refusal. `sources list` shows the same code under `needs` and never asks the Keychain for a key.
+  - *What `enable` does.* The bundled install row, the settings row, the first sync through the existing
+    local-sync job, and for iMessage the hourly schedule. Signal is still not scheduled (every read asks the
+    Keychain for Signal's key): enabling reads once, `sources sync signal` reads again.
+  - *Extensions.* The node cannot install a browser extension. `sources enable browser_visits` answers
+    `connected` when the extension's key is enrolled, and otherwise exits 2 with the three steps that are the
+    person's and the `topos-node pushers add <app> --sources …` command for that app.
+  - Measured on a HOME-redirected node with no account (`mode: local`), an invented Messages database and an
+    invented Signal database encrypted with SQLCipher: both sources turned on through a pseudo-terminal yes,
+    4 + 4 rows landed under the local identity, the iMessage schedule row was written, and an enrolled coding
+    agent's `query_scope(messages:read, raw)` returned rows from both. Not observed: a real Full Disk Access
+    grant to a service-run node, and the Keychain request for a real Signal key.
+
+### Changed
+- **Signal Desktop can be read on a plain macOS install.** `[O]` The reader imported `pysqlcipher3`, a
+  source-only package that builds against a system SQLCipher, shipped as the `signal` extra; no install
+  carried it, the owner's included. `sqlcipher3` (prebuilt wheels with SQLCipher inside) is now a dependency
+  on macOS, the reader takes whichever binding is installed, and the `signal` extra installs the same
+  package elsewhere. The key is now set before `cipher_compatibility`: set first, the pragma was ignored
+  (measured: a version-3 setting "opened" a version-4 database), so the reader's fallback for an older
+  Signal database never applied.
+  `tests/sources/test_signal_reader_open.py` opens a really encrypted database where the binding is installed
+  and is skipped, not passed, where it is not.
+
 ## [1.5.48] — 2026-11-10
 
 ### Fixed

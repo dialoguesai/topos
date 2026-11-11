@@ -139,7 +139,26 @@ _RECLASSIFY_RULE = RouteRule(
     "makes owner-only coding-session replies shareable again (owner ruling 20 Oct 2026); the dry run only counts",
     _reclassify_dry_run,
 )
-PRECEDENCE: Tuple[RouteRule, ...] = (_RECLASSIFY_RULE,)
+#: iMessage and Signal Desktop on the owner doors (``ingestion/messenger_setup.py``). The doors were written for
+#: the owner's own coding transcripts and the census lists them open; for a messenger source, turning it on,
+#: turning it back on and syncing it read OTHER people's words into the node, which is the same change the
+#: generic ``POST /sources/{id}/sync`` already needs a confirmation for (Q3). So a coding agent with a shell
+#: cannot enable Messages by itself: it needs the Topos app, or the yes a person gives on a terminal
+#: (``topos-node sources enable imessage``). ``preview`` writes nothing into the node, but to count it snapshots
+#: the whole Messages database (or opens Signal's with its key) and says how much a person wrote and since when,
+#: so it is the person's to ask for too. ``pause`` only stops reading and stays open under the census row below.
+MESSENGER_SOURCE_IDS = frozenset({"imessage", "signal"})
+_MESSENGERS = "{" + "|".join(sorted(MESSENGER_SOURCE_IDS)) + "}"
+MESSENGER_RULES: Tuple[RouteRule, ...] = tuple(
+    RouteRule("POST", f"/api/local/owner/sources/{_MESSENGERS}/{verb}", DANGEROUS, reason)
+    for verb, reason in (
+        ("preview", "counts the owner's Messages or Signal history: opens the store itself, though it writes nothing"),
+        ("enable", "starts reading the owner's Messages or Signal history into the node: other people's words"),
+        ("resume", "turns a paused messenger source back on"),
+        ("sync", "source_sync of a messenger source (Q3: needs a confirmation)"),
+    )
+)
+PRECEDENCE: Tuple[RouteRule, ...] = (_RECLASSIFY_RULE, *MESSENGER_RULES)
 
 #: Checked first: the contract says these pass, whatever else matches.
 CARVE_OUTS: Tuple[RouteRule, ...] = (

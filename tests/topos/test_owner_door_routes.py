@@ -333,13 +333,35 @@ async def test_a_transcript_id_in_the_body_does_not_pass_a_foreign_install(socke
 
 @pytest.mark.asyncio
 async def test_a_non_transcript_owner_sources_door_is_still_dangerous(socket_dir) -> None:
-    # Lane L5's own doors are OPEN at the socket layer (settled at integration, 16 Oct): the door
-    # serves only the three bundled transcript sources and answers 404/409 for any other id itself
-    # (tests/api/test_owner_sources_doors.py). The shared sync door and the install doors stay dangerous.
-    _served(await _call("POST", "/api/local/owner/sources/imessage/sync"))
+    # Lane L5's own doors are OPEN at the socket layer (settled at integration, 16 Oct) for an id they do
+    # not serve: the door answers 404 itself (tests/api/test_owner_sources_doors.py). The shared sync door
+    # and the install doors stay dangerous.
+    _served(await _call("POST", "/api/local/owner/sources/gmail_messages/sync"))
     _refused(await _call("POST", "/sources/imessage/sync"))
     _refused(await _call("POST", "/v1/source-install", body=b'{"source_id": "imessage"}'))
     _refused(await _call("DELETE", "/v1/source-install", body=b'{"source_id": "codex_sessions"}'))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("source_id", sorted(census.MESSENGER_SOURCE_IDS))
+async def test_turning_a_messenger_source_on_needs_the_app_or_a_confirmation(socket_dir, source_id: str) -> None:
+    """protects: the owner doors now serve iMessage and Signal (ingestion/messenger_setup.py). Reading other
+    people's messages into the node is not the owner's own transcripts: a coding agent with a shell must not
+    be able to start it, or even count it, with one POST. Stopping stays open."""
+    base = f"/api/local/owner/sources/{source_id}"
+    for verb in ("preview", "enable", "resume", "sync"):
+        assert census.lookup("POST", f"{base}/{verb}").verdict == census.DANGEROUS
+        _refused(await _call("POST", f"{base}/{verb}", body=b'{"backfill": "30d"}'))
+        _served(await _call("POST", f"{base}/{verb}", body=b'{"backfill": "30d"}', headers=_token_header()))
+    _served(await _call("POST", f"{base}/pause", body=b"{}"))
+    _served(await _call("GET", base))
+    _served(await _call("GET", "/api/local/owner/sources"))
+
+
+def test_the_messenger_rules_name_exactly_the_catalogs_messenger_sources() -> None:
+    from topos.sources.setup_catalog import MESSENGER_SOURCE_IDS
+
+    assert census.MESSENGER_SOURCE_IDS == frozenset(MESSENGER_SOURCE_IDS)
 
 
 @pytest.mark.asyncio
