@@ -338,6 +338,9 @@ CENSUS: Tuple[RouteRule, ...] = (
     _d("POST", "/v1/signal/derivation/backfill/runs", "signal: starts a multi-batch derivation run"),
     _o("POST", "/v1/signal/derivation/backfill/runs/current/stop",
        "stops the active backfill run between records; never starts one, and a rerun resumes"),
+    # The standing switch (features/derivation/auto_catchup.py): on, the node starts catch-up runs by itself
+    # from then on; off is the owner's setting to change as well. The route checks the confirmed peer itself.
+    _d("PUT", "/v1/signal/derivation/backfill/auto", "signal: the owner's switch for automatic catch-up runs"),
     _d("PUT", "/v1/signal/entities/communities/{community_id}/name", "signal: entity curation"),
     _d("POST", "/v1/signal/entities/graph/rebuild", "signal: rebuilds the entity graph"),
     _d("DELETE", "/v1/signal/entities/{entity_id}/blackhole", "signal_unblackhole_entity (Off-limits)"),

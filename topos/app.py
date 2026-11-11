@@ -506,6 +506,15 @@ async def startup_event() -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("Local sync scheduler at startup failed (non-fatal): %s", e)
     try:
+        # The owner's automatic catch-up for fact packs (features.derivation.auto_catchup). The loop waits out
+        # startup, then looks once a minute; with the owner's switch off (the default) a look reads one row.
+        from .core.state import get_db_connection as _get_conn_for_packs_auto
+        from .features.derivation.auto_catchup import start_scheduler as _start_packs_auto
+
+        _start_packs_auto(_spawn_background, _get_conn_for_packs_auto)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Fact-pack automatic catch-up at startup failed (non-fatal): %s", type(e).__name__)
+    try:
         # The NSFW tag sweep (disclosure.nsfw_tags): every canonical row with text is evaluated by the
         # explicit-wording rule, rows no tagger decided are tagged and classifier flags the rule does not
         # confirm are cleared, in bounded gated batches on a worker thread; then a re-check on an interval.

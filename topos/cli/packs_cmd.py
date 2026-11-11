@@ -1,13 +1,21 @@
-"""`topos-node packs list|backfill|status|stop` — fact packs and their history backfill, from a terminal.
+"""`topos-node packs list|backfill|status|stop|auto` — fact packs and their history backfill, from a terminal.
 
-A fact pack reads new records as they arrive; the history from before it was switched on is read
-only when the owner asks (a backfill). In the app that is one press per batch of 200 records per
-pack. Here it is one command and one yes:
+A fact pack reads new records as they arrive only for the sources whose lane runs it; everything
+else, and the history from before a pack was switched on, is read when the owner asks (a backfill).
+In the app that is one press per batch of 200 records per pack. Here it is one command and one yes:
 
     topos-node packs list
     topos-node packs backfill --all-enabled --until-done
     topos-node packs backfill --all-enabled --since 2026-04-01 --until-done
     topos-node packs backfill --pack moments.joy --pack life.events --limit 100
+
+or one standing yes, after which the node keeps the switched-on packs current by itself
+(`features/derivation/auto_catchup`): recent records only, when arrivals have gone quiet, never
+beside another backfill, and a backfill you start wins over it:
+
+    topos-node packs auto on
+    topos-node packs auto status
+    topos-node packs auto off
 
 `backfill` prints the plan (which packs, how far back, how many records wait for each, which model
 reads each pack and which one checks what it finds, the batch size), asks `[y/N]` once on this
@@ -20,8 +28,9 @@ record is kept, so the same command later picks up where the run stopped.
 Starting a run is a dangerous change on the owner socket (`owner_door_routes`): it needs the human,
 asked here on a terminal, and a one-change confirmation token (`uds.write_owner_confirmation`) —
 never a flag an agent could pass. An agent that wants a backfill tells the person to run this
-command in their own terminal. `list`, `status` and `stop` change nothing a yes protects and need
-no terminal.
+command in their own terminal. `auto on` and `auto off` are the same kind of change (the setting is
+the owner's) and ask the same way. `list`, `status`, `auto status` and `stop` change nothing a yes
+protects and need no terminal.
 
 The extractor is whatever the owner has picked for facts (Topos Facts for the packs it knows, the
 local model for the rest); this command names it and never changes it.
@@ -50,6 +59,7 @@ PLAN_PATH = "/v1/signal/derivation/backfill/plan"
 RUNS_PATH = "/v1/signal/derivation/backfill/runs"
 CURRENT_PATH = RUNS_PATH + "/current"
 STOP_PATH = CURRENT_PATH + "/stop"
+AUTO_PATH = "/v1/signal/derivation/backfill/auto"
 
 DEFAULT_LIMIT = 200
 MAX_LIMIT = 1000
@@ -185,12 +195,95 @@ def _run(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     since = str(run.get("since") or "")
     return {"run_id": str(run.get("run_id") or "")[:40], "state": _word(run.get("state")) or "unknown",
             "reason": _word(run.get("reason")), "limit": _int(run.get("limit")),
+            "origin": "auto" if run.get("origin") == "auto" else "owner",
+            "waiting_for": _word(run.get("waiting_for")),
             "until_done": bool(run.get("until_done")), "since": since if _SINCE_RE.match(since) else None,
             "started_at": _stamp(run.get("started_at")),
             "finished_at": _stamp(run.get("finished_at")), "elapsed_s": _seconds(run.get("elapsed_s")),
             "packs": packs,
             "totals": {**{k: _int(totals.get(k)) for k in _COUNT_KEYS},
                        **{k: _seconds(totals.get(k)) for k in _TIME_KEYS}}}
+
+
+def _auto(body: Any) -> Optional[Dict[str, Any]]:
+    """The automatic catch-up in a status body, reduced to switches, periods, state words, stamps and counts."""
+    if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+        return None
+    last = body.get("last") if isinstance(body.get("last"), dict) else None
+    nxt = body.get("next") if isinstance(body.get("next"), dict) else {}
+    look = None
+    if last is not None:
+        totals = last.get("totals") if isinstance(last.get("totals"), dict) else None
+        since = str(last.get("since") or "")
+        new = last.get("new_records")
+        look = {"run_id": str(last.get("run_id") or "")[:40] or None, "state": _word(last.get("state")) or "unknown",
+                "reason": _word(last.get("reason")), "started_at": _stamp(last.get("started_at")),
+                "finished_at": _stamp(last.get("finished_at")), "since": since if _SINCE_RE.match(since) else None,
+                "packs": _int(last.get("packs")), "waiting": _int(last.get("waiting")),
+                "new_records": _int(new) if isinstance(new, int) and not isinstance(new, bool) else None,
+                "older_records": _int(last.get("older_records")),
+                "totals": ({**{k: _int(totals.get(k)) for k in _COUNT_KEYS},
+                            **{k: _seconds(totals.get(k)) for k in _TIME_KEYS}} if totals is not None else None)}
+    return {"enabled": body["enabled"], "kill_switch": body.get("kill_switch") is True,
+            "changed_at": _stamp(body.get("changed_at")),
+            "quiet_s": _int(body.get("quiet_s")), "min_gap_s": _int(body.get("min_gap_s")),
+            "first_window_days": _int(body.get("first_window_days")),
+            "max_window_days": _int(body.get("max_window_days")), "last": look,
+            "next": {"state": _word(nxt.get("state")) or "unknown", "not_before": _stamp(nxt.get("not_before"))}}
+
+
+def _auto_lines(auto: Dict[str, Any]) -> List[str]:
+    """The automatic catch-up, in words: the switch, the last look, when the next may start."""
+    if auto["kill_switch"]:
+        head = ("Automatic catch-up: held off by TOPOS_PACKS_AUTO_CATCHUP in the node's environment"
+                + (" (your switch is on)." if auto["enabled"] else "."))
+    elif not auto["enabled"]:
+        head = "Automatic catch-up: off. `topos-node packs auto on` keeps the switched-on packs current."
+    else:
+        head = "Automatic catch-up: on" + (f" since {auto['changed_at']} UTC." if auto["changed_at"] else ".")
+    lines = [head]
+    if auto["enabled"] and not auto["kill_switch"]:
+        lines.append(f"  It looks when new journal entries or messages have landed and none has arrived for "
+                     f"{_duration(auto['quiet_s'])}, at most once every {_duration(auto['min_gap_s'])}.")
+    last = auto["last"]
+    if last is not None:
+        when = f"{last['started_at'] or '?'} UTC"
+        window = f"records dated {last['since']} or later" if last["since"] else "recent records"
+        if last["state"] == "nothing_waiting":
+            lines.append(f"  Last look {when}: nothing waiting among {window}; no run, no model loaded.")
+        else:
+            line = (f"  Last automatic run {last['run_id'] or '?'}: {last['state']}"
+                    + (f" ({last['reason']})" if last["reason"] else "") + f", started {when}, {window}, "
+                    f"{last['packs']} pack{'s' if last['packs'] != 1 else ''}")
+            if last["totals"] is not None:
+                line += f": {_counts_line(last['totals'])}{_times(last['totals'])}"
+            lines.append(line + ".")
+        if last["older_records"]:
+            lines.append(f"  {last['older_records']:,} of the records that landed carry a date before that and were "
+                         "left: `topos-node packs backfill --since YYYY-MM-DD` reads them.")
+    if auto["enabled"] and not auto["kill_switch"]:
+        nxt = auto["next"]
+        at = f"not before {nxt['not_before']} UTC" if nxt["not_before"] else "soon"
+        lines.append("  Next: " + {
+            "run_active": "after the backfill that is working now.",
+            "waiting_for_records": "when new journal entries or messages land.",
+            "waiting_for_quiet": f"{at} (arrivals have to go quiet first).",
+            "waiting_for_gap": f"{at} (the minimum gap between looks).",
+            "due": "at the next look, within a minute or two.",
+        }.get(nxt["state"], "unknown."))
+    return lines
+
+
+def _auto_status(sock) -> Optional[Dict[str, Any]]:
+    """The automatic catch-up's state, or None from a node that does not serve it or is not answering."""
+    import httpx
+
+    from topos.mcp_server import NodeDown, NodeRefused
+
+    try:
+        return _auto(sock.request_sync("GET", AUTO_PATH))
+    except (NodeDown, NodeRefused, httpx.HTTPError):
+        return None
 
 
 def _duration(seconds: float) -> str:
@@ -285,7 +378,8 @@ def packs_backfill(pack_ids: tuple, all_enabled: bool, limit: int, until_done: b
             _fail(f"Not switched on: {', '.join(off)}. Switch a pack on in the app (Data → Fact packs) first.")
 
     active = _run(_request(sock, "GET", CURRENT_PATH, what="the backfill status"))
-    if active is not None and active["state"] in _ACTIVE:
+    yields = active is not None and active["state"] in _ACTIVE and active["origin"] == "auto"
+    if active is not None and active["state"] in _ACTIVE and not yields:
         _fail("A backfill run is already working. `topos-node packs status --follow` watches it; "
               "`topos-node packs stop` stops it.")
 
@@ -360,6 +454,9 @@ def packs_backfill(pack_ids: tuple, all_enabled: bool, limit: int, until_done: b
                    "how many facts are found.")
     click.echo("The node does the work and this terminal follows it. Ctrl-C stops it after the record in hand; "
                "the same command later picks up where it stopped.")
+    if yields:
+        click.echo("The automatic catch-up is working right now. Your run wins: it stops after the record in "
+                   "hand, and your run starts then.")
     if not click.confirm("Run it?", default=False, err=True):
         click.echo("Nothing started.")
         sys.exit(EXIT_OK)
@@ -395,15 +492,19 @@ def packs_status(follow: bool, as_json: bool) -> None:
     """The backfill run that is working, or the last one since the node started."""
     sock = _socket()
     run = _run(_request(sock, "GET", CURRENT_PATH, what="the backfill status"))
+    auto = _auto_status(sock)
     if as_json:
-        click.echo(json.dumps({"run": run}, indent=2, sort_keys=True))
+        click.echo(json.dumps({"run": run, "auto": auto}, indent=2, sort_keys=True))
         return
     if run is None:
         click.echo("No backfill run since the node started.")
+        for line in _auto_lines(auto) if auto is not None else []:
+            click.echo(line)
         return
     if follow and run["state"] in _ACTIVE:
         sys.exit(_follow(sock, run["run_id"]))
-    click.echo(f"Run {run['run_id']}: {run['state']}" + (f" ({run['reason']})" if run["reason"] else "")
+    click.echo(f"Run {run['run_id']}" + (" (automatic catch-up)" if run["origin"] == "auto" else "")
+               + f": {run['state']}" + (f" ({run['reason']})" if run["reason"] else "")
                + f", started {run['started_at'] or '?'} UTC, {_duration(run['elapsed_s'])}"
                + (f", records dated {run['since']} or later." if run["since"] else "."))
     for pack in run["packs"]:
@@ -420,6 +521,8 @@ def packs_status(follow: bool, as_json: bool) -> None:
             line += f"; read by {pack['extract_model']}"
         click.echo(line)
     click.echo(f"Total: {_counts_line(run['totals'])}{_times(run['totals'])}.")
+    for line in _auto_lines(auto) if auto is not None else []:
+        click.echo(line)
 
 
 @packs_group.command("stop")
@@ -430,6 +533,130 @@ def packs_stop() -> None:
         click.echo("Stopping after the record in hand. `topos-node packs status` shows when it has stopped.")
     else:
         click.echo("No backfill run is active.")
+
+
+# ----------------------------------------------------------------------------- the standing switch
+@packs_group.group("auto")
+def packs_auto() -> None:
+    """Keep the switched-on fact packs current without a backfill each time."""
+
+
+@packs_auto.command("status")
+@_JSON_OPTION
+def packs_auto_status(as_json: bool) -> None:
+    """Whether the automatic catch-up is on, how its last look ended and when the next may start."""
+    auto = _auto(_request(_socket(), "GET", AUTO_PATH, what="the automatic catch-up status"))
+    if as_json:
+        click.echo(json.dumps({"auto": auto}, indent=2, sort_keys=True))
+        return
+    if auto is None:
+        _fail("Topos did not report the automatic catch-up. Check `topos-node status`.")
+    for line in _auto_lines(auto):
+        click.echo(line)
+
+
+def _set_auto(sock, body: Dict[str, Any]) -> Dict[str, Any]:
+    """Send the one confirmed change; the node's answer as a projection."""
+    from topos.mcp_server import NodeDown, NodeRefused
+    from topos.uds import write_owner_confirmation
+
+    try:
+        answer = sock.request_sync("PUT", AUTO_PATH, json_body=body,
+                                   headers={"X-Topos-Owner-Confirm": write_owner_confirmation()})
+    except NodeDown:
+        _fail("Topos stopped before the change was made. Check `topos-node status`.", EXIT_NODE_DOWN)
+    except NodeRefused as exc:
+        _fail(f"Topos refused the change ({exc.code or exc.status}). Nothing changed.")
+    auto = _auto(answer)
+    if auto is None:
+        _fail("Topos did not report the automatic catch-up. Check `topos-node packs auto status`.")
+    return auto
+
+
+@packs_auto.command("on")
+@click.option("--quiet-minutes", type=click.IntRange(1, 24 * 60), default=None,
+              help="How long nothing new must have arrived before a look (default: 10, or as set before).")
+@click.option("--min-gap-minutes", type=click.IntRange(5, 7 * 24 * 60), default=None,
+              help="The least time between two looks (default: 60, or as set before).")
+def packs_auto_on(quiet_minutes: Optional[int], min_gap_minutes: Optional[int]) -> None:
+    """Turn the automatic catch-up on: says what it will do, asks you once."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        _fail("Turning this on lets your Topos start fact-pack runs by itself, so it asks you first: "
+              "run this command in your own terminal.", EXIT_NEEDS_HUMAN)
+    sock = _socket()
+    auto = _auto(_request(sock, "GET", AUTO_PATH, what="the automatic catch-up status"))
+    if auto is None:
+        _fail("Topos did not report the automatic catch-up. Check `topos-node status`.")
+    if auto["enabled"] and quiet_minutes is None and min_gap_minutes is None:
+        click.echo("Already on.")
+        for line in _auto_lines(auto)[1:]:
+            click.echo(line)
+        sys.exit(EXIT_OK)
+    quiet_s = quiet_minutes * 60 if quiet_minutes is not None else auto["quiet_s"]
+    gap_s = min_gap_minutes * 60 if min_gap_minutes is not None else auto["min_gap_s"]
+    listing = _request(sock, "GET", PACKS_PATH, what="the pack list")
+    packs = _packs(listing)
+    on = sorted(p["pack_id"] for p in packs if p["enabled"])
+    days = auto["first_window_days"] or 7
+    click.echo("Automatic catch-up for fact packs")
+    click.echo(f"  {len(on)} of {len(packs)} packs are switched on. This keeps the switched-on ones current; it "
+               "switches none on or off.")
+    click.echo(f"  When new journal entries or messages have landed, from any source, and none has arrived for "
+               f"{_duration(quiet_s)}, Topos reads them for those packs: at most one look every {_duration(gap_s)}.")
+    click.echo(f"  The first look reads the last {days} days; after that, what landed since the last one"
+               + (f", never more than {auto['max_window_days']} days back" if auto["max_window_days"] else "")
+               + ". Older history stays `topos-node packs backfill`.")
+    if on and not auto["enabled"]:
+        import datetime as _dt
+
+        since = (_dt.datetime.now(_dt.timezone.utc).date() - _dt.timedelta(days=days)).isoformat()
+        plan = _request(sock, "GET", PLAN_PATH, what="the count", params={"pack_id": on, "since": since})
+        extraction = plan.get("extraction") if isinstance(plan.get("extraction"), dict) else {}
+        llm_model = _model(extraction.get("llm_model")) or "the local extraction model"
+        classifier = _model(extraction.get("classifier_model")) if extraction.get("provider") == "topos_facts" else None
+        verifier = _model(plan.get("verify_model"))
+        click.echo(f"  Waiting now among records dated {since} or later: {_int(plan.get('total_waiting')):,}.")
+        click.echo("  Read by " + (f"Topos Facts ({classifier}) for the packs it knows and the local model "
+                                   f"{llm_model} for the rest" if classifier else f"the local model {llm_model}")
+                   + ("; every fact found is checked by " + verifier + "." if verifier
+                      else "; verification is off on this node."))
+    click.echo("  It uses the models you have picked and changes no setting. It starts no run beside another "
+               "backfill, a backfill you start stops it after the record in hand, and it gives way to your own "
+               "requests between records. No model is loaded when nothing is waiting.")
+    click.echo("  `topos-node packs auto off` turns it off; `topos-node packs status` shows what it did.")
+    if not click.confirm("Turn it on?" if not auto["enabled"] else "Change it?", default=False, err=True):
+        click.echo("Nothing changed.")
+        sys.exit(EXIT_OK)
+    body: Dict[str, Any] = {"enabled": True}
+    if quiet_minutes is not None:
+        body["quiet_s"] = quiet_s
+    if min_gap_minutes is not None:
+        body["min_gap_s"] = gap_s
+    for line in _auto_lines(_set_auto(sock, body)):
+        click.echo(line)
+
+
+@packs_auto.command("off")
+def packs_auto_off() -> None:
+    """Turn the automatic catch-up off. A run it started stops after the record in hand."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        _fail("This setting is yours to change, so it asks you first: run this command in your own terminal. "
+              "(`topos-node packs stop` stops a run that is working and needs no terminal.)", EXIT_NEEDS_HUMAN)
+    sock = _socket()
+    auto = _auto(_request(sock, "GET", AUTO_PATH, what="the automatic catch-up status"))
+    if auto is None:
+        _fail("Topos did not report the automatic catch-up. Check `topos-node status`.")
+    if not auto["enabled"]:
+        click.echo("Already off.")
+        sys.exit(EXIT_OK)
+    click.echo("Turning the automatic catch-up off: new records are then read for the fact packs only when "
+               "you run `topos-node packs backfill` (or where a source's own lane reads them). "
+               "A run it started stops after the record in hand; what it read is kept.")
+    if not click.confirm("Turn it off?", default=False, err=True):
+        click.echo("Nothing changed.")
+        sys.exit(EXIT_OK)
+    for line in _auto_lines(_set_auto(sock, {"enabled": False})):
+        click.echo(line)
 
 
 # ----------------------------------------------------------------------------- following a run
@@ -448,6 +675,7 @@ def _follow(sock, run_id: str, *, first: Optional[Dict[str, Any]] = None) -> int
     failures = 0
     last_line_at = time.monotonic()
     last_live = (None, -1)
+    said_waiting = False
     run = first
     while True:
         try:
@@ -471,6 +699,9 @@ def _follow(sock, run_id: str, *, first: Optional[Dict[str, Any]] = None) -> int
                     click.echo("The node restarted, and the run ended with it. Run the same command to pick up "
                                "where it stopped.", err=True)
                     return EXIT_FAILED
+            if run["waiting_for"] and not said_waiting:
+                said_waiting = True
+                click.echo("Waiting for the automatic catch-up to finish the record in hand...")
             for pack in run["packs"]:
                 pid = pack["pack_id"]
                 if pack["state"] != "waiting" and pid not in announced:
