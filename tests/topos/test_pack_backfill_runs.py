@@ -31,6 +31,7 @@ from topos import owner_door_routes as census, uds
 from topos.features.derivation import backfill_runs as runs
 from topos.features.derivation import surfaces
 from topos.features.derivation.registry import bundled_pack_dir, seed_pack_registry
+from topos.features.signal.derived_index import index_derived_objects as _REAL_INDEXER
 from topos.storage.db.migrations import apply_all_migrations
 
 JOY = "moments.joy"
@@ -158,6 +159,54 @@ def test_no_write_transaction_is_open_during_a_model_call(node, model) -> None:
     stats = surfaces.run_pack_backfill(node.conn, JOY, limit=10)
     assert stats["processed"] == 6 and len(model.verify) >= 1
     assert len(held) == len(model.extract) + len(model.verify) and not any(held), held
+
+
+def test_no_write_transaction_is_open_while_the_embedding_model_works(node, model, monkeypatch) -> None:
+    """The batch's tail stamps the run and then embeds what was written, with the real indexer here and a stub
+    encoder. The stamp was a bare UPDATE left uncommitted, so the encoder ran with SQLite's write lock held and the
+    indexer then asked for the write gate: on a live node (1.5.47, 10 Nov 2026) every other writer waited 312 to
+    343 s at 5 of 9 batch ends."""
+    held: List[bool] = []
+    stamps: List[Optional[str]] = []
+
+    class Encoder:
+        def run_inference(self, payload: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, Any]:
+            held.append(node.conn.in_transaction)
+            other = _open(node.path)
+            try:
+                stamps.append(other.execute("SELECT last_run_at FROM pack_registry WHERE pack_id=?",
+                                            (JOY,)).fetchone()[0])
+            finally:
+                other.close()
+            return {"vectors": [[0.1] * 8 for _ in payload["texts"]], "dims": 8, "provider": "stub"}
+
+    monkeypatch.setattr("topos.features.signal.derived_index.index_derived_objects", _REAL_INDEXER)
+    monkeypatch.setattr("topos.engine.backends.huggingface.HuggingFaceAdapter", Encoder)
+    stats = surfaces.run_pack_backfill(node.conn, JOY, limit=10)
+    assert stats["written"] >= 1 and stats["indexed"] != -1, stats
+    assert held, "the batch wrote facts, so the encoder was asked"
+    assert not any(held), "the encoder ran inside the backfill's open write transaction"
+    assert all(stamps), "the run stamp was not committed before the encoder ran"
+    assert not node.conn.in_transaction
+
+
+def test_no_write_transaction_is_open_when_an_assertion_reaches_the_writer(node, model, monkeypatch) -> None:
+    """The writer queues a conflict through the write gate (`FactStore._queue_conflict`). The batch's own counters
+    and the verifier call's measurement row were still uncommitted when it was called, so that path asked for the
+    gate while holding SQLite's write lock: the same inversion as the tail, without a model call in it."""
+    from topos.features.derivation.writer import DerivationWriter
+
+    real = DerivationWriter.assert_pack_fact
+    held: List[bool] = []
+
+    def assert_pack_fact(self, **kw):
+        held.append(self.conn.in_transaction)
+        return real(self, **kw)
+
+    monkeypatch.setattr(DerivationWriter, "assert_pack_fact", assert_pack_fact)
+    stats = surfaces.run_pack_backfill(node.conn, JOY, limit=10)
+    assert stats["accepted"] == 6 and len(held) == 6
+    assert not any(held), held
 
 
 def test_a_stop_ends_the_batch_between_records_and_a_rerun_resumes(node, model) -> None:

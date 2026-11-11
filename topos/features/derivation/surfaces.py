@@ -333,7 +333,14 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     No write transaction is open during a model call (`settle`, as in the ingest job since
     topos#271): the marks of the records the prefilter passed over, and the measurement row
     of the call before, are committed first. Without that the backfill held SQLite's write
-    lock across every extraction and verifier call of a batch."""
+    lock across every extraction and verifier call of a batch.
+
+    Nor is one open when this connection asks for the write gate. This function writes its
+    bookkeeping outside the gate, in short bursts, and two things it calls take the gate: the
+    writer, when it queues a conflict, and the indexer in the tail. Each is entered with
+    nothing uncommitted: `settle` before the writer, and the run stamp as its own gated,
+    committed write before the indexer. Holding SQLite's write lock while waiting for the
+    gate stalls every gated writer for as long as the wait lasts."""
     from ...enrichment.jobs.canonical.derivation_job import (
         _bump_yield, _iter_history, _ledger_write, _note_deferral, _verify_mode,
         retire_role_skipped_progress)
@@ -482,6 +489,11 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                 continue
             stats["accepted"] += 1
             _bump_yield(conn, pack_id, accepted=1)
+            # The writer queues a conflict through the write gate (FactStore._queue_conflict).
+            # Waiting on the gate with these counters and the verifier call's measurement row
+            # uncommitted is the inversion the tail had: a gated writer blocks on SQLite's
+            # write lock, and this connection cannot release it until it gets the gate.
+            settle()
             out = writer.assert_pack_fact(
                 pack=pack, predicate=a["predicate"], subject_entity_id=owner,
                 value=a["value"], actor_role=rec["role"],
@@ -509,8 +521,21 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     # observed 2026-09-03 on values.motivation, 73 records in, 11 facts out,
     # card still blank. mark_pack_run is otherwise only called at the end of an
     # ingest batch (derivation_job.py:292), which a quiet node may never have.
+    #
+    # Gated and committed here, before the embedding step. The stamp was a bare
+    # UPDATE left open: in WAL it took SQLite's write lock, the indexer below
+    # then loaded and embedded every changed object, and only after that asked
+    # for the write gate. A gated writer that started in that window held the
+    # gate while its BEGIN IMMEDIATE waited out the busy retries (about 156 s)
+    # and failed, the next one did the same, and this connection could not
+    # commit until it got the gate. On a live node on 1.5.47 (10 Nov 2026)
+    # every other writer waited 312 to 343 s that way at 5 of 9 batch ends.
+    # `batched_writes` takes the gate first, commits on the way out, and rolls
+    # back if the stamp fails, so the indexer starts with nothing open here.
+    from ...storage.db.write_gate import batched_writes
     from .registry import mark_pack_run
-    mark_pack_run(conn, pack_id, pack.version)
+    with batched_writes(conn):
+        mark_pack_run(conn, pack_id, pack.version)
 
     # Embed what we just wrote, or the owner can see these facts on the Facts
     # page and cannot ask about them: the semantic lane reads signal_embeddings,
