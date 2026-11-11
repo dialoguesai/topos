@@ -492,7 +492,8 @@ def fact_digest(conn) -> str:
     served from it, and what one switched on adds arrives with the build. The state is added only while an admitted
     ontology is off (or the registry cannot be read), so on a node with them all on the digest is the one it kept
     before this rule and an upgrade queues nothing."""
-    from .selective_facts import SEMANTICS, enabled_revision
+    from .selective_facts import enabled_revision
+    from .expanded_facts import SEMANTICS
     row = conn.execute("SELECT COUNT(*), MAX(rowid), MAX(valid_from), MAX(valid_to) FROM signal_objects "
                        "WHERE object_type='fact'").fetchone()
     on = enabled_revision(conn)

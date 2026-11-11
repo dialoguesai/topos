@@ -348,7 +348,7 @@ def _fact_of_ontology_switched_off(conn, key, opaque, member, enabled) -> bool:
     Reads only the candidate's own row; anything it cannot read or name is not one, so it counts as any refusal."""
     from .evidence import _json
     from .knowledge_projections import load_projection_row
-    from .selective_facts import ontology_of
+    from .selective_facts import catalog_ontology_of as ontology_of
     try:
         descriptor = unseal(key, opaque, member.sealed).get("projection")
         if not descriptor or descriptor.get("table") != "signal_objects":

@@ -9,6 +9,52 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.49] — 2026-11-10
+
+### Added
+- **Provisional self-coherence measurements for the owner dashboard.** `[O]` A versioned, read-only literal-claim comparison reports aligned groups, potential tensions and coverage over a rolling 30-day window. Missing comparisons remain unknown; failures and owner corrections do not count as contradictions. Each group receives one vote. The home client can display these aggregates without a schema migration or changes to claim verification. See `docs/dashboard-measurements.md` for the formula and limits.
+- **Explicit grants for every bundled fact category.** `[P] [O]` New versioned consent covers all 30 categories, 237 pack predicates and the 12 known legacy predicates, including sensitive and inferred facts when selected. Structured values, dependent facts and named people use the same source permission and owner-protection checks. Previews and final responses enforce the selected categories and fact types. Existing v1 grants keep their original scope. Requires the matching control-plane and web release; no pack is enabled and no grant is widened automatically.
+
+
+- **Fact packs can keep up with new records by themselves: `topos-node packs auto on`.** `[E:derivation]` `[O]`
+  A fact pack reads a new record as it arrives only for a source whose lane runs the `derivation` job, and few
+  sources do. Everything else was read only by a backfill, and a backfill asks for a typed yes each time, so the
+  facts stopped keeping up whenever the command was not run. There is now one standing switch, off by default,
+  that means "keep my switched-on fact packs current". While it is on the node starts a catch-up run by itself,
+  on the same machinery as a confirmed backfill (`features/derivation/auto_catchup.py` on top of
+  `backfill_runs.py`).
+  - *Changes during a pending count.* The scheduler rechecks the owner switch and kill switch under the setting lock before starting. Turning it off or changing its timing while records are counted prevents that pending run.
+  - *Who turns it on.* Only the owner. `topos-node packs auto on [--quiet-minutes N] [--min-gap-minutes N]`
+    says what it will do, asks `[y/N]` once on a terminal, and sends one confirmed change; `packs auto off` asks
+    the same way; `packs auto status` is a read. The route is `PUT /v1/signal/derivation/backfill/auto
+    {enabled, quiet_s, min_gap_s}`: `dangerous` in the owner socket's census, and it checks the confirmed peer
+    itself, so the app can add a toggle and nothing else can set it. `GET` on the same path is an open read.
+    `TOPOS_PACKS_AUTO_CATCHUP=off` in the node's environment holds it off whatever the switch says.
+  - *When a run starts.* The node looks once a minute. A run starts when journal entries or messages have landed
+    since the last look, nothing new has landed for the quiet period (default 10 minutes), the last look ended at
+    least the minimum gap ago (default 1 hour), and no backfill is working. It reads the two record tables, not a
+    source's lane, so it covers every source at once, records an app pushed included. The node's own start counts
+    as an arrival, so nothing starts in the first quiet period after a restart. Both periods can be set by the
+    owner on the switch, or node-wide with `TOPOS_PACKS_AUTO_QUIET_S` and `TOPOS_PACKS_AUTO_MIN_GAP_S`.
+  - *What it reads.* Every switched-on pack that has something waiting, and recent records only: those dated on
+    or after the day before the last look that read everything it reached, and never more than 30 days back. The
+    first look after the switch is turned on reads the last 7 days. Older history stays `packs backfill`. A record
+    that lands late with a date before the window is counted and left for a backfill too; the window is not
+    widened for it, because that would also read every unread record of those days. Records already read cost a
+    key lookup and no model call.
+  - *What it never does.* It loads no model to look, and a look that finds nothing waiting starts no run. It
+    keeps no model resident, changes no setting, and uses the extractor and the verification setting the node
+    already has. It never runs beside another backfill.
+  - *Your backfill wins.* `topos-node packs backfill` while an automatic run is working is not refused: the
+    automatic run stops after the record in hand, and your run starts when it has. The app's single-batch
+    button waits the same way. `packs stop` stops an automatic run like any other.
+  - *How it works a run.* Like a confirmed backfill: it yields to your own requests between records, no write
+    transaction is open during a model call, and its own bookkeeping (two `engine_config` rows: your switch, and
+    how far the last look reached) is written through the write gate and committed each time, with nothing else
+    open on the connection. A node restart ends a run; the next look does the same window again.
+  - *Where to see it.* `topos-node packs status` marks an automatic run as such and adds the switch, what the
+    last look read and wrote, and when the next may start. The node log says the same in counts and dates.
+
 ## [1.5.48] — 2026-11-10
 
 ### Fixed

@@ -1462,7 +1462,8 @@ class SearchIndexService:
                         members['projection:'+table+':'+record_id]={"identity":identity,"row":source_rows[_key(identity)],
                             "facts":set(),"message":identity.model_dump(),"entity_dependencies":dependencies,
                             "review_context_revision":context_for(conn,identity,source_rows[_key(identity)],boundary=boundary)[0],
-                            "projection":{"table":table,"record_id":record_id,"revision":projected.revision},
+                            "projection":{"table":table,"record_id":record_id,"revision":projected.revision,
+                                **({"revision_contract":projected.revision_contract} if projected.revision_contract else {})},
                             "classification_contexts":contexts,"rank_text":projected.content,
                             # Each source by its family's rule (a journal entry's stated day, IF-5 §1).
                             "rank_event_us":projected.rank_time_us()}
@@ -1481,8 +1482,9 @@ class SearchIndexService:
         basis = basis_of(authority, clock=clock, boundary_revision=boundary_revision)
         if getattr(getattr(policy, "search", None), "selective_facts", None) is not None:
             from .selective_facts import CATALOG_DIGEST
+            from .expanded_facts import CATALOG_DIGEST as EXPANDED_CATALOG_DIGEST
             from . import switches
-            basis["selective_facts_revision"] = [CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
+            basis["selective_facts_revision"] = [CATALOG_DIGEST, EXPANDED_CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
         if policy.versions.capability in DIRECT_SEARCH_CAPABILITIES:
             basis["message_review_revision"] = frozen.authority_digest
         if automatic:
@@ -1519,7 +1521,7 @@ class SearchIndexService:
                     from .automatic_message_review import context_for
                     for entry in members.values():
                         projection = entry.get('projection')
-                        if projection and current_revision(conn, projection['table'], projection['record_id']) != projection['revision']:
+                        if projection and current_revision(conn, projection['table'], projection['record_id'],contract=projection.get('revision_contract')) != projection['revision']:
                             return None
                         contexts = entry.get('classification_contexts', []) or [
                             {'identity':entry['identity'].model_dump(), 'revision':entry['review_context_revision']}]
@@ -2172,8 +2174,9 @@ class SearchIndexService:
         basis = dict(index["basis"])
         if "selective_facts_revision" in basis:
             from .selective_facts import CATALOG_DIGEST
+            from .expanded_facts import CATALOG_DIGEST as EXPANDED_CATALOG_DIGEST
             from . import switches
-            expected["selective_facts_revision"] = [CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
+            expected["selective_facts_revision"] = [CATALOG_DIGEST, EXPANDED_CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
         from .index_review_guard import VERSION as GUARD_VERSION
         guarded = (authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH
                    and basis.get("review_guard_version") == GUARD_VERSION)
@@ -2509,7 +2512,7 @@ class SearchIndexService:
                         # The boundary: Off-limits is decided again on the projection's current rows (their
                         # volatile columns are outside the revision, not outside the scan).
                         try:
-                            revision=current_revision(conn,projection['table'],projection['record_id'],boundary=boundary)
+                            revision=current_revision(conn,projection['table'],projection['record_id'],boundary=boundary,contract=projection.get('revision_contract'))
                         except PolicyError:
                             return stale('projection')
                         if revision!=projection['revision']:

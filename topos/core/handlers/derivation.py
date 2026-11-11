@@ -119,11 +119,15 @@ async def handle_run_pack_backfill(message):
     pack_id = str(payload.get("pack_id") or "").strip()
     limit = min(int(payload.get("limit") or 200), 1000)
     try:
-        from ...features.derivation.backfill_runs import BackfillBusy, single_batch
+        import asyncio
+
+        from ...features.derivation.backfill_runs import BackfillBusy, single_batch, yield_to_owner
         from ...features.derivation.surfaces import BackfillDeferred, run_pack_backfill
         from .common import run_db_write
         try:
             # Never beside a confirmed run (backfill_runs): one backfill on the local models at a time.
+            # An automatic catch-up run gives way instead: it stops after the record in hand, and this waits.
+            await asyncio.to_thread(yield_to_owner)
             with single_batch():
                 stats = await run_db_write(run_pack_backfill, pack_id, limit)
         except BackfillBusy as busy:

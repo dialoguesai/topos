@@ -116,6 +116,7 @@ REFUSALS = {
     "fact_excluded_from_grant": HELD_BACK, "fact_ontology_unselected": OUTSIDE,
     # the owner switched the ontology off at this node: their own standing choice, whatever the grant signed
     "fact_ontology_off": HELD_BACK,
+    "fact_assertion_unselected": OUTSIDE,
     "selective_facts_disabled": OUTSIDE, "fact_selection_required": OUTSIDE,
     "fact_not_owner_stated": NEVER, "fact_ontology_unknown": COULD_NOT_CHECK,
     "fact_ontology_unsupported": OUTSIDE, "fact_lineage_unsupported": OUTSIDE,

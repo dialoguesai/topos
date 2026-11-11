@@ -151,7 +151,7 @@ ENGINEERING = frozenset({
     "protection_unsynced", "index_over_cap", "member_fingerprint_unavailable", "release_form_limit", "build_abort",
     # typed-family adapters (RD11)
     "fact_predicate_unsupported", "fact_subject_unattested", "fact_value_not_text", "fact_not_grounded",
-    "fact_ontology_unknown",
+    "fact_ontology_unknown", "fact_classification_unknown",
     "goal_not_grounded", "lineage_revision_stale", "cross_rule_derivation", "evidence_outside_form", "lineage_unsupported",
     "lineage_identity_incomplete", "lineage_identity_ambiguous", "relationship_projection_unsupported",
     "relationship_not_grounded", "relationship_lineage_unknown", "relationship_subject_unknown",
@@ -176,7 +176,7 @@ POLICY = frozenset({
     "relationship_not_current", "time_edge_outside",
     "selective_facts_disabled", "fact_selection_required", "fact_excluded_from_grant",
     "fact_ontology_unselected", "fact_ontology_unsupported", "fact_not_owner_stated", "fact_lineage_unsupported",
-    "fact_ontology_off",
+    "fact_ontology_off", "fact_assertion_unselected",
     # IF-5 evidence families
     "journal_owner_unproven", "journal_citation_needs_record_option", "interest_below_threshold",
     "interest_label_withheld", "interest_source_unproven",
@@ -1198,7 +1198,8 @@ def run(*, canonical: Path, reviews: Path, ledger: Path, index_root: Path, keys:
                     members["projection:" + table + ":" + record_id] = {"identity": ident, "row": source_rows[_key(ident)],
                         "facts": set(), "message": ident.model_dump(), "entity_dependencies": dependencies,
                         "review_context_revision": context_for(conn, ident, source_rows[_key(ident)], boundary=boundary)[0],
-                        "projection": {"table": table, "record_id": record_id, "revision": projected.revision},
+                        "projection": {"table": table, "record_id": record_id, "revision": projected.revision,
+                            **({"revision_contract": projected.revision_contract} if projected.revision_contract else {})},
                         "classification_contexts": contexts, "rank_text": projected.content, "rank_event_us": event,
                         "outcome": typed}
                     typed.evidence = tuple(sorted({(e.snapshot.message.identity.table, e.snapshot.message.identity.source_id)
@@ -2821,6 +2822,12 @@ def _what_if_main(args) -> int:
 # mirrors the vector query, so no census logic changes. Measured 22 Oct on a store copy: 0 of ~143k stored vectors
 # lack a hash; for unedited rows the hash reproduces (iMessage 3,998/3,998); every mismatch is a row re-ingested or
 # rewritten after it was embedded.
+# All-fact grants v2: candidates follows dependency chains; fact_projection dispatches
+# to the signed v2 contract; _rebuild_once carries its dependency revision contract.
+# Re-read: run calls candidates/qualify_projection directly, and its copied member
+# construction now carries revision_contract too. Legacy RD11 what-ifs still model
+# the legacy projection only; they are not a v2 coverage estimate. Native evidence
+# rules and the actual census membership remain the node's own qualification calls.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2841,7 +2848,7 @@ PINNED: dict[str, str] = {
     "knowledge_projections.goal_projection":
         "50174909a47472fba1aa56c6dcdd00cca3adaa7242ef70e33e4fec552ffe3c1a",
     "knowledge_projections.fact_projection":
-        "7f385df68ff8775c21c2d743f6aaeacf7beb6a7316fe205fc902984a6e6d2102",
+        "1a62e81fb82921adad7828e11d390575f9b1d3b109e7f4543184030550f5d5a6",
     "inferred_facts.enabled":
         "659c4f01c08e7437979d1770f09c79afe6390cab2f4425d613375a4ff83880bb",
     "inferred_facts.refusal":
@@ -2887,7 +2894,7 @@ PINNED: dict[str, str] = {
     "ingest_provenance.IngestProvenanceService._publish_marker":
         "5dc00feb054416453d9d454f950c094174728e76e678bc155fb5ce8181fba73d",
     "knowledge_projections.candidates":
-        "3332c8e2be02a1bb6ea922d54abff823ab0ac0ca166cb92d0dff0da68b26e54b",
+        "c6209ce9250c52b4c6629bddab032404c79ec2fd09bc4496bd03f4dca77f0000",
     "knowledge_projections.qualify_projection":
         "602ccf69e34408d482afd45e3983ce397893619b25f05b2c80278e81f1ac1cb0",
     "message_evidence._floors":
@@ -2907,7 +2914,7 @@ PINNED: dict[str, str] = {
     "search_index.SearchIndexService._members":
         "1640c4118839a81eec9c0be510e010b1ca7eb09cbf7fdbd7fdc5a49559d84831",
     "search_index.SearchIndexService._rebuild_once":
-        "3c6e42c2751d1eaaeaa85d838cad8cd07a229e01f30bd6534a53304a034eaa22",
+        "e8fd2ba5205ebb3f95b2b41bd1515e5787325bcb19c9c67f74f97d35933836bf",
     "search_release.MessageSearchRelease._accept":
         "76ddcd44321e79b53cf402ea1cd085215d82f8dabb0cb5b0702024c7fd6dd4db",
     "knowledge_projections._inferred":
