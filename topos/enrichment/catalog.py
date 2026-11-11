@@ -200,6 +200,20 @@ _STATIC_METADATA: Dict[str, Dict[str, Any]] = {
         "cost_tier": COST_HIGH,
         "value_props": ("signal_density",),
     },
+    # The job's id is `derivation`; what the owner knows it by is the fact packs it runs.
+    "derivation": {
+        "title": "Fact packs",
+        "description": (
+            "Reads each new record with the fact packs that are switched on "
+            "(Data → Fact packs) and writes the facts they find, so facts keep "
+            "up with new records instead of waiting for a backfill. The "
+            "heaviest enrichment: one local-model call per record for each "
+            "pack the record matches, and a second model checks every fact "
+            "found. Off for a source until you switch it on here."
+        ),
+        "cost_tier": COST_HIGH,
+        "value_props": ("signal_density",),
+    },
     "relationship_edges": {
         "title": "Relationship graph",
         "description": (

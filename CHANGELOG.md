@@ -91,6 +91,22 @@ The machine-readable twin of each release is
   Signal database never applied.
   `tests/sources/test_signal_reader_open.py` opens a really encrypted database where the binding is installed
   and is skipped, not passed, where it is not.
+- **The per-source switch that runs fact packs on new records is named, and its batch waits for the owner.**
+  `[E:derivation]` Fact packs read a record when it arrives only for a source whose canonical lane lists the
+  `derivation` job, and of the bundled sources only YouTube transcripts lists it. Messages and journals never
+  did: the job was registered in August and attached to no such source. Measured on one live node on
+  10 Nov 2026, enabled packs had read 16 of September's 122 journal entries, none of October's 128 and no
+  message from either month; every fact they held came from a hand-started backfill. The switch that attaches
+  the job to a source already existed (Connectors → Enrichments in the app, `PATCH
+  /v1/sources/{source_id}/enrichments/derivation`), but the catalog showed it as "Derivation" with no
+  description. It is now "Fact packs", marked as the heaviest enrichment, and says what it does and costs:
+  one local-model call per record for each pack the record matches, and a second model checks every fact.
+  The default does not change: it stays off for messages and journals until the owner switches it on for a
+  source, because at one owner's volume (about 16 of their own records a day, 28 packs on) it is roughly 1.5
+  to 2 hours of local-model time a day on the LLM route (estimated from prefilter counts, not a measured run).
+  Separately, an ingest batch and its history catch-up now stop between records, with the record's writes
+  committed, while an owner request is pending (`core.owner_requests.pace`), as the backfill run does; before,
+  a batch ran end to end without looking up.
 
 ## [1.5.48] — 2026-11-10
 
