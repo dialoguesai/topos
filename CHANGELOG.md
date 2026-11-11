@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.50] — 2026-11-11
+
 ### Added
 - **`topos-node sources`: iMessage, Signal and the browser extensions' sources, by the id the app uses.** `[O]`
   A node with no account could turn on only its coding tool's own history: `sources enable` served the three

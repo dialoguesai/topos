@@ -1492,6 +1492,17 @@
       ]
     },
     {
+      "version": "1.5.50",
+      "summary": "Messages, Signal and the browser extensions' sources can be turned on from a terminal by id; the per-source switch that runs fact packs on new records is named and its batch waits for the owner; a reaction the owner sent in Messages is no longer read as the owner's own text. No setting is switched on automatically.",
+      "steps": [],
+      "notes": [
+        "No migration and no reprocessing. One dependency change: sqlcipher3 (prebuilt wheels) is installed on macOS so the Signal Desktop reader works on a plain install; the signal extra installs the same package elsewhere.",
+        "[O] topos-node sources list, preview, enable, pause, resume and sync take imessage, signal, browser_visits, browser_events and chatgpt_ui_conversation. Turning on iMessage or Signal asks the person on a terminal or in the Topos app; a source this process cannot read is refused before anything is written. Nothing is enabled by the upgrade.",
+        "[E:derivation] The enrichment switch shown as Derivation is now Fact packs, with its cost stated. Its default is unchanged: off for messages and journals. An ingest batch and its history catch-up now stop between records while an owner request is pending.",
+        "[E:derivation] A reaction the owner sent in Messages is left out of the ingest batch, the history walk behind catch-up and backfill, the enable-offer trial and the commitments lane. Facts already written from a reaction are not removed and no job output is invalidated."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
