@@ -329,7 +329,7 @@ def tick(conn: sqlite3.Connection, *, wall: Callable[[], datetime] = _utcnow,
     """One look, on a worker thread with that thread's own connection. Starts at most one run.
 
     Returns `{"decision": word, ...}`: `kill_switch`, `off`, `run_active`, `no_new_records`,
-    `ingest_busy`, `min_gap`, `nothing_waiting` or `started`. While the switch is off a look reads one
+    `ingest_busy`, `min_gap`, `switch_changed`, `nothing_waiting` or `started`. While the switch is off a look reads one
     row and nothing else. `wall` is the time of day (the stamps and the minimum gap), `clock` the
     monotonic one (the quiet period). `conn_factory` resolves the connection the run's end is recorded
     on, on the run's own thread (the default is that thread's node connection)."""
@@ -378,6 +378,15 @@ def tick(conn: sqlite3.Connection, *, wall: Callable[[], datetime] = _utcnow,
         return {"decision": "nothing_waiting", **look}
 
     with _bookkeeping:
+        # Counting can walk many records. Serialize the final permission check with set_switch:
+        # an owner change during that work must win before a background run can acquire the slot.
+        if kill_switch():
+            return {"decision": "kill_switch"}
+        current_switch = read_switch(conn)
+        if not current_switch["enabled"]:
+            return {"decision": "off"}
+        if current_switch != switch:
+            return {"decision": "switch_changed"}
         try:
             run = runs.start_run(pack_ids, runs.DEFAULT_BATCH_LIMIT, True, since=since, origin=runs.AUTO,
                                  run_batch=run_batch,

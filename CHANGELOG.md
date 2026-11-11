@@ -43,6 +43,41 @@ The machine-readable twin of each release is
     4 + 4 rows landed under the local identity, the iMessage schedule row was written, and an enrolled coding
     agent's `query_scope(messages:read, raw)` returned rows from both. Not observed: a real Full Disk Access
     grant to a service-run node, and the Keychain request for a real Signal key.
+
+### Changed
+- **Signal Desktop can be read on a plain macOS install.** `[O]` The reader imported `pysqlcipher3`, a
+  source-only package that builds against a system SQLCipher, shipped as the `signal` extra; no install
+  carried it, the owner's included. `sqlcipher3` (prebuilt wheels with SQLCipher inside) is now a dependency
+  on macOS, the reader takes whichever binding is installed, and the `signal` extra installs the same
+  package elsewhere. The key is now set before `cipher_compatibility`: set first, the pragma was ignored
+  (measured: a version-3 setting "opened" a version-4 database), so the reader's fallback for an older
+  Signal database never applied.
+  `tests/sources/test_signal_reader_open.py` opens a really encrypted database where the binding is installed
+  and is skipped, not passed, where it is not.
+- **The per-source switch that runs fact packs on new records is named, and its batch waits for the owner.**
+  `[E:derivation]` Fact packs read a record when it arrives only for a source whose canonical lane lists the
+  `derivation` job, and of the bundled sources only YouTube transcripts lists it. Messages and journals never
+  did: the job was registered in August and attached to no such source. Measured on one live node on
+  10 Nov 2026, enabled packs had read 16 of September's 122 journal entries, none of October's 128 and no
+  message from either month; every fact they held came from a hand-started backfill. The switch that attaches
+  the job to a source already existed (Connectors → Enrichments in the app, `PATCH
+  /v1/sources/{source_id}/enrichments/derivation`), but the catalog showed it as "Derivation" with no
+  description. It is now "Fact packs", marked as the heaviest enrichment, and says what it does and costs:
+  one local-model call per record for each pack the record matches, and a second model checks every fact.
+  The default does not change: it stays off for messages and journals until the owner switches it on for a
+  source, because at one owner's volume (about 16 of their own records a day, 28 packs on) it is roughly 1.5
+  to 2 hours of local-model time a day on the LLM route (estimated from prefilter counts, not a measured run).
+  Separately, an ingest batch and its history catch-up now stop between records, with the record's writes
+  committed, while an owner request is pending (`core.owner_requests.pace`), as the backfill run does; before,
+  a batch ran end to end without looking up.
+
+## [1.5.49] — 2026-11-10
+
+### Added
+- **Provisional self-coherence measurements for the owner dashboard.** `[O]` A versioned, read-only literal-claim comparison reports aligned groups, potential tensions and coverage over a rolling 30-day window. Missing comparisons remain unknown; failures and owner corrections do not count as contradictions. Each group receives one vote. The home client can display these aggregates without a schema migration or changes to claim verification. See `docs/dashboard-measurements.md` for the formula and limits.
+- **Explicit grants for every bundled fact category.** `[P] [O]` New versioned consent covers all 30 categories, 237 pack predicates and the 12 known legacy predicates, including sensitive and inferred facts when selected. Structured values, dependent facts and named people use the same source permission and owner-protection checks. Previews and final responses enforce the selected categories and fact types. Existing v1 grants keep their original scope. Requires the matching control-plane and web release; no pack is enabled and no grant is widened automatically.
+
+
 - **Fact packs can keep up with new records by themselves: `topos-node packs auto on`.** `[E:derivation]` `[O]`
   A fact pack reads a new record as it arrives only for a source whose lane runs the `derivation` job, and few
   sources do. Everything else was read only by a backfill, and a backfill asks for a typed yes each time, so the
@@ -50,6 +85,7 @@ The machine-readable twin of each release is
   that means "keep my switched-on fact packs current". While it is on the node starts a catch-up run by itself,
   on the same machinery as a confirmed backfill (`features/derivation/auto_catchup.py` on top of
   `backfill_runs.py`).
+  - *Changes during a pending count.* The scheduler rechecks the owner switch and kill switch under the setting lock before starting. Turning it off or changing its timing while records are counted prevents that pending run.
   - *Who turns it on.* Only the owner. `topos-node packs auto on [--quiet-minutes N] [--min-gap-minutes N]`
     says what it will do, asks `[y/N]` once on a terminal, and sends one confirmed change; `packs auto off` asks
     the same way; `packs auto status` is a read. The route is `PUT /v1/signal/derivation/backfill/auto
@@ -80,33 +116,6 @@ The machine-readable twin of each release is
     open on the connection. A node restart ends a run; the next look does the same window again.
   - *Where to see it.* `topos-node packs status` marks an automatic run as such and adds the switch, what the
     last look read and wrote, and when the next may start. The node log says the same in counts and dates.
-
-### Changed
-- **Signal Desktop can be read on a plain macOS install.** `[O]` The reader imported `pysqlcipher3`, a
-  source-only package that builds against a system SQLCipher, shipped as the `signal` extra; no install
-  carried it, the owner's included. `sqlcipher3` (prebuilt wheels with SQLCipher inside) is now a dependency
-  on macOS, the reader takes whichever binding is installed, and the `signal` extra installs the same
-  package elsewhere. The key is now set before `cipher_compatibility`: set first, the pragma was ignored
-  (measured: a version-3 setting "opened" a version-4 database), so the reader's fallback for an older
-  Signal database never applied.
-  `tests/sources/test_signal_reader_open.py` opens a really encrypted database where the binding is installed
-  and is skipped, not passed, where it is not.
-- **The per-source switch that runs fact packs on new records is named, and its batch waits for the owner.**
-  `[E:derivation]` Fact packs read a record when it arrives only for a source whose canonical lane lists the
-  `derivation` job, and of the bundled sources only YouTube transcripts lists it. Messages and journals never
-  did: the job was registered in August and attached to no such source. Measured on one live node on
-  10 Nov 2026, enabled packs had read 16 of September's 122 journal entries, none of October's 128 and no
-  message from either month; every fact they held came from a hand-started backfill. The switch that attaches
-  the job to a source already existed (Connectors → Enrichments in the app, `PATCH
-  /v1/sources/{source_id}/enrichments/derivation`), but the catalog showed it as "Derivation" with no
-  description. It is now "Fact packs", marked as the heaviest enrichment, and says what it does and costs:
-  one local-model call per record for each pack the record matches, and a second model checks every fact.
-  The default does not change: it stays off for messages and journals until the owner switches it on for a
-  source, because at one owner's volume (about 16 of their own records a day, 28 packs on) it is roughly 1.5
-  to 2 hours of local-model time a day on the LLM route (estimated from prefilter counts, not a measured run).
-  Separately, an ingest batch and its history catch-up now stop between records, with the record's writes
-  committed, while an owner request is pending (`core.owner_requests.pace`), as the backfill run does; before,
-  a batch ran end to end without looking up.
 
 ## [1.5.48] — 2026-11-10
 

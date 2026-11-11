@@ -1482,6 +1482,16 @@
       ]
     },
     {
+      "version": "1.5.49",
+      "summary": "Explicit grants for all bundled fact categories, optional owner-enabled automatic fact-pack catch-up, and provisional owner-only literal-claim coherence measurements. No setting or grant is widened automatically.",
+      "steps": [],
+      "notes": [
+        "[P] [O] All 30 bundled categories are available through explicitly selected v2 grants. Existing v1 consent is unchanged; no data reprocessing or automatic grant migration. Permission indexes rebuild on the changed implementation revision.",
+        "[O] Optional automatic catch-up keeps enabled packs current over recent records. Off by default; requires explicit owner activation. No automatic reprocessing, model-policy change, or job-output invalidation.",
+        "[O] The additive owner dashboard coherence metric reads retained claims and reports provisional literal agreement and coverage. No schema migration, model call, label write or verification behavior change. Missing comparisons remain null."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

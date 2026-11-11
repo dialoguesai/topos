@@ -239,6 +239,31 @@ def looks(node):
 
 # ----------------------------------------------------------------------------- off means off
 
+@pytest.mark.parametrize("change,decision", [
+    ("owner_off", "off"), ("kill_switch", "kill_switch"), ("longer_quiet", "switch_changed"),
+])
+def test_switch_changed_while_counting_cannot_start_a_run(node, looks, monkeypatch, change, decision):
+    """Counting pending records can take time; owner changes during it must win before any run starts."""
+    watch = looks()
+    assert watch.look()["decision"] == "ingest_busy"
+    waiting = auto.waiting_by_pack
+
+    def count_then_change(conn, since):
+        counts = waiting(conn, since)
+        assert counts[JOY] > 0
+        if change == "owner_off":
+            auto.set_switch(conn, False, now=watch.now)
+        elif change == "kill_switch":
+            monkeypatch.setenv(auto.KILL_ENV, "off")
+        else:
+            auto.set_switch(conn, True, quiet_s=24 * 3600, now=watch.now)
+        return counts
+
+    monkeypatch.setattr(auto, "waiting_by_pack", count_then_change)
+    monkeypatch.setattr(runs, "start_run", lambda *a, **kw: pytest.fail("started after the switch changed"))
+    assert watch.look(GAP + 5)["decision"] == decision
+    assert not runs.busy()
+
 
 def test_off_is_the_default_and_a_look_then_starts_nothing(node, model, looks) -> None:
     sched = looks(on=False)

@@ -366,5 +366,17 @@ def test_no_node_code_names_an_app():
     """The node has no special case for any app. The two packs keep their ids: facts on disk carry them."""
     named = re.compile(r"\bMoments\b|[\"'`]moments[\"'`]|agent-moments|reflection_(?:invitations|conversation|sweep)")
     root = Path(topos.__file__).parent
-    hits = [str(path.relative_to(root)) for path in root.rglob("*.py") if named.search(path.read_text(encoding="utf-8"))]
+    # The frozen consent catalog carries bundled category titles verbatim. It is
+    # literal data, not an app-specific branch; continue scanning every code node.
+    import ast
+    def code_text(path):
+        text = path.read_text(encoding="utf-8")
+        if path.relative_to(root).as_posix() == "permissions_v2/fact_catalog_v2.py":
+            tree = ast.parse(text)
+            assert len(tree.body) == 2 and isinstance(tree.body[1], ast.Assign)
+            assert tree.body[1].targets[0].id == "PACKS"
+            ast.literal_eval(tree.body[1].value)
+            return ast.unparse(tree.body[0])
+        return text
+    hits = [str(path.relative_to(root)) for path in root.rglob("*.py") if named.search(code_text(path))]
     assert hits == []

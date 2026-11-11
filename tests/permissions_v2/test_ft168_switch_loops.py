@@ -367,13 +367,18 @@ def test_a_switch_while_a_build_is_in_flight_is_built_again_by_the_loop(served, 
 
 def test_a_switch_of_an_ontology_outside_the_release_queues_nothing(served, monkeypatch, caplog):
     node = served
+    # Extension packs outside the frozen grant vocabulary remain irrelevant;
+    # the former health/craft/beliefs examples are now supported categories.
+    node.canonical.executemany("INSERT INTO pack_registry(pack_id,version,enabled) VALUES(?,'future',0)",
+                              [(oid,) for oid in ('future.health','future.craft','future.beliefs')])
+    node.canonical.commit()
     reasons = ft.record_refusal_reasons(node)
     running = ft.Running(node, monkeypatch)
     try:
         with caplog.at_level("WARNING"), ft.Asker(node, QUERY) as asker:
             assert running.wait(lambda: running.observations >= 2) is not None
-            for ontology_id, on in (("health.mental", False), ("health.mental", True), ("craft.tooling", True),
-                                    ("craft.tooling", False), ("beliefs.civic", True)):
+            for ontology_id, on in (("future.health", False), ("future.health", True), ("future.craft", True),
+                                    ("future.craft", False), ("future.beliefs", True)):
                 assert ft.switch(node, ontology_id, on), ontology_id
                 seen = running.observations
                 assert running.wait(lambda: running.observations >= seen + 2) is not None
