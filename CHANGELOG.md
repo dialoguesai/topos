@@ -48,6 +48,8 @@ The machine-readable twin of each release is
   - *Where to see it.* `topos-node packs status` marks an automatic run as such and adds the switch, what the
     last look read and wrote, and when the next may start. The node log says the same in counts and dates.
 
+## [1.5.48] — 2026-11-10
+
 ### Fixed
 - **The end of a backfill batch no longer stalls the node's other writers.** `[E:derivation]` After its last
   record, `run_pack_backfill` stamped the pack's run with a bare `UPDATE pack_registry`, outside the write gate
