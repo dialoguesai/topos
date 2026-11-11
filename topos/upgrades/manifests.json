@@ -1471,6 +1471,17 @@
       ]
     },
     {
+      "version": "1.5.48",
+      "summary": "The end of a fact-pack backfill batch no longer stalls the node's other writers: the batch's run stamp is a gated, committed write before the embedding step, where it used to hold SQLite's write lock through that step and then wait for the write gate.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "On 1.5.47 a backfill batch's tail stamped pack_registry outside the write gate, left the stamp uncommitted, embedded what the batch wrote, and only then asked for the gate. A gated writer that started in that window waited out SQLite's busy retries (about 156 s) and failed, the next one did the same, and the backfill could not commit until it got the gate: every other writer on the node waited 312 to 343 s at 5 of 9 batch ends on one live node.",
+        "The batch also commits its counters before handing an accepted assertion to the fact writer, which takes the gate when it queues a conflict.",
+        "A stop still runs the stamp and the embedding step; an embedding failure is still reported in the batch's counts and never raised."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
