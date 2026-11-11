@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.48] — 2026-11-10
+
 ### Fixed
 - **The end of a backfill batch no longer stalls the node's other writers.** `[E:derivation]` After its last
   record, `run_pack_backfill` stamped the pack's run with a bare `UPDATE pack_registry`, outside the write gate
