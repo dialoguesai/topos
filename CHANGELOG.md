@@ -55,6 +55,26 @@ The machine-readable twin of each release is
   `tests/sources/test_signal_reader_open.py` opens a really encrypted database where the binding is installed
   and is skipped, not passed, where it is not.
 
+## [1.5.48] — 2026-11-10
+
+### Fixed
+- **The end of a backfill batch no longer stalls the node's other writers.** `[E:derivation]` After its last
+  record, `run_pack_backfill` stamped the pack's run with a bare `UPDATE pack_registry`, outside the write gate
+  and left uncommitted, and then embedded what the batch wrote (`index_derived_objects`). The indexer loads and
+  embeds every changed object first and takes the write gate only to store the vectors, so the backfill's
+  connection held SQLite's write lock through the whole embedding step and then queued for the gate. A gated
+  writer that started in that window held the gate while its `BEGIN IMMEDIATE` waited out the busy retries
+  (5 x 30 s, about 156 s) and failed with "database is locked"; the next one did the same; the backfill could
+  not commit until it got the gate. On a live node on 1.5.47 (10 Nov 2026) this stalled every other writer for
+  312 to 343 s, five times, at 5 of 9 batch ends, on the LLM route and the Topos Facts route alike; each time
+  `claim_next_job` logged a gate hold of about 156 s twice in a row. Three incoming writes timed out and were
+  redelivered, so nothing was lost. The stamp is now its own gated write, committed before the embedding step
+  starts (and rolled back if it fails), so the indexer is entered with nothing open on the connection. The
+  batch also commits its counters before handing an accepted assertion to the fact writer, which takes the
+  gate when it queues a conflict: the same order, without a model call in it, and not seen in that log. A stop
+  still runs the stamp and the embedding step, and an embedding failure is still reported in the batch's
+  counts and never raised.
+
 ## [1.5.47] — 2026-11-10
 
 ### Added
