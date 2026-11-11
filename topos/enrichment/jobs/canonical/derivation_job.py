@@ -77,6 +77,58 @@ def _record_role_for(row: Dict[str, Any], table: str, posture_for: Callable[[Dic
     return "observed"
 
 
+def _owner_reaction(role: str, table: str, row: Dict[str, Any], text: Any) -> bool:
+    """True for a reaction ("tapback") the owner sent: a record no pack reads.
+
+    Messages stores a reaction as a message from whoever reacted, and its text is the
+    message reacted to, in quotes after "Loved", "Liked" and the rest. The sender flag
+    makes it `authored`, so an owner-only pack read the other person's words as the
+    owner's: measured on one node, 11 Nov 2026, 82 of the owner's 1,910 texts since
+    1 July were reactions, 47 reached the model for one pack, and 2 of them became 3
+    stored facts, one of them the other person's thanks filed as the owner's gratitude.
+
+    The record is dropped, not demoted to `observed`: the message reacted to is a record
+    of its own, read there with its real sender, and a second copy with no speaker label
+    would only be read again by every pack that takes observed text. `row` is whatever
+    carries the row's metadata (`features/facts/reactions.py`); a row with none is judged
+    by its words. A contact's reaction is not touched here: it is `observed` already.
+    """
+    if role != "authored" or table != "conversation_messages":
+        return False
+    from ....features.facts.reactions import is_reaction
+    return is_reaction(row, text)
+
+
+def _with_stored_metadata(conn, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The batch's message rows, each with the metadata stored for it when it brought none.
+
+    The lanes that feed a batch hand on text and sender; the reader's metadata, where the
+    native reaction marker is, stays on the stored row (local sync, a reprocess reload). A
+    row that already carries metadata is passed through as it is; the rest are copies, so
+    the other jobs of the same batch see the list they were given. A database without the
+    column, or a row not stored yet, leaves the row to be judged by its words."""
+    def _bare(row):
+        return (isinstance(row, dict)
+                and str(row.get("_table") or row.get("canonical_table") or "") == "conversation_messages"
+                and not any(row.get(key) for key in ("metadata_json", "_metadata", "metadata"))
+                and row.get("message_id"))
+    wanted = sorted({str(row["message_id"]) for row in rows if _bare(row)})
+    stored: Dict[str, Any] = {}
+    for start in range(0, len(wanted), 400):
+        chunk = wanted[start:start + 400]
+        try:
+            stored.update((str(mid), meta) for mid, meta in conn.execute(
+                f"SELECT message_id, metadata_json FROM conversation_messages"
+                f" WHERE metadata_json IS NOT NULL AND message_id IN ({','.join('?' for _ in chunk)})",
+                chunk).fetchall())
+        except sqlite3.Error:
+            return rows
+    if not stored:
+        return rows
+    return [{**row, "metadata_json": stored[str(row["message_id"])]}
+            if _bare(row) and str(row["message_id"]) in stored else row for row in rows]
+
+
 def _row_to_record(row: Dict[str, Any], *,
                    posture_for: Callable[[Dict[str, Any]], str]) -> Optional[Dict[str, Any]]:
     text = str(row.get("content") or row.get("text") or row.get("title") or "")
@@ -88,6 +140,8 @@ def _row_to_record(row: Dict[str, Any], *,
         return None
     table = str(row.get("_table") or row.get("canonical_table") or "")
     role = _record_role_for(row, table, posture_for)
+    if _owner_reaction(role, table, row, text):
+        return None
     date = str(row.get("event_at") or row.get("entry_at") or row.get("occurred_at") or "")[:10]
     return {"record_id": rid, "table": table or "canonical", "text": text,
             "role": role, "date": date,
@@ -410,7 +464,8 @@ def run_derivation_batch(
             return a
         return apply_verdict(a, last_verdict)
 
-    recs = [rec for rec in (_row_to_record(row, posture_for=posture_for) for row in rows) if rec is not None]
+    recs = [rec for rec in (_row_to_record(row, posture_for=posture_for)
+                            for row in _with_stored_metadata(conn, rows)) if rec is not None]
     _attach_dm_recipients(conn, recs)
     written = 0
     for rec in recs:
@@ -578,14 +633,16 @@ def _iter_history(conn, limit=2000, posture_for=None, since=None):
         out.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
                     "date": str(at or "")[:10], "role": role or "authored", "source_id": ""})
     msg_since = " AND event_at >= ?" if since else ""
+    from ....features.facts.reactions import stored_metadata_column
     msg_rows = _rows(
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role,"
             f" CASE WHEN COALESCE(is_from_self,0)=1 THEN NULL ELSE sender_id END,"
-            f" is_from_self, sender_id, sender_type, source_id, dataset_id, conversation_id"
+            f" is_from_self, sender_id, sender_type, source_id, dataset_id, conversation_id,"
+            f" {stored_metadata_column(conn)}"
             f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15{msg_since}"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")
     if not msg_rows:
-        msg_rows = [tuple(r) + (None,) * 7 for r in _rows(
+        msg_rows = [tuple(r) + (None,) * 8 for r in _rows(
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role"
             f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15{msg_since}"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")]
@@ -599,11 +656,14 @@ def _iter_history(conn, limit=2000, posture_for=None, since=None):
             speakers = resolve_peer_identities(conn, keys)
         except Exception:  # noqa: BLE001 — no speaker label means no outward fact, never a crash
             speakers = {}
-    for tbl, rid, text, at, stored, sender, is_self, sender_id, sender_type, source_id, dataset_id, conv in msg_rows:
+    for (tbl, rid, text, at, stored, sender, is_self, sender_id, sender_type, source_id, dataset_id, conv,
+         meta) in msg_rows:
         _cid, eid, display = speakers.get(str(sender or ""), (None, None, None))
         role = _record_role_for({"actor_role": stored, "is_from_self": is_self, "sender_id": sender_id,
                                  "sender_type": sender_type, "source_id": source_id,
                                  "dataset_id": dataset_id}, tbl, posture_for)
+        if _owner_reaction(role, tbl, {"metadata_json": meta}, text):
+            continue   # the owner's reaction: its text is the message reacted to
         out.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
                     "date": str(at or "")[:10], "role": role, "source_id": "",
                     "speaker": str(display or "") if eid else "",
@@ -711,20 +771,24 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
                 return conn.execute(sql).fetchall()
             except _sqlite3.OperationalError:
                 return []          # canonical table absent on this node — fine
+        from ....features.facts.reactions import stored_metadata_column
         msg_rows = _rows(
-            """SELECT 'conversation_messages', message_id, content, event_at, actor_role,
-                      is_from_self, sender_id, sender_type, source_id, dataset_id
+            f"""SELECT 'conversation_messages', message_id, content, event_at, actor_role,
+                      is_from_self, sender_id, sender_type, source_id, dataset_id,
+                      {stored_metadata_column(conn)}
                FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15
                AND event_at >= datetime('now','-14 day') ORDER BY event_at DESC LIMIT 400""")
         if not msg_rows:
-            msg_rows = [tuple(r) + (None,) * 5 for r in _rows(
+            msg_rows = [tuple(r) + (None,) * 6 for r in _rows(
                 """SELECT 'conversation_messages', message_id, content, event_at, actor_role
                    FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15
                    AND event_at >= datetime('now','-14 day') ORDER BY event_at DESC LIMIT 400""")]
         recent = []
         for tbl, rid, text, at, stored, *who in msg_rows:
             row = dict(zip(("actor_role", "is_from_self", "sender_id", "sender_type", "source_id",
-                            "dataset_id"), (stored, *who)))
+                            "dataset_id", "metadata_json"), (stored, *who)))
+            if _owner_reaction(_record_role_for(row, tbl, posture_for), tbl, row, text):
+                continue   # a trial reads what ingest will: never the owner's reaction
             recent.append((tbl, rid, text, at, _record_role_for(row, tbl, posture_for)))
         recent += _rows(
             """SELECT 'journal_entries', entry_id, content, entry_at, 'authored'

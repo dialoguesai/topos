@@ -56,16 +56,21 @@ def promise_shaped_records(conn: sqlite3.Connection, *, limit: int = 2000) -> Li
     `conversation_messages.actor_role` is blank on most owner messages and the history walk
     reads blank as `observed`, which no owner-subject pack accepts.
     """
+    from ..facts.reactions import is_reaction, stored_metadata_column
     out: List[Dict[str, Any]] = []
     try:
         rows = conn.execute(
-            "SELECT message_id, content, event_at, conversation_id FROM conversation_messages"
+            f"SELECT message_id, content, event_at, conversation_id, {stored_metadata_column(conn)}"
+            " FROM conversation_messages"
             " WHERE is_from_self=1 AND content IS NOT NULL AND LENGTH(content)>15"
             " ORDER BY event_at DESC LIMIT ?", (int(limit) * 10,)).fetchall()
     except sqlite3.Error:
         rows = []
+    # A reaction the owner sent is `is_from_self` too, and its text is the other person's
+    # message: 'Loved “I'll send it tomorrow”' is their promise, not the owner's.
     hits = [(str(mid), str(text), str(at or "")[:10], str(conv or ""))
-            for mid, text, at, conv in rows if is_promise_shaped(text)]
+            for mid, text, at, conv, meta in rows
+            if is_promise_shaped(text) and not is_reaction({"metadata_json": meta}, text)]
     # THE RECIPIENT. In a direct message "I'll read it" is a promise to the person being
     # texted, and their name is nowhere in the text — measured on the first live pass: 40
     # promise-shaped records, 40 model calls, zero assertions, because the pack (rightly)
