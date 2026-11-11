@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Provisional self-coherence measurements for the owner dashboard.** `[O]` A versioned, read-only literal-claim comparison reports aligned groups, potential tensions and coverage over a rolling 30-day window. Missing comparisons remain unknown; failures and owner corrections do not count as contradictions. Each group receives one vote. The home client can display these aggregates without a schema migration or changes to claim verification. See `docs/dashboard-measurements.md` for the formula and limits.
+
 ## [1.5.48] — 2026-11-10
 
 ### Fixed
