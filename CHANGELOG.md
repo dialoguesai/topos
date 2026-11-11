@@ -71,6 +71,28 @@ The machine-readable twin of each release is
   committed, while an owner request is pending (`core.owner_requests.pace`), as the backfill run does; before,
   a batch ran end to end without looking up.
 
+### Fixed
+- **A reaction the owner sent in Messages is no longer read by fact packs as text the owner wrote.**
+  `[E:derivation]` Messages stores a reaction ("tapback") as a message from whoever reacted, and its text is
+  the message reacted to, in curly quotes after "Loved", "Liked", "Laughed at" and the rest. The row's sender
+  flag says the owner, so the derivation job gave it the role `authored` and every owner-only pack read the
+  other person's sentence as the owner's own. On one node (11 Nov 2026), 82 of the owner's 1,910 texts since
+  1 July were reactions; 47 reached the model for `moments.joy`, and 2 of them became 3 stored facts, one of
+  them the other person's thanks filed as the owner's gratitude. The iMessage reader already records the
+  native marker on every row it stores (`associated_message_guid` and a non-zero `associated_message_type` in
+  `metadata_json`), so nothing changes at the reader; the derivation job now reads it. An owner's reaction is
+  left out of the ingest batch, of the history walk that the catch-up, the owner's backfill and the backfill
+  plan's "waiting" count share, and of the enable-offer trial. It is dropped rather than demoted to `observed`:
+  the message reacted to is a record of its own and is read there, with its real sender. A batch row that
+  arrives without metadata (local sync and a reprocess hand on text and sender only) is judged by the stored
+  row's. A row with no marker anywhere is judged by its words: the whole text must be one of the forms Messages
+  writes in English (the six tapbacks, "Reacted … to", "Removed … from", then one quotation and nothing after
+  it), so a message that merely opens with "Loved" or "Liked" is still read. The commitments lane, which picks
+  the owner's promise-shaped messages itself, had the same gap (a reaction to "I'll send it tomorrow" is
+  promise-shaped) and applies the same rule. A contact's reaction is read as before. Limits: facts already
+  written from a reaction are not removed, and a message the owner typed that consists of nothing but
+  `Loved “…”` is treated as a reaction.
+
 ## [1.5.49] — 2026-11-10
 
 ### Added
