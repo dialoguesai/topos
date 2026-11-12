@@ -5,6 +5,10 @@ An app is any other name. It is enrolled the same way and becomes the same class
 reaches those reads and only the dispatch door on the socket. It is enrolled on a terminal only: the pairing approval
 is for coding tools. A yes on that terminal is also what reconnects a disconnected app.
 
+``--feedback facts:<pack>,...`` is a second, separate grant (DR-72): the app may record the owner's reaction and rank
+on facts of those packs. ``--reads`` never gives it, the same prompt shows it, and an enrolment without it replaces a
+grant that had it.
+
 The label (CONTRACTS §1.1) is minted by lane L1's ``mint_agent_label`` and
 written here, once, to ``~/.topos/agents/<client>.token`` (0700 dir, 0600 file).
 It is never printed: the stdio server reads the file, nothing else does
@@ -39,7 +43,7 @@ from typing import Optional
 import click
 
 from topos import mcp_server
-from topos.mcp_clients import AppGrant, parse_app_reads
+from topos.mcp_clients import AppGrant, parse_app_grant
 from topos.mcp_server import CLIENT_NAMES, DISPLAY_NAMES
 
 EXIT_OK = 0
@@ -104,14 +108,15 @@ def _client_or_fail(name: str) -> str:
         raise AssertionError  # unreachable
 
 
-def _grant_or_fail(client: str, reads: Optional[str]) -> Optional[AppGrant]:
-    """An app's ``--reads``, checked; None for a coding tool. An app must say what it reads, and a coding tool can't."""
+def _grant_or_fail(client: str, reads: Optional[str], feedback: Optional[str] = None) -> Optional[AppGrant]:
+    """An app's ``--reads`` and ``--feedback``, checked; None for a coding tool. An app must say what it reads, and a
+    coding tool can't. Feedback is never implied: no ``--feedback``, no feedback."""
     if client in CLIENT_NAMES:
-        if reads:
-            _fail(f"{DISPLAY_NAMES[client]} is a coding tool, so it takes no --reads.")
+        if reads or feedback:
+            _fail(f"{DISPLAY_NAMES[client]} is a coding tool, so it takes no --reads and no --feedback.")
         return None
     try:
-        grant = parse_app_reads((reads or "").split(","))
+        grant = parse_app_grant((reads or "").split(","), (feedback or "").split(",") if feedback else ())
     except ValueError as exc:
         hint = "Say what it may read: --reads facts:<pack>,messages,journals." if not reads else str(exc)
         _fail(f"Could not connect {client}: {hint}")
@@ -132,10 +137,14 @@ def _unknown_packs(conn: sqlite3.Connection, grant: AppGrant) -> list[str]:
 
 
 def _consent_question(client: str, display: str, grant: Optional[AppGrant] = None) -> str:
-    """What the owner says yes to. An app reads what its grant says, and the question says what that is."""
+    """What the owner says yes to. An app reads what its grant says, and the question says what that is; what it may
+    record is said in the same question, after the reads."""
     if grant is not None:
+        records = grant.plain_feedback()
         return (f"Connect {display} to your Topos? As you, it can read: {grant.plain()}. "
-                "Every read is recorded under its name.")
+                + (f"It can also record: {records}. It cannot change a fact. " if records else "")
+                + "Every read is recorded under its name"
+                + (", and so is each reaction or rank it records." if records else "."))
     return (f"Connect {display} to your Topos? It will read what you allow in Topos, as you, "
             "and every read is recorded under its name.")
 
@@ -250,7 +259,11 @@ def _public_row(row: dict) -> dict:
         "enrolled_at": row.get("created_at"),
         "revoked": bool(row.get("revoked_at")),
     }
-    return {**public, "reads": row["reads"]} if "reads" in row else public
+    if "reads" in row:
+        public["reads"] = row["reads"]
+    if row.get("feedback"):
+        public["feedback"] = row["feedback"]
+    return public
 
 
 def _echo(payload: dict | list, as_json: bool, human: str) -> None:
@@ -272,14 +285,18 @@ def agents_group() -> None:
 )
 @click.option("--open-terminal", is_flag=True, help="Open the approval prompt in Terminal on macOS; no command typing needed.")
 @click.option("--reads", default=None, help="For an app: what it may read, comma separated: facts:<pack>, messages, journals.")
-def agents_add(name: str, as_json: bool, approved: bool, open_terminal: bool, reads: Optional[str]) -> None:
+@click.option("--feedback", default=None,
+              help="For an app: the packs whose facts it may put your reaction and rank on, comma separated: "
+                   "facts:<pack>. Each must also be in --reads. Off unless you give it.")
+def agents_add(name: str, as_json: bool, approved: bool, open_terminal: bool, reads: Optional[str],
+               feedback: Optional[str]) -> None:
     """Connect an AI coding tool or an app to this Topos (asks you first)."""
     client = _client_or_fail(name)
     display = DISPLAY_NAMES.get(client, client)
     is_app = client not in CLIENT_NAMES
     if is_app and (approved or open_terminal):
         _fail(f"{display} is connected from a terminal: run `topos-node agents add {client} --reads ...` yourself.")
-    grant = _grant_or_fail(client, reads)
+    grant = _grant_or_fail(client, reads, feedback)
     if open_terminal:
         if approved:
             raise click.UsageError("Use either --approved or --open-terminal.")

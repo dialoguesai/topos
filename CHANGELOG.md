@@ -9,6 +9,32 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **An app you connect can keep your reaction and rank on a fact, if you let it** (DR-72). `[P] [O]`
+  An app that shows you your facts (it reads them with `pack_facts`) can now save two things you put on one: a
+  reaction (`love`, `like`, `sad` or `down`) and a rank (a whole number from -3 to 3). Until now an app could only
+  read, so anything you marked stayed inside that app.
+  - *You give it, separately from reading.* `topos-node agents add <name> --reads facts:<pack>,... --feedback
+    facts:<pack>,...`. The question you say yes to lists what the app can read and then what it can record.
+    `--reads` alone never gives it, a pack under `--feedback` must also be under `--reads`, and connecting the app
+    again without `--feedback` takes it away. No app has it until you run this. `agents list --json` shows it.
+  - *What the app sends.* `fact_feedback` on the dispatch door: `{"fact_id", "reaction"?, "rank"?}`. A field it
+    leaves out stays as it was. `"reaction": null` takes the reaction back; `"rank": 0` takes the rank back. Sending
+    the same value twice changes nothing, so a retry cannot undo itself.
+  - *Only on a fact it can read.* The write is accepted only for a fact `pack_facts` would give that app at that
+    moment. A fact from another pack, a fact Off-limits holds back, a sensitive fact, a replaced fact and an id that
+    does not exist all get the same answer (`404 fact_not_available`), so the write cannot be used to find out
+    whether a fact exists. An app with reads only is refused.
+  - *What is kept.* One row per fact in a new table, `fact_feedback`: the reaction, the rank, when, and which app.
+    The fact itself is never changed: not its text, its confidence or its dates. `pack_facts` now returns `reaction`
+    and `rank` with every fact (null when there is none) to every app that can read that fact, and to the Topos app;
+    it never says which app recorded them, and the node sorts nothing by them. Another app you gave `--feedback`
+    for the same pack can change them.
+  - *When a fact is replaced.* If a pack run replaces a fact with a newer one, the reaction and rank stay with the
+    old fact and are no longer shown; the new fact starts with none.
+  - *On upgrade.* No step and no migration: the table is created the first time an app records something. Apps you
+    already connected keep their reads and cannot record until you connect them again with `--feedback`.
+
 ## [1.5.49] — 2026-11-10
 
 ### Added
