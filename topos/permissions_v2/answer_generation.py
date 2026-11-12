@@ -19,7 +19,7 @@ from .answer_checks import (_CITATION, _SCAFFOLD_FOLDS, _TOKEN, DENSE_TEMPLATES,
     _forms_within_one_suffix, _within_one_suffix, citation_numbers, copied_sentence, echoes_protected_word,
     echoes_question_only_word, normalize_citations, post_check_citations, protected_question_words, question_anchors,
     question_only_anchors, scrub_sentences, split_sentences, _stem, _tokens)
-from .answer_protocol import K_ANSWER, K_ANSWER_V4, AnswerOnly, AnswerWithSources, NoAnswer, VERSION
+from .answer_protocol import K_ANSWER, K_ANSWER_LEGACY, K_ANSWER_V4, AnswerOnly, AnswerWithSources, NoAnswer, VERSION
 from .canonical import PolicyError
 from . import answer_tense, switches
 
@@ -244,9 +244,57 @@ class CheckedAnswer:
     lead_connective_trimmed: bool = False
 
 
-def _clip(content: str, limit: int = 420) -> str:
+# The room the prompt gives one item's body and its supporting line, in characters: a fixed cut for each while
+# ANSWER_SHARED_CONTEXT is off, each item's least share of a common budget while it is on (`shown_items`).
+BODY_CHARS = 420
+SUPPORT_CHARS = 160
+
+
+def _clip(content: str, limit: int = BODY_CHARS) -> str:
     text = " ".join(content.split())
     return text if len(text) <= limit else text[:limit]
+
+
+def _clip_sentences(text: str, limit: int) -> str:
+    """`text` (its whitespace already collapsed) within `limit` characters, ending at the last sentence end that fits.
+
+    A cut inside a sentence can lose the negation, condition or attribution at its end ("I agreed to go" of "I agreed
+    to go only if the roof is fixed"), so the sentence that does not fit is left out whole. The result is always the
+    start of `text`, cut where `split_sentences` ends a sentence. When not even the first sentence fits, the text is
+    cut at `limit` as `_clip` cuts it: an item never shows nothing because its one sentence is long."""
+    if len(text) <= limit:
+        return text
+    kept, used = [], 0
+    for sentence in split_sentences(text):
+        size = len(sentence) + bool(kept)
+        if used + size > limit:
+            break
+        kept.append(sentence)
+        used += size
+    whole = " ".join(kept)
+    return whole if whole and text.startswith(whole) else text[:limit]
+
+
+def _shared_room(lengths: list[int], least: int, slots: int) -> list[int]:
+    """How many characters each text may show when `slots * least` characters are shared between them.
+
+    Every text first gets what it had before: its own length, or `least` when it is longer. What the short ones left
+    unused is then dealt to the ones still cut, in equal shares, until it is gone or nothing is cut. So no text gets
+    less than `least` (or its whole length), none gets more than its length, and the sum never passes `slots * least`
+    (`slots` is never fewer than the texts). Only the lengths are read: the same texts in the same order always get the
+    same room."""
+    room = [min(length, least) for length in lengths]
+    spare = slots * least - sum(room)
+    while spare > 0:
+        cut = [n for n, length in enumerate(lengths) if room[n] < length]
+        if not cut:
+            break
+        share = max(1, spare // len(cut))
+        for n in cut:
+            extra = min(share, lengths[n] - room[n], spare)
+            room[n] += extra
+            spare -= extra
+    return room
 
 
 def _date(record, precision: str) -> str:
@@ -262,7 +310,8 @@ class ShownItem:
     """One released record as the writer's prompt shows it (`build_prompt`, which writes its item block from this):
     the body clipped to the prompt's budget with its whitespace collapsed (`_clip`), the kind, the date at the grant's
     precision ("" when the prompt shows none) and, for a fact, a goal or a relationship, the supporting text line
-    (its first citation's text, collapsed and cut to 160 characters; None when the prompt shows no such line)."""
+    (its first citation's text, collapsed and cut to 160 characters; None when the prompt shows no such line).
+    With ANSWER_SHARED_CONTEXT on the two cuts are the record's share of the prompt's room (`shown_items`)."""
     body: str
     kind: str
     date: str
@@ -274,16 +323,54 @@ class ShownItem:
                 + ((self.support,) if self.support is not None else ()))
 
 
-def shown_item(record, precision: str) -> ShownItem:
-    """What the writer's prompt shows of one released record (ShownItem)."""
+def _support_text(record) -> str | None:
+    """The text of a record's supporting line before any cut: its first citation's, whitespace collapsed, for a fact,
+    a goal or a relationship; None for any other kind or with no citation."""
     citations = getattr(record, "citations", ())
-    support = (" ".join(citations[0].content.split())[:160]
-               if citations and record.kind in ("fact", "goal", "relationship") else None)
-    return ShownItem(_clip(record.content), record.kind, _date(record, precision), support)
+    if not citations or record.kind not in ("fact", "goal", "relationship"):
+        return None
+    return " ".join(citations[0].content.split())
+
+
+def shown_item(record, precision: str) -> ShownItem:
+    """What the writer's prompt shows of one released record (ShownItem) at the fixed cuts: the prompt of every
+    release up to 1.5.49, and of this one while ANSWER_SHARED_CONTEXT is off."""
+    support = _support_text(record)
+    return ShownItem(_clip(record.content), record.kind, _date(record, precision),
+                     None if support is None else support[:SUPPORT_CHARS])
+
+
+def shared_context_on(env=None) -> bool:
+    return switches.on(switches.ANSWER_SHARED_CONTEXT, env)
+
+
+def shown_items(records: list, precision: str) -> list[ShownItem]:
+    """What the writer's prompt shows of these released records together, one ShownItem each, in their order.
+
+    Off (`ANSWER_SHARED_CONTEXT`, the default): `shown_item` of each, the fixed cuts. On: the bodies share
+    `BODY_CHARS` for each of them, and the supporting lines `SUPPORT_CHARS` for each of them, counted as eight when
+    there are fewer (`K_ANSWER_LEGACY`, the most items a prompt held when the cuts were set): a short text's unused
+    room goes to the long ones (`_shared_room`), so the prompt can be no longer than the fixed cuts allow that many
+    items, and a text that still does not fit ends at a sentence end (`_clip_sentences`). What one record shows
+    then depends on the others beside it, so `build_prompt` and Fix A (`withhold_protected_items`) both read this,
+    over the same list. Nothing but these records' own text is read, and each text shown is the start of the
+    record's own (its body, or its first citation's): more of a released record, never another record."""
+    if not shared_context_on():
+        return [shown_item(record, precision) for record in records]
+    bodies = [" ".join(record.content.split()) for record in records]
+    supports = [_support_text(record) for record in records]
+    slots = max(len(records), K_ANSWER_LEGACY)
+    body_room = _shared_room([len(body) for body in bodies], BODY_CHARS, slots)
+    lined = [number for number, support in enumerate(supports) if support is not None]
+    support_room = dict(zip(lined, _shared_room([len(supports[number]) for number in lined], SUPPORT_CHARS, slots)))
+    return [ShownItem(_clip_sentences(bodies[number], body_room[number]), record.kind, _date(record, precision),
+                      None if supports[number] is None
+                      else _clip_sentences(supports[number], support_room[number]))
+            for number, record in enumerate(records)]
 
 
 def withhold_protected_items(records: list, *, boundary, precision: str) -> tuple[list, int]:
-    """Fix A (`ANSWER_PROTECTED_ITEM_FILTER`): the released records none of whose shown texts (`shown_item`) carries an
+    """Fix A (`ANSWER_PROTECTED_ITEM_FILTER`): the released records none of whose shown texts (`shown_items`) carries an
     Off-limits term by `boundary.mentions_protected`, in their order, and how many were withheld.
 
     Why a record the share's release permitted can still carry one here: the release's veto reads the stored row
@@ -298,8 +385,16 @@ def withhold_protected_items(records: list, *, boundary, precision: str) -> tupl
     every reading of it does. It does not cover a protected term the writer writes that no shown text carries (a
     common word that is also a name part, written capitalised; a full name, alias or handle that only the joined
     sentences spell); the body check still refuses those."""
-    kept = [record for record in records if not boundary.mentions_protected(*shown_item(record, precision).texts())]
-    return kept, len(records) - len(kept)
+    kept = list(records)
+    while True:
+        passing = [record for record, shown in zip(kept, shown_items(kept, precision))
+                   if not boundary.mentions_protected(*shown.texts())]
+        # ANSWER_SHARED_CONTEXT: a withheld record's room goes to the ones left, which then show more of their own
+        # text, so they are read again as the prompt will show them, until a pass withholds nothing. Off, what a
+        # record shows does not depend on the others and one pass is the answer, as before.
+        if len(passing) == len(kept) or not shared_context_on():
+            return passing, len(records) - len(passing)
+        kept = passing
 
 
 def _name_words(value) -> set[str]:
@@ -899,9 +994,10 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
     if time_line:
         # TR162 C: the node's own lines, after the quoted question and before the items.
         lines[2:2] = [time_line]
+    # What the prompt shows of each item, from the one place Fix A reads it too (`shown_items`).
+    showing = shown_items(records, precision)
     for number, record in enumerate(records, 1):
-        # What the prompt shows of the item, from the one place Fix A reads it too (`shown_item`).
-        shown = shown_item(record, precision)
+        shown = showing[number - 1]
         body = shown.body
         raw_texts.append(body)
         # The item's kind is on its prompt line, so the model sees it: a journal entry carries "journal" and "entry",

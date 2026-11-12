@@ -1293,3 +1293,62 @@ The 53ce26ea sharing attempt was stopped before completion because that schema f
 changes the exact release tree; it is diagnostic, not passing release evidence.
 Full CI and a fresh sharing rig remain required; no deployment claimed. Prior offline
 and real-model comparison limitations remain unchanged.
+
+## RQ-2026-11-11-GRANT-102 — Grant search word forms, request words and shared answer context (all off)
+
+- **Recorded:** 2026-11-11. **Status:** implemented on branch `feat/grant-response-quality-port` behind three
+  switches that are off by default; not loaded on any node, not live verified, not released. Carries forward the
+  deterministic parts of draft topos#102 (written for 1.5.5, 772 commits behind main); that draft is untouched.
+- **Failure:** A question to a share can miss permitted material or lose context. Three deterministic causes from
+  the draft still stood on main: (1) the word lane matched exact words only, so a plural question missed a singular
+  item; (2) a request's own words ("can", "tell", "about") were scored like subject words, so an item sharing only
+  those was returned, and outranked the subject item when the subject was asked in another form; (3) the answer
+  prompt cut every item at 420 characters and its supporting line at 160 wherever that fell, whatever room the
+  other items left unused.
+- **Method:** `SEARCH_PLURAL_FOLD`: a query word also matches its regular plural or singular, the forms made from
+  the query word and looked up in the stored term bags of the members inside the request's window (no index
+  rebuild, no vocabulary scan). `SEARCH_REQUEST_WORDS`: a closed list of thirteen request words is left out of the
+  query when it has any other word. `ANSWER_SHARED_CONTEXT`: the items' bodies share 420 characters each (counted
+  as eight items when there are fewer), likewise the supporting lines at 160; an item that still does not fit
+  ends at a sentence end, or at its room when its first sentence does not fit; Fix A re-reads the items after a
+  withheld item's room is shared out. The writer's and the judge's templates are unchanged.
+- **Affected question families:** Questions to a share (named search, batch, answers). Home chat, owner search and
+  the query pipeline are not touched: none of this code is on those paths.
+- **What was sorted out of the draft:** already on main in another form: statistics and fusion inside the effective
+  window (`search_lanes.within`), per-sentence verification (the support judge), the subject and anchor word
+  rules (withdrawn on main, switches off), the extra CI shard. Needs a model or an owner's ruling, not carried:
+  the verifier and revision prompts with exact-quote evidence, the fixed opening for sentences citing an inferred
+  fact, the answer-only paraphrase guidance, assertion type and goal status in the item header, the "item text
+  truncated" line, every supporting citation instead of the first, and a blank reply read as abstention (main
+  now defers a kept question on `model_error`, so that would turn a retry into a final no-answer).
+- **Verification (offline, deterministic):** the frozen synthetic lexical corpus of the draft
+  (`scripts/build_grant_eval_corpus.py` at `origin/codex/1.5.5-grant-response-quality`, sha256 `887072c0…0786`,
+  640 retrieval cases, 320 with a relevant permitted item and 320 without), ranked by `search_lanes.rank` with no
+  vectors:
+
+  | Switches | Relevant item first | Relevant item returned | No-item cases returning nothing |
+  | --- | ---: | ---: | ---: |
+  | none (main) | 160/320 | 176/320 | 192/320 |
+  | plural | 220/320 | 266/320 | 192/320 |
+  | request words | 176/320 | 176/320 | 320/320 |
+  | both | 266/320 | 266/320 | 320/320 |
+
+  The draft's own fold and request filter, patched over today's lane for comparison, give 248/320, 248/320 and
+  320/320, the numbers the draft reported. Tests: `tests/permissions_v2/test_search_word_lane_options.py` and
+  `tests/permissions_v2/test_answer_shared_context.py`, with the switch table and the neighbouring answer and
+  search files (counts in the PR).
+- **Limits:** The corpus was authored for the draft, its held-out groups included, and was read while this was
+  built: it is an exposed regression set, not a fresh holdout, and its cases are correlated variants. It has no
+  embeddings, so it says nothing about the meaning lane or fusion on a real index. The plural reading conflates a
+  name with the same name plus "s". The request-word reading drops a subject that is itself a request word. The
+  shared context changes what the writer reads: its effect on answers is unmeasured. It also shows more of each
+  item, so while the Off-limits item filter is off, a shown item that names an Off-limits entry in a form the
+  release's veto passes can refuse a whole answer more often (the body check still refuses; nothing is released).
+- **Paired offline gate:** NOT RUN, before or after. The gate's catalog covers the home-chat and query paths, which
+  this change does not touch, and the release machine could run only targeted tests on the night this was built.
+  No baseline exists for this change; do not read this entry as a passing comparison.
+- **Real-model companion:** NOT RUN. No model was loaded or called. There is no live baseline and no live result
+  for any of the three switches, which is why each is off by default.
+- **Deployment:** none. No node, grant, index or setting was changed.
+- **Rollback:** unset the switch (off is the word lane, the prompt and the receipt of 1.5.49); or revert the
+  commit. No stored data or index format changes.

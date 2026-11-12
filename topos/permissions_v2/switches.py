@@ -489,6 +489,45 @@ ANSWER_LEAD_CONNECTIVE_TRIM = _switch(
     "or reordered. While it is on the receipt says lead_connective_trimmed. Off: the answer as written, and the "
     "receipt of before.")
 
+# Grant response quality, carried forward from topos#102 (11 Nov 2026): the parts of that draft that need no model
+# to decide. Each reads only what the share already permits, and each is off, bound and unbound alike, until a
+# battery with the real writer and real embeddings measures it. Off is the retrieval and the prompt of before.
+SEARCH_PLURAL_FOLD = _switch(
+    "SEARCH_PLURAL_FOLD", "bool", False, False,
+    "A share's word search (named search, batch and answers) also matches a query word's regular English plural or "
+    "singular: \"projects\" finds an item that says \"project\", \"hobby\" one that says \"hobbies\". The forms "
+    "are made from the query word alone and looked up in the stored word counts of the members inside the request's "
+    "window, so nothing is rebuilt and nothing outside the permitted set, or outside the window, can lend a form or "
+    "move a score. Plural forms only: no stem, no synonym, no irregular plural; \"news\" is not \"new\". It cannot "
+    "tell a name from a word (a surname that is a first name with an s meets that first name). It changes which "
+    "permitted members the word lane ranks, never what a grant permits: every member still passes the same walk and "
+    "checks. On the frozen synthetic word-search corpus of topos#102 (640 cases, no embeddings, 11 Nov 2026) the "
+    "relevant item came first in 220 of the 320 cases that have one, against 160 with it off, and was among those "
+    "returned in 266 against 176; the 320 cases that have none were unchanged (192 return nothing). Off: exact "
+    "words, as in 1.5.49.")
+SEARCH_REQUEST_WORDS = _switch(
+    "SEARCH_REQUEST_WORDS", "bool", False, False,
+    "A share's word search (named search, batch and answers) leaves the words a request is phrased with out of the "
+    "query: can, could, would, should, how, about, tell, please, give, show, summarize, summarise, describe. An item "
+    "that shares only those with \"Can you tell me about the kiln?\" is then not scored by the word lane and does "
+    "not outrank the one that names the kiln. A query made of nothing else keeps them all, and the meaning lane "
+    "still reads the whole question. It only narrows what the word lane scores, so a subject that is itself one of "
+    "those words (a show, a can) is no longer matched by words: this one can return fewer permitted items, which "
+    "is why it is a switch of its own. On the same corpus, with SEARCH_PLURAL_FOLD on, the relevant item came first "
+    "in 266 of 320 cases against 220 without it, and all 320 cases that have none returned nothing against 192. "
+    "Off: every query word is scored, as in 1.5.49.")
+ANSWER_SHARED_CONTEXT = _switch(
+    "ANSWER_SHARED_CONTEXT", "bool", False, False,
+    "The room the answer prompt gives the released items' text is shared between them. Off, each item's text is cut "
+    "at 420 characters and its supporting line at 160, wherever that falls. On, a short item's unused room goes to "
+    "the long ones (equal shares; the whole is what the same number of items, or eight when there are fewer, could "
+    "take before, so the prompt's ceiling does not move), no item gets less room than before, and an item that "
+    "still does not fit ends at its last whole sentence that fits; when not even its first sentence fits it is cut "
+    "at its room, as before. Only text of records the share already released to this job is shown, and the "
+    "Off-limits item filter (ANSWER_PROTECTED_ITEM_FILTER) reads the items exactly as this shows them. The system "
+    "text and the template version are unchanged; the owner's private receipt says context_budget shared while it "
+    "is on. Not measured with a model. Off: the prompt of 1.5.49, byte for byte.")
+
 SWITCHES = (
     ENABLED, CONFIG_PATH, EVIDENCE_REVIEWS, PROJECTION_REVIEWS, IDENTITY_ATTESTATIONS, INGEST_SNAPSHOTS,
     INGEST_SNAPSHOT_ROOT, MESSAGE_SEARCH, MESSAGE_SEARCH_BATCH, ANSWERS, TRUTH_INTERPRET,
@@ -506,6 +545,7 @@ SWITCHES = (
     ANSWER_CITATION_FORMS, ANSWER_NAME_CLASSES, ANSWER_DENSE, ANSWER_VECTOR_FLOOR, ANSWER_DENSE_ON_QUESTION,
     ANSWER_NAME_ONE_ITEM, ANSWER_HOLDS_BACKGROUND, ANSWER_JUDGE_RESERVE_SECONDS,
     ANSWER_PROTECTED_ITEM_FILTER, ANSWER_TENSE_GUARD, ANSWER_DENIED_DOMAIN_REFUSAL, ANSWER_LEAD_CONNECTIVE_TRIM,
+    SEARCH_PLURAL_FOLD, SEARCH_REQUEST_WORDS, ANSWER_SHARED_CONTEXT,
 )
 BY_NAME = {item.name: item for item in SWITCHES}
 
