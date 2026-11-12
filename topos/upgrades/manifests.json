@@ -1495,7 +1495,9 @@
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "[E:derivation] [P] DR-62: moments.tension and moments.joy read an owner-written message in a two-party iMessage or Signal conversation with the 3 turns before it from the last 7 days, and read the owner's messages of 15 characters or fewer when they have such turns; moments.joy gets a thank-word rule on a message the owner sent. Only while the fact check is on (TOPOS_DERIVATION_VERIFY is not off); no other pack changes and no pack is enabled. The turns are kept on the fact as context_refs, which protect it and are never a source; a fact carrying context_refs is refused by the all-category fact grants (fact_lineage_unsupported). Template shadow-11. No migration, no reprocessing and no job output invalidated: messages already read are not read again."
+      ]
     }
   ]
 }

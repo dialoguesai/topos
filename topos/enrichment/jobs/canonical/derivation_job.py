@@ -119,6 +119,10 @@ CONTEXT_MAX_AGE_DAYS = 7
 _CONTEXT_SOURCES = frozenset({"imessage", "signal"})
 #: How many rows past the k turns one context read may look at to step over reactions.
 CONTEXT_REACTION_SLACK = 12
+#: How long one read of the owner's protections (the Off-limits guard, the excluded records,
+#: each conversation's verdict) serves a batch. A backfill batch is model calls for minutes or
+#: hours; a turn the owner excludes or protects meanwhile stops being read within this long.
+CONTEXT_PROTECTIONS_MAX_AGE_S = 30.0
 
 
 def _is_reaction(metadata: Any, text: Any) -> bool:
@@ -138,6 +142,25 @@ def _is_reaction(metadata: Any, text: Any) -> bool:
     if by_marker_or_words is not None:
         return bool(by_marker_or_words(row, text))
     return bool(reactions.quotes_another_message(row))
+
+
+def _sent_in_a_group(metadata: Any) -> bool:
+    """Whether a stored row's metadata says it was sent in a group chat.
+
+    `_other_party` calls a conversation two-party when one other person has written in it, so
+    a group in which only one other member has written so far would pass. Messages names every
+    chat `<service>;<style>;<identifier>` and the style is `+` for a group and `-` for a direct
+    chat; the reader keeps that name as `chat_guid`. This can only take context away: a row
+    with no such name (Signal, an older import) is left to the sender count."""
+    if isinstance(metadata, (str, bytes)) and metadata:
+        try:
+            metadata = _json.loads(metadata)
+        except (TypeError, ValueError):
+            return False
+    if not isinstance(metadata, dict):
+        return False
+    parts = str(metadata.get("chat_guid") or "").split(";")
+    return len(parts) >= 3 and parts[1] == "+"
 
 
 def _aware(value: Any):
@@ -165,7 +188,9 @@ def _conversation_context(conn, rec: Dict[str, Any], k: int, *,
     not text the owner wrote. Each turn is labelled OWNER or with the
     sender's agreed contact name (`resolve_peer_identities`, "Contact" when none agrees), and
     carries its record id, which the fact keeps as a protection-only ref (`context_refs`).
-    `cache` holds the guard, the exclusions and each conversation's verdict across a batch."""
+    A conversation Messages itself calls a group gives none, whoever has written in it
+    (`_sent_in_a_group`). `cache` holds the guard, the exclusions and each conversation's
+    verdict across a batch, re-read every CONTEXT_PROTECTIONS_MAX_AGE_S."""
     if k <= 0 or rec.get("role") != "authored" or rec.get("table") != "conversation_messages":
         return []
     try:
@@ -187,19 +212,21 @@ def _read_conversation_context(conn, rec, k, cache) -> List[Dict[str, Any]]:
                          " WHERE message_id=?", (rid,)).fetchone()
     if not found or not found[0] or str(found[2] or "").lower() not in _CONTEXT_SOURCES:
         return []
-    if _is_reaction(found[3], rec.get("text")):
+    if _is_reaction(found[3], rec.get("text")) or _sent_in_a_group(found[3]):
         return []
     conv, at = str(found[0]), str(found[1] or "")
     when = _aware(at)
     if when is None:
         return []
-    if "guard" not in cache:
+    import time as _time
+    if "guard" not in cache or _time.monotonic() - cache.get("protections_at", 0.0) > CONTEXT_PROTECTIONS_MAX_AGE_S:
         from ....features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
         from ....features.lifecycle.exclusions import excluded_record_ids
         from ....features.lifecycle.off_limits_view import for_own_processing
         cache["guard"] = BlackholeGuard(conn, caller_class=CallerClass.UNKNOWN, view=for_own_processing())
         cache["excluded"] = excluded_record_ids(conn)
         cache["conversations"] = {}
+        cache["protections_at"] = _time.monotonic()
     guard = cache["guard"]
     if conv not in cache["conversations"]:
         cache["conversations"][conv] = _other_party(conn, conv, guard, is_diarisation_label)
@@ -215,6 +242,9 @@ def _read_conversation_context(conn, rec, k, cache) -> List[Dict[str, Any]]:
         f" AND content IS NOT NULL AND TRIM(content)<>''{system}"
         f" ORDER BY event_at DESC, message_id DESC LIMIT ?",
         (conv, rid, at, at, rid, int(k) + CONTEXT_REACTION_SLACK)).fetchall()
+    if any(_sent_in_a_group(row[5]) for row in rows):
+        cache["conversations"][conv] = None
+        return []
     # Newest first: the k messages before the owner's, stepping over reactions. Only then are
     # the withheld ones dropped, so a withheld turn is never replaced by an older one.
     last = [row[:5] for row in rows if not _is_reaction(row[5], row[1])][:int(k)]
@@ -278,11 +308,21 @@ def _context_refs(context: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str
 
 def _owners_own(a: Dict[str, Any], context) -> Dict[str, Any]:
     """DR-62: nothing read with someone else's words is written about anyone but the owner, not
-    even to the review queue. A verifier that moves `about` off the owner rejects it instead."""
+    even to the review queue. A verifier that moves `about` off the owner rejects it instead.
+
+    And nothing read with them is written unchecked. A verifier call that failed leaves an
+    assertion `error`, which is stored flagged for a one-record reading; one read with context
+    is rejected, because the ruling's reading is the one the verifier checked against the same
+    turns. (With the fact check switched off there is no context to begin with:
+    `template.context_packs`.)"""
     if context and a.get("verifier_status") == "rerouted":
         a = dict(a)
         a["verifier_status"] = "rejected"
         a["verifier_reason"] = f"read with context, not about the owner ({a.get('about')})"[:120]
+    elif context and a.get("verifier_status") == "error":
+        a = dict(a)
+        a["verifier_status"] = "rejected"
+        a["verifier_reason"] = "read with context, not fact-checked"
     return a
 
 
@@ -551,7 +591,7 @@ def run_derivation_batch(
             settle()
             return _tf.raw_output(tf_model, pack.pack, rec["text"]), _tf.MODEL_ID
         raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec),
-                                      context=context),
+                                      context=context, record_table=str(rec.get("table") or "")),
                   pack_id=pack.pack, mode=mode)
         _bump_yield(conn, pack.pack, llm_calls=1)
         return raw, model
@@ -1007,7 +1047,7 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
             context = _context_for(conn, pack, rec, ctx_cache) or None
             try:
                 raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec),
-                                              context=context),
+                                              context=context, record_table=str(rec.get("table") or "")),
                           pack_id=pack.pack, mode="trial")
             except Exception:  # noqa: BLE001
                 continue

@@ -352,7 +352,7 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     from .prefilter import PackPrefilter
     from . import template as _T
     from .registry import bundled_pack_dir
-    from .template import addressing_for, build_prompt, context_packs, parse_output
+    from .template import THANKS_CUE_PACKS, addressing_for, build_prompt, context_packs, parse_output
     from .verify import (apply_verdict, build_verify_prompt, label_note_for, lens_note_for,
                          parse_verdict, verifier_model)
     from .writer import DerivationWriter
@@ -415,7 +415,7 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                                       recipient=str(rec.get("recipient") or ""),
                                       recipient_entity_id=str(rec.get("recipient_entity_id") or ""),
                                       recipient_key=str(rec.get("recipient_key") or ""),
-                                      context=context))
+                                      context=context, record_table=str(rec.get("table") or "")))
         _bump_yield(conn, pack_id, llm_calls=1, prefilter_hits=1)
         return raw
 
@@ -475,8 +475,11 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
         stats["extract_s"] += time.perf_counter() - began
         valid, _rej = parse_output(
             raw, pack, record_text=rec["text"],
-            # Not the stand-in for an unnamed partner: exempted, it would be stored as a person.
-            grounded_exempt=tuple(x for x in (rec.get("recipient"), rec.get("speaker")) if x and x != UNNAMED_RECIPIENT),
+            # The thank-word cue gives the joy pack the recipient, and the stand-in for an unnamed one
+            # must not be exempt: exempted, "the person you are texting" would be stored as a person
+            # (ingest: `_recipient_parse_args`). Every other pack keeps the pair it had.
+            grounded_exempt=tuple(x for x in (rec.get("recipient"), rec.get("speaker"))
+                                  if not (pack_id in THANKS_CUE_PACKS and x == UNNAMED_RECIPIENT)),
             runner_labels=[l for l in (
                 f"id:{rec['recipient_entity_id']}" if rec.get("recipient_entity_id") else "",
                 f"key:{rec['recipient_key']}" if rec.get("recipient_key") else "",

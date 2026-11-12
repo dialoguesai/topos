@@ -115,4 +115,10 @@ def authorize(row,payload,policy):
         raise PolicyError('fact_lineage_unsupported')
     if payload.get('dependencies'):
         raise PolicyError('fact_lineage_unsupported')
+    # DR-62: a fact read WITH other records (`context_refs`: the turns before the owner's
+    # message) may describe what only the other person's turn said. Those records are not
+    # in source_refs_json, so nothing on this side qualifies or protects them. Such a fact
+    # is not shared at all, as a root or as a dependency, until a ruling says how.
+    if payload.get('context_refs') not in (None,[]):
+        raise PolicyError('fact_lineage_unsupported')
     return oid

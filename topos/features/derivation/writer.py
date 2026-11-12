@@ -346,6 +346,8 @@ class DerivationWriter:
                         for r in (context_refs or []) if isinstance(r, dict) and r.get("record_id")]
         if pred is None:
             return {"outcome": "schema_reject", "reason": f"unknown predicate {predicate}"}
+        if context_refs and self._read_with_an_excluded_record(context_refs):
+            return {"outcome": "context_excluded", "reason": "read with a record the owner has excluded"}
         # Bind the person NAMES in the value to entity ids. Done here rather than at each
         # call site so every producer gets it — the synthesiser already passed an id, the
         # LLM path never did, and that asymmetry is why exactly one predicate on the live
@@ -657,6 +659,20 @@ class DerivationWriter:
             if new_d is None or old_d is None or abs((new_d - old_d).days) <= days:
                 return {"object_id": r[0], "object_key": r[1], "payload_json": r[2]}
         return None
+
+    def _read_with_an_excluded_record(self, context_refs: List[Dict[str, Any]]) -> bool:
+        """DR-62: whether the owner has excluded a record this reading was made with.
+
+        The turns are read before the model calls and the fact is written after them, minutes
+        apart on a local model. An exclusion in between has already run its purge, so nothing
+        would take out a fact written after it: the fact is not written instead."""
+        ids = sorted({str(r["record_id"]) for r in context_refs})
+        try:
+            return self.conn.execute(
+                "SELECT 1 FROM intelligence_exclusions WHERE artifact_type='record'"
+                f" AND artifact_key IN ({','.join('?' for _ in ids)}) LIMIT 1", ids).fetchone() is not None
+        except sqlite3.OperationalError:
+            return False
 
     def _corroborate(self, incumbent: Dict[str, Any], confidence: float, refs: List[Dict[str, Any]],
                      context_refs: Optional[List[Dict[str, Any]]] = None) -> None:

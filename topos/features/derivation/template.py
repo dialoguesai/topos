@@ -275,9 +275,8 @@ def _predicate_menu(pack: Pack) -> str:
 #: The packs DR-62 rules on. `TOPOS_DERIVATION_CONTEXT_PACKS` narrows this set and cannot widen it: context for
 #: another pack is another ruling.
 CONTEXT_PACKS = ("moments.tension", "moments.joy")
-#: The ruled default.
+#: The ruled number. `TOPOS_DERIVATION_CONTEXT_TURNS` can lower it and cannot raise it: more turns is another ruling.
 CONTEXT_TURNS = 3
-_CONTEXT_TURNS_CEILING = 12
 #: How a context line names the owner, and the other person when no contact name agrees.
 CONTEXT_OWNER = "OWNER"
 CONTEXT_UNNAMED = "Contact"
@@ -302,18 +301,28 @@ def _off(name: str, default: str) -> bool:
 
 
 def context_turns() -> int:
-    """`TOPOS_DERIVATION_CONTEXT_TURNS`: how many earlier turns a context pack reads (0 = one record at a time)."""
+    """`TOPOS_DERIVATION_CONTEXT_TURNS`: how many earlier turns a context pack reads, 0 to the ruled 3 (0 = one
+    record at a time). A larger number reads 3."""
     raw = os.environ.get("TOPOS_DERIVATION_CONTEXT_TURNS", "").strip()
     try:
         turns = int(raw) if raw else CONTEXT_TURNS
     except ValueError:
         turns = CONTEXT_TURNS
-    return max(0, min(turns, _CONTEXT_TURNS_CEILING))
+    return max(0, min(turns, CONTEXT_TURNS))
+
+
+def fact_check_off() -> bool:
+    """Whether the owner switched the fact check off (`TOPOS_DERIVATION_VERIFY=off`): the one value for which the
+    runners skip the verifier (`derivation_job._verify_mode`)."""
+    return os.environ.get("TOPOS_DERIVATION_VERIFY", "required").strip().lower() == "off"
 
 
 def context_packs() -> frozenset:
-    """`TOPOS_DERIVATION_CONTEXT_PACKS`, within the ruled set; empty when the turns are 0."""
-    if context_turns() <= 0:
+    """`TOPOS_DERIVATION_CONTEXT_PACKS`, within the ruled set; empty when the turns are 0, and while the fact check
+    is off. DR-62 rules on a reading the verifier checks against the same turns. With no verifier there is only
+    the parser between another person's turn and a stored fact, and that reading has no ruling: the packs then read
+    one record at a time, as before, and no short message."""
+    if context_turns() <= 0 or fact_check_off():
         return frozenset()
     raw = os.environ.get("TOPOS_DERIVATION_CONTEXT_PACKS")
     named = CONTEXT_PACKS if raw is None else [p.strip() for p in raw.split(",")]
@@ -395,9 +404,16 @@ def thank_word(text: Any) -> str:
     return found.group(0).lower() if found else ""
 
 
-def thanks_cue_applies(pack: Any, record_text: Any, actor_role: str) -> str:
-    """The thank-word the cue quotes, for a cue pack reading the owner's own words; else ""."""
-    if str(getattr(pack, "pack", "") or "") not in THANKS_CUE_PACKS or actor_role != "authored":
+#: Where a thank-you is one the owner sent to a person. A journal entry and the owner's turn in an AI chat are
+#: `authored` too, but "grateful" in a journal thanked nobody, and "thanks" to an assistant is not a moment.
+THANKS_CUE_TABLES = frozenset({"conversation_messages"})
+
+
+def thanks_cue_applies(pack: Any, record_text: Any, actor_role: str, record_table: str = "") -> str:
+    """The thank-word the cue quotes, for a cue pack reading a message the owner sent (`record_table` in
+    THANKS_CUE_TABLES); else "". A caller that does not say what the record is gets no cue."""
+    if (str(getattr(pack, "pack", "") or "") not in THANKS_CUE_PACKS or actor_role != "authored"
+            or str(record_table or "") not in THANKS_CUE_TABLES):
         return ""
     return thank_word(record_text)
 
@@ -405,14 +421,15 @@ def thanks_cue_applies(pack: Any, record_text: Any, actor_role: str) -> str:
 def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str,
                  known_people=None, speaker: str = "", speaker_entity_id: str = "",
                  recipient: str = "", recipient_entity_id: str = "", recipient_key: str = "",
-                 context: Optional[Sequence[Mapping[str, Any]]] = None) -> str:
+                 context: Optional[Sequence[Mapping[str, Any]]] = None, record_table: str = "") -> str:
     """`context` is the turns before the record (DR-62; the job passes them only to `context_packs()` for a
-    two-party message): the block before the record and one hard rule. With no context and no thank-word cue the
+    two-party message): the block before the record and one hard rule. `record_table` is the table the record is
+    stored in; the thank-word cue reads it (`thanks_cue_applies`). With no context and no thank-word cue the
     prompt is byte for byte the one-record prompt."""
     record_text = clean_record_text(record_text)
     g = pack.guidance
     abst = "\n".join(f"- {a}" for a in (g.get("abstention") or []))
-    thanks = thanks_cue_applies(pack, record_text, actor_role)
+    thanks = thanks_cue_applies(pack, record_text, actor_role, record_table)
     if str(getattr(pack, "pack", "") or "") in THANKS_CUE_PACKS and not thanks:
         # The recipient rides with the cue and only with it (see TR_ADD).
         recipient = recipient_entity_id = recipient_key = ""
@@ -522,7 +539,7 @@ def addressing_for(pack: Any, rec: Dict[str, Any]) -> Dict[str, Any]:
     the verifier's addressing, so the three agree."""
     if str(getattr(pack, "pack", "") or "") in RECIPIENT_LABEL_PACKS:
         return rec
-    if thanks_cue_applies(pack, rec.get("text"), str(rec.get("role") or "")):
+    if thanks_cue_applies(pack, rec.get("text"), str(rec.get("role") or ""), str(rec.get("table") or "")):
         return rec
     return {k: v for k, v in rec.items() if k not in _RECIPIENT_KEYS}
 

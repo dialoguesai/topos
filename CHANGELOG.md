@@ -16,12 +16,20 @@ The machine-readable twin of each release is
   fewer was never read at all. `moments.tension` and `moments.joy` now read a message you wrote in a two-party
   iMessage or Signal conversation together with the 3 turns before it from the last 7 days, each labelled OWNER
   or with the other person's contact name. These two packs also read your short messages, when they have such
-  turns. Nothing changes for any other pack, and nothing is switched on: a pack you have not turned on reads
-  nothing.
+  turns. Nothing changes for any other pack, and the upgrade switches no pack on. A Moments pack you have not
+  turned on is read only by the trial behind its enable offer, as before; that trial now reads the way the pack
+  will, so it too sees the turns and your short messages.
+  - *It needs the fact check.* The ruling is for a reading the fact check verifies against the same turns. With
+    the fact check switched off (`TOPOS_DERIVATION_VERIFY=off`) the two packs read as they did before: one
+    message at a time, no turns, no short messages. A finding read with turns whose fact-check call fails is
+    not written; read alone it is still stored and flagged, as before.
   - *What is never a turn.* A system row, a reaction (a "Loved …" row repeats another message under the
     reactor's name, so it is stepped over), a row you excluded, one tagged NSFW, one your Off-limits list
-    protects. No turns at all with an Off-limits person, in a group, in another messenger, an AI chat, a journal
-    or a transcript, or for a message that is itself a reaction. Any error means no turns, never a failed batch.
+    protects. No turns at all with an Off-limits person, in a group (more than one other person has written,
+    or Messages itself names the chat a group), in another messenger, an AI chat, a journal or a transcript, or
+    for a message that is itself a reaction. Any error means no turns, never a failed batch. A long batch looks
+    at your exclusions and Off-limits list again every 30 seconds, and a finding is not written when you
+    excluded one of its turns while it was being read.
   - *Only your words are evidence.* A finding whose quote is not in your own message, or that is about anyone
     but you, is dropped before it is checked; the fact check reads the same turns; if it decides the finding is
     about the other person, the finding is rejected, not sent to review. The other person can appear only as
@@ -30,17 +38,20 @@ The machine-readable twin of each release is
     beside it as `context_refs` and only protect it: excluding, deleting or scrubbing one, or retention removing
     it, takes the fact out, and an app's `pack_facts` read leaves the fact out when one is protected, names an
     Off-limits person, is tagged NSFW or is gone. They are never a source and never an excerpt.
-  - *A thank-you.* When your message has a thank-word (thank, thanks, thx, appreciate, appreciated, grateful),
-    `moments.joy` gets one more rule, and in a direct message the gratitude is tied to the person you sent it
-    to. Every other message gets the prompt it had.
+  - *Not shared through a grant.* A fact read with turns is refused by the all-category fact grants of 1.5.49
+    (`fact_lineage_unsupported`), and so is any fact derived from it: that door checks a fact's sources, and
+    the turns are not sources. A Moments fact read alone is shared as before.
+  - *A thank-you.* When a message you sent has a thank-word (thank, thanks, thx, appreciate, appreciated,
+    grateful), `moments.joy` gets one more rule, and in a direct message the gratitude is tied to the person you
+    sent it to. Every other message, and every journal entry and AI chat turn, gets the prompt it had.
   - *Every path reads the same way:* new records, the catch-up, the trial behind an enable offer, a backfill
     (with `--since` too) and the automatic catch-up; the count shown before a backfill counts a short message
     only where the run would read it. A pack that Topos Facts reads is given the one record, as before, so it
     has no turns and no short messages.
-  - *Switches.* `TOPOS_DERIVATION_CONTEXT_TURNS` (3; 0 is one message at a time, as before),
-    `TOPOS_DERIVATION_CONTEXT_PACKS` (the two packs; it can narrow the list, never add to it),
-    `TOPOS_DERIVATION_CONTEXT_SITUATION` (true). With 0 turns and no thank-word every prompt is byte for byte
-    what it was. Template `shadow-11`. `no-invalidation`: nothing already written is wrong, and messages
+  - *Switches.* `TOPOS_DERIVATION_CONTEXT_TURNS` (3; it can lower the number, never raise it; 0 is one message
+    at a time, as before), `TOPOS_DERIVATION_CONTEXT_PACKS` (the two packs; it can narrow the list, never add to
+    it), `TOPOS_DERIVATION_CONTEXT_SITUATION` (true). With 0 turns and no thank-word every prompt is byte for
+    byte what it was. Template `shadow-11`. `no-invalidation`: nothing already written is wrong, and messages
     already read are not read again; your short messages, never read before, are new to these two packs.
 
 ## [1.5.49] — 2026-11-10
