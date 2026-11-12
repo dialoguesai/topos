@@ -200,6 +200,11 @@ CENSUS: Tuple[RouteRule, ...] = (
     _d("POST", "/sync", "syncs every source (stub)"),
     # device.py
     _o("POST", "/device_name", "the device's display name"),
+    # diagnostics.py — sending a report off the node is the owner's decision; looking at one and stopping are not
+    _d("POST", "/diagnostics/dialogues/send", "sends the diagnostic report the owner previewed to Dialogues"),
+    _d("POST", "/diagnostics/dialogues/share-one-hour", "turns on diagnostics sharing with Dialogues for one hour"),
+    _o("POST", "/diagnostics/dialogues/preview", "builds the report on the node for the owner to read; sends nothing"),
+    _o("DELETE", "/diagnostics/dialogues", "stops diagnostics sharing: it can only reduce what leaves the node"),
     # llm.py
     _o("POST", "/llm/generate", "a model call; no owner state changes"),
     _o("POST", "/llm_generation", "a model call; no owner state changes"),

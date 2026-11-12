@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **A diagnostic report you can read; nothing is sent.** `[O]` Groundwork for voluntary diagnostics sharing with Dialogues. The node can build the small report it would share and show it to you: three totals since the node last started (HTTP requests, HTTP server errors, time spent on HTTP requests) and three facts about the computer (operating system family, CPU architecture, CPU count). It holds no messages, documents, prompts, answers, names, paths or keys. This release cannot send it: there is no collector and no recipient, so sharing reports as unavailable and both send actions are refused, confirmed or not. No setting turns sharing on. There is no screen for it yet: the preview is `POST /diagnostics/dialogues/preview` on the owner socket. The controls (status, preview, send, share for one hour, stop) answer only to your own Topos app on that socket; a coding agent, an enrolled app and any network request are refused, and sending or switching on also needs your confirmation. The node counts the three totals in memory and never writes them to disk. See `docs/DIAGNOSTICS_SHARING.md` for the report, the controls and what has to exist before anything can be sent.
+
 ## [1.5.49] — 2026-11-10
 
 ### Added

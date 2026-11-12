@@ -25,6 +25,7 @@ from .api import (
     data_commit as data_commit_routes,
     db as db_routes,
     device as device_routes,
+    diagnostics as diagnostics_routes,
     enrichment as enrichment_routes,
     health as health_routes,
     ingestion_compat as ingestion_compat_routes,
@@ -71,6 +72,7 @@ from .api import (
 )
 from .config.settings import settings
 from .core.logging import align_uvicorn_loggers, configure_logging
+from .diagnostics.sharing import DiagnosticsMeasurements
 from .observability.http import TelemetryMiddleware
 from .extensions import load_extensions
 from .core import state
@@ -121,6 +123,9 @@ app = FastAPI(
 )
 
 app.add_middleware(TelemetryMiddleware)
+# Three in-memory totals for the owner's diagnostics preview (docs/DIAGNOSTICS_SHARING.md): nothing leaves the
+# node, nothing is written to disk, and it reads no OpenTelemetry state.
+app.add_middleware(DiagnosticsMeasurements)
 
 
 def _log_runtime_banner() -> None:
@@ -156,6 +161,7 @@ app.include_router(llm_routes.router)
 app.include_router(db_routes.router)
 app.include_router(sync_routes.router)
 app.include_router(device_routes.router)
+app.include_router(diagnostics_routes.router)
 app.include_router(backup_routes.router)
 app.include_router(analytics_routes.router)
 app.include_router(sources_routes.router)
