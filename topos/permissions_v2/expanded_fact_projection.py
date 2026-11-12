@@ -8,7 +8,9 @@ import json
 import math
 from .canonical import PolicyError
 from .evidence import _deleted, _json, _key
-from .expanded_facts import PACKS, authorize
+from .expanded_facts import PACKS
+from .selective_facts import authorize
+from .custom_fact_runtime import policy_packs, current_packs
 from .fact_eligibility import (canonical_utc_microseconds, fact_current_from_microseconds,
                                stated_day_elapsed_microseconds)
 from .identity import ATTESTED_CONTRACT, permit_subjects
@@ -57,9 +59,9 @@ def value_fields(value,schema):
     return {key:item for key,item in value.items() if key in schema}
 
 
-def stored_value(oid,payload):
+def stored_value(oid,payload,*,packs=None):
     """Only the value schema frozen into this consent contract may leave the node."""
-    pred=PACKS[oid]['predicates'].get(payload.get('predicate'))
+    pred=(PACKS if packs is None else packs)[oid]['predicates'].get(payload.get('predicate'))
     if pred is None:  # exact legacy producer mapping was already checked
         return _value(payload.get('object_value'))
     if pred['value_type']=='structured':
@@ -83,6 +85,7 @@ def project(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us):
     from .permitted_derivation import check_lineage
     if not switches.on(switches.SELECTIVE_FACTS):
         raise PolicyError('selective_facts_disabled')
+    packs=policy_packs(policy.search.selective_facts)
     enabled=enabled_ontologies(conn)
     subjects=permit_subjects(conn,contract=ATTESTED_CONTRACT)
     artifacts=[]; refs=[]; visiting=set(); visited=set(); domains=set(); sensitivities=['none']; pending_days=[]
@@ -108,6 +111,8 @@ def project(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us):
             raise PolicyError('fact_ontology_off')
         if not isinstance(payload.get('subject_entity_id'),str):
             raise PolicyError('fact_projection_unsupported')
+        if oid not in PACKS and payload.get('subject_entity_id') not in subjects:
+            raise PolicyError('fact_projection_unsupported')
         if payload.get('subject_entity_id') not in subjects:
             subject_entity=_entity(conn,payload.get('subject_entity_id'))
             if not subject_entity or not subject_entity.get('canonical_name'):
@@ -119,8 +124,8 @@ def project(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us):
             _value(entity.get('canonical_name'))
             _unrestricted(resolver,conn,reviews,review_db,'entities',entity['entity_id'],entity)
         _unrestricted(resolver,conn,reviews,review_db,'signal_objects',current['object_id'],current)
-        stored_value(oid,payload)
-        spec=PACKS[oid];domains.update(spec['domains'])
+        stored_value(oid,payload,packs=packs)
+        spec=packs[oid];domains.update(spec['domains'])
         pred=spec['predicates'].get(payload['predicate'])
         sensitivity=pred['sensitivity'] if pred else ('special' if oid.startswith('health.') else 'personal')
         # Payload labels and an explicit owner review can only raise the floor.
@@ -169,7 +174,7 @@ def project(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us):
         raise PolicyError('fact_not_current')
     for artifact in artifacts:
         check_lineage(_json(artifact['payload_json'],dict),sources)
-    predicate=payload['predicate']; value=stored_value(oid,payload)
+    predicate=payload['predicate']; value=stored_value(oid,payload,packs=packs)
     atomic=scalar(predicate,payload)
     stated=(payload.get('subject_entity_id') in subjects and not any(a.get('altitude')=='inferred' for a in artifacts) and row.get('altitude') in (None,'stated') and predicate in PREDICATE_TEXT and atomic is not None
         and any(explicitly_states_claim(native[_key(q.snapshot.message.identity)]['content'],predicate,atomic)
@@ -182,10 +187,10 @@ def project(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us):
     if any(a.get('altitude')=='inferred' for a in artifacts) and 'inferred' not in policy.search.selective_facts.assertions:
         raise PolicyError('fact_assertion_unselected')
     subject='owner' if payload.get('subject_entity_id') in subjects else _entity(conn,payload['subject_entity_id'])['canonical_name']
-    schema=PACKS[oid]['predicates'].get(predicate,{}).get('value_schema')
+    schema=packs[oid]['predicates'].get(predicate,{}).get('value_schema')
     value=display_value(conn,value,schema,payload.get("value_struct"))
     content=(f'Owner {PREDICATE_TEXT[predicate]} {atomic}.' if stated else
-        f'Extracted or inferred fact about {subject} ({PACKS[oid]["title"]}, {predicate}): '
+        f'Extracted or inferred fact about {subject} ({packs[oid]["title"]}, {predicate}): '
         + json.dumps(value,ensure_ascii=False,sort_keys=True,separators=(', ', ': ')))
     if len(content)>8000:
         raise PolicyError('fact_projection_unsupported')
@@ -213,7 +218,7 @@ def _entity_values(value,schema):
 
 def linked_entities(conn,row):
     payload=_json(row['payload_json'],dict)
-    spec=PACKS.get(row.get('ontology_id'),{}).get('predicates',{}).get(payload.get('predicate'),{})
+    spec=current_packs().get(row.get('ontology_id'),{}).get('predicates',{}).get(payload.get('predicate'),{})
     identity_values=(payload.get('subject_entity_id'),payload.get('object_entity_id'))
     if any(x is not None and not isinstance(x,str) for x in identity_values):
         raise PolicyError('fact_projection_unsupported')
@@ -256,7 +261,13 @@ def fact_revision(conn,row,*,boundary=None):
         for table,values in (('signal_objects',facts),('entities',entities)):
             for current in values.values():
                 if boundary.legacy_veto(table,current):raise PolicyError('entity_protected')
-    return rows_revision([list(facts.values()),list(entities.values())])
+    groups=[list(facts.values()),list(entities.values())]
+    custom_ids=sorted({fact.get('ontology_id') for fact in facts.values()
+                       if fact.get('ontology_id') and fact.get('ontology_id') not in PACKS})
+    if custom_ids:
+        packs=current_packs()
+        groups.append([{'ontology_id':oid,'manifest':packs.get(oid)} for oid in custom_ids])
+    return rows_revision(groups)
 
 
 def display_value(conn,value,schema,bindings=None):

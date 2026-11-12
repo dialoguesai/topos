@@ -11,6 +11,7 @@ from pydantic import Field, field_validator, model_validator
 from .canonical import PolicyError, digest
 from .contract import Hash, Identifier, StrictModel
 from .expanded_facts import ExpandedFacts, selection as selection_v2
+from .custom_facts import CustomFacts
 
 VERSION = "selective-facts/v1"
 VOCABULARY = "fact-ontology-vocabulary/v1"
@@ -65,9 +66,11 @@ class SelectiveFacts(StrictModel):
 
 
 # The discriminator prevents a v1 document from acquiring v2 behavior.
-FactSelection = Annotated[SelectiveFacts | ExpandedFacts, Field(discriminator="version")]
+FactSelection = Annotated[SelectiveFacts | ExpandedFacts | CustomFacts, Field(discriminator="version")]
 
 def parse_selection(raw):
+    if isinstance(raw, dict) and raw.get("version") == "selective-facts/v3":
+        return CustomFacts.parse(raw)
     if isinstance(raw, dict) and raw.get("version") == "selective-facts/v2":
         return ExpandedFacts.parse(raw)
     return SelectiveFacts.parse(raw)
@@ -110,7 +113,12 @@ def enabled_ontologies(conn):
     A grant's signed consent names an ontology; this is the owner's standing choice about it, and both must hold.
     A registry that is missing or cannot be read names none: a fact shares only while its ontology is provably on."""
     try:
-        return frozenset(row[0] for row in conn.execute("SELECT pack_id FROM pack_registry WHERE enabled=1"))
+        enabled = {row[0] for row in conn.execute("SELECT pack_id FROM pack_registry WHERE enabled=1")}
+        from ..features.derivation.custom_packs import load_custom_packs
+        from ..features.derivation.registry import runs_as_switched_on
+        installed = load_custom_packs()
+        return frozenset(oid for oid in enabled if not oid.startswith("custom.")
+                         or (oid in installed and runs_as_switched_on(conn, installed[oid])))
     except sqlite3.Error:
         return frozenset()
 
@@ -123,17 +131,24 @@ def enabled_revision(conn):
     moves it. No index basis binds it: an index is never refused because of a switch."""
     enabled = enabled_ontologies(conn)
     from .expanded_facts import SEMANTICS as expanded_semantics
-    return sorted(oid for oid in expanded_semantics if oid in enabled)
+    from .custom_fact_runtime import installed_manifests
+    custom = installed_manifests()
+    return sorted([oid for oid in expanded_semantics if oid in enabled] +
+                  [oid + ":" + spec["revision"] for oid, spec in custom.items() if oid in enabled])
 
 
 def catalog():
     from .expanded_facts import catalog as expanded_catalog
-    return expanded_catalog()
+    from .custom_fact_runtime import installed_manifests
+    from .custom_facts import catalog as custom_catalog
+    custom = installed_manifests(catalog_limit=True)
+    return custom_catalog(custom) if custom else expanded_catalog()
 
 
 def catalog_ontology_of(row, payload):
     from .expanded_facts import ontology_of as expanded_ontology
-    return expanded_ontology(row, payload)
+    from .custom_fact_runtime import current_packs
+    return expanded_ontology(row, payload, packs=current_packs())
 
 
 def ontology_of(row, payload):
@@ -161,9 +176,10 @@ def ontology_of(row, payload):
 
 def authorize(row, payload, policy):
     declaration = getattr(policy.search, "selective_facts", None)
-    if isinstance(declaration, ExpandedFacts):
+    if isinstance(declaration, (ExpandedFacts, CustomFacts)):
         from .expanded_facts import authorize as expanded_authorize
-        return expanded_authorize(row, payload, policy)
+        from .custom_fact_runtime import policy_packs
+        return expanded_authorize(row, payload, policy, packs=policy_packs(declaration))
     if declaration is None:
         raise PolicyError("fact_selection_required")
     if row["object_id"] in declaration.excluded_fact_ids:
@@ -201,7 +217,7 @@ def validate_output(policy, output):
     for fact in raw.get("records", raw.get("sources", [])):
         if fact.get("kind") != "fact":
             continue
-        if (declaration is None or fact.get("assertion") not in (declaration.assertions if isinstance(declaration, ExpandedFacts) else ["owner_stated"])
+        if (declaration is None or fact.get("assertion") not in (declaration.assertions if isinstance(declaration, (ExpandedFacts, CustomFacts)) else ["owner_stated"])
                 or not any(item.ontology_id == fact.get("ontology_id")
                            and fact.get("predicate") in item.predicates for item in declaration.ontologies)
                 or not fact.get("citations")

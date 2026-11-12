@@ -1,5 +1,112 @@
 {
   "$defs": {
+    "CustomFacts": {
+      "additionalProperties": false,
+      "properties": {
+        "assertions": {
+          "items": {
+            "enum": [
+              "owner_stated",
+              "inferred"
+            ],
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "title": "Assertions",
+          "type": "array"
+        },
+        "catalog_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Catalog Digest",
+          "type": "string"
+        },
+        "custom_packs": {
+          "additionalProperties": true,
+          "title": "Custom Packs",
+          "type": "object"
+        },
+        "excluded_fact_ids": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 500,
+          "title": "Excluded Fact Ids",
+          "type": "array"
+        },
+        "ontologies": {
+          "items": {
+            "$ref": "#/$defs/CustomOntologySelection"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "title": "Ontologies",
+          "type": "array"
+        },
+        "version": {
+          "const": "selective-facts/v3",
+          "title": "Version",
+          "type": "string"
+        },
+        "vocabulary": {
+          "const": "fact-ontology-vocabulary/v3",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "vocabulary",
+        "catalog_digest",
+        "custom_packs",
+        "ontologies",
+        "assertions",
+        "excluded_fact_ids"
+      ],
+      "title": "CustomFacts",
+      "type": "object"
+    },
+    "CustomOntologySelection": {
+      "additionalProperties": false,
+      "properties": {
+        "ontology_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Ontology Id",
+          "type": "string"
+        },
+        "predicates": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "title": "Predicates",
+          "type": "array"
+        },
+        "revision": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ontology_id",
+        "revision",
+        "predicates"
+      ],
+      "title": "CustomOntologySelection",
+      "type": "object"
+    },
     "ExpandedFacts": {
       "additionalProperties": false,
       "properties": {
@@ -274,7 +381,8 @@
           "discriminator": {
             "mapping": {
               "selective-facts/v1": "#/$defs/SelectiveFacts",
-              "selective-facts/v2": "#/$defs/ExpandedFacts"
+              "selective-facts/v2": "#/$defs/ExpandedFacts",
+              "selective-facts/v3": "#/$defs/CustomFacts"
             },
             "propertyName": "version"
           },
@@ -284,6 +392,9 @@
             },
             {
               "$ref": "#/$defs/ExpandedFacts"
+            },
+            {
+              "$ref": "#/$defs/CustomFacts"
             }
           ]
         },

@@ -451,12 +451,20 @@ class DerivationWriter:
             # would mint a phantom second event — corroborate the original instead.
             retold = self._episodic_retelling(key.rsplit(":", 1)[0] + ":", pred, occurrence)
             if retold is not None:
-                self._corroborate({"object_id": retold["object_id"],
-                                   "payload": json.loads(retold["payload_json"] or "{}"),
-                                   "source_refs": (json.loads(retold["payload_json"] or "{}").get("source_refs") or [])},
-                                  confidence, source_refs, context_refs)
-                self.stats["retelling_merged"] = self.stats.get("retelling_merged", 0) + 1
-                return {"outcome": "retelling_merged", "object_id": retold["object_id"]}
+                from .registry import definition_sha
+                retold_payload = json.loads(retold["payload_json"] or "{}")
+                if (not pack.first_party and (retold_payload.get("extractor") or {}).get("definition_digest")
+                        != definition_sha(pack, stamped=False)):
+                    # Re-extract the existing event below rather than corroborating its
+                    # stale definition or creating a second active event for a new date.
+                    key = retold["object_key"]
+                    incumbent = self.store._active_fact_by_key(key)
+                else:
+                    self._corroborate({"object_id": retold["object_id"], "payload": retold_payload,
+                                       "source_refs": retold_payload.get("source_refs") or []},
+                                      confidence, source_refs, context_refs)
+                    self.stats["retelling_merged"] = self.stats.get("retelling_merged", 0) + 1
+                    return {"outcome": "retelling_merged", "object_id": retold["object_id"]}
         now = _now_iso()
         # THE FACT'S TIME IS ITS EVIDENCE TIME (owner rule, 2026-08-26): a stated
         # fact anchors to its stated occurrence, else its source record's date;
@@ -465,6 +473,19 @@ class DerivationWriter:
         # completed it (synthesis passes the newest evidence date as event_date).
         anchor = (str(occurrence)[:10] if occurrence else None) or \
                  (str(event_date)[:10] if event_date else None) or now
+
+        if incumbent is not None and not pack.first_party:
+            # Only a new extraction can attest an old fact to the current definition.
+            # Replacing the row keeps fresh evidence separate from the old reading.
+            from .registry import definition_sha
+            if (incumbent["payload"].get("extractor") or {}).get("definition_digest") != definition_sha(pack, stamped=False):
+                with self._revision():
+                    self._close(incumbent, reason="correction", at=now)
+                    row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
+                                       confidence, object_entity_id, occurrence, quote,
+                                       valid_from=anchor, key=key, context_refs=context_refs)
+                self.stats["corrected"] += 1
+                return {"outcome": "corrected", "object_id": row}
 
         if incumbent is not None:
             inc_payload = incumbent["payload"]
@@ -796,6 +817,9 @@ class DerivationWriter:
             "extractor": {"model": self.model, "pack_version": pack.version,
                           "template": TEMPLATE_VERSION, "ts": _now_iso()},
         }
+        if not pack.first_party:
+            from .registry import definition_sha
+            payload["extractor"]["definition_digest"] = definition_sha(pack, stamped=False)
         if isinstance(value, dict):
             payload["value_struct"] = value
         if quote:

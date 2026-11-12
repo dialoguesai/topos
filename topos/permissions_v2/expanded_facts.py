@@ -72,7 +72,8 @@ def catalog():
             for oid,spec in SEMANTICS.items()]}
 
 
-def ontology_of(row,payload):
+def ontology_of(row,payload,*,packs=None):
+    packs = PACKS if packs is None else packs
     oid,version=row.get('ontology_id'),row.get('ontology_version')
     predicate=payload.get('predicate')
     if not isinstance(predicate,str):
@@ -83,22 +84,23 @@ def ontology_of(row,payload):
             or any(x not in (None,'stated') for x in (row.get('altitude'),payload.get('altitude')))):
             raise PolicyError('fact_ontology_unknown')
         return LEGACY[predicate]
-    spec=PACKS.get(oid) if isinstance(oid,str) else None
+    spec=packs.get(oid) if isinstance(oid,str) else None
     pred=spec['predicates'].get(predicate) if spec and isinstance(predicate,str) else None
     extractor=payload.get('extractor')
     if (pred is None or version not in spec['pack_versions'] or payload.get('pack')!=oid
         or payload.get('ontology_id',oid)!=oid or payload.get('ontology_version',version)!=version
         or not isinstance(extractor,dict) or extractor.get('pack_version')!=version
+        or (oid.startswith('custom.') and extractor.get('definition_digest')!=spec.get('definition_digest'))
         or row.get('altitude')!=pred['altitude'] or payload.get('altitude')!=pred['altitude']):
         raise PolicyError('fact_ontology_unsupported')
     return oid
 
 
-def authorize(row,payload,policy):
+def authorize(row,payload,policy,*,packs=None):
     declaration=policy.search.selective_facts
     if row['object_id'] in declaration.excluded_fact_ids:
         raise PolicyError('fact_excluded_from_grant')
-    oid=ontology_of(row,payload)
+    oid=ontology_of(row,payload,packs=packs)
     if not any(x.ontology_id==oid and payload['predicate'] in x.predicates for x in declaration.ontologies):
         raise PolicyError('fact_ontology_unselected')
     # The pack writer labels every extraction owner_only by default, including
