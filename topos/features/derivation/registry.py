@@ -9,9 +9,11 @@ before 22 of them have earned a junk gate. Wave A earned its gate 2026-08-26
 
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Optional
 
 from .packs import Pack, load_packs
 
@@ -37,9 +39,73 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str,
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
 
 
+def install_stamp_path(pack_file: Path, pack_id: str) -> Path:
+    """The stamp beside an owner-added pack file: `.custom.name.added`, next to `custom.name.yaml`."""
+    return Path(pack_file).with_name(f".{pack_id}.added")
+
+
+def _install_stamp(pack: Pack) -> str:
+    """The random value `custom_packs` writes beside a pack file each time the pack is added or removed.
+
+    It is part of what the registry row records, so a pack that was removed and added again is not the pack the
+    owner switched on even when the file is byte for byte the same and no seeding ran in between (node stopped,
+    or no ingest batch and no Fact packs page view). Without it the row still said enabled with a matching
+    digest, and the pack came back switched on. A file with no stamp (dropped in by hand) has the empty one."""
+    try:
+        path = install_stamp_path(Path(str(getattr(pack, "source_path", "") or "")), pack.pack)
+        return path.read_text("utf-8")[:64] if path.is_file() else ""
+    except (OSError, ValueError):
+        return "unreadable"
+
+
+def definition_sha(pack: Pack, *, stamped: bool = True) -> Optional[str]:
+    """What a pack from outside the package declares, as one digest; None for a pack that ships with the engine.
+
+    A bundled pack changes only with a release. A pack the owner added from a file (`custom_packs`) can change
+    whenever the file does, and the registry row is the only record of what the owner said yes to. The digest is
+    over the parsed definition, so a comment or a reordered key is not a change, and over the install stamp, so
+    removing a pack and adding it again is one. `stamped=False` is the definition alone: what `packs add`
+    compares to say a file is already added, unchanged."""
+    if getattr(pack, "first_party", False):
+        return None
+    try:
+        body = json.dumps(getattr(pack, "raw", None) or {}, sort_keys=True, separators=(",", ":"),
+                          ensure_ascii=False, default=str)
+    except (TypeError, ValueError, RecursionError):
+        # A parsed file json cannot order or walk. `custom_packs` refuses such a file before it loads; this
+        # keeps the seeding of every other pack alive if one arrives another way.
+        body = repr(getattr(pack, "raw", None))
+    if stamped:
+        body += "\n" + _install_stamp(pack)
+    # `backslashreplace`: text that is not valid Unicode (`custom_packs` refuses it) must not raise here, where
+    # one pack's digest is computed inside the seeding of every pack.
+    return hashlib.sha256(body.encode("utf-8", "backslashreplace")).hexdigest()
+
+
+def runs_as_switched_on(conn: sqlite3.Connection, pack: Pack) -> bool:
+    """Is this pack, as it loads now, the one the registry row was written for? Always true for a bundled pack.
+
+    For a pack the owner added, false until `seed_pack_registry` has recorded this definition, and that same
+    seeding switches a changed pack off. So between a file changing and the next seeding nothing reads with a
+    definition the owner has not switched on: `enabled_packs` and a backfill batch both ask this first."""
+    sha = definition_sha(pack)
+    if sha is None:
+        return True
+    try:
+        row = conn.execute("SELECT definition_sha FROM pack_registry WHERE pack_id=?", (pack.pack,)).fetchone()
+    except sqlite3.OperationalError:        # a registry that was never seeded by this code has no such column
+        return False
+    return bool(row) and row[0] == sha
+
+
 def seed_pack_registry(conn: sqlite3.Connection, pack_dir: Path) -> None:
     """Idempotent: INSERT OR IGNORE every bundled pack; Wave A enabled, rest off.
-    Never flips an existing row — the owner's enable/disable choices are theirs."""
+    Never flips an existing row — the owner's enable/disable choices are theirs.
+
+    The one exception is a pack the owner added from a file (origin `third_party`). It is inserted off like
+    every pack outside Wave A, and its row is switched off again when the file's definition or its install stamp
+    is no longer the one the row records, or when the file is gone or no longer loads: the owner's yes was to a
+    definition, not to an id, so adding a changed pack (or the same id again after removing it) starts off."""
     # `origin` answers "where did this pack come from" AFTER seeding. Nothing could
     # answer that before: the registry is the runtime authority, so a policy keyed on
     # first-party-ness (D9) had nothing to read once the YAML was out of scope — and the
@@ -65,16 +131,23 @@ def seed_pack_registry(conn: sqlite3.Connection, pack_dir: Path) -> None:
           SET active_since=CASE WHEN NEW.enabled=1 THEN datetime('now') ELSE NULL END
           WHERE pack_id=NEW.pack_id;
         END""")
+    _add_column_if_missing(conn, "pack_registry", "definition_sha", "TEXT")
     packs = load_packs(pack_dir)
     for pid, pack in packs.items():
         origin = "first_party" if getattr(pack, "first_party", False) else "third_party"
+        sha = definition_sha(pack)
         conn.execute(
             """INSERT OR IGNORE INTO pack_registry
-               (pack_id, version, enabled, disclosure_default, origin, active_since)
-               VALUES (?, ?, ?, ?, ?, CASE WHEN ?=1 THEN datetime('now') ELSE NULL END)""",
+               (pack_id, version, enabled, disclosure_default, origin, active_since, definition_sha)
+               VALUES (?, ?, ?, ?, ?, CASE WHEN ?=1 THEN datetime('now') ELSE NULL END, ?)""",
             (pid, pack.version, 1 if pid in ENABLED_BY_DEFAULT else 0,
-             getattr(pack, "disclosure_default", "owner_only") or "owner_only", origin, 1 if pid in ENABLED_BY_DEFAULT else 0),
+             getattr(pack, "disclosure_default", "owner_only") or "owner_only", origin,
+             1 if pid in ENABLED_BY_DEFAULT else 0, sha),
         )
+        if sha is not None:
+            conn.execute(
+                "UPDATE pack_registry SET enabled=0, definition_sha=?, updated_at=datetime('now')"
+                " WHERE pack_id=? AND COALESCE(definition_sha,'')<>?", (sha, pid, sha))
         # Origin follows the file, not the row: a pack that moves between the shipped
         # directory and anywhere else has genuinely changed provenance, and a stale
         # 'first_party' is the one value here that must never persist by inertia.
@@ -88,6 +161,17 @@ def seed_pack_registry(conn: sqlite3.Connection, pack_dir: Path) -> None:
             " WHERE pack_id=? AND version<>?",
             (pack.version, pid, pack.version),
         )
+    # An owner-added pack whose file is gone or no longer loads. Only rows this seeding could have loaded:
+    # `pack_dir` decides which third-party packs are in reach, and a caller seeding another directory must not
+    # switch off what it never looked for.
+    from .packs import _is_bundled_catalog
+
+    if _is_bundled_catalog(pack_dir):
+        present = sorted(pid for pid, pack in packs.items() if not getattr(pack, "first_party", False))
+        conn.execute(
+            "UPDATE pack_registry SET enabled=0, updated_at=datetime('now')"
+            " WHERE origin='third_party' AND enabled=1"
+            + (f" AND pack_id NOT IN ({','.join('?' for _ in present)})" if present else ""), present)
     conn.commit()
 
 
@@ -96,7 +180,8 @@ def enabled_packs(conn: sqlite3.Connection, pack_dir: Path) -> Dict[str, Pack]:
     ids = [r[0] for r in rows]
     if not ids:
         return {}
-    return load_packs(pack_dir, only=ids)
+    return {pid: pack for pid, pack in load_packs(pack_dir, only=ids).items()
+            if runs_as_switched_on(conn, pack)}
 
 
 def mark_pack_run(conn: sqlite3.Connection, pack_id: str, version: str) -> None:

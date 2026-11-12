@@ -1,4 +1,4 @@
-"""`topos-node packs list|backfill|status|stop|auto|retract-reactions` — fact packs, from a terminal.
+"""`topos-node packs list|add|remove|backfill|status|stop|auto|retract-reactions` — fact packs, from a terminal.
 
 A fact pack reads new records as they arrive only for the sources whose lane runs it; everything
 else, and the history from before a pack was switched on, is read when the owner asks (a backfill).
@@ -44,6 +44,21 @@ nothing back: a fact one of these replaced stays closed, and the command says so
 
 The extractor is whatever the owner has picked for facts (Topos Facts for the packs it knows, the
 local model for the rest); this command names it and never changes it.
+
+A pack of the owner's own is added from a file (`features/derivation/custom_packs`):
+
+    topos-node packs add --check my-pack.yaml     says whether the file is a pack, adds nothing
+    topos-node packs add my-pack.yaml             shows what it would read and write, asks `[y/N]`
+    topos-node packs remove custom.gardening
+
+`add` is a change to what the node may write about its owner, so it asks the same way a backfill
+does: on a terminal, once, and there is no flag that answers for the person. It writes the pack file
+and a small stamp beside it in the node's own pack directory and writes nothing else, so it works
+with the node stopped. Its one other read is the node's database, read-only, to count the apps whose
+grant already names the pack's id (`_apps_granted`): a grant names an id, so it covers whatever
+definition is added under that id, and the prompt says so before the person answers. The pack
+starts switched off; switching it on is the app's Fact packs page, as for every pack. No route,
+relay message or tool adds a pack: an app cannot.
 
 What is printed is a projection: pack ids, counts, state words, model names, times. Never a response body.
 """
@@ -331,7 +346,7 @@ def _times(counts: Dict[str, Any]) -> str:
 # ----------------------------------------------------------------------------- the group
 @click.group("packs")
 def packs_group() -> None:
-    """List fact packs and backfill their history."""
+    """List fact packs, add your own, and backfill their history."""
 
 
 @packs_group.command("list")
@@ -352,6 +367,127 @@ def packs_list(as_json: bool) -> None:
                    f"{p['last_run_at'] or 'never'}")
     on = sum(1 for p in packs if p["enabled"])
     click.echo(f"{on} of {len(packs)} switched on. `topos-node packs backfill --all-enabled` reads their history.")
+    _unloaded_custom_packs()
+
+
+def _unloaded_custom_packs() -> None:
+    """Say which files in this node's own pack directory are not loading, and why: a pack the owner added that
+    stopped validating is otherwise only missing from the list."""
+    from topos.features.derivation.custom_packs import custom_pack_problems
+
+    for name, reason in sorted(custom_pack_problems().items()):
+        click.echo(f"Not loaded: {name}. {reason}")
+
+
+def _apps_granted(pack_id: str) -> Optional[int]:
+    """How many connected apps hold a grant that names this pack id, or None when this node's database cannot be
+    read. The database is opened read-only and nothing is created; a node that has no database yet has no apps."""
+    import sqlite3
+
+    try:
+        from topos.mcp_clients import apps_granted_pack
+        from topos.storage.db.paths import resolve_active_database
+
+        path = resolve_active_database().path
+        if not path.is_file():
+            return 0
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            return apps_granted_pack(conn, pack_id)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 -- a database that cannot be read is said, never guessed as "no apps"
+        return None
+
+
+def _existing_grants_line(pack_id: str) -> Optional[str]:
+    """What to say before the question when an app's grant already names this id; None when no app's does."""
+    count = _apps_granted(pack_id)
+    if count is None:
+        return ("  Topos could not check whether an app already holds a grant that names this id. If one does, "
+                "that grant covers this definition too once you switch the pack on, with no new approval "
+                "(`topos-node agents list --json` shows what each app reads).")
+    if count <= 0:
+        return None
+    apps = "1 app already holds a grant" if count == 1 else f"{count} apps already hold a grant"
+    return (f"  {apps} that names {pack_id}. A grant names the id, not this definition: once you switch the "
+            "pack on, it covers the facts this file writes too, with no new approval "
+            "(`topos-node agents list --json` shows what each app reads).")
+
+
+#: Who reads the facts of a pack the owner adds, as `packs add` says it before it asks. An app is held to a grant
+#: that names the pack (`pack_facts`). A coding agent and a routine are not: they put questions to the node, and
+#: no rule holds a fact back from an answer because its pack is one the owner added (DISCLOSURE_RULES DR-74).
+_WHO_READS = (
+    "  It starts switched off. Once you switch it on: an app reads its facts only if you approve a grant that "
+    "names this pack. A coding agent you connected and your routines need no such grant: an answer Topos gives "
+    "them can draw on this pack's facts, as it can on the facts of the packs Topos ships.")
+#: Said in place of whatever a check raised, when it raised instead of refusing.
+_NOT_A_PACK = "The file is not a pack Topos can read."
+
+
+@packs_group.command("add")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False))
+@click.option("--check", is_flag=True, help="Only say whether the file is a pack Topos can add; add nothing.")
+def packs_add(file: str, check: bool) -> None:
+    """Add a fact pack of your own from a YAML file: shows what it would read and write, asks you once."""
+    from pathlib import Path
+
+    from topos.features.derivation import custom_packs
+
+    try:
+        pack, content = custom_packs.read_candidate(Path(file))
+    except custom_packs.CustomPackError as exc:
+        _fail(f"Not added. {exc}")
+    except Exception:  # noqa: BLE001 -- the last line: a file from outside never ends this command in a traceback
+        _fail(f"Not added. {_NOT_A_PACK}")
+    for line in custom_packs.describe(pack):
+        click.echo(line)
+    click.echo(_WHO_READS)
+    grants = _existing_grants_line(pack.pack)
+    if grants:
+        click.echo(grants)
+    if check:
+        click.echo("This file is a pack Topos can add. Nothing was added.")
+        return
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        _fail("Adding a pack changes what Topos may write about you, so it asks you first: "
+              "run this command in your own terminal.", EXIT_NEEDS_HUMAN)
+    click.echo("If a pack with this id is already added, this file replaces it and the pack is switched off "
+               "until you switch it on again.")
+    if not click.confirm("Add it?", default=False, err=True):
+        click.echo("Nothing added.")
+        sys.exit(EXIT_OK)
+    try:
+        # The bytes that were read and shown above, not the file again: a file that changed while the question
+        # was open is not what the owner said yes to.
+        added = custom_packs.install_content(content)
+    except custom_packs.CustomPackError as exc:
+        _fail(f"Not added. {exc}")
+    except Exception:  # noqa: BLE001
+        _fail(f"Not added. {_NOT_A_PACK}")
+    if added["unchanged"]:
+        click.echo(f"{added['pack_id']} {added['version']} is already added, unchanged.")
+        return
+    click.echo(f"Added {added['pack_id']} {added['version']}"
+               + (f" (it replaces {added['replaced']})." if added["replaced"] else "."))
+    click.echo("It is switched off. Switch it on in the app (Data → Fact packs); "
+               f"`topos-node packs backfill --pack {added['pack_id']}` then reads your history.")
+
+
+@packs_group.command("remove")
+@click.argument("pack_id", type=PACK, metavar="ID")
+def packs_remove(pack_id: str) -> None:
+    """Remove a fact pack you added. The facts it already wrote are kept."""
+    from topos.features.derivation import custom_packs
+
+    try:
+        removed = custom_packs.remove_pack(pack_id)
+    except custom_packs.CustomPackError as exc:
+        _fail(f"Not removed. {exc}")
+    if not removed:
+        _fail(f"{pack_id} is not a pack you added (see `topos-node packs list`).")
+    click.echo(f"Removed {pack_id}. It reads nothing from now on; the facts it already wrote are kept.")
 
 
 @packs_group.command("backfill")

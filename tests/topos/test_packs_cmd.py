@@ -805,5 +805,7 @@ def test_the_group_is_on_the_node_cli():
     from topos.cli.commands import main
 
     assert main.commands["packs"] is packs_cmd.packs_group
-    assert set(packs_cmd.packs_group.commands) == {"list", "backfill", "status", "stop", "auto", "retract-reactions"}
+    # `add` and `remove` (a pack of the owner's own) are covered in tests/topos/test_packs_cmd_custom.py
+    assert set(packs_cmd.packs_group.commands) == {"list", "add", "remove", "backfill", "status", "stop", "auto",
+                                                   "retract-reactions"}
     assert set(packs_cmd.packs_group.commands["auto"].commands) == {"on", "off", "status"}

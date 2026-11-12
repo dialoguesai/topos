@@ -435,11 +435,18 @@ def load_pack(path: Path, known_namespaces: Optional[set] = None,
 
 
 def load_packs(directory: Path, only: Optional[List[str]] = None,
-               *, trusted: bool = False) -> Dict[str, Pack]:
+               *, trusted: bool = False, include_custom: bool = True) -> Dict[str, Pack]:
     """Load every pack YAML in a directory (skips _scales/vocab/INDEX).
 
     See `load_pack` for `trusted`. It is off by default so that the safe answer is the one
     you get by not thinking about it.
+
+    When `directory` is the catalog that ships with the engine, the packs the owner added
+    from a file (`custom_packs`) are composed in after it, so every caller that reads the
+    catalog reads them too. They are always loaded untrusted, whatever `trusted` says about
+    the bundled files, and they never displace a bundled pack: a custom pack whose id or
+    predicate a bundled pack already uses is left out. `include_custom=False` is the bundled
+    catalog alone (what a custom pack is checked against when it is added).
     """
     out: Dict[str, Pack] = {}
     seen_ns: set = set()
@@ -457,4 +464,21 @@ def load_packs(directory: Path, only: Optional[List[str]] = None,
                 if name in other.predicates:
                     raise PackValidationError(f"predicate {name} declared by both {other.pack} and {p.pack}")
         out[p.pack] = p
+    if include_custom and _is_bundled_catalog(directory):
+        from .custom_packs import load_custom_packs
+
+        taken = {name for other in out.values() for name in other.predicates}
+        for pid, pack in load_custom_packs().items():
+            if only and pid not in only:
+                continue
+            if pid in out or taken & set(pack.predicates):
+                continue        # a bundled pack keeps its id and its predicates, always
+            out[pid] = pack
     return out
+
+
+def _is_bundled_catalog(directory: Path) -> bool:
+    try:
+        return Path(directory).resolve() == first_party_pack_dirs()[0].resolve()
+    except OSError:
+        return False

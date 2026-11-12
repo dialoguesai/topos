@@ -97,10 +97,29 @@ def _day(value: Any) -> str:
 
 
 def enabled_packs(conn: sqlite3.Connection) -> List[str]:
-    """The packs the owner switched on. No registry table means none on."""
+    """The packs the owner switched on. No registry table means none on.
+
+    A pack the owner added from a file is on only as the definition they switched on, the test the ingest job and
+    a backfill use (``registry.runs_as_switched_on``). The registry row alone is not enough: after ``packs remove``
+    and ``packs add`` of the same id, or after a new version is added, the row still says on until the next seeding,
+    and the command has already told the owner the pack is switched off. In that window nothing is read for it, and
+    this read gives none of the facts it wrote before."""
     if not _present(conn, "pack_registry"):
         return []
-    return sorted(str(r[0]) for r in conn.execute("SELECT pack_id FROM pack_registry WHERE enabled=1").fetchall())
+    on = sorted(str(r[0]) for r in conn.execute("SELECT pack_id FROM pack_registry WHERE enabled=1").fetchall())
+    from ..features.derivation.custom_packs import is_custom_id
+
+    added = [p for p in on if is_custom_id(p)]
+    if not added:
+        return on
+    from ..features.derivation.packs import load_packs
+    from ..features.derivation.registry import bundled_pack_dir, runs_as_switched_on
+
+    try:
+        loaded = load_packs(bundled_pack_dir(), only=added)
+    except Exception:  # noqa: BLE001 -- an added pack that cannot be loaded is not on; the shipped packs still are
+        loaded = {}
+    return [p for p in on if p not in added or (p in loaded and runs_as_switched_on(conn, loaded[p]))]
 
 
 def pack_status(conn: sqlite3.Connection, granted: Optional[Tuple[str, ...]] = None) -> Dict[str, List[str]]:
@@ -194,7 +213,7 @@ def _strings(value: Any) -> List[str]:
 
 # --- pack definitions -----------------------------------------------------------------------------------------------
 @lru_cache(maxsize=8)
-def _definitions(pack_ids: Tuple[str, ...], signature: Tuple[Tuple[str, float], ...]) -> Dict[str, Any]:
+def _definitions(pack_ids: Tuple[str, ...], signature: Tuple[Tuple[str, Optional[float]], ...]) -> Dict[str, Any]:
     from ..features.derivation.packs import load_packs
     from ..features.derivation.registry import bundled_pack_dir
 
@@ -202,14 +221,29 @@ def _definitions(pack_ids: Tuple[str, ...], signature: Tuple[Tuple[str, float], 
 
 
 def pack_definitions(pack_ids: Iterable[str]) -> Dict[str, Any]:
-    """The bundled definitions of these packs, reloaded when a file changes. Raises when they cannot be loaded: the
-    read then fails closed rather than guessing which fields name people or which predicates are special."""
+    """The definitions of these packs, reloaded when a file changes. Raises when a bundled one cannot be loaded: the
+    read then fails closed rather than guessing which fields name people or which predicates are special.
+
+    A pack the owner added from a file (``features/derivation/custom_packs``) is read from the node's own pack
+    directory. One whose file is gone or no longer loads has no definition here, which is not an error: the read
+    then holds every one of its facts back from an agent as unclassifiable (:func:`_special`), and the other packs
+    are served as before."""
+    from ..features.derivation.custom_packs import custom_pack_dir, is_custom_id
     from ..features.derivation.registry import bundled_pack_dir
 
     base = bundled_pack_dir()
     ids = tuple(sorted(set(pack_ids)))
-    signature = tuple((p, (base / f"{p}.yaml").stat().st_mtime) for p in ids)
-    return _definitions(ids, signature)
+    signature = []
+    for p in ids:
+        if is_custom_id(p):
+            try:
+                stamp: Optional[float] = (custom_pack_dir() / f"{p}.yaml").stat().st_mtime_ns
+            except OSError:
+                stamp = None
+            signature.append((p, stamp))
+        else:
+            signature.append((p, (base / f"{p}.yaml").stat().st_mtime))
+    return _definitions(ids, tuple(signature))
 
 
 def _field_kinds(definition: Any, predicate: str) -> Dict[str, str]:

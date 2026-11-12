@@ -1,0 +1,31 @@
+pack: custom.gardening
+version: 1.0.0
+title: My gardening
+sensitivity_class: personal
+role_policy: authored_only
+net_subject: deny
+disclosure_default: owner_only
+routing:
+  descriptors: [Plants the owner grows in their garden]
+  exemplars: [I grow tomatoes, I planted basil]
+predicates:
+  - name: custom.plant
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: stated
+    value_schema:
+      name: string
+guidance:
+  definitions: Plants the owner explicitly says they grow.
+  abstention: [Do not extract plants from fiction, wishes, or another person's garden.]
+eval:
+  gold:
+    - text: I grow tomatoes in my garden.
+      role: authored
+      expect: [{predicate: custom.plant, value: {name: tomatoes}}]
+  negative_controls:
+    - text: The movie had a beautiful garden.
+      role: authored
+      expect: []
+consumers: [assistant_context]
