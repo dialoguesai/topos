@@ -9,6 +9,9 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **`verify_claim` leaves its audit line on the exits that still had none.** `[O]` Since 1.5.39 a check that ended on its deadline, a cancel, an overloaded model or an error has written one content-free `truth verify_claim audit:` line. A request refused before any work (an unknown mode, no `caller_app_id`, a bad `deadline_s`) still wrote nothing. It now writes the same line with `outcome: error`, `phase: dispatch` and a `reason` naming the refusal, never the mode or deadline the caller sent. The line for an overloaded model says which kind it was (`compute_busy`, `compute_unavailable` or `compute_rate_limited`) and carries `retry_after_seconds` when the model host gave one. `outcome` is always one of a fixed list; a stop reason outside it is logged as `error`. No caller-visible change.
+
 ## [1.5.49] — 2026-11-10
 
 ### Added
