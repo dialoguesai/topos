@@ -1,5 +1,5 @@
-"""DR-62 (owner, 26 Oct 2026): the two Moments packs read an owner's message in a two-party iMessage or
-Signal conversation with the 3 turns before it; the joy pack hears a thank-you.
+"""DR-62 (owner, 26 Oct 2026): the two Moments packs read an owner's message in a two-party iMessage
+conversation with the 3 turns before it; the joy pack hears a thank-you.
 
 What the ruling pins and these tests hold: context only for `moments.tension` / `moments.joy` and only in
 two-party conversations; no turn the owner excluded, tagged NSFW or protected as Off-limits, and no context
@@ -16,10 +16,18 @@ check switched off no pack reads context, and a finding read with context whose 
 written. The turns are 3 at most. A chat Messages itself calls a group gives none, whoever has written in it.
 The thank-word cue is for a message the owner sent, not a journal entry or a turn in an AI chat.
 
+Built the narrow way after the second review, and not ruled by the owner either. No string in a fact's value
+repeats 4 consecutive words of the other person's turn (a turn of 2 or 3 words: the whole turn), unless the
+owner's own message has the same run. A Signal conversation gets no context: nothing stored says it is not a
+group. With the fact check off the thank-word cue is off too, so the two packs read exactly as 1.5.49 did. An
+enable offer keeps no example of a finding read with context, and the node log holds an offer's numbers only.
+
 Invented people and lines in a migrated temp database; never the owner's node.
 """
+import contextlib
 import hashlib
 import json
+import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -52,12 +60,22 @@ def packs():
     return load_packs(bundled_pack_dir())
 
 
+@pytest.fixture(autouse=True)
+def _fact_check_on(monkeypatch):
+    """The default. A shell that has the owner's switch set must not change what these tests read."""
+    monkeypatch.delenv("TOPOS_DERIVATION_VERIFY", raising=False)
+
+
 @pytest.fixture
 def node_db(tmp_path):
+    return _node(tmp_path / "node.db")
+
+
+def _node(path):
     from topos.storage.canonical.conversations_tables import ConversationsTablesManager
     from topos.storage.db.migrations import apply_all_migrations
 
-    conn = sqlite3.connect(tmp_path / "node.db")
+    conn = sqlite3.connect(path)
     apply_all_migrations(conn)
     ConversationsTablesManager(conn).ensure_tables()
     if "actor_role" not in {r[1] for r in conn.execute("PRAGMA table_info(conversation_messages)")}:
@@ -194,6 +212,32 @@ def test_a_group_where_only_one_other_person_has_written_gives_no_context(node_d
     assert [t["record_id"] for t in _conversation_context(node_db, _owner_rec("p2"), 3)] == ["p1"]
 
 
+def test_a_signal_conversation_gets_no_context_until_a_stored_row_can_say_it_is_two_party(node_db, monkeypatch):
+    """Signal's reader keeps no group marker, so a group in which one other member has written counts as
+    two-party. Until a row can say otherwise, no Signal conversation gets context, and no short message is read."""
+    _message(node_db, "s1", NEWS, own=False, at=_ts(minutes=9), conv="sig", source="signal")
+    _message(node_db, "s2", PROUD, own=True, at=_ts(minutes=8), conv="sig", source="signal")
+    _message(node_db, "s3", THANKS, own=True, at=_ts(minutes=7), conv="sig", source="signal")
+    from topos.enrichment.jobs.canonical.derivation_job import _other_party
+    from topos.features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+    from topos.features.lifecycle.off_limits_view import for_own_processing
+    guard = BlackholeGuard(node_db, caller_class=CallerClass.UNKNOWN, view=for_own_processing())
+    assert _other_party(node_db, "sig", guard, T.is_diarisation_label) is not None, "the sender count: two-party"
+    assert _conversation_context(node_db, _owner_rec("s2"), 3) == []
+    assert _conversation_context(node_db, _owner_rec("s3", THANKS), 3) == []
+    _enable(node_db, "moments.joy")
+    _ingest_only(monkeypatch)
+    seen = _model(monkeypatch, {"joy": _reply(_peak("this made my whole week"))})
+    rows = [dict(_row("s2", node_db), source_id="signal"), dict(_row("s3", node_db, THANKS), source_id="signal")]
+    run_derivation_batch(node_db, rows, stats={})
+    (joy,) = _lens(seen["extract"], "joy", PROUD)
+    assert "Conversation context" not in joy and NEWS not in joy
+    assert not [p for p in seen["extract"] if f"---\n{THANKS}\n---" in p], "read alone it is too short to read"
+    assert seen["verify"] and not [v for v in seen["verify"] if NEWS in v]
+    ((_refs, payload),) = _facts(node_db, "moments.joy")
+    assert not payload.get("context_refs")
+
+
 def test_a_turn_excluded_while_a_batch_runs_stops_being_read(node_db, monkeypatch):
     """One batch keeps one cache, and a backfill batch can run for hours."""
     from topos.enrichment.jobs.canonical import derivation_job
@@ -214,12 +258,12 @@ REACTION = {"associated_message_guid": "p:0/00000000-0000-0000-0000-000000000000
 ORDINARY = {"associated_message_type": 0, "message_guid": "g-1"}
 
 
-def _message(conn, mid, text, *, own, at, metadata=None, conv="dm"):
+def _message(conn, mid, text, *, own, at, metadata=None, conv="dm", source="imessage"):
     conn.execute(
         "INSERT INTO conversation_messages (message_id, conversation_id, dataset_id, sender_type, sender_id, content,"
         " event_at, source_id, is_from_self, message_type, actor_role, metadata_json)"
-        " VALUES (?,?,'d',?,?,?,?,'imessage',?,'message',?,?)",
-        (mid, conv, "self" if own else "contact", "self" if own else MAREN, text, at, 1 if own else 0,
+        " VALUES (?,?,'d',?,?,?,?,?,?,'message',?,?)",
+        (mid, conv, "self" if own else "contact", "self" if own else MAREN, text, at, source, 1 if own else 0,
          "authored" if own else "observed", json.dumps(metadata) if metadata is not None else None))
     conn.commit()
 
@@ -334,14 +378,15 @@ def test_the_context_block_sits_before_the_record_and_its_rule_heads_the_hard_ru
     block = T.CONTEXT_BLOCK.format(lines=f"[OWNER, 2026-10-26 09:00] how did the interview go\n"
                                          f"[{MAREN_NAME}, 2026-10-26 09:10] {NEWS}")
     assert block + "Record (role=authored, date=2026-10-26):\n---\nWow. Okay.\n---" in p
-    assert "Hard rules:\n" + T.RULE_CONTEXT + "\n- " in p
+    assert "Hard rules:\n" + T.RULE_CONTEXT + "\n" + T.RULE_NO_COPY + "\n- " in p and p.count(T.RULE_NO_COPY) == 1
     assert T.RULE_NO_SITUATION not in p
+    assert T.RULE_NO_COPY not in T.build_prompt(packs["moments.tension"], "Wow. Okay.", "2026-10-26", "authored")
 
 
 def test_the_situation_switch_adds_the_people_only_rule(packs, monkeypatch):
     monkeypatch.setenv("TOPOS_DERIVATION_CONTEXT_SITUATION", "false")
     p = T.build_prompt(packs["moments.joy"], PROUD, "2026-10-26", "authored", context=_turns())
-    assert "Hard rules:\n" + T.RULE_CONTEXT + "\n" + T.RULE_NO_SITUATION + "\n- " in p
+    assert "Hard rules:\n" + T.RULE_CONTEXT + "\n" + T.RULE_NO_SITUATION + "\n" + T.RULE_NO_COPY + "\n- " in p
 
 
 def test_a_newline_in_someone_elses_turn_cannot_start_an_owner_line(packs):
@@ -418,6 +463,48 @@ def test_addressing_keeps_the_recipient_for_joy_only_with_a_thank_word(packs):
     assert args == {"runner_labels": [f"key:{MAREN}"], "grounded_exempt": (MAREN_NAME,)}
 
 
+#: sha256 of the prompts 1.5.49 builds for a thank-you: origin/main's `build_prompt` (ce1c165e), given the
+#: arguments `_thanks_prompts` gives this tree's (less `record_table`, which it does not have).
+BEFORE_THANKS = {
+    "joy_thanks": "d2a088084a614c873a888ab46d822cfd5d575d3a69172fdd73c220f004345654",
+    "joy_thanks_sent_to": "6a092df5db76ea03b0a8906dab26389e30eea1ed19a36327c4da1751fbb4572d",
+    "joy_plain_sent_to": "c63be3943e458bda0bfc10c136e2310c06be535745bf60183166c61d32217e54",
+    "tension_thanks": "cdab4333549cda4fe80c6f090a42af481eef1a7b55c15184a65aad6bd5b7d274",
+}
+LONG_THANKS = "Thank you so much for Sunday"
+
+
+def _thanks_prompts(packs):
+    joy, tension = packs["moments.joy"], packs["moments.tension"]
+    thanks = (LONG_THANKS, "2026-10-26", "authored")
+    sent_to = {"recipient": MAREN_NAME, "recipient_key": MAREN}
+    return {
+        "joy_thanks": T.build_prompt(joy, *thanks, record_table=MESSAGE),
+        "joy_thanks_sent_to": T.build_prompt(joy, *thanks, **sent_to, record_table=MESSAGE),
+        "joy_plain_sent_to": T.build_prompt(joy, "Honestly last night with the band was one of those nights.",
+                                            "2026-10-20", "authored", recipient=MAREN_NAME,
+                                            recipient_entity_id="ent_maren", record_table=MESSAGE),
+        "tension_thanks": T.build_prompt(tension, *thanks, **sent_to, record_table=MESSAGE),
+    }
+
+
+def test_with_the_fact_check_off_a_thank_you_gets_the_prompt_and_the_addressing_of_1_5_49(packs, monkeypatch):
+    """The cue binds a person to a fact from the record's addressing, not from the words, and the fact check is
+    what reads that back. The owner's node runs with it off: there the joy pack must read as it did."""
+    joy = packs["moments.joy"]
+    rec = {"text": LONG_THANKS, "role": "authored", "table": MESSAGE, "recipient": MAREN_NAME, "recipient_key": MAREN}
+    on = {k: _sha(v) for k, v in _thanks_prompts(packs).items()}
+    assert [k for k in on if on[k] != BEFORE_THANKS[k]] == ["joy_thanks", "joy_thanks_sent_to", "joy_plain_sent_to"]
+    assert T.thanks_cue_applies(joy, LONG_THANKS, "authored", MESSAGE) == "thank"
+    for raw in ("off", " OFF "):
+        monkeypatch.setenv("TOPOS_DERIVATION_VERIFY", raw)
+        assert {k: _sha(v) for k, v in _thanks_prompts(packs).items()} == BEFORE_THANKS, raw
+        assert T.thanks_cue_applies(joy, LONG_THANKS, "authored", MESSAGE) == ""
+        assert "recipient" not in T.addressing_for(joy, rec)
+        assert _recipient_parse_args(joy, rec) == {"runner_labels": [], "grounded_exempt": ()}
+        assert T.addressing_for(packs["obligations.commitments"], rec) is rec, "the commitments label is not the cue's"
+
+
 # --- the parser: the owner's own words ----------------------------------------------------------------------------
 
 def _reply(*assertions):
@@ -459,7 +546,124 @@ def test_a_person_may_be_grounded_by_a_speaker_name_never_by_the_contexts_text(p
     assert T.parse_output(by_stand_in, joy, record_text=PROUD, context=unnamed) == ([], 1)
 
 
+# --- the parser: never the other person's words --------------------------------------------------------------------
+
+def _kept(packs, description, record=PROUD, turns=None, quote="this made my whole week", **value):
+    """Whether the parser keeps a peak with this description, read with the turns. A drop is counted as a copy."""
+    counts = {}
+    raw = _reply(_peak(quote, description=description, **value))
+    valid, rejects = T.parse_output(raw, packs["moments.joy"], record_text=record,
+                                    context=_turns() if turns is None else turns, counts=counts)
+    assert (len(valid), rejects, counts.get("context_copied", 0)) in ((1, 0, 0), (0, 1, 1))
+    return bool(valid)
+
+
+def _their(text):
+    return [_turns()[0], dict(_turns()[1], text=text)]
+
+
+def test_a_value_never_repeats_the_other_persons_words(packs):
+    """The second review's probe: the owner's quote, and the other person's whole line as the description. The
+    quote guard passed it and it was written. Four consecutive words of their turn are a quotation."""
+    assert T.CONTEXT_COPY_RUN_WORDS == 4 and T.CONTEXT_COPY_SHORT_TURN_WORDS == 2
+    assert not _kept(packs, NEWS)
+    # near-copies: case and punctuation, a clause dropped, a word changed, wrapped in other words
+    assert not _kept(packs, "i got the rotterdam offer - starting in march")
+    assert not _kept(packs, "I got the Rotterdam offer")
+    assert not _kept(packs, "She got the Rotterdam offer and starts in March")
+    assert not _kept(packs, "Maren wrote “I got the Rotterdam offer”")
+    assert not _kept(packs, "so proud about the offer starting in March")
+    # in any field, and inside a list
+    assert not _kept(packs, "her news", activity=NEWS)
+    assert not _kept(packs, "her news", where=NEWS.upper())
+    counts = {}
+    listed = _reply({"predicate": "moment.peak", "quote": "this made my whole week",
+                     "value": {"kind": "accomplished", "description": ["her news", "got the Rotterdam offer!"]}})
+    assert T.parse_output(listed, packs["moments.joy"], record_text=PROUD, context=_turns(), counts=counts) == ([], 1)
+    assert counts == {"context_copied": 1}
+    # the ruling: the description may name the situation, in other words
+    for named in ("her new job", "Maren's Rotterdam offer", "the Rotterdam offer", "her job in Rotterdam from March"):
+        assert _kept(packs, named), named
+    # an earlier turn of the owner's is not the other person's words
+    assert _kept(packs, "after asking how did the interview go")
+    # read alone the parser is what it was
+    alone = T.parse_output(_reply(_peak("this made my whole week", description=NEWS)), packs["moments.joy"],
+                           record_text=PROUD)
+    assert len(alone[0]) == 1 and alone[1] == 0
+
+
+def test_words_the_owner_wrote_too_are_the_owners(packs):
+    echo = "You got the Rotterdam offer!! So proud of you"
+    assert _kept(packs, "she got the Rotterdam offer", record=echo, quote="So proud of you")
+    assert not _kept(packs, "she got the Rotterdam offer, starting in March", record=echo, quote="So proud of you")
+    assert not _kept(packs, "she got the Rotterdam offer")
+
+
+def test_a_short_turn_is_matched_whole_and_one_word_is_not_a_quotation(packs):
+    assert not _kept(packs, "Dad died", turns=_their("Dad died."))
+    assert not _kept(packs, "hearing that dad died", turns=_their("Dad died."))
+    assert _kept(packs, "her father's death", turns=_their("Dad died."))
+    assert _kept(packs, "her dad", turns=_their("Dad died."))
+    assert not _kept(packs, "they said we broke up", turns=_their("We broke up"))
+    assert _kept(packs, "their breakup", turns=_their("We broke up"))
+    assert _kept(packs, "a yes at last", turns=_their("Yes!!"))
+
+
+def test_a_script_written_without_spaces_is_counted_by_character(packs):
+    theirs = _their("東京の仕事が決まった")
+    assert not _kept(packs, "東京の仕事が決まった", turns=theirs)
+    assert not _kept(packs, "「東京の仕事」", turns=theirs)
+    assert _kept(packs, "新しい仕事", turns=theirs)
+
+
+def test_the_other_persons_line_as_a_description_is_counted_and_never_written_or_logged(node_db, monkeypatch):
+    _enable(node_db, "moments.joy")
+    _ingest_only(monkeypatch)
+    seen = _model(monkeypatch, {"joy": _reply(_peak("this made my whole week", description=NEWS))})
+    stats = {}
+    with _node_log() as lines:
+        run_derivation_batch(node_db, [_row("m1", node_db)], stats=stats)
+    assert stats.get("context_copied") == 1 and stats.get("parse_rejects") == 1
+    assert not seen["verify"] and _facts(node_db, "moments.joy") == []
+    assert node_db.execute("SELECT COUNT(*) FROM derivation_training_ledger").fetchone()[0] == 0
+    assert "Rotterdam" not in "\n".join(lines) and "Rotterdam" not in json.dumps(stats)
+    # the owner's backfill counts it the same way
+    from topos.features.derivation.surfaces import run_pack_backfill
+    monkeypatch.setattr("topos.features.signal.derived_index.index_derived_objects", lambda *a, **kw: {})
+    node_db.execute("DELETE FROM derivation_progress")
+    node_db.commit()
+    with _node_log() as lines:
+        backfill = run_pack_backfill(node_db, "moments.joy", use_prefilter=False)
+    assert backfill["context_copied"] >= 1
+    read_alone = {r["record_id"] for refs, _payload in _facts(node_db, "moments.joy") for r in refs}
+    assert read_alone and read_alone <= {"g2", "t1"}, "only the records read alone, where it is the model's own text"
+    assert "Rotterdam" not in "\n".join(lines)
+
+
 # --- the job: ingest, catch-up, the trial, the owner's backfill ---------------------------------------------------
+
+@contextlib.contextmanager
+def _node_log():
+    """Every line the node's loggers write while the block runs, at any level."""
+    lines = []
+
+    class _Keep(logging.Handler):
+        def emit(self, record):
+            lines.append(record.getMessage())
+
+    log, keep = logging.getLogger("topos"), _Keep(level=logging.DEBUG)
+    job = logging.getLogger("topos.enrichment.jobs.derivation")
+    before = (log.level, job.level)
+    log.addHandler(keep)
+    log.setLevel(logging.DEBUG)
+    job.setLevel(logging.DEBUG)
+    try:
+        yield lines
+    finally:
+        log.removeHandler(keep)
+        log.setLevel(before[0])
+        job.setLevel(before[1])
+
 
 def _enable(conn, *pack_ids):
     from topos.features.derivation.registry import seed_pack_registry
@@ -706,6 +910,103 @@ def test_the_enable_offer_trial_reads_as_ingest_will(node_db, monkeypatch):
     in_dm = [p for p in trial if PROUD in p.split("Record (role=")[1] and "who is bringing" not in p
              and "Conversation context" in p]
     assert in_dm and any(f"---\n{THANKS}\n---" in p for p in trial), "the short thank-you, with its turns"
+
+
+def test_an_enable_offer_keeps_no_example_read_with_context_and_its_log_line_is_numbers_only(node_db, monkeypatch):
+    """An offer's examples are findings: a value and the owner's quote. One read with the other person's turns
+    may describe what only their turn said, and an offer row has no `context_refs` to take it out by. The log
+    line carried the whole offer, examples included."""
+    _enable(node_db)
+    node_db.execute("INSERT OR IGNORE INTO pack_yield (pack_id, day, prefilter_hits)"
+                    " VALUES ('moments.joy', date('now'), 40)")
+    for i in range(5):
+        _message(node_db, f"x{i}", f"{PROUD} ({i})", own=True, at=_ts(minutes=4 - i * 0.1))
+    _model(monkeypatch)
+    from topos.engine.backends import ollama
+    answer = ollama.OllamaAdapter._generate
+
+    def describing(self, model, prompt, **kw):
+        extracting = LENS["joy"] in prompt and "strict fact-checker" not in prompt
+        if extracting and "this made my whole week" in prompt.lower().split("record (role=")[1]:
+            with_turns = "Conversation context" in prompt
+            return {"text": _reply(_peak("this made my whole week",
+                                         description="the Rotterdam news" if with_turns else "a good week"))}
+        return answer(self, model, prompt, **kw)
+
+    monkeypatch.setattr(ollama.OllamaAdapter, "_generate", describing)
+    stats = {}
+    with _node_log() as lines:
+        run_derivation_batch(node_db, [], stats=stats)
+    (stored,) = node_db.execute("SELECT stats_json FROM pack_offers WHERE pack_id='moments.joy'"
+                                " AND kind='enable_offer'").fetchall()
+    offer = json.loads(stored[0])
+    assert offer["examples_withheld"] >= 6, "the DM's messages, each read with its turns"
+    assert len(offer["examples"]) >= 2, "the group's and the other messenger's, read alone, are kept as before"
+    assert offer["accepted"] == len(offer["examples"]) + offer["examples_withheld"] == stats["trial_moments.joy"]["accepted"]
+    assert "Rotterdam" not in stored[0] and {e["value"]["description"] for e in offer["examples"]} == {"a good week"}
+    (minted,) = [line for line in lines if line.startswith("pack offer minted")]
+    assert "enable_offer moments.joy" in minted and f"'accepted': {offer['accepted']}" in minted
+    assert "examples_withheld" in minted and "'examples'" not in minted
+    logged = "\n".join(lines)
+    assert "a good week" not in logged and "Rotterdam" not in logged and "whole week" not in logged
+
+
+def _left_behind(conn, seen, stats, backfill):
+    """What a run read and wrote, less ids and clock times."""
+    facts = sorted(
+        json.dumps([pack, [r["record_id"] for r in json.loads(refs)],
+                    {k: v for k, v in json.loads(payload).items() if k != "extractor"}], sort_keys=True)
+        for pack, refs, payload in conn.execute(
+            "SELECT ontology_id, source_refs_json, payload_json FROM signal_objects WHERE object_type='fact'"))
+    ledger = sorted(conn.execute(
+        "SELECT stage, pack_id, record_id, predicate, value_json, about, quote, vstatus, COALESCE(vreason,'')"
+        " FROM derivation_training_ledger").fetchall())
+    progress = sorted(k for (k,) in conn.execute("SELECT key FROM derivation_progress"))
+    timed = ("extract_s", "verify_s")
+    return {"extract": seen["extract"], "verify": seen["verify"], "facts": facts, "ledger": ledger,
+            "progress": progress, "stats": stats, "backfill": {k: v for k, v in backfill.items() if k not in timed}}
+
+
+def _run_every_path(conn, monkeypatch):
+    """Ingest, catch-up and the trial, then the owner's backfill of the joy pack, on a DM with a thank-you."""
+    from topos.features.derivation.surfaces import run_pack_backfill
+    _message(conn, "k1", LONG_THANKS, own=True, at=_ts(minutes=3))
+    _enable(conn, "moments.joy", "moments.tension", "obligations.commitments")
+    monkeypatch.setattr("topos.features.signal.derived_index.index_derived_objects", lambda *a, **kw: {})
+    gratitude = {"predicate": "moment.gratitude", "quote": "Thank you",
+                 "value": {"person": "id:ent_maren", "what": "Sunday", "acknowledged": True}}
+    seen = _model(monkeypatch, {"joy": _reply(gratitude, _peak("made my whole week", description=NEWS))})
+    stats = {}
+    run_derivation_batch(conn, [_row("k1", conn, LONG_THANKS), _row("m1", conn), _row("m2", conn, THANKS)], stats=stats)
+    conn.execute("DELETE FROM derivation_progress WHERE key LIKE 'moments.joy@%'")
+    conn.commit()
+    backfill = run_pack_backfill(conn, "moments.joy", use_prefilter=False)
+    return _left_behind(conn, seen, stats, backfill)
+
+
+def test_with_the_fact_check_off_every_path_reads_and_writes_exactly_as_1_5_49(tmp_path, monkeypatch, packs):
+    """The owner's node runs with the fact check off. There DR-62 changes nothing: the same prompts, no verifier
+    call, the same facts, ledger rows and progress keys as the 1.5.49 code path, which is this tree's with both
+    pack sets empty (every DR-62 branch hangs on one of them)."""
+    monkeypatch.setenv("TOPOS_DERIVATION_VERIFY", "off")
+    here = _run_every_path(_node(tmp_path / "here.db"), monkeypatch)
+    monkeypatch.setattr(T, "CONTEXT_PACKS", ())
+    monkeypatch.setattr(T, "THANKS_CUE_PACKS", frozenset())
+    before = _run_every_path(_node(tmp_path / "before.db"), monkeypatch)
+    assert here == before
+    assert here["extract"] and here["verify"] == [] and here["facts"] and here["ledger"]
+    thanks = _lens(here["extract"], "joy", LONG_THANKS)
+    assert thanks and {_sha(p.replace(f"date={p.split('date=')[1][:10]}", "date=2026-10-26")) for p in thanks} == {
+        BEFORE_THANKS["joy_thanks"]}, "1.5.49's own prompt for it: no cue, no recipient"
+    assert not [p for p in here["extract"] if "Conversation context" in p or f"---\n{THANKS}\n---" in p]
+    assert "context_copied" not in here["stats"] and "context_reads" not in here["stats"]
+    assert not [f for f in here["facts"] if "context_refs" in f]
+    # and with it on, the same node reads differently: the comparison above is not empty
+    monkeypatch.undo()
+    monkeypatch.delenv("TOPOS_DERIVATION_VERIFY", raising=False)
+    on = _run_every_path(_node(tmp_path / "on.db"), monkeypatch)
+    assert [p for p in on["extract"] if "Conversation context" in p] and on["verify"]
+    assert T.TX2_RULE.format(word="thank") in _lens(on["extract"], "joy", LONG_THANKS)[0]
 
 
 def test_the_owners_backfill_reads_a_moments_pack_with_its_conversation(node_db, monkeypatch):

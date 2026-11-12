@@ -14,26 +14,35 @@ The machine-readable twin of each release is
   Owner ruling DR-62 (26 Oct 2026). "Wow. Okay." or "Thank you!!" says little alone, and a fact pack read one
   message at a time, so most of what a conversation makes plain was missed, and a message of 15 characters or
   fewer was never read at all. `moments.tension` and `moments.joy` now read a message you wrote in a two-party
-  iMessage or Signal conversation together with the 3 turns before it from the last 7 days, each labelled OWNER
-  or with the other person's contact name. These two packs also read your short messages, when they have such
-  turns. Nothing changes for any other pack, and the upgrade switches no pack on. A Moments pack you have not
-  turned on is read only by the trial behind its enable offer, as before; that trial now reads the way the pack
-  will, so it too sees the turns and your short messages.
+  iMessage conversation together with the 3 turns before it from the last 7 days, each labelled OWNER or with
+  the other person's contact name. These two packs also read your short messages, when they have such turns.
+  Nothing changes for any other pack, and the upgrade switches no pack on. A Moments pack you have not turned
+  on is read only by the trial behind its enable offer, as before; that trial now reads the way the pack will,
+  so it too sees the turns and your short messages.
   - *It needs the fact check.* The ruling is for a reading the fact check verifies against the same turns. With
-    the fact check switched off (`TOPOS_DERIVATION_VERIFY=off`) the two packs read as they did before: one
-    message at a time, no turns, no short messages. A finding read with turns whose fact-check call fails is
-    not written; read alone it is still stored and flagged, as before.
+    the fact check switched off (`TOPOS_DERIVATION_VERIFY=off`) the two packs read exactly as in 1.5.49: one
+    message at a time, no turns, no short messages, no thank-word rule and no recipient label; the prompts,
+    what the parser keeps and what is written are the same. A finding read with turns whose fact-check call
+    fails is not written; read alone it is still stored and flagged, as before.
+  - *Not Signal yet.* The ruling names iMessage and Signal. Signal conversations get no turns in this release:
+    nothing Topos stores for a Signal message says whether its conversation is a group, so a group in which one
+    other member has written could not be told from a two-party conversation. Messages names every chat a
+    group or a direct chat, and that is checked. Signal follows once its reader stores the same.
   - *What is never a turn.* A system row, a reaction (a "Loved …" row repeats another message under the
     reactor's name, so it is stepped over), a row you excluded, one tagged NSFW, one your Off-limits list
     protects. No turns at all with an Off-limits person, in a group (more than one other person has written,
-    or Messages itself names the chat a group), in another messenger, an AI chat, a journal or a transcript, or
-    for a message that is itself a reaction. Any error means no turns, never a failed batch. A long batch looks
-    at your exclusions and Off-limits list again every 30 seconds, and a finding is not written when you
-    excluded one of its turns while it was being read.
+    or Messages itself names the chat a group), in Signal or any other messenger, an AI chat, a journal or a
+    transcript, or for a message that is itself a reaction. Any error means no turns, never a failed batch. A
+    long batch looks at your exclusions and Off-limits list again every 30 seconds, and a finding is not
+    written when you excluded one of its turns while it was being read.
   - *Only your words are evidence.* A finding whose quote is not in your own message, or that is about anyone
     but you, is dropped before it is checked; the fact check reads the same turns; if it decides the finding is
     about the other person, the finding is rejected, not sent to review. The other person can appear only as
-    who the moment is with. The description may name the situation; it never quotes them.
+    who the moment is with. The description may name the situation; it never quotes them: a finding in which
+    any text field repeats 4 words in a row of the other person's turn (a turn of 2 or 3 words: the whole
+    turn) is dropped before it is checked, unless your own message has the same words. Case, punctuation and
+    spacing do not matter; a script written without spaces is counted by character. Dropped findings are
+    counted (`context_copied`), and their text is not kept or logged. The prompt asks the model not to copy.
   - *Moments never shows the other person's words.* The fact rests on your message alone. The turns are kept
     beside it as `context_refs` and only protect it: excluding, deleting or scrubbing one, or retention removing
     it, takes the fact out, and an app's `pack_facts` read leaves the fact out when one is protected, names an
@@ -43,7 +52,11 @@ The machine-readable twin of each release is
     the turns are not sources. A Moments fact read alone is shared as before.
   - *A thank-you.* When a message you sent has a thank-word (thank, thanks, thx, appreciate, appreciated,
     grateful), `moments.joy` gets one more rule, and in a direct message the gratitude is tied to the person you
-    sent it to. Every other message, and every journal entry and AI chat turn, gets the prompt it had.
+    sent it to. Only while the fact check is on, like the turns. Every other message, and every journal entry
+    and AI chat turn, gets the prompt it had.
+  - *Enable offers and the node log.* An enable offer keeps no example of a finding read with turns: the offer
+    counts it (`examples_withheld`) and shows the examples read from one message alone, as before. The log line
+    for a new offer holds its numbers only; it used to carry the examples too.
   - *Every path reads the same way:* new records, the catch-up, the trial behind an enable offer, a backfill
     (with `--since` too) and the automatic catch-up; the count shown before a backfill counts a short message
     only where the run would read it. A pack that Topos Facts reads is given the one record, as before, so it
@@ -51,8 +64,9 @@ The machine-readable twin of each release is
   - *Switches.* `TOPOS_DERIVATION_CONTEXT_TURNS` (3; it can lower the number, never raise it; 0 is one message
     at a time, as before), `TOPOS_DERIVATION_CONTEXT_PACKS` (the two packs; it can narrow the list, never add to
     it), `TOPOS_DERIVATION_CONTEXT_SITUATION` (true). With 0 turns and no thank-word every prompt is byte for
-    byte what it was. Template `shadow-11`. `no-invalidation`: nothing already written is wrong, and messages
-    already read are not read again; your short messages, never read before, are new to these two packs.
+    byte what it was, and so is every prompt while the fact check is off. Template `shadow-11`.
+    `no-invalidation`: nothing already written is wrong, and messages already read are not read again; your
+    short messages, never read before, are new to these two packs.
 
 ## [1.5.49] — 2026-11-10
 

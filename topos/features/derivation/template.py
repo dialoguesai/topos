@@ -15,8 +15,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .packs import Pack, load_scales
 
-#: shadow-11 (DR-62): the Moments packs' conversation context and the joy pack's thank-word cue. Every other prompt,
-#: and these two packs' prompt on a record with neither, is byte for byte shadow-10's.
+#: shadow-11 (DR-62): the tension and joy packs' conversation context and the joy pack's thank-word cue. Every other
+#: prompt, and these two packs' prompt on a record with neither, is byte for byte shadow-10's.
 TEMPLATE_VERSION = "shadow-11"
 _PACK_DIR = Path(__file__).resolve().parents[4] if False else None  # set by set_pack_dir()
 
@@ -267,10 +267,10 @@ def _predicate_menu(pack: Pack) -> str:
     return "\n".join(lines)
 
 
-# --- DR-62 (owner, 26 Oct 2026): the Moments packs read an owner's message with the turns before it ---------------
+# --- DR-62 (owner, 26 Oct 2026): the tension and joy packs read an owner's message with the turns before it -------
 # The other person's words help the extractor tell what the owner's own words refer to ("Wow. Okay." after their
 # news); they are never evidence. The verifier reads the same turns, and the parser keeps only assertions that quote
-# the owner's message and are about the owner.
+# the owner's message, are about the owner and repeat none of the other person's words (`copies_other_turn`).
 
 #: The packs DR-62 rules on. `TOPOS_DERIVATION_CONTEXT_PACKS` narrows this set and cannot widen it: context for
 #: another pack is another ruling.
@@ -290,6 +290,10 @@ CONTEXT_BLOCK = (
 RULE_CONTEXT = ("- Every assertion rests on the OWNER's own words in the Record and quotes them. The context may supply "
                 "who or what those words refer to (the person the owner is answering, what \"it\" means); it is never "
                 "itself a source of facts.")
+#: The ruling: a description may name the situation and never quotes the other person. The parser enforces it
+#: (`copies_other_turn`); this line asks for it, so fewer findings are lost to the parser.
+RULE_NO_COPY = ("- Never copy another person's words from the context into any field. Say who or what the OWNER is "
+                "answering in a few words of your own: an assertion that repeats a run of their words is discarded.")
 #: `TOPOS_DERIVATION_CONTEXT_SITUATION=false` ("people only", the ruling's other answer): the person answered may be
 #: named, the situation may not. A prompt rule only; no deterministic check backs it.
 RULE_NO_SITUATION = ("- Describe the moment only with what the OWNER's own words in the Record say: never name an "
@@ -378,11 +382,79 @@ def quote_in_record(quote: Any, record_text: Any) -> bool:
     return bool(pieces) and all(p in text for p in pieces)
 
 
+# --- the other person's words never reach a fact's value ------------------------------------------------------------
+# The quote guard covers `quote`. This covers every other string the extractor returns (a description, a `what`, a
+# name): read with context, none may repeat a run of words from a turn the owner did not write. Counted in words, so
+# case, punctuation and spacing do not hide a copy, and a near-copy (a word changed, a clause dropped) still shares
+# a run. What a value may do is name the situation in other words: that is the ruling.
+
+#: The run, in words. Four keeps "the Rotterdam offer" (the situation, named) and drops "got the Rotterdam offer"
+#: (their sentence). A built default: the ruling says "never quotes", not how long a quotation is.
+CONTEXT_COPY_RUN_WORDS = 4
+#: A turn shorter than the run is matched whole, from this many words ("Dad died"). One word is vocabulary.
+CONTEXT_COPY_SHORT_TURN_WORDS = 2
+# A script written without spaces has no words to count, so each of its characters is one (Thai, kana, Han).
+_UNSPACED = "\u0e00-\u0e7f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff"
+_WORD = re.compile(f"[{_UNSPACED}]|[^\\W_{_UNSPACED}]+")
+
+
+def _words(text: Any) -> List[str]:
+    return _WORD.findall(_quote_norm(text).replace("'", ""))
+
+
+def _runs(words: Sequence[str], n: int) -> set:
+    return {tuple(words[i:i + n]) for i in range(len(words) - n + 1)}
+
+
+def _strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _strings(item)
+
+
+def other_turn_runs(record_text: Any, context: Optional[Sequence[Mapping[str, Any]]]) -> set:
+    """The word runs that are another person's and not also the owner's: every CONTEXT_COPY_RUN_WORDS consecutive
+    words of each turn the owner did not write, as the prompt showed it, and a shorter turn whole; less any run the
+    owner's own record has too (said by both, they are the owner's words as well)."""
+    theirs: set = set()
+    for turn in context or ():
+        if turn.get("owner"):
+            continue
+        words = _words(_one_line(turn.get("text"), CONTEXT_LINE_CHARS))
+        if len(words) >= CONTEXT_COPY_RUN_WORDS:
+            theirs |= _runs(words, CONTEXT_COPY_RUN_WORDS)
+        elif len(words) >= CONTEXT_COPY_SHORT_TURN_WORDS:
+            theirs.add(tuple(words))
+    if theirs:
+        own = _words(clean_record_text(str(record_text or "")))
+        for n in {len(run) for run in theirs}:
+            theirs -= _runs(own, n)
+    return theirs
+
+
+def copies_other_turn(value: Any, record_text: Any, context: Optional[Sequence[Mapping[str, Any]]],
+                      runs: Optional[set] = None) -> bool:
+    """Whether a string anywhere in an assertion's value repeats one of `other_turn_runs`."""
+    theirs = other_turn_runs(record_text, context) if runs is None else runs
+    if not theirs:
+        return False
+    sizes = {len(run) for run in theirs}
+    return any(not theirs.isdisjoint(_runs(_words(text), n)) for text in _strings(value) for n in sizes)
+
+
 # --- the joy pack's thank-word cue ---------------------------------------------------------------------------------
 # The pack defines a thank-you the owner writes as gratitude, yet the extractor tends to pass over a plain one. When
 # the owner's message has a thank-word, one hard rule says so and, in a direct message, binds the gratitude to the
 # recipient's runner label. Every other message gets the prompt unchanged. The label goes with the cue and nowhere
 # else: offered on every joy call, with the context in view, it invites thanks to the recipient that nobody wrote.
+# Like the context, the cue is for a reading the fact check verifies: it binds a person to a fact from the record's
+# addressing, not from the words. With the fact check off there is no cue and no label, and the joy pack's prompt
+# and parse are what they were before DR-62, whatever the message says.
 
 #: Packs whose prompt carries the cue.
 THANKS_CUE_PACKS = frozenset({"moments.joy"})
@@ -411,9 +483,10 @@ THANKS_CUE_TABLES = frozenset({"conversation_messages"})
 
 def thanks_cue_applies(pack: Any, record_text: Any, actor_role: str, record_table: str = "") -> str:
     """The thank-word the cue quotes, for a cue pack reading a message the owner sent (`record_table` in
-    THANKS_CUE_TABLES); else "". A caller that does not say what the record is gets no cue."""
-    if (str(getattr(pack, "pack", "") or "") not in THANKS_CUE_PACKS or actor_role != "authored"
-            or str(record_table or "") not in THANKS_CUE_TABLES):
+    THANKS_CUE_TABLES); else "". A caller that does not say what the record is gets no cue, and nobody gets one
+    while the fact check is off (`fact_check_off`)."""
+    if (fact_check_off() or str(getattr(pack, "pack", "") or "") not in THANKS_CUE_PACKS
+            or actor_role != "authored" or str(record_table or "") not in THANKS_CUE_TABLES):
         return ""
     return thank_word(record_text)
 
@@ -423,15 +496,16 @@ def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str
                  recipient: str = "", recipient_entity_id: str = "", recipient_key: str = "",
                  context: Optional[Sequence[Mapping[str, Any]]] = None, record_table: str = "") -> str:
     """`context` is the turns before the record (DR-62; the job passes them only to `context_packs()` for a
-    two-party message): the block before the record and one hard rule. `record_table` is the table the record is
+    two-party message): the block before the record and two hard rules. `record_table` is the table the record is
     stored in; the thank-word cue reads it (`thanks_cue_applies`). With no context and no thank-word cue the
-    prompt is byte for byte the one-record prompt."""
+    prompt is byte for byte the one-record prompt, and so is every prompt while the fact check is off."""
     record_text = clean_record_text(record_text)
     g = pack.guidance
     abst = "\n".join(f"- {a}" for a in (g.get("abstention") or []))
     thanks = thanks_cue_applies(pack, record_text, actor_role, record_table)
-    if str(getattr(pack, "pack", "") or "") in THANKS_CUE_PACKS and not thanks:
-        # The recipient rides with the cue and only with it (see TR_ADD).
+    if str(getattr(pack, "pack", "") or "") in THANKS_CUE_PACKS and not thanks and not fact_check_off():
+        # The recipient rides with the cue and only with it (see TR_ADD). With the fact check off nothing here
+        # touches the arguments: the prompt is the one this function built before the cue existed.
         recipient = recipient_entity_id = recipient_key = ""
     # The record's own sender identity, for packs that read other people's words. It comes
     # from the record (contacts + the entity spine), never from the text, and it is what
@@ -457,7 +531,8 @@ def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str
     context_block = rule_context = ""
     if context:
         context_block = render_context(context)
-        rule_context = RULE_CONTEXT + "\n" + ("" if context_situation() else RULE_NO_SITUATION + "\n")
+        rule_context = (RULE_CONTEXT + "\n" + ("" if context_situation() else RULE_NO_SITUATION + "\n")
+                        + RULE_NO_COPY + "\n")
     known_block = ""
     if known_people:
         names = ", ".join(known_people)
@@ -575,14 +650,18 @@ def normalise_runner_label(value: Any, runner_labels: Any) -> Any:
 
 def parse_output(raw: str, pack: Pack, record_text: str = None,
                  grounded_exempt: Any = (), runner_labels: Any = (),
-                 context: Optional[Sequence[Mapping[str, Any]]] = None) -> Tuple[List[Dict[str, Any]], int]:
+                 context: Optional[Sequence[Mapping[str, Any]]] = None,
+                 counts: Optional[Dict[str, int]] = None) -> Tuple[List[Dict[str, Any]], int]:
     """Return (valid_assertions, schema_reject_count).
 
     `context` is what `build_prompt` showed before the record (DR-62). A person value may then
     be grounded by the context's speaker names, never by its text, and every assertion must be
-    the owner's own: its quote in the record (`quote_in_record`) and `about` the owner. Without
-    the quote guard another person's line could come back as the owner's quote, which Moments
-    prints as "you wrote". There is no switch for it."""
+    the owner's own: its quote in the record (`quote_in_record`), `about` the owner, and no
+    string in its value repeating the other person's words (`copies_other_turn`). Without the
+    quote guard another person's line could come back as the owner's quote, which an app prints
+    as "you wrote"; without the other, as the moment's description. There is no switch for
+    either. `counts["context_copied"]` is how many assertions the second one dropped: a number,
+    the text is never kept or logged."""
     m = _JSON_RE.search(raw or "")
     if not m:
         return [], 1 if (raw or "").strip() else 0
@@ -594,6 +673,7 @@ def parse_output(raw: str, pack: Pack, record_text: str = None,
     grounding = record_text
     if context and record_text is not None:
         grounding = "\n".join([record_text, *context_speaker_names(context)])
+    their_runs = other_turn_runs(record_text, context) if context else set()
     valid, rejects = [], 0
     for a in data.get("assertions") or []:
         if not isinstance(a, dict):
@@ -710,6 +790,11 @@ def parse_output(raw: str, pack: Pack, record_text: str = None,
             about = "unclear" if _needs_about(pred.name) else "owner"
         if context and (about != "owner" or not quote_in_record(a.get("quote"), record_text)):
             rejects += 1               # read with other people's words: the owner's own words, about the owner, only
+            continue
+        if their_runs and copies_other_turn(val, record_text, context, their_runs):
+            rejects += 1               # the other person's words in a value: never a fact
+            if counts is not None:
+                counts["context_copied"] = counts.get("context_copied", 0) + 1
             continue
         if (record_text is not None and pred.name == "rel.relationship"
                 and isinstance(val, dict) and isinstance(val.get("role"), str)):

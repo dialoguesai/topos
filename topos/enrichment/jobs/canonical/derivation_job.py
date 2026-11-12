@@ -114,9 +114,13 @@ def _reads_short_records() -> bool:
 
 #: DR-62: a context turn older than this before the owner's message belongs to another exchange.
 CONTEXT_MAX_AGE_DAYS = 7
-#: The messengers whose two-party conversations DR-62 reads. Groups, AI chats, journals and
-#: transcripts get no context.
-_CONTEXT_SOURCES = frozenset({"imessage", "signal"})
+#: The messengers whose two-party conversations get context. Groups, AI chats, journals and
+#: transcripts get none. DR-62 names iMessage and Signal, and Signal is left out here: its
+#: reader stores no group marker, so a Signal group in which one other member has written
+#: cannot be told from a two-party conversation (`_other_party` counts senders), and DR-62
+#: gives a group none. Signal joins this set when a stored row can prove the conversation is
+#: two-party, the way `chat_guid` does for Messages (`_sent_in_a_group`).
+_CONTEXT_SOURCES = frozenset({"imessage"})
 #: How many rows past the k turns one context read may look at to step over reactions.
 CONTEXT_REACTION_SLACK = 12
 #: How long one read of the owner's protections (the Off-limits guard, the excluded records,
@@ -151,7 +155,8 @@ def _sent_in_a_group(metadata: Any) -> bool:
     a group in which only one other member has written so far would pass. Messages names every
     chat `<service>;<style>;<identifier>` and the style is `+` for a group and `-` for a direct
     chat; the reader keeps that name as `chat_guid`. This can only take context away: a row
-    with no such name (Signal, an older import) is left to the sender count."""
+    with no such name (an older import) is left to the sender count. A messenger whose rows
+    never carry one is not in `_CONTEXT_SOURCES`."""
     if isinstance(metadata, (str, bytes)) and metadata:
         try:
             metadata = _json.loads(metadata)
@@ -174,9 +179,10 @@ def _aware(value: Any):
 
 def _conversation_context(conn, rec: Dict[str, Any], k: int, *,
                           cache: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-    """The k turns before an owner-written message in a two-party iMessage or Signal
-    conversation, oldest first (DR-62, owner, 26 Oct 2026). [] for anything else, and on any
-    error: no context is today's one-record reading, never a failed batch.
+    """The k turns before an owner-written message in a two-party iMessage conversation, oldest
+    first (DR-62, owner, 26 Oct 2026; Signal waits for a group marker, `_CONTEXT_SOURCES`). []
+    for anything else, and on any error: no context is today's one-record reading, never a
+    failed batch.
 
     Within CONTEXT_MAX_AGE_DAYS of the message, never a system row, never a row the owner
     excluded (`lifecycle.exclusions`), one tagged NSFW or one the Off-limits guard withholds
@@ -467,11 +473,15 @@ def _has_recent_offer(conn, pack_id, kind, days=30) -> bool:
 
 
 def _mint_offer(conn, pack_id, kind, stats):
+    """Store the offer and log that it was made. The log line carries the offer's numbers only:
+    an enable offer's `examples` are findings (a value, the owner's quote), and a log holds
+    counts and ids, never text."""
     import uuid as _uuid
     conn.execute(
         "INSERT INTO pack_offers (offer_id, pack_id, kind, stats_json) VALUES (?,?,?,?)",
         (f"ofr_{_uuid.uuid4().hex[:12]}", pack_id, kind, _json.dumps(stats, default=str)))
-    logger.info("pack offer minted: %s %s %s", kind, pack_id, stats)
+    counts = {k: v for k, v in stats.items() if isinstance(v, (int, float)) and not isinstance(v, bool)}
+    logger.info("pack offer minted: %s %s %s", kind, pack_id, counts)
 
 
 #: self-gating knobs — deliberately conservative; the node OFFERS, the owner decides
@@ -691,7 +701,7 @@ def run_derivation_batch(
                 logger.debug("derivation llm error on %s: %s", key, exc)
                 continue
             valid, rejects = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec),
-                                          context=context)
+                                          context=context, counts=st)
             st["parse_rejects"] = st.get("parse_rejects", 0) + rejects
             _bump_yield(conn, pid, assertions=len(valid))
             if context:
@@ -920,7 +930,7 @@ def _drip_catchup(conn, *, packs, filters, pack_raw, judge, writer_for, owner, d
                 st["llm_errors"] = st.get("llm_errors", 0) + 1
                 continue
             valid, _rej = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec),
-                                       context=context)
+                                       context=context, counts=st)
             _bump_yield(conn, pid, assertions=len(valid))
             for a in valid:
                 a = judge(pack, rec, a, "catchup")
@@ -1039,7 +1049,7 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
         # The trial reads a record the way ingest will once the pack is on, or its accept
         # rate measures a different prompt than the one the owner is offered.
         _attach_dm_recipients(conn, sample)
-        n_assert = n_acc = 0
+        n_assert = n_acc = n_withheld = 0
         examples = []
         for rec in sample:
             if cancel is not None and cancel.is_set():
@@ -1052,7 +1062,7 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
             except Exception:  # noqa: BLE001
                 continue
             valid, _rej = parse_output(raw, pack, record_text=rec["text"], **_recipient_parse_args(pack, rec),
-                                       context=context)
+                                       context=context, counts=st)
             for a in valid:
                 a = judge(pack, rec, a, "trial")
                 n_assert += 1
@@ -1062,14 +1072,22 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
                     n_acc += 1
                     # The bounded shadow trial must retain every accepted finding,
                     # so the owner can inspect the evidence behind the offer count.
+                    # Not one read with a conversation (DR-62): its value may describe what
+                    # only the other person's turn said, and an offer row keeps no
+                    # `context_refs`, so nothing would take the example out when the owner
+                    # excludes or deletes that turn. It is counted, not kept.
+                    if context:
+                        n_withheld += 1
+                        continue
                     examples.append({"predicate": a["predicate"],
                                      "value": a["value"], "quote": a.get("quote", "")})
         conn.commit()
         st[f"trial_{pid}"] = {"sampled": len(sample), "assertions": n_assert, "accepted": n_acc}
         if n_acc >= TRIAL_MIN_ACCEPTED and n_assert and (n_acc / n_assert) >= TRIAL_MIN_ACCEPT_RATE:
-            _mint_offer(conn, pid, "enable_offer",
-                        {"sampled": len(sample), "assertions": n_assert,
-                         "accepted": n_acc, "examples": examples})
+            offer = {"sampled": len(sample), "assertions": n_assert, "accepted": n_acc, "examples": examples}
+            if n_withheld:
+                offer["examples_withheld"] = n_withheld
+            _mint_offer(conn, pid, "enable_offer", offer)
 
 
 class DerivationJob(BaseEnrichmentJob):

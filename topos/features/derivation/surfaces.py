@@ -484,7 +484,7 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                 f"id:{rec['recipient_entity_id']}" if rec.get("recipient_entity_id") else "",
                 f"key:{rec['recipient_key']}" if rec.get("recipient_key") else "",
                 f"id:{rec['speaker_entity_id']}" if rec.get("speaker_entity_id") else "") if l],
-            context=context)
+            context=context, counts=stats)
         stats["assertions"] += len(valid)
         _bump_yield(conn, pack_id, assertions=len(valid))
         for a in valid:

@@ -26,7 +26,7 @@ and no special-class filter, as on every owner read (owner questions read with f
   ``*_entity_id(s)`` keys are dropped, and any id- or handle-shaped token left in text becomes "someone";
 * the fact's quote, and a source record's text, only when the owner wrote it. A record someone else wrote gives its
   source and date only. Record ids never leave;
-* the records a Moments fact was read WITH (DR-62: the turns before the owner's message, the payload's
+* the records a tension or joy fact was read WITH (DR-62: the turns before the owner's message, the payload's
   ``context_refs``) are never a source and never shown. For an agent they protect the fact as a source does: it is
   left out when one is protected or names a protected person, is tagged NSFW, or can no longer be read.
 """
