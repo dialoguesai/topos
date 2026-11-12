@@ -360,8 +360,9 @@ OWNER_AGENT_ALLOWED_TYPES = frozenset({"query", "aggregate", "get_sources"})
 
 
 def owner_agent_allowed_types(principal: Any) -> frozenset:
-    """The types an ``owner_agent`` may send: what an enrolled app's grant opens (``mcp_clients.AppGrant``, DR-66), else
-    the coding agents' three reads. Decided from the channel-verified principal, never from the payload."""
+    """The types an ``owner_agent`` may send: what an enrolled app's grant opens (``mcp_clients.AppGrant``, DR-66; its
+    reads, and ``fact_feedback`` only when the owner gave it the feedback grant, DR-72), else the coding agents' three
+    reads. Decided from the channel-verified principal, never from the payload."""
     from ...mcp_clients import app_agent_of, app_grant_of
 
     return app_grant_of(principal).message_types() if app_agent_of(principal) else OWNER_AGENT_ALLOWED_TYPES
@@ -494,6 +495,8 @@ OWNER_DOOR_OPEN_TYPES = frozenset({
     # An app's two reads (DR-61, DR-66): the facts of the packs its grant names, filtered for an agent, and the turns
     # around a message. Neither writes. The owner's app and an enrolled app only, decided in their handlers.
     "pack_facts", "reflection_facts", "message_context",
+    # NOT here: fact_feedback (DR-72), the one write an app's grant can open. It stores the owner's reaction and rank,
+    # so it is dangerous by subtraction; an enrolled app holding the grant passes by ``_app_granted_write``.
     # NOT here: tools_index rebuilds the tool index (INSERT OR REPLACE + DELETE with prune_missing,
     # features/signal/tool_index.py) — a write, and an instruction sink (security re-check N1).
 })
@@ -548,14 +551,36 @@ def _door_exempt(message: Dict[str, Any], msg_type: str) -> bool:
     return str(payload.get("source_id") or "").strip() in TRANSCRIPT_SOURCE_IDS
 
 
+def _app_granted_write(principal: "Optional[object]", msg_type: str) -> bool:
+    """Whether this is an enrolled app sending a write its own grant opens (``mcp_clients.AppGrant.write_types``:
+    today ``fact_feedback`` alone, DR-72).
+
+    The split asks for the human's yes before a change. For this change the yes was given on a terminal when the app
+    was enrolled, to a question that named what the app may record, and the grant stored then is read from the app's
+    row on every request (``auth.py``). So the grant is this door's confirmation, for that app and that type only.
+    Read from the channel-verified principal and its stored grant, never from the frame; it does not lean on
+    ``_owner_agent_refusal`` having run first. The type stays in ``DANGEROUS_TYPES``: every other socket caller,
+    the owner's own unattested processes included, still needs one of the four legs.
+
+    What this gives up: an app's label is a file the owner's other programs can read, so a program running as the
+    owner that takes the label can record a reaction or a rank as that app. It can change nothing else: not a fact,
+    not its text, and only on facts that app can already read."""
+    from ...mcp_clients import app_agent_of, app_grant_of
+
+    return bool(app_agent_of(principal)) and msg_type in app_grant_of(principal).write_types()
+
+
 def _dangerous_door_allowed(principal: "Optional[object]", msg_type: str) -> bool:
-    """Whether this request may pass a dangerous door: the four legs above, in order. True for any request that is
-    not on the real socket (a relay frame, an in-process principal, a TCP caller): those are decided by the gates
-    that already exist, and nothing here widens them."""
+    """Whether this request may pass a dangerous door: the four legs above, in order, and before them an enrolled
+    app's own granted write (``_app_granted_write``). True for any request that is not on the real socket (a relay
+    frame, an in-process principal, a TCP caller): those are decided by the gates that already exist, and nothing
+    here widens them."""
     from ... import uds
 
     if getattr(principal, "channel", None) == "cp_relay":
         return True                                    # the relay stamp's own rules, unchanged
+    if _app_granted_write(principal, msg_type):
+        return True                                    # the yes at enrolment named this write (DR-72)
     peer = uds.current_socket_peer()
     if peer is None:
         return True                                    # not a socket request: in-process, or another channel

@@ -53,6 +53,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "enrichment_process_source",
     "enrichment_progress",
     "enrichment_status_source",
+    "fact_feedback",
     "finish_google_contacts_import",
     "finish_google_contacts_import_global",
     "get_analytics",

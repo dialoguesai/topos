@@ -47,6 +47,304 @@ The machine-readable twin of each release is
   - *Limits.* Stated facts only (no `synthesis`), up to 20 packs of 256 KB each, 50 predicates per pack. The
     quick fact lookup that answers some questions without the model covers shipped packs only.
 
+## [1.5.50] — 2026-11-11
+
+### Added
+- **`topos-node sources`: iMessage, Signal and the browser extensions' sources, by the id the app uses.** `[O]`
+  A node with no account could turn on only its coding tool's own history: `sources enable` served the three
+  transcript sources and answered 404 for everything else, because the web app turns Messages and Signal on
+  through the control plane. A setup prompt that says "also set up iMessage" had nothing to call.
+  `topos-node sources list` now shows every source that can be turned on from a terminal (id, name, on or off,
+  what is missing), and `preview` / `enable` / `pause` / `resume` / `sync` take `imessage`, `signal`,
+  `browser_visits`, `browser_events` and `chatgpt_ui_conversation` as well. The word may be the registry id, the
+  name the app shows, or what a person types ("iMessage Sync", "Browser History Plugin", "ChatGPT Shadow"):
+  `sources/setup_catalog.py` is the one table, pinned to the registry by `tests/sources/test_setup_catalog.py`.
+  - *iMessage and Signal ask the person.* They hold other people's words. `enable` shows how many messages
+    there are and how many the chosen window (`--backfill 30d | all`) would read, says what is kept and that a
+    connected coding assistant can then read it, and asks `[y/N]` on the terminal. The owner-socket doors
+    (`POST /api/local/owner/sources/{imessage|signal}/{preview,enable,resume,sync}`) are `dangerous` in the
+    census and check the confirmed peer themselves, so they are refused without the Topos app or that yes, with
+    `TOPOS_OWNER_DOOR_SPLIT` off too. Without a terminal (a coding agent's shell) the command exits 2 with
+    `human.say`, having counted nothing; `enable --open-terminal` opens the window where the question waits, as
+    `agents add --open-terminal` does. `pause` needs no confirmation: it only stops reading.
+  - *A source this process cannot read is refused before anything is written*, with a code and one sentence:
+    `full_disk_access_needed` (macOS gives Messages only to a process with Full Disk Access; a node run as a
+    background service does not have it until the person grants it), `messages_not_found`, `signal_not_found`,
+    `signal_reader_missing`, `signal_key_unavailable`. No install row, settings row, schedule or job exists
+    after a refusal. `sources list` shows the same code under `needs` and never asks the Keychain for a key.
+  - *What `enable` does.* The bundled install row, the settings row, the first sync through the existing
+    local-sync job, and for iMessage the hourly schedule. Signal is still not scheduled (every read asks the
+    Keychain for Signal's key): enabling reads once, `sources sync signal` reads again.
+  - *Extensions.* The node cannot install a browser extension. `sources enable browser_visits` answers
+    `connected` when the extension's key is enrolled, and otherwise exits 2 with the three steps that are the
+    person's and the `topos-node pushers add <app> --sources …` command for that app.
+  - Measured on a HOME-redirected node with no account (`mode: local`), an invented Messages database and an
+    invented Signal database encrypted with SQLCipher: both sources turned on through a pseudo-terminal yes,
+    4 + 4 rows landed under the local identity, the iMessage schedule row was written, and an enrolled coding
+    agent's `query_scope(messages:read, raw)` returned rows from both. Not observed: a real Full Disk Access
+    grant to a service-run node, and the Keychain request for a real Signal key.
+- **An experimental, separately started gateway that bounds requests to one local model provider.** `[O]`
+  Chat and generation requests sent straight to the provider bypass the Engine HTTP worker budget. A new
+  program, `python -m topos.compute.gateway`, can stand in front of one loopback provider for controlled
+  testing: streaming and non-streaming `/api/chat` and `/api/generate` share one first-in-first-out queue
+  (4 waiting) and one active-request limit (1), the same defaults and the same `compute_busy` /
+  `compute_unavailable` answers as the Engine budget. Nothing changes for a node that does not start it:
+  the node never imports, starts or configures it, no setting turns it on, and
+  `tests/engine/test_provider_gateway_opt_in.py` fails if that stops being true.
+  - *What it guarantees.* An id for each request, and none of its content, is written to a private journal
+    before the request is sent. A request cancelled while queued is never sent. A reply that ends without the provider's `done` leaves the gateway refusing
+    new work, and that state survives a restart: there is no automatic recovery or reset. Two gateways cannot
+    share a state directory.
+  - *What it never does.* It sends the provider nothing by itself and adds nothing to a request. It refuses
+    (400) a request that only loads, warms, unloads or pins a model: no prompt, no messages, or a negative
+    `keep_alive`. It listens on 127.0.0.1 only, needs a bearer secret of 32 characters or more in
+    `TOPOS_PROVIDER_GATEWAY_TOKEN`, follows no redirect and proxies no model-management route.
+  - *What it is not.* Not a drop-in replacement for the provider, not a whole-GPU limit, and not tried
+    against a real model. Do not point the node's own provider setting at it. See
+    `docs/provider-admission-gateway.md`.
+- **An app you connect can keep your reaction and rank on a fact, if you let it** (DR-72). `[P] [O]`
+  An app that shows you your facts (it reads them with `pack_facts`) can now save two things you put on one: a
+  reaction (`love`, `like`, `sad` or `down`) and a rank (a whole number from -3 to 3). Until now an app could only
+  read, so anything you marked stayed inside that app.
+  - *You give it, separately from reading.* `topos-node agents add <name> --reads facts:<pack>,... --feedback
+    facts:<pack>,...`. The question you say yes to lists what the app can read and then what it can record.
+    It also says that other apps that can read those facts see what is recorded. `--reads` alone never gives it, a
+    pack under `--feedback` must also be under `--reads`, and connecting the app again without `--feedback` takes it
+    away. No app has it until you run this. `topos-node agents list` now shows, for each app, what it reads and
+    what it may record (`--json` too).
+  - *What the app sends.* `fact_feedback` on the dispatch door: `{"fact_id", "reaction"?, "rank"?}`. A field it
+    leaves out stays as it was. `"reaction": null` takes the reaction back; `"rank": 0` takes the rank back. Sending
+    the same value twice changes nothing, so a retry cannot undo itself.
+  - *Only on a fact it can read.* The write is accepted only for a fact `pack_facts` would give that app at that
+    moment. A fact from another pack, a fact Off-limits holds back, a sensitive fact, a replaced fact and an id that
+    does not exist all get the same answer (`404 fact_not_available`), so the write cannot be used to find out
+    whether a fact exists. An app with reads only is refused.
+  - *What is kept.* One row per fact in a new table, `fact_feedback`: the reaction, the rank, when, and which app.
+    The fact itself is never changed: not its text, its confidence or its dates. `pack_facts` now returns `reaction`
+    and `rank` with every fact (null when there is none) to every app that can read that fact, and to the Topos app;
+    it never says which app recorded them, and the node sorts nothing by them. Another app you gave `--feedback`
+    for the same pack can change them.
+  - *When a fact is replaced.* If a pack run replaces a fact with a newer one, the reaction and rank stay with the
+    old fact and are no longer shown; the new fact starts with none.
+  - *When a fact is erased.* If you remove a record or a whole source and a fact goes with it, the reaction and
+    rank on that fact are deleted in the same step, with the time and the app's name. Nothing is kept under the
+    id of a fact the node no longer has.
+  - *On upgrade.* No step and no migration: the table is created the first time an app records something. Apps you
+    already connected keep their reads and cannot record until you connect them again with `--feedback`.
+- **The two Moments packs read your message with the three turns before it, and the joy pack hears a thank-you.** `[E:derivation]` `[P]`
+  Owner ruling DR-62 (26 Oct 2026). "Wow. Okay." or "Thank you!!" says little alone, and a fact pack read one
+  message at a time, so most of what a conversation makes plain was missed, and a message of 15 characters or
+  fewer was never read at all. `moments.tension` and `moments.joy` now read a message you wrote in a two-party
+  iMessage conversation together with the 3 turns before it from the last 7 days, each labelled OWNER or with
+  the other person's contact name. These two packs also read your short messages, when they have such turns.
+  Nothing changes for any other pack, and the upgrade switches no pack on. A Moments pack you have not turned
+  on is read only by the trial behind its enable offer, as before; that trial now reads the way the pack will,
+  so it too sees the turns and your short messages.
+  - *It needs the fact check.* The ruling is for a reading the fact check verifies against the same turns. With
+    the fact check switched off (`TOPOS_DERIVATION_VERIFY=off`) the two packs read exactly as in 1.5.49: one
+    message at a time, no turns, no short messages, no thank-word rule and no recipient label; the prompts,
+    what the parser keeps and what is written are the same, except the template stamp: facts and ledger rows
+    written by any pack carry `shadow-11` where 1.5.49 wrote `shadow-10`. A finding read with turns whose
+    fact-check call fails is not written; read alone it is still stored and flagged, as before.
+  - *Only a chat Messages names a direct chat; not Signal yet.* The ruling names iMessage and Signal. A group
+    in which only one other member has written cannot be told from a two-party conversation by counting who
+    wrote, so a conversation gets turns only when one of its stored rows (your message, or one read for its
+    turns) carries the name Messages gives a direct chat (`chat_guid` `<service>;-;<id>`). A conversation whose
+    rows have no metadata or no chat name, such as an older import, gets none; one row naming a group takes
+    them away. Signal conversations get no turns in this release: nothing Topos stores for a Signal message
+    says whether its conversation is a group. Signal follows once its reader stores the same.
+  - *What is never a turn.* A system row, a reaction (a "Loved …" row repeats another message under the
+    reactor's name, so it is stepped over), a row you excluded, one tagged NSFW, one your Off-limits list
+    protects. No turns at all with an Off-limits person, in a group (more than one other person has written,
+    or Messages itself names the chat a group), in a conversation no stored row names a direct chat, in Signal
+    or any other messenger, an AI chat, a journal or a transcript, or for a message that is itself a reaction. Any error means no turns, never a failed batch. A
+    long batch looks at your exclusions and Off-limits list again every 30 seconds, and a finding is not
+    written when you excluded one of its turns while it was being read.
+  - *Only your words are evidence.* A finding whose quote is not in your own message, or that is about anyone
+    but you, is dropped before it is checked; the fact check reads the same turns; if it decides the finding is
+    about the other person, the finding is rejected, not sent to review. The other person can appear only as
+    who the moment is with. The description may name the situation; it never quotes them: a finding in which
+    any text field repeats 4 words in a row of the other person's turn (a turn of 2 or 3 words: the whole
+    turn) is dropped before it is checked, unless your own message has the same words. Case, punctuation and
+    spacing do not matter; a script written without spaces is counted by character. Dropped findings are
+    counted (`context_copied`), and their text is not kept or logged. The prompt asks the model not to copy.
+    A date the model gives for the moment is kept only as a YYYY-MM-DD date; anything else there is dropped
+    and the finding kept.
+  - *The training ledger.* Every judged finding leaves a row in `derivation_training_ledger`, which keeps no
+    turns to take it out by. For a finding read with turns the row keeps its status, your quote and the date,
+    and no value, no fact-check reason (a fixed line instead: the checker read the turns and its reason could
+    repeat them) and no name in `about` (`other`, not `other:<name>`). Findings read from one message alone
+    are logged as before.
+  - *No conflict queued from turns.* A finding read with turns that would contradict a stronger fact already
+    held is counted (`context_conflict_dropped`) and dropped; the fact held stands. It used to wait in the
+    conflict queue (`fact_conflicts`), whose row keeps the value with no sources and no turns, so excluding a
+    turn would not have taken it out, and accepting it would have made a fact no turn protects. A finding read
+    from one message alone is queued as before.
+  - *Moments never shows the other person's words.* The fact rests on your message alone. The turns are kept
+    beside it as `context_refs` and only protect it: excluding, deleting or scrubbing one, or retention removing
+    it, takes the fact out, and an app's `pack_facts` read leaves the fact out when one is protected, names an
+    Off-limits person, is tagged NSFW or is gone. They are never a source and never an excerpt.
+  - *Not shared through a grant.* A fact read with turns is refused by the all-category fact grants of 1.5.49
+    (`fact_lineage_unsupported`), and so is any fact derived from it: that door checks a fact's sources, and
+    the turns are not sources. A Moments fact read alone is shared as before.
+  - *A thank-you.* When a message you sent has a thank-word (thank, thanks, thx, appreciate, appreciated,
+    grateful), `moments.joy` gets one more rule, and in a direct message the gratitude is tied to the person you
+    sent it to. Only while the fact check is on, like the turns. Every other message, and every journal entry
+    and AI chat turn, gets the prompt it had.
+  - *Enable offers and the node log.* An enable offer keeps no example of a finding read with turns: the offer
+    counts it (`examples_withheld`) and shows the examples read from one message alone, as before. The log line
+    for a new offer holds its numbers only; it used to carry the examples too.
+  - *Every path reads the same way:* new records, the catch-up, the trial behind an enable offer, a backfill
+    (with `--since` too) and the automatic catch-up; the count shown before a backfill counts a short message
+    only where the run would read it. A pack that Topos Facts reads is given the one record, as before, so it
+    has no turns and no short messages.
+  - *Switches.* `TOPOS_DERIVATION_CONTEXT_TURNS` (3; it can lower the number, never raise it; 0 is one message
+    at a time, as before), `TOPOS_DERIVATION_CONTEXT_PACKS` (the two packs; it can narrow the list, never add to
+    it), `TOPOS_DERIVATION_CONTEXT_SITUATION` (true). With 0 turns and no thank-word every prompt is byte for
+    byte what it was, and so is every prompt while the fact check is off. Template `shadow-11`.
+    `no-invalidation`: nothing already written is wrong, and messages already read are not read again; your
+    short messages, never read before, are new to these two packs.
+- **`topos-node packs retract-reactions`: end the facts a pack stored from a reaction you sent in Messages.**
+  `[E:derivation]` `[O]` Fact packs no longer read a reaction the owner sent (the fix below), but a fact stored
+  from one before that fix stays where it is. This command counts those facts and, when you say so, ends them.
+  - *What it counts.* A standing pack fact whose every source record is a reaction the owner sent, by the same
+    test the packs and the commitments lane apply (the marker Messages puts on the stored row, or the English
+    text form). A fact with any other source (a journal entry, a message you typed, a contact's message, a
+    record that is no longer stored) is left alone. The packs also skip a message whose stored metadata
+    cannot be read; that alone does not end a fact here: a message counts as a reaction only when its
+    metadata can be read and carries the marker, or its words are the text form. A fact read from a message
+    of that kind is left, counted apart and said.
+  - *What it leaves although the fact names only reactions.* A fact you made yourself in the app (confirmed,
+    corrected, revised, added from an assertion held for review, or given another author): counted apart and
+    said. A fact you marked in an app with a reaction or a rank of your own: counted apart and said. A fact
+    about when you are active, which cites records for their time and not their words: counted apart and
+    said. And a fact whose list of records is not the whole story, or cannot be shown to be. The list falls
+    short in four ways: an event told again in a later record keeps only the later record in its list; a
+    record can change a detail of a fact without joining its list; a fact read a second time within seven
+    days by the same model stores nothing at all, so a fact first read from a reaction and then from a
+    message you typed still names only the reaction; and a reading that disagrees with the fact at lower
+    confidence (a message you typed that tells the same event with one more detail) is held for review and
+    stores nothing. Topos keeps its own log of every reading that reached the fact writer, stored or not. A
+    fact is ended only when that log accounts for it: the log holds the fact's first store and each later
+    merge, every one from a reaction you sent; it holds no reading from any other record of the same value
+    or, for a kind of fact that holds many values or is an event, of the same one; and no reading held for
+    review names the fact, whatever became of it. When the log shows another record, is missing a store, or
+    is not there, the fact is left, counted apart and said. So is a fact stored before a retention floor was
+    applied (`POST /v1/sources/retention`: keep a source's data only from a date onward), or while one is
+    being applied: the floor deletes the log's rows for the messages it removes, so the log is then known to
+    be short. Removing a source or a single record leaves the log as it is.
+  - *By itself it only counts.* `topos-node packs retract-reactions` prints pack ids and counts, needs no
+    terminal and writes nothing (`--json` for the same as data). It never prints a fact or a message.
+  - *`--apply` ends them, after asking you.* It shows the count, asks `[y/N]` once on a terminal, and sends one
+    confirmed change that carries the count you were shown; if the count has changed since, nothing is ended.
+    The facts are judged once more when the change holds the write gate, so a message you typed that is read,
+    or a mark you make in an app, while the change waits its turn keeps its fact (reported as changed).
+    Without a terminal it exits 2 and asks no one. No flag or environment variable answers for you. The route is
+    `POST /v1/signal/derivation/reaction-facts/retract`: `dangerous` in the owner socket's census, and it checks
+    the confirmed peer itself. `GET /v1/signal/derivation/reaction-facts` is the count, an open read.
+  - *What ending means.* The fact is closed as of now, the way a superseded fact is: its row and its value stay
+    in the history. No row is deleted, no message is touched and no tombstone is written, so the same value
+    read later from a message you typed can be stored again. The reaction itself is not read again, so a later
+    backfill does not bring an ended fact back. The write goes through the write gate, in one commit.
+  - *Nothing runs by itself.* An upgrade ends no fact; only this command does, on your yes.
+  - *What ending does not put back.* If a fact stored from a reaction took the place of an earlier fact (a
+    reaction's value replaced what you had typed), the earlier fact stays closed. If a reaction changed a
+    detail of a fact you also wrote yourself, that fact is left as it is, with the changed detail. The command
+    says both before it asks. Finding and restoring these is not built.
+  - Limits: facts that did not come from a pack are not looked at. Assertions held for review and the training
+    ledger's rows from a reaction stay. A fact you marked in an app is kept whatever the mark says, a thumbs
+    down included (the owner has not ruled otherwise); the marks are read from the table by its name, since
+    the change that records them is not part of this one. A fact stored from a reaction that Topos's log has
+    no store for is left and counted, so a node whose log was cleared ends nothing with this command. Once a
+    reaction has changed a detail of a fact, any reading of the same kind of fact from another record that
+    was not stored keeps it, which is wider than a repeat of that fact. For sharing, an ended fact is a
+    closed fact the node has no rule for,
+    and such a fact withholds the message it names: the reaction it was read from is not released to a share
+    from then on (the owner has not ruled otherwise; a test now pins it). The English text form is wider than
+    a reaction: a message you typed that starts with a reaction word and a curly quote and ends with a curly
+    quote (`Loved “one title” and now reading “another”`) reads as a reaction too, even when Messages marked
+    the row as ordinary. The packs skip such a message, and a fact read only from it is counted here and ended
+    on your yes; you are shown counts, not the facts, so you cannot pick it out first. The writer still
+    replaces an event's list of records when the event is told again (not fixed here; this command reads
+    Topos's log to get around it). An edit you make to a fact in the app that leaves it exactly as it was
+    leaves no mark on it, so it cannot be seen and does not keep the fact. Facts that Topos builds from other
+    facts (a summary of your work history or of how visible your work is, `work.venture_history` and
+    `work.professional_visibility`) are not looked at, and stay standing when a fact they were built from is
+    ended. A retention floor that was lifted afterwards takes its record with it, so the log it shortened is
+    then read as whole. The facts are judged again once the change holds the write gate, but the fact lanes
+    write their log without the gate: a reading committed in the moment between that judgement and the
+    change is not seen. Not run on a real node: the tests use an invented database, a stubbed model and the
+    real owner socket gate.
+- **Sharing: three optional changes to what a share's search finds and what its answer writer is shown, each behind a switch that is off by default** (`SEARCH_PLURAL_FOLD`, `SEARCH_REQUEST_WORDS`, `ANSWER_SHARED_CONTEXT`; the parts of draft topos#102 that need no model to decide). `[P]` A question to a share could miss material the share permits: "What projects?" did not find an item that says "project", a request's own words ("Can you tell me about ...") matched items that share only those words, and the answer writer was shown the first 420 characters of every item however short the others were, cut wherever that fell. Nothing changes until a switch is set, and none of them changes what a share permits: each reads only records the share already releases, and every item still passes the same checks.
+  - *`TOPOS_PERMISSIONS_V2_SEARCH_PLURAL_FOLD=true`.* A share's word search (named search, batch and answers) also matches a query word's regular English plural or singular: "projects" finds "project", "hobby" finds "hobbies", "boxes" finds "box". The forms are made from the query word and looked up in the word counts the share's index already stores for the items inside the request's time window, so nothing is rebuilt, and an item outside the share or outside the window cannot lend a form or move a score. Plural forms only: no stems, no synonyms, no irregular plurals ("leaf" and "leaves" stay apart), and "news" is not "new". It cannot tell a name from a word, so a surname that is a first name with an "s" meets that first name. It reads spelling, not meaning, so it also joins a few words that are no plural of each other: any word of four or more letters ending in "s" is read as a possible plural ("lens" also matches "len"), and any word of three or more letters also matches itself with "-s" or "-es" ("los" also matches "loses"). A stored word that two words of one question both reach ("potatos" and "potatoes" both reach "potato") is counted once, and a question word that is itself a form of another ("lens" beside "len") still brings its own forms ("lenses").
+  - *`TOPOS_PERMISSIONS_V2_SEARCH_REQUEST_WORDS=true`.* The word search leaves out the words a request is phrased with (can, could, would, should, how, about, tell, please, give, show, summarize, summarise, describe) when the question has any other word, so an item that shares only those with the question is not found by words. The meaning search still reads the whole question. This one can return fewer permitted items: a subject that is itself one of those words (a show, a can) is no longer matched by words.
+  - *`TOPOS_PERMISSIONS_V2_ANSWER_SHARED_CONTEXT=true`.* The room the answer prompt gives the items' text is shared between them: a short item's unused room goes to the long ones in equal shares, no item gets less room than before, and the whole is what the same number of items (eight when there are fewer) could take before, so the prompt's ceiling does not move. An item that still does not fit ends at its last whole sentence that fits. When the whole sentences that fit would fill less than half the item's room (its first sentence does not fit, or a short opening is followed by one long sentence, the shape of a chat message or an AI-chat reply), it is cut at its room, as before, and that cut can fall inside a sentence. An item can show less text than the fixed cut did, even though its room is no smaller: the sentence that does not fit is left out whole and the room it leaves is not handed on. Eight long items of 43-character sentences show 386 characters each, against 420; the worst case is half of what the fixed cut showed, 210 characters against 420. The same holds for the supporting line of a fact, a goal or a relationship (at the worst 80 characters against 160). The Off-limits item filter (`ANSWER_PROTECTED_ITEM_FILTER`) reads every item exactly as the prompt will show it, again after a withheld item's room has gone to the others. The writer's instructions and template version are unchanged; the owner's private receipt says `context_budget: shared` on every answer job while it is on, whether or not that job came to write a prompt.
+  - *Measured, and not measured.* On the frozen synthetic word-search corpus of topos#102 (640 cases, no embeddings, no model; run on 11 Nov 2026 against this code): with everything off the relevant item came first in 160 of the 320 cases that have one and was among those returned in 176; with the plural switch 220 and 266; with both search switches 266 and 266. Of the 320 cases that have no relevant item, 192 returned nothing with the request-word switch off and all 320 with it on. That corpus was written for the draft and was read while this was built, so it is not a fresh test, and it has no meaning search. No model ran: whether answers get better with any of the three is not measured, which is why all three are off. Left out of topos#102 because they need a model to judge or an owner's ruling: its verifier and revision prompts, the fixed opening for sentences that cite an inferred fact, showing a fact's assertion type and a goal's status to the writer, and treating a blank reply as "no answer".
+
+### Changed
+- **Signal Desktop can be read on a plain macOS install.** `[O]` The reader imported `pysqlcipher3`, a
+  source-only package that builds against a system SQLCipher, shipped as the `signal` extra; no install
+  carried it, the owner's included. `sqlcipher3` (prebuilt wheels with SQLCipher inside) is now a dependency
+  on macOS, the reader takes whichever binding is installed, and the `signal` extra installs the same
+  package elsewhere. The key is now set before `cipher_compatibility`: set first, the pragma was ignored
+  (measured: a version-3 setting "opened" a version-4 database), so the reader's fallback for an older
+  Signal database never applied.
+  `tests/sources/test_signal_reader_open.py` opens a really encrypted database where the binding is installed
+  and is skipped, not passed, where it is not.
+- **The per-source switch that runs fact packs on new records is named, and its batch waits for the owner.**
+  `[E:derivation]` Fact packs read a record when it arrives only for a source whose canonical lane lists the
+  `derivation` job, and of the bundled sources only YouTube transcripts lists it. Messages and journals never
+  did: the job was registered in August and attached to no such source. Measured on one live node on
+  10 Nov 2026, enabled packs had read 16 of September's 122 journal entries, none of October's 128 and no
+  message from either month; every fact they held came from a hand-started backfill. The switch that attaches
+  the job to a source already existed (Connectors → Enrichments in the app, `PATCH
+  /v1/sources/{source_id}/enrichments/derivation`), but the catalog showed it as "Derivation" with no
+  description. It is now "Fact packs", marked as the heaviest enrichment, and says what it does and costs:
+  one local-model call per record for each pack the record matches, and a second model checks every fact.
+  The default does not change: it stays off for messages and journals until the owner switches it on for a
+  source, because at one owner's volume (about 16 of their own records a day, 28 packs on) it is roughly 1.5
+  to 2 hours of local-model time a day on the LLM route (estimated from prefilter counts, not a measured run).
+  Separately, an ingest batch and its history catch-up now stop between records, with the record's writes
+  committed, while an owner request is pending (`core.owner_requests.pace`), as the backfill run does; before,
+  a batch ran end to end without looking up.
+
+### Fixed
+- **A reaction the owner sent in Messages is no longer read by fact packs as text the owner wrote.**
+  `[E:derivation]` Messages stores a reaction ("tapback") as a message from whoever reacted, and its text is
+  the message reacted to, in curly quotes after "Loved", "Liked", "Laughed at" and the rest. The row's sender
+  flag says the owner, so the derivation job gave it the role `authored` and every owner-only pack read the
+  other person's sentence as the owner's own. On one node (11 Nov 2026), 82 of the owner's 1,910 texts since
+  1 July were reactions; 47 reached the model for `moments.joy`, and 2 of them became 3 stored facts, one of
+  them the other person's thanks filed as the owner's gratitude. The iMessage reader already records the
+  native marker on every row it stores (`associated_message_guid` and a non-zero `associated_message_type` in
+  `metadata_json`), so nothing changes at the reader; the derivation job now reads it. An owner's reaction is
+  left out of the ingest batch, of the history walk that the catch-up, the owner's backfill and the backfill
+  plan's "waiting" count share, and of the enable-offer trial. It is dropped rather than demoted to `observed`:
+  the message reacted to is a record of its own and is read there, with its real sender. A batch row that
+  arrives without metadata (local sync and a reprocess hand on text and sender only) is judged by the stored
+  row's. A row with no marker anywhere is judged by its words: the whole text must be one of the forms Messages
+  writes in English (the six tapbacks, "Reacted … to", "Removed … from", then one quotation and nothing after
+  it), so a message that merely opens with "Loved" or "Liked" is still read. The commitments lane, which picks
+  the owner's promise-shaped messages itself, had the same gap (a reaction to "I'll send it tomorrow" is
+  promise-shaped) and applies the same rule. A contact's reaction is read as before. Limits: facts already
+  written from a reaction are not removed, and a message the owner typed that consists of nothing but
+  `Loved “…”` is treated as a reaction.
+- **`verify_claim` leaves its audit line on the exits that still had none.** `[O]` Since 1.5.39 a check that ended on its deadline, a cancel, an overloaded model or an error has written one content-free `truth verify_claim audit:` line. A request refused before any work (an unknown mode, no `caller_app_id`, a bad `deadline_s`) still wrote nothing. It now writes the same line with `outcome: error`, `phase: dispatch` and a `reason` naming the refusal, never the mode or deadline the caller sent. The line for an overloaded model says which kind it was (`compute_busy`, `compute_unavailable` or `compute_rate_limited`) and carries `retry_after_seconds` when the model host gave one. `outcome` is always one of a fixed list; a stop reason outside it is logged as `error`. No caller-visible change.
+- **A read whose control-plane connection closed while it waited is dropped, not run for nobody.** `[O]` When a
+  handler slot comes free, a queued read whose socket closed while it waited is no longer run: the control plane
+  failed it the moment the socket closed, and a reply can only go to the socket its request came on. The four
+  share doors already had this rule; it now covers a closed list of 12 reads (`INBOUND_GONE_READ_TYPES`: the
+  database explorer's tables, rows and file list, the source list, overview and install status, disk status, the
+  owner's sharing status, catalog and counts, `signal_data_health`, `truth_weekly_stats`). Writes and protocol
+  commands are still applied however late they are reached, and a read on a live connection is still answered
+  however long it waited. Measured on a 1.5.28 node on 26-27 Oct, a laptop asleep with the lid shut: macOS woke
+  it for about 45 s every 15 min, 59 of 67 connection drops came 1-28 s after a wake, and 307 of the 360 replies
+  sent to a dead socket were these reads, some 28 min after their socket died, holding slots while new requests
+  were refused busy. The list was re-checked against today's handlers: the four message types added since
+  (`truth_own_claim_label`, which writes, and the reads `pack_facts`, `message_context`,
+  `messenger_rating_candidates`) are not in it. The `control_plane_inbound_shed` log line gains a trailing
+  `gone_read=` count. No migration, no new setting.
+
 ## [1.5.49] — 2026-11-10
 
 ### Added

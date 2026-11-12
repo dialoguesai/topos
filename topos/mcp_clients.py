@@ -74,10 +74,16 @@ APP_READ_PLAIN: Dict[str, str] = {"messages:read": "your messages and the turns 
 class AppGrant:
     """What the owner let one app read (DISCLOSURE_RULES DR-66), stored on its enrolment and shown on the approval
     prompt. An app is not a coding agent: it never reaches the coding agents' ``aggregate`` and ``get_sources``, and on
-    the socket it reaches the dispatch door alone (``owner_door_routes.APP_AGENT_ROUTES``). No grant reads nothing."""
+    the socket it reaches the dispatch door alone (``owner_door_routes.APP_AGENT_ROUTES``). No grant reads nothing.
+
+    ``feedback`` is the one thing an app may write, and it is a grant of its own (DR-72): the packs on whose facts it
+    may record the owner's reaction and rank (``query/fact_feedback.py``). It is given with ``--feedback`` and never by
+    ``--reads``, it is shown in the same approval question, and it only ever names packs the app also reads
+    (:func:`parse_app_grant` refuses any other at enrolment; :func:`read_app_grant` drops any other from a stored row)."""
 
     packs: Tuple[str, ...] = ()
     scopes: Tuple[str, ...] = ()
+    feedback: Tuple[str, ...] = ()
 
     def message_types(self) -> frozenset:
         types = set()
@@ -87,17 +93,29 @@ class AppGrant:
             types.add("query")
         if "messages:read" in self.scopes:
             types.add("message_context")
-        return frozenset(types)
+        return frozenset(types | self.write_types())
+
+    def write_types(self) -> frozenset:
+        """The types this grant opens that change something on the node. Empty unless the owner gave ``--feedback``."""
+        return frozenset({"fact_feedback"}) if self.feedback else frozenset()
 
     def words(self) -> List[str]:
         """The ``--reads`` words that make this grant."""
         by_scope = {scope: word for word, scope in APP_READ_SCOPES.items()}
         return [f"facts:{pack}" for pack in self.packs] + [by_scope[scope] for scope in self.scopes if scope in by_scope]
 
+    def feedback_words(self) -> List[str]:
+        """The ``--feedback`` words that make this grant."""
+        return [f"facts:{pack}" for pack in self.feedback]
+
     def plain(self) -> str:
         """The grant in words for the approval prompt."""
         parts = [f"facts from {', '.join(self.packs)}"] if self.packs else []
         return "; ".join(parts + [APP_READ_PLAIN.get(scope, scope) for scope in self.scopes])
+
+    def plain_feedback(self) -> str:
+        """What the app may record, in words for the approval prompt; "" when nothing."""
+        return f"your reaction and rank on facts from {', '.join(self.feedback)}" if self.feedback else ""
 
 
 NO_GRANT = AppGrant()
@@ -116,6 +134,25 @@ def parse_app_reads(words: Iterable[str]) -> AppGrant:
         else:
             raise ValueError(f"unknown read {word!r}; use facts:<pack>, {', '.join(APP_READ_SCOPES)}")
     return AppGrant(tuple(dict.fromkeys(packs)), tuple(dict.fromkeys(scopes)))
+
+
+def parse_app_grant(reads: Iterable[str], feedback: Iterable[str] = ()) -> AppGrant:
+    """The ``--reads`` words and the ``--feedback`` words -> the grant, or ValueError naming the word it does not take.
+
+    ``--feedback`` takes ``facts:<pack>`` only, and only for a pack ``--reads`` names: an app records on a fact it can
+    read, so a feedback pack it cannot read would be a grant that can never be used and that the prompt would still
+    show."""
+    grant = parse_app_reads(reads)
+    packs: List[str] = []
+    for raw in feedback:
+        word = str(raw or "").strip()
+        pack = word[len("facts:"):].strip() if word.startswith("facts:") else ""
+        if not pack:
+            raise ValueError(f"unknown feedback {word!r}; use facts:<pack>")
+        if pack not in grant.packs:
+            raise ValueError(f"feedback on {pack} needs facts:{pack} in --reads too")
+        packs.append(pack)
+    return AppGrant(grant.packs, grant.scopes, tuple(dict.fromkeys(packs)))
 
 #: Elevation ceiling (owner decision, Who's Asking §06): a consented client may
 #: reach `facts`, never `facts_all` — special-class content (health, beliefs,
@@ -292,7 +329,10 @@ def read_app_grant(conn: sqlite3.Connection, client_id: str) -> AppGrant:
     try:
         row = conn.execute(f"SELECT reads_json FROM {APP_GRANTS_TABLE} WHERE client_id = ?", (client_id,)).fetchone()
         reads = json.loads(row[0]) if row else {}
-        return AppGrant(tuple(reads.get("packs") or ()), tuple(reads.get("scopes") or ()))
+        packs = tuple(reads.get("packs") or ())
+        # A row written before feedback grants has no such key: no feedback. A pack the row does not also read is dropped.
+        feedback = tuple(pack for pack in (reads.get("feedback") or ()) if pack in packs)
+        return AppGrant(packs, tuple(reads.get("scopes") or ()), feedback)
     except (sqlite3.Error, ValueError, TypeError, AttributeError):
         logger.warning("app grant read failed for %r", client_id, exc_info=True)  # DB trouble must never widen a grant
         return NO_GRANT
@@ -343,7 +383,8 @@ def mint_agent_label(conn: sqlite3.Connection, *, client: str, approved: bool = 
                 INSERT INTO {APP_GRANTS_TABLE} (client_id, reads_json, granted_at) VALUES (?, ?, ?)
                 ON CONFLICT(client_id) DO UPDATE SET reads_json = excluded.reads_json, granted_at = excluded.granted_at
                 """,
-                (cid, json.dumps({"packs": list(grant.packs), "scopes": list(grant.scopes)}), _now()),
+                (cid, json.dumps({"packs": list(grant.packs), "scopes": list(grant.scopes),
+                                  "feedback": list(grant.feedback)}), _now()),
             )
         commit_connection(conn)
     row = dict(get_client(conn, cid) or {})
@@ -409,7 +450,9 @@ def list_agents(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     for row in rows:
         row["client"] = str(row["client_id"])[len(AGENT_CLIENT_ID_PREFIX):]
         if row["client"] not in AGENT_DISPLAY_NAMES:
-            row["reads"] = read_app_grant(conn, row["client_id"]).words()
+            grant = read_app_grant(conn, row["client_id"])
+            row["reads"] = grant.words()
+            row["feedback"] = grant.feedback_words()
     return rows
 
 

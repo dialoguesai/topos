@@ -79,7 +79,7 @@ SECTIONS = (
     DepSection("database", DATABASE_DEPS),
     DepSection("engine", ENGINE_DEPS),
     DepSection("local", ()),
-    DepSection("signal", ("pysqlcipher3",)),
+    DepSection("signal", ("sqlcipher3",)),
     DepSection("dev", ("pytest", "pytest-asyncio", "httpx")),
 )
 
@@ -91,6 +91,9 @@ CUSTOM_SPECS: dict[str, str] = {
     # load on MPS; 2.11.0 survives the identical race.
     "torch": ">=2.8.0,<2.13",
     "networkx": ">=3.2.1,<3.7",
+    # A range, not ~=: the wheels that carry SQLCipher start at 0.6.2, and the core entry carries a
+    # platform marker this script does not write.
+    "sqlcipher3": ">=0.6.2,<0.7",
 }
 
 
@@ -206,7 +209,10 @@ def expected_content(versions: dict[str, str]) -> str:
 def current_specs(content: str, dep: str) -> str | None:
     escaped = re.escape(dep)
     match = re.search(rf'"{escaped}([^"]+)"', content)
-    return match.group(1) if match else None
+    if not match:
+        return None
+    # The version spec only: an environment marker (`; sys_platform == 'darwin'`) is not a pin.
+    return match.group(1).split(";", 1)[0].strip()
 
 
 def check_pins(content: str, versions: dict[str, str]) -> list[str]:

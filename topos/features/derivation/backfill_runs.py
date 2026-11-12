@@ -576,11 +576,15 @@ def waiting_counts(conn: sqlite3.Connection, catalog: Dict[str, Any], pack_ids: 
     A record waits for a pack when the pack's role gate lets it in, its prefilter passes it and
     `derivation_progress` does not hold it yet. `per_record` asks the progress table once per record
     that got that far instead of loading each pack's whole key range first: the right trade for the
-    few days the automatic catch-up counts, the wrong one for a full history. Reads only."""
-    from ...enrichment.jobs.canonical.derivation_job import _iter_history
+    few days the automatic catch-up counts, the wrong one for a full history. Reads only.
+
+    An owner's short message (DR-62, `_iter_history`) waits only for a pack that would read it
+    with its conversation, and only when it has one; it is not one of the records walked."""
+    from ...enrichment.jobs.canonical.derivation_job import _context_for, _iter_history
     from ..provenance.posture import make_posture_resolver
     from .prefilter import PackPrefilter, _tokens
     from .surfaces import BACKFILL_HISTORY_WINDOW
+    from .template import context_packs
 
     pack_ids = list(pack_ids)
     waiting = {pid: 0 for pid in pack_ids}
@@ -598,16 +602,37 @@ def waiting_counts(conn: sqlite3.Connection, catalog: Dict[str, Any], pack_ids: 
         return conn.execute("SELECT 1 FROM derivation_progress WHERE key = ?",
                             (prefix[pid] + suffix,)).fetchone() is not None
 
+    ctx_packs = context_packs()
+    ctx_cache: Dict[str, Any] = {"record_only": _record_only_packs(conn, pack_ids)}
     for rec in _iter_history(conn, limit=BACKFILL_HISTORY_WINDOW, posture_for=make_posture_resolver(conn),
                              since=since):
-        history[rec["table"]] = history.get(rec["table"], 0) + 1
+        short = bool(rec.get("short"))
+        if not short:
+            history[rec["table"]] = history.get(rec["table"], 0) + 1
         low = (rec["text"] or "").lower()
         tokens = _tokens(low)
         suffix = f"{rec['table']}:{rec['record_id']}"
         for pid in pack_ids:
+            if short and pid not in ctx_packs:
+                continue
             if rec["role"] in roles[pid] and filters[pid].matches(low, tokens) and not keyed(pid, suffix):
+                if short and not _context_for(conn, catalog[pid], rec, ctx_cache):
+                    continue
                 waiting[pid] += 1
     return waiting, history
+
+
+def _record_only_packs(conn: sqlite3.Connection, pack_ids: Sequence[str]) -> frozenset:
+    """The packs a run would not read with a conversation's context: the ones Topos Facts reads,
+    and, while its pack list is not on this computer, the ones it might. Loads no model."""
+    from ...config.facts_llm import facts_classifier_version
+    from . import topos_facts as _tf
+
+    if not facts_classifier_version(conn):
+        return frozenset()
+    spec = _tf.known_packs_offline()
+    return frozenset(pid for pid in pack_ids
+                     if pid not in _tf.ROUTED_TO_LLM and (spec is None or pid in spec))
 
 
 def _done_keys(conn: sqlite3.Connection, prefix: str) -> set:

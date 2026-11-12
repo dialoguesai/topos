@@ -15,6 +15,15 @@ internal id. Rerank is off in v1; `rerank` is a hook that sees member texts only
 The floor is `VECTOR_FLOOR` on every path but one: answers mode passes its own
 (`vector_floor`, lane GD-R, `search_release.answer_vector_floor`). A floor only
 decides which members of P the vector lane scores; it never reaches outside P.
+
+Two readings of the query's words, each off unless the node's switch is on
+(`search_release.lexical_options`). `plural_fold`: a query word also matches its
+English plural or singular in a member's term bag (`_variants`). The forms are
+made from the query word alone and looked up in the bags of the members inside
+the request's window, so the index is read as stored (no rebuild) and nothing
+outside P, or outside the window, can lend a form. `drop_request_words`: the
+words a request is phrased with (`REQUEST_WORDS`) are left out of the query when
+it has any other word. Both read the query and P's stored bags, nothing else.
 """
 from __future__ import annotations
 
@@ -43,22 +52,105 @@ def _event(member: Member, precision: str = "second") -> int:
     return member.event_at_us // bucket
 
 
-def lexical(index: LoadedIndex, query: str) -> list[tuple[str, float]]:
-    terms = sorted(set(tokenize(query)))
+# The words a request is phrased with ("Can you tell me about the kiln?", "Please summarize the kiln."). Query
+# wording, never index terms: the stored term bags are read as they are. A few are also things ("show", "can").
+REQUEST_WORDS = frozenset({"can", "could", "would", "should", "how", "about", "tell", "please", "give", "show",
+                           "summarize", "summarise", "describe"})
+
+# Words that end in "s" and are no plural, whose remainder is another common word: "news" is not "new".
+_NOT_PLURAL = frozenset({"news", "hers"})
+_HISS = ("s", "x", "z", "ch", "sh")
+
+
+def _plurals(word: str) -> tuple[str, ...]:
+    """The regular English plurals of `word`: "hobby" to "hobbies", "box" to "boxes", "potato" to "potatoes" and
+    "potatos", "project" to "projects". Nothing for a word under three letters."""
+    if len(word) < 3:
+        return ()
+    if word[-1] == "y" and word[-2] not in "aeiou":
+        return (word[:-1] + "ies",)
+    if word.endswith(_HISS):
+        return (word + "es",)
+    return (word + "s", word + "es") if word[-1] == "o" else (word + "s",)
+
+
+def _variants(term: str) -> tuple[str, ...]:
+    """`term`, then the other words that are its regular plural or that it is the regular plural of.
+
+    Plural forms only: no stem, no synonym, no irregular plural ("leaf" and "leaves", "person" and "people" stay
+    apart). It cannot tell a name from a word: a name and the same name with an "s" meet. Each singular is one whose
+    own plural (`_plurals`) is `term`, so the relation is the same in both directions: "caches" finds "cache", "cache"
+    finds "caches". Only ASCII letters, three or more of them; anything else (a number, "café", any other script)
+    matches itself alone, as before. A word that is the plural of nothing in use ("status" of "statu") gains a form
+    no bag holds, which costs one failed lookup.
+
+    It reads spelling, not meaning, so it also joins words that are no plural of each other. Any word of four or
+    more letters ending in "s" is read as a possible plural: "lens" also matches "len", "series" looks up "serie"
+    and "sery". Any word of three or more letters gains its "-s" or "-es" form: "los" also matches "loses", "add"
+    matches "adds". All of it stays among the members the lane was given."""
+    if len(term) < 3 or not term.isascii() or not term.isalpha() or term in _NOT_PLURAL:
+        return (term,)
+    singulars = []
+    if len(term) >= 4 and term[-1] == "s":
+        singulars = [term[:-1]]
+        if term.endswith("es"):
+            singulars.append(term[:-2])
+        if term.endswith("ies"):
+            singulars.append(term[:-3] + "y")
+    forms = [term]
+    for form in [single for single in singulars if term in _plurals(single)] + list(_plurals(term)):
+        if form not in forms and form not in _NOT_PLURAL:
+            forms.append(form)
+    return tuple(forms)
+
+
+def lexical(index: LoadedIndex, query: str, *, plural_fold: bool = False,
+            drop_request_words: bool = False) -> list[tuple[str, float]]:
+    """Okapi BM25 over the members of `index`, every statistic taken from them alone.
+
+    `drop_request_words`: the query's request words (`REQUEST_WORDS`) are left out, so a member that only shares
+    "can", "tell" and "about" with the question is not scored and does not outrank the one that names its subject.
+    A query made of nothing else keeps them all. A subject that is itself one of those words ("What show did they
+    watch?") is left out with them; the vector lane and the query's other words still read it.
+
+    `plural_fold`: each query word stands for itself and its plural forms (`_variants`). A member's count of the
+    word is the sum over those forms and its document frequency counts a member holding any of them, so a word asked
+    in the singular and written in the plural is one word, scored once. A query that holds both forms of a word
+    ("project" and "projects") counts it once too, and a stored form stands for one query word only: the first, in
+    sorted order, that reaches it. A query word an earlier one already reached ("lens" after "len") is that same
+    word, and its own further forms ("lenses") join it, so no form of a query word goes unread: "len lens" scores
+    what "lens" alone scores. Two query words that are different spellings of one plural ("potatos" and
+    "potatoes") both reach "potato", and an item that says "potato" is scored for it once, as it is for either
+    alone. Off, the default: exact words, as before."""
+    words = set(tokenize(query))
+    terms = sorted(words - REQUEST_WORDS or words) if drop_request_words else sorted(words)
     members = index.members
     if not terms or not members:
         return []
     count = len(members)
     average = sum(member.doc_len for member in members) / count or 1.0
-    frequency = {term: sum(1 for member in members if term in member.terms) for term in terms}
+    if plural_fold:
+        groups, group_of = [], {}
+        for term in terms:              # sorted, so a singular comes before its own plural and stands for both
+            group = group_of.get(term)
+            if group is None:
+                group = []
+                groups.append(group)
+            for form in _variants(term):
+                if form not in group_of:
+                    group_of[form] = group
+                    group.append(form)
+        counts = [[sum(member.terms.get(form, 0) for form in group) for group in groups] for member in members]
+    else:
+        counts = [[member.terms.get(term, 0) for term in terms] for member in members]
+    frequency = [sum(1 for row in counts if row[position]) for position in range(len(counts[0]))]
     scored = []
-    for member in members:
+    for member, row in zip(members, counts):
         score = 0.0
-        for term in terms:
-            tf = member.terms.get(term, 0)
+        for position, tf in enumerate(row):
             if not tf:
                 continue
-            idf = math.log(1.0 + (count - frequency[term] + 0.5) / (frequency[term] + 0.5))
+            idf = math.log(1.0 + (count - frequency[position] + 0.5) / (frequency[position] + 0.5))
             score += idf * tf * (BM25_K1 + 1) / (tf + BM25_K1 * (1 - BM25_B + BM25_B * member.doc_len / average))
         if score > 0:
             scored.append((member.opaque_id, score))
@@ -120,7 +212,8 @@ def within(index: LoadedIndex, lower_us: int, upper_us: int) -> LoadedIndex:
 def rank(index: LoadedIndex, query: str, query_vector: Sequence[float] | None, *, limit: int, lower_us: int,
          upper_us: int, precision: str = "none",
          rerank: Callable[[str, list[str]], list[str]] | None = None, spare: int = 0,
-         fill: bool = False, vector_floor: float = VECTOR_FLOOR) -> list[str]:
+         fill: bool = False, vector_floor: float = VECTOR_FLOOR, plural_fold: bool = False,
+         drop_request_words: bool = False) -> list[str]:
     """Opaque ids of releasable-by-time members in fused rank order, at most `limit` of them.
 
     `spare` (FT168-D6): up to that many further candidates after those, for a walk that passes some by without
@@ -136,9 +229,14 @@ def rank(index: LoadedIndex, query: str, query_vector: Sequence[float] | None, *
     members keep their order and come first; only members already inside `lower_us`..`upper_us` are added.
 
     `vector_floor` (lane GD-R, answers mode only): the vector lane's cosine floor, `VECTOR_FLOOR` unless the caller
-    passes another. It moves which already-permitted members the vector lane scores, never which members are here."""
+    passes another. It moves which already-permitted members the vector lane scores, never which members are here.
+
+    `plural_fold`, `drop_request_words` (`search_release.lexical_options`): the lexical lane also matches a query
+    word's plural forms, and leaves the query's request words out (`lexical`). Both read the query and the term bags
+    of the members inside the window, after `within`, and nothing else. The vector lane is not touched."""
     index = within(index, lower_us, upper_us)
-    scored = [lexical(index, query), vector(index, query_vector, vector_floor=vector_floor)]
+    scored = [lexical(index, query, plural_fold=plural_fold, drop_request_words=drop_request_words),
+              vector(index, query_vector, vector_floor=vector_floor)]
     order = _fused(index, [_ranked(index, lane, precision) for lane in scored], precision)
     if rerank is not None:
         known = set(order)

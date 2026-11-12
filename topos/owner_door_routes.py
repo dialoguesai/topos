@@ -139,7 +139,26 @@ _RECLASSIFY_RULE = RouteRule(
     "makes owner-only coding-session replies shareable again (owner ruling 20 Oct 2026); the dry run only counts",
     _reclassify_dry_run,
 )
-PRECEDENCE: Tuple[RouteRule, ...] = (_RECLASSIFY_RULE,)
+#: iMessage and Signal Desktop on the owner doors (``ingestion/messenger_setup.py``). The doors were written for
+#: the owner's own coding transcripts and the census lists them open; for a messenger source, turning it on,
+#: turning it back on and syncing it read OTHER people's words into the node, which is the same change the
+#: generic ``POST /sources/{id}/sync`` already needs a confirmation for (Q3). So a coding agent with a shell
+#: cannot enable Messages by itself: it needs the Topos app, or the yes a person gives on a terminal
+#: (``topos-node sources enable imessage``). ``preview`` writes nothing into the node, but to count it snapshots
+#: the whole Messages database (or opens Signal's with its key) and says how much a person wrote and since when,
+#: so it is the person's to ask for too. ``pause`` only stops reading and stays open under the census row below.
+MESSENGER_SOURCE_IDS = frozenset({"imessage", "signal"})
+_MESSENGERS = "{" + "|".join(sorted(MESSENGER_SOURCE_IDS)) + "}"
+MESSENGER_RULES: Tuple[RouteRule, ...] = tuple(
+    RouteRule("POST", f"/api/local/owner/sources/{_MESSENGERS}/{verb}", DANGEROUS, reason)
+    for verb, reason in (
+        ("preview", "counts the owner's Messages or Signal history: opens the store itself, though it writes nothing"),
+        ("enable", "starts reading the owner's Messages or Signal history into the node: other people's words"),
+        ("resume", "turns a paused messenger source back on"),
+        ("sync", "source_sync of a messenger source (Q3: needs a confirmation)"),
+    )
+)
+PRECEDENCE: Tuple[RouteRule, ...] = (_RECLASSIFY_RULE, *MESSENGER_RULES)
 
 #: Checked first: the contract says these pass, whatever else matches.
 CARVE_OUTS: Tuple[RouteRule, ...] = (
@@ -322,6 +341,11 @@ CENSUS: Tuple[RouteRule, ...] = (
     # The standing switch (features/derivation/auto_catchup.py): on, the node starts catch-up runs by itself
     # from then on; off is the owner's setting to change as well. The route checks the confirmed peer itself.
     _d("PUT", "/v1/signal/derivation/backfill/auto", "signal: the owner's switch for automatic catch-up runs"),
+    # Ending the facts a pack wrote from a reaction the owner sent (features/derivation/reaction_retract.py):
+    # it changes what the node holds to be true, so it needs the app or the owner's yes on a terminal, and the
+    # route checks the confirmed peer itself as well. Counting them is a GET.
+    _d("POST", "/v1/signal/derivation/reaction-facts/retract",
+       "signal: ends the standing facts written from the owner's own reactions"),
     _d("PUT", "/v1/signal/entities/communities/{community_id}/name", "signal: entity curation"),
     _d("POST", "/v1/signal/entities/graph/rebuild", "signal: rebuilds the entity graph"),
     _d("DELETE", "/v1/signal/entities/{entity_id}/blackhole", "signal_unblackhole_entity (Off-limits)"),

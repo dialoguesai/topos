@@ -1,6 +1,8 @@
 """Signal Desktop DB reader: open SQLCipher DB, query messages since checkpoint.
 
-Requires pysqlcipher3 (pip install pysqlcipher3). Key from ~/Library/Application Support/Signal/config.json.
+Needs a SQLCipher binding: ``sqlcipher3`` (prebuilt wheels, installed with the node on macOS) or the
+older ``pysqlcipher3`` (built from source against a system SQLCipher). Key from
+~/Library/Application Support/Signal/config.json.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
+
+from ...runtime_platform import INSTALL_PYTHON
 
 logger = logging.getLogger("topos.ingestion.sources.signal_reader")
 
@@ -300,25 +304,51 @@ def _parse_signal_cursor(last_record_id: Optional[str]) -> tuple[float, Optional
         return 0.0, None
 
 
-def read_signal_rows(
-    last_record_id: Optional[str] = None,
+#: The SQLCipher bindings this reader can use, in the order it tries them. ``sqlcipher3`` ships prebuilt
+#: wheels (it is a dependency of the node on macOS); ``pysqlcipher3`` is the older source-only package
+#: an existing install may still carry. Both expose the same ``dbapi2`` module.
+SQLCIPHER_BINDINGS = ("sqlcipher3", "pysqlcipher3")
+
+SQLCIPHER_MISSING_MESSAGE = (
+    "No SQLCipher binding is installed, so Signal's database cannot be opened. "
+    f"Reinstall Topos with it: uv tool install --force --python {INSTALL_PYTHON} 'topos-node[signal]'"
+)
+
+
+def sqlcipher_available() -> bool:
+    """Whether a SQLCipher binding can be imported, without importing it."""
+    from importlib import util as importlib_util
+
+    for name in SQLCIPHER_BINDINGS:
+        try:
+            if importlib_util.find_spec(name) is not None:
+                return True
+        except (ImportError, ValueError):
+            continue
+    return False
+
+
+def _sqlcipher_module() -> Any:
+    """The binding's ``dbapi2`` module, or ImportError with the sentence a person can act on."""
+    for name in SQLCIPHER_BINDINGS:
+        try:
+            return importlib.import_module(f"{name}.dbapi2")
+        except ImportError:
+            continue
+    raise ImportError(SQLCIPHER_MISSING_MESSAGE)
+
+
+def _open_signal_db(
     config_path: Optional[Path] = None,
     db_path: Optional[Path] = None,
-    my_phone_number: Optional[str] = None,
-    batch_size: int = 5000,
-    start_unix: Optional[float] = None,
     signal_key_hex: Optional[str] = None,
-) -> list[Dict[str, Any]]:
+) -> Any:
+    """An open connection to Signal Desktop's database, rows as dicts. The caller closes it.
+
+    Raises ImportError (no binding), FileNotFoundError (no Signal database on this computer) or
+    ValueError (no key, or a key that does not open it). No message text is in any of them.
     """
-    Open Signal SQLCipher DB and return message rows since last_record_id.
-    Each row: id (signal:{id}), thread_id (conversationId), content (body), created_at (Unix), role (user/other from type), ROWID/id.
-    """
-    try:
-        from pysqlcipher3 import dbapi2 as sqlcipher
-    except ImportError as e:
-        raise ImportError(
-            "pysqlcipher3 required for Signal sync. Install with: pip install pysqlcipher3"
-        ) from e
+    sqlcipher = _sqlcipher_module()
 
     config_path, db_path = config_path or get_signal_paths()[0], db_path or get_signal_paths()[1]
     if not db_path.exists():
@@ -334,20 +364,22 @@ def read_signal_rows(
 
     conn = None
     last_open_error: Optional[str] = None
-    # Different Signal versions/DBs can require different compatibility modes.
+    # Different Signal versions/DBs can require different compatibility modes. The key goes first:
+    # SQLCipher applies ``cipher_compatibility`` to a keyed connection, before its first read.
     for compat in (4, 3):
+        candidate = None
         try:
             candidate = sqlcipher.connect(str(db_path))
-            if compat is not None:
-                candidate.execute(f"PRAGMA cipher_compatibility = {compat}")
             candidate.execute(f'PRAGMA key = "{key_hex_expr}"')
+            candidate.execute(f"PRAGMA cipher_compatibility = {compat}")
             candidate.execute("SELECT count(*) FROM sqlite_master")
             conn = candidate
             break
         except Exception as e:
             last_open_error = str(e)
             try:
-                candidate.close()
+                if candidate is not None:
+                    candidate.close()
             except Exception:
                 pass
             continue
@@ -359,6 +391,83 @@ def read_signal_rows(
         )
 
     conn.row_factory = lambda c, r: dict(zip([col[0] for col in c.description], r))
+    return conn
+
+
+#: ``sent_at`` in milliseconds whatever unit this Signal build stored it in (seconds, ms, us or ns).
+_NORMALIZED_SENT_AT_MS = """
+            CASE
+                WHEN abs(sent_at) >= 100000000000000000 THEN (sent_at / 1000000.0)
+                WHEN abs(sent_at) >= 100000000000000 THEN (sent_at / 1000.0)
+                WHEN abs(sent_at) >= 100000000000 THEN (sent_at * 1.0)
+                ELSE (sent_at * 1000.0)
+            END
+        """
+
+
+def count_signal_messages(
+    start_unix: Optional[float] = None,
+    config_path: Optional[Path] = None,
+    db_path: Optional[Path] = None,
+    signal_key_hex: Optional[str] = None,
+) -> Dict[str, Any]:
+    """What a sync would read, counted and never read: messages, conversations, oldest and newest.
+
+    The same table and the same time normalisation as ``read_signal_rows``, so the numbers are the
+    rows a sync would see. ``in_window`` is how many of them are at or after ``start_unix``. No body,
+    sender or conversation name is selected.
+    """
+    conn = _open_signal_db(config_path, db_path, signal_key_hex)
+    try:
+        columns = {str(row.get("name") or "") for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+        if "sent_at" not in columns:
+            raise ValueError("Signal messages table is missing the sent_at column")
+        conversation_col = "conversationId" if "conversationId" in columns else (
+            "conversation_id" if "conversation_id" in columns else None
+        )
+        conversations = f"COUNT(DISTINCT {conversation_col})" if conversation_col else "NULL"
+        start_ms = int(float(start_unix) * 1000.0) if start_unix is not None else None
+        row = conn.execute(
+            f"""
+            SELECT COUNT(*) AS messages, {conversations} AS conversations,
+                   MIN({_NORMALIZED_SENT_AT_MS}) AS oldest_ms, MAX({_NORMALIZED_SENT_AT_MS}) AS newest_ms,
+                   SUM(CASE WHEN ? IS NULL OR ({_NORMALIZED_SENT_AT_MS}) >= ? THEN 1 ELSE 0 END) AS in_window
+            FROM messages
+            """,
+            (start_ms, start_ms),
+        ).fetchone() or {}
+    finally:
+        conn.close()
+
+    def _seconds(value: Any) -> Optional[float]:
+        try:
+            return float(value) / 1000.0 if value is not None and float(value) > 0 else None
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "messages": int(row.get("messages") or 0),
+        "conversations": int(row.get("conversations") or 0) if row.get("conversations") is not None else None,
+        "in_window": int(row.get("in_window") or 0),
+        "oldest": _seconds(row.get("oldest_ms")),
+        "newest": _seconds(row.get("newest_ms")),
+    }
+
+
+def read_signal_rows(
+    last_record_id: Optional[str] = None,
+    config_path: Optional[Path] = None,
+    db_path: Optional[Path] = None,
+    my_phone_number: Optional[str] = None,
+    batch_size: int = 5000,
+    start_unix: Optional[float] = None,
+    signal_key_hex: Optional[str] = None,
+) -> list[Dict[str, Any]]:
+    """
+    Open Signal SQLCipher DB and return message rows since last_record_id.
+    Each row: id (signal:{id}), thread_id (conversationId), content (body), created_at (Unix), role (user/other from type), ROWID/id.
+    """
+    conn = _open_signal_db(config_path, db_path, signal_key_hex)
     try:
         # Signal Desktop schema varies by version; detect available columns first.
         table_info_rows = conn.execute("PRAGMA table_info(messages)").fetchall()
@@ -429,14 +538,7 @@ def read_signal_rows(
                 start_ms = None
 
         # Signal Desktop: read only columns that exist in this schema variant.
-        normalized_sent_at_expr = """
-            CASE
-                WHEN abs(sent_at) >= 100000000000000000 THEN (sent_at / 1000000.0)
-                WHEN abs(sent_at) >= 100000000000000 THEN (sent_at / 1000.0)
-                WHEN abs(sent_at) >= 100000000000 THEN (sent_at * 1.0)
-                ELSE (sent_at * 1000.0)
-            END
-        """
+        normalized_sent_at_expr = _NORMALIZED_SENT_AT_MS
 
         # Keyset on (sent_at, id). `sent_at > cursor` alone skipped every row that
         # shared the last row's millisecond when a batch ended between them.
