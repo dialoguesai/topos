@@ -1,4 +1,4 @@
-"""`topos-node packs list|backfill|status|stop|auto`: what it asks, what it sends, what it prints.
+"""`topos-node packs list|backfill|status|stop|auto|retract-reactions`: what it asks, what it sends, what it prints.
 
 protects: a backfill starts only after a person answers `[y/N]` on a terminal. With no terminal the command asks no
 one, sends nothing and mints no confirmation; a no sends nothing; a yes mints exactly one confirmation and sends ONE
@@ -8,7 +8,9 @@ prints a projection (pack ids, counts, state words), never a response body. Ever
 serves, and the start is the one the owner socket's census names dangerous. `packs auto on` and `packs auto off`
 set the owner's standing switch the same way: a terminal, one `[y/N]`, one confirmation, one request; `packs auto
 status` and the automatic lines of `packs status` are reads. A backfill asked for while an automatic run is working
-is not turned away.
+is not turned away. `packs retract-reactions` counts and sends nothing that changes anything; `--apply` ends the
+facts the same way a backfill starts: a terminal, the count, one `[y/N]`, one confirmation, one request carrying the
+count that was shown.
 
 A terminal and a person are patched (``isatty`` on the module's ``sys``, ``click.confirm``); the owner socket is an
 in-memory fake that records each request and plays a scripted run.
@@ -95,6 +97,10 @@ AUTO_ON = {**AUTO_OFF, "enabled": True, "changed_at": "2026-11-11T14:02:00Z",
                     "totals": {"processed": 9, "assertions": 11, "accepted": 8, "written": 7, "quarantined": 1,
                                "llm_errors": 0, "extract_s": 15.0, "verify_s": 96.0}},
            "next": {"state": "waiting_for_gap", "not_before": "2026-11-11T16:03:12Z"}}
+#: What the node answers for the facts stored from the owner's reactions: two packs, one row that is not a pack.
+REACTION_FACTS = {"packs": [{"pack_id": JOY, "facts": 2, "sample": PLANTED}, {"pack_id": EVENTS, "facts": 1},
+                            {"pack_id": "../../etc/passwd", "facts": 9}],
+                  "total": 12, "kept_confirmed": 1, "note": PLANTED}
 STOPPED = _snap("stopped", [{"pack_id": EVENTS, "state": "stopped", "batches": [_batch(1, 57)]}, {"pack_id": JOY}],
                 reason="stopped")
 
@@ -107,8 +113,9 @@ class _Socket:
                  answers: Optional[Dict[tuple, Any]] = None, packs: Optional[Dict[str, Any]] = None,
                  waiting: Optional[Dict[str, int]] = None, started: bool = False,
                  provider: str = "llm", spec_on_disk: bool = True, truncated: bool = False,
-                 auto: Optional[Dict[str, Any]] = None) -> None:
+                 auto: Optional[Dict[str, Any]] = None, reaction_facts: Optional[Dict[str, Any]] = None) -> None:
         self.provider, self.spec_on_disk, self.truncated = provider, spec_on_disk, truncated
+        self.reaction_facts = dict(reaction_facts if reaction_facts is not None else REACTION_FACTS)
         self.auto = dict(auto if auto is not None else AUTO_OFF)
         self.calls: List[Dict[str, Any]] = []
         self.before = before if before is not None else {"run": None}
@@ -174,6 +181,12 @@ class _Socket:
             if json_body["enabled"]:
                 self.auto["next"] = {"state": "waiting_for_quiet", "not_before": "2026-11-11T14:12:00Z"}
             return self.auto
+        if (method, path) == ("GET", packs_cmd.REACTION_FACTS_PATH):
+            return self.reaction_facts
+        if (method, path) == ("POST", packs_cmd.RETRACT_PATH):
+            ended = {**self.reaction_facts, "retracted": 3, "changed": 0}
+            self.reaction_facts = {"packs": [], "total": 0, "kept_confirmed": self.reaction_facts["kept_confirmed"]}
+            return ended
         raise AssertionError(f"unexpected request {method} {path}")
 
 
@@ -667,6 +680,80 @@ def test_a_backfill_asked_for_while_the_automatic_run_works_is_not_turned_away(c
     assert "Done: 300 processed" in out.out
 
 
+# ----------------------------------------------------------------------------- facts stored from reactions
+
+
+def test_retract_reactions_counts_per_pack_and_changes_nothing_by_default(cli):
+    out = cli("retract-reactions", tty=False)
+    assert out.code == packs_cmd.EXIT_OK, out.out
+    assert out.sock.sent() == [("GET", packs_cmd.REACTION_FACTS_PATH)], "a read, and nothing else"
+    assert out.prompts == [] and out.tokens == [] and _posts(out) == []
+    assert "  moments.joy      2" in out.out and "  life.events      1" in out.out
+    assert "3 facts in 2 packs standing." in out.out, "counted from the rows that are packs, not the body's total"
+    assert "1 more of the same kind is left as it is: you confirmed or corrected it in the app." in out.out
+    assert "Nothing changed. `topos-node packs retract-reactions --apply` ends them, after asking you." in out.out
+    assert "passwd" not in out.out
+    doc = json.loads(cli("retract-reactions", "--json", tty=False).out)["reaction_facts"]
+    assert doc == {"packs": [{"pack_id": JOY, "facts": 2}, {"pack_id": EVENTS, "facts": 1}], "total": 3,
+                   "kept_confirmed": 1}
+
+
+def test_retract_reactions_apply_shows_the_count_asks_once_and_sends_one_confirmed_change(cli):
+    out = cli("retract-reactions", "--apply")
+    assert out.code == packs_cmd.EXIT_OK, out.out
+    assert out.prompts == ["End them?"] and out.tokens == ["confirm-token"]
+    assert out.sock.sent() == [("GET", packs_cmd.REACTION_FACTS_PATH), ("POST", packs_cmd.RETRACT_PATH)]
+    (post,) = _posts(out)
+    assert post["json"] == {"expected_total": 3}, "the yes covers the count that was shown"
+    assert post["headers"] == {"X-Topos-Owner-Confirm": "confirm-token"}
+    shown, _, after = out.out.partition("no row is deleted and no message is touched")
+    assert "3 facts in 2 packs standing." in shown and "3 facts in 2 packs ended." in after
+
+
+def test_retract_reactions_apply_without_a_terminal_asks_no_one_and_touches_nothing(cli):
+    out = cli("retract-reactions", "--apply", tty=False)
+    assert out.code == packs_cmd.EXIT_NEEDS_HUMAN
+    assert "run this command in your own terminal" in out.out
+    assert out.calls == [] and out.prompts == [] and out.tokens == []
+
+
+def test_retract_reactions_a_no_changes_nothing_and_mints_no_confirmation(cli):
+    out = cli("retract-reactions", "--apply", answer=False)
+    assert out.code == packs_cmd.EXIT_OK and "Nothing changed." in out.out
+    assert out.prompts == ["End them?"] and out.tokens == [] and _posts(out) == []
+
+
+def test_retract_reactions_has_no_flag_that_answers_for_the_person(cli):
+    for flag in ("--yes", "-y", "--force", "--no-confirm", "--confirm", "--no-input"):
+        for args in ((flag,), ("--apply", flag)):
+            out = cli("retract-reactions", *args)
+            assert out.code == 2 and out.calls == [] and out.tokens == [], args
+    options = {opt for param in packs_cmd.packs_retract_reactions.params for opt in param.opts}
+    assert options == {"--apply", "--json"}
+    both = cli("retract-reactions", "--apply", "--json")
+    assert both.code == 2 and both.calls == [] and both.prompts == []
+
+
+def test_retract_reactions_with_nothing_to_end_asks_nothing(cli):
+    none = {"packs": [], "total": 0, "kept_confirmed": 0}
+    for args in ((), ("--apply",)):
+        out = cli("retract-reactions", *args, socket=_Socket(reaction_facts=none))
+        assert out.code == packs_cmd.EXIT_OK and "Nothing to end." in out.out
+        assert out.prompts == [] and out.tokens == [] and _posts(out) == []
+
+
+@pytest.mark.parametrize("refusal, says", [
+    (NodeRefused(403, "owner_confirmation_required"), "refused the change (owner_confirmation_required)"),
+    (NodeRefused(409, "reaction_facts_changed"), "The count changed while you were asked"),
+])
+def test_retract_reactions_a_refused_change_says_so(cli, refusal, says):
+    out = cli("retract-reactions", "--apply", socket=_Socket(answers={("POST", packs_cmd.RETRACT_PATH): refusal}))
+    assert out.code == packs_cmd.EXIT_FAILED and says in out.out and "Nothing changed" in out.out
+    down = cli("retract-reactions", tty=False,
+               socket=_Socket(answers={("GET", packs_cmd.REACTION_FACTS_PATH): NodeDown("down")}))
+    assert down.code == packs_cmd.EXIT_NODE_DOWN
+
+
 # ----------------------------------------------------------------------------- the node serves what the CLI sends
 
 
@@ -683,11 +770,13 @@ def test_every_path_the_commands_send_is_a_route_the_node_serves(cli):
     sent = set()
     for args, sock in ((("list",), None), (("status",), None), (("stop",), None), (("auto", "on"), None),
                        (("auto", "off"), _Socket(auto=AUTO_ON)), (("auto", "status"), None),
+                       (("retract-reactions", "--apply"), None),
                        (("backfill", "--all-enabled"), _Socket(status=[WORKING, KeyboardInterrupt(), STOPPED]))):
         sent |= set(cli(*args, socket=sock).sock.sent())
     assert sent == {("GET", packs_cmd.PACKS_PATH), ("GET", packs_cmd.PLAN_PATH), ("GET", packs_cmd.CURRENT_PATH),
                     ("POST", packs_cmd.RUNS_PATH), ("POST", packs_cmd.STOP_PATH),
-                    ("GET", packs_cmd.AUTO_PATH), ("PUT", packs_cmd.AUTO_PATH)}
+                    ("GET", packs_cmd.AUTO_PATH), ("PUT", packs_cmd.AUTO_PATH),
+                    ("GET", packs_cmd.REACTION_FACTS_PATH), ("POST", packs_cmd.RETRACT_PATH)}
     missing = sorted(f"{m} {p}" for m, p in sent if not _served(m, p))
     assert not missing, f"the CLI sends paths the node does not serve: {missing}"
 
@@ -696,7 +785,9 @@ def test_only_the_start_needs_the_yes_and_it_is_the_dangerous_one():
     assert census.lookup("POST", packs_cmd.RUNS_PATH).verdict == census.DANGEROUS
     assert census.lookup("POST", packs_cmd.STOP_PATH).verdict == census.OPEN
     assert census.lookup("PUT", packs_cmd.AUTO_PATH).verdict == census.DANGEROUS, "the standing switch is a yes too"
-    for path in (packs_cmd.PACKS_PATH, packs_cmd.PLAN_PATH, packs_cmd.CURRENT_PATH, packs_cmd.AUTO_PATH):
+    assert census.lookup("POST", packs_cmd.RETRACT_PATH).verdict == census.DANGEROUS, "and so is ending facts"
+    for path in (packs_cmd.PACKS_PATH, packs_cmd.PLAN_PATH, packs_cmd.CURRENT_PATH, packs_cmd.AUTO_PATH,
+                 packs_cmd.REACTION_FACTS_PATH):
         assert census.lookup("GET", path).verdict == census.READ
 
 
@@ -704,5 +795,5 @@ def test_the_group_is_on_the_node_cli():
     from topos.cli.commands import main
 
     assert main.commands["packs"] is packs_cmd.packs_group
-    assert set(packs_cmd.packs_group.commands) == {"list", "backfill", "status", "stop", "auto"}
+    assert set(packs_cmd.packs_group.commands) == {"list", "backfill", "status", "stop", "auto", "retract-reactions"}
     assert set(packs_cmd.packs_group.commands["auto"].commands) == {"on", "off", "status"}

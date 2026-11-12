@@ -9,6 +9,33 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **`topos-node packs retract-reactions`: end the facts a pack stored from a reaction you sent in Messages.**
+  `[E:derivation]` `[O]` Fact packs no longer read a reaction the owner sent (the fix below), but a fact stored
+  from one before that fix stays where it is. This command counts those facts and, when you say so, ends them.
+  - *What it counts.* A standing pack fact whose every source record is a reaction the owner sent, by the same
+    test the packs and the commitments lane apply (the marker Messages puts on the stored row, or the English
+    text form). A fact with any other source (a journal entry, a message you typed, a contact's message, a
+    record that is no longer stored) is left alone. So is a fact you confirmed or corrected in the app; those
+    are counted apart and said.
+  - *By itself it only counts.* `topos-node packs retract-reactions` prints pack ids and counts, needs no
+    terminal and writes nothing (`--json` for the same as data). It never prints a fact or a message.
+  - *`--apply` ends them, after asking you.* It shows the count, asks `[y/N]` once on a terminal, and sends one
+    confirmed change that carries the count you were shown; if the count has changed since, nothing is ended.
+    Without a terminal it exits 2 and asks no one. No flag or environment variable answers for you. The route is
+    `POST /v1/signal/derivation/reaction-facts/retract`: `dangerous` in the owner socket's census, and it checks
+    the confirmed peer itself. `GET /v1/signal/derivation/reaction-facts` is the count, an open read.
+  - *What ending means.* The fact is closed as of now, the way a superseded fact is: its row and its value stay
+    in the history. No row is deleted, no message is touched and no tombstone is written, so the same value
+    read later from a message you typed can be stored again. The reaction itself is not read again, so a later
+    backfill does not bring an ended fact back. The write goes through the write gate, in one commit.
+  - *Nothing runs by itself.* An upgrade ends no fact; only this command does, on your yes.
+  - Limits: facts that did not come from a pack are not looked at. Assertions held for review and the training
+    ledger's rows from a reaction stay. For sharing, an ended fact is a closed fact the node has no rule for,
+    and such a fact withholds the message it names: the reaction it was read from is not released to a share
+    from then on (the owner has not ruled otherwise). Not run on a real node: the tests use an invented
+    database, a stubbed model and the real owner socket gate.
+
 ### Fixed
 - **A reaction the owner sent in Messages is no longer read by fact packs as text the owner wrote.**
   `[E:derivation]` Messages stores a reaction ("tapback") as a message from whoever reacted, and its text is

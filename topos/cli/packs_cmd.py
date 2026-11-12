@@ -1,4 +1,4 @@
-"""`topos-node packs list|backfill|status|stop|auto` — fact packs and their history backfill, from a terminal.
+"""`topos-node packs list|backfill|status|stop|auto|retract-reactions` — fact packs, from a terminal.
 
 A fact pack reads new records as they arrive only for the sources whose lane runs it; everything
 else, and the history from before a pack was switched on, is read when the owner asks (a backfill).
@@ -32,6 +32,15 @@ command in their own terminal. `auto on` and `auto off` are the same kind of cha
 the owner's) and ask the same way. `list`, `status`, `auto status` and `stop` change nothing a yes
 protects and need no terminal.
 
+`retract-reactions` is about facts a pack stored before it learned that a reaction the owner sent in
+Messages quotes someone else (`features/derivation/reaction_retract`). By itself it only counts them,
+per pack, and is a read. `retract-reactions --apply` ends them (each stays in the history, closed; no
+row is deleted, no message is touched) and is the same kind of change as a backfill: a terminal, the
+count, one `[y/N]`, one confirmation, one request that carries the count that was shown.
+
+    topos-node packs retract-reactions
+    topos-node packs retract-reactions --apply
+
 The extractor is whatever the owner has picked for facts (Topos Facts for the packs it knows, the
 local model for the rest); this command names it and never changes it.
 
@@ -60,6 +69,8 @@ RUNS_PATH = "/v1/signal/derivation/backfill/runs"
 CURRENT_PATH = RUNS_PATH + "/current"
 STOP_PATH = CURRENT_PATH + "/stop"
 AUTO_PATH = "/v1/signal/derivation/backfill/auto"
+REACTION_FACTS_PATH = "/v1/signal/derivation/reaction-facts"
+RETRACT_PATH = REACTION_FACTS_PATH + "/retract"
 
 DEFAULT_LIMIT = 200
 MAX_LIMIT = 1000
@@ -657,6 +668,94 @@ def packs_auto_off() -> None:
         sys.exit(EXIT_OK)
     for line in _auto_lines(_set_auto(sock, {"enabled": False})):
         click.echo(line)
+
+
+# ----------------------------------------------------------------------------- facts written from reactions
+def _reaction_facts(body: Any) -> Optional[Dict[str, Any]]:
+    """The count of facts written from the owner's reactions, reduced to pack ids and counts."""
+    if not isinstance(body, dict) or not isinstance(body.get("packs"), list):
+        return None
+    packs = [{"pack_id": str(row["pack_id"]), "facts": _int(row.get("facts"))}
+             for row in body["packs"]
+             if isinstance(row, dict) and _PACK_ID_RE.match(str(row.get("pack_id") or "")) and _int(row.get("facts"))]
+    out = {"packs": packs, "total": sum(p["facts"] for p in packs), "kept_confirmed": _int(body.get("kept_confirmed"))}
+    for key in ("retracted", "changed"):
+        if key in body:
+            out[key] = _int(body.get(key))
+    return out
+
+
+def _reaction_lines(found: Dict[str, Any], verb: str) -> List[str]:
+    lines = []
+    if found["packs"]:
+        width = max(len(p["pack_id"]) for p in found["packs"])
+        lines = [f"  {p['pack_id'].ljust(width)}  {p['facts']:>5,}" for p in found["packs"]]
+    total = found["total"]
+    lines.append(f"{total:,} fact{'s' if total != 1 else ''} in {len(found['packs'])} "
+                 f"pack{'s' if len(found['packs']) != 1 else ''} {verb}.")
+    kept = found["kept_confirmed"]
+    if kept:
+        lines.append(f"{kept:,} more of the same kind {'is' if kept == 1 else 'are'} left as "
+                     f"{'it is' if kept == 1 else 'they are'}: you confirmed or corrected "
+                     f"{'it' if kept == 1 else 'them'} in the app.")
+    return lines
+
+
+@packs_group.command("retract-reactions")
+@click.option("--apply", "apply", is_flag=True,
+              help="End those facts. Asks you once, on a terminal (default: count them and change nothing).")
+@_JSON_OPTION
+def packs_retract_reactions(apply: bool, as_json: bool) -> None:
+    """Facts stored from a reaction you sent in Messages: counts them per pack; --apply ends them."""
+    if apply and as_json:
+        raise click.UsageError("--json is for the count; --apply asks you on a terminal.")
+    if apply and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        _fail("Ending facts changes what your Topos holds to be true, so it asks you first: "
+              "run this command in your own terminal.", EXIT_NEEDS_HUMAN)
+    sock = _socket()
+    found = _reaction_facts(_request(sock, "GET", REACTION_FACTS_PATH, what="the count"))
+    if found is None:
+        _fail("Topos did not report the count. Check `topos-node status`.")
+    if as_json:
+        click.echo(json.dumps({"reaction_facts": found}, indent=2, sort_keys=True))
+        return
+    click.echo("Facts stored from a reaction you sent in Messages")
+    click.echo("  A reaction quotes the message it reacts to, so its words are the other person's. A fact counts "
+               "here when every record it was read from is such a reaction; a fact with any other source does not.")
+    for line in _reaction_lines(found, "standing"):
+        click.echo(line)
+    if not found["total"]:
+        click.echo("Nothing to end.")
+        sys.exit(EXIT_OK)
+    if not apply:
+        click.echo("Nothing changed. `topos-node packs retract-reactions --apply` ends them, after asking you.")
+        sys.exit(EXIT_OK)
+    click.echo("Ending a fact closes it as of now: it stays in the history, no row is deleted and no message is "
+               "touched. A reaction is not read again, so a later backfill does not bring these back.")
+    if not click.confirm("End them?", default=False, err=True):
+        click.echo("Nothing changed.")
+        sys.exit(EXIT_OK)
+
+    from topos.mcp_server import NodeDown, NodeRefused
+    from topos.uds import write_owner_confirmation
+
+    try:
+        answer = sock.request_sync("POST", RETRACT_PATH, json_body={"expected_total": found["total"]},
+                                   headers={"X-Topos-Owner-Confirm": write_owner_confirmation()})
+    except NodeDown:
+        _fail("Topos stopped before the change was made. Check `topos-node status`.", EXIT_NODE_DOWN)
+    except NodeRefused as exc:
+        if exc.code == "reaction_facts_changed":
+            _fail("The count changed while you were asked. Nothing changed; run the command again.")
+        _fail(f"Topos refused the change ({exc.code or exc.status}). Nothing changed.")
+    done = _reaction_facts(answer)
+    if done is None:
+        _fail("Topos did not report what it ended. `topos-node packs retract-reactions` counts what is left.")
+    for line in _reaction_lines(done, "ended"):
+        click.echo(line)
+    if done.get("changed"):
+        click.echo(f"{done['changed']:,} changed while this ran and "
+                   f"{'was' if done['changed'] == 1 else 'were'} left; run the command again to count.")
 
 
 # ----------------------------------------------------------------------------- following a run
