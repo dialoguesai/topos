@@ -41,6 +41,15 @@ The machine-readable twin of each release is
     to the model. The list is the engine's own, so a drafter can see it and reword. It counts none of your
     records.
 
+### Fixed
+- **A pack is switched, and its history read, only with the owner's yes, over every local door.** `[E:derivation]` `[O]`
+  `PUT /v1/signal/derivation/packs/{id}` and the single-batch `POST /v1/signal/derivation/packs/{id}/backfill`
+  asked a TCP caller for the API key and nothing else, so a local process holding the key could switch a pack on
+  or off (an outward one too, by sending `consent: true`) or read history with no person asked. Both now answer
+  only the owner socket, from a peer that may change things (the app, or a yes the owner just gave on a
+  terminal), as `packs on`/`off` and a run's start already did; anything else gets 403
+  `owner_confirmation_required`. The web app's switch and backfill are relay messages and are unchanged.
+
 ## [1.5.53] — 2026-11-12
 
 ### Added

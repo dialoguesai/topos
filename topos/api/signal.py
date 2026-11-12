@@ -1206,9 +1206,16 @@ async def put_derivation_pack(
     _api_key: str = Depends(require_api_key),
 ):
     """Enabling an outward pack (`net_subject: allow`) needs `consent: true`; without it
-    the route answers 409 with the terms the owner must be shown."""
-    from ..features.derivation.surfaces import ConsentRequired, set_pack_enabled
+    the route answers 409 with the terms the owner must be shown.
 
+    Only the owner socket, from a peer that may change things (the app, a confirmation the owner just gave on a
+    terminal): over TCP the API key alone would switch a pack on or off with no person asked. The web app's switch
+    travels as a relay message and is not this route."""
+    from ..features.derivation.surfaces import ConsentRequired, set_pack_enabled
+    from ..uds import OWNER_CONFIRMATION_MESSAGE
+
+    if not _confirmed_owner_socket():
+        return _backfill_refusal(403, "owner_confirmation_required", OWNER_CONFIRMATION_MESSAGE)
     try:
         ok = set_pack_enabled(_entities_conn(), pack_id, enabled,
                               consent=consent, consent_note=consent_note)
@@ -1277,11 +1284,18 @@ async def post_pack_backfill(
     Refused 409 `backfill_already_running` while a confirmed run is working through its packs
     (`backfill_runs`): a run and a single batch never share the local models. An automatic catch-up
     run is not a reason to refuse: it is asked to stop after the record in hand and this batch waits
-    for it (`yield_to_owner`), on a worker thread."""
+    for it (`yield_to_owner`), on a worker thread.
+
+    Only the owner socket, from a peer that may change things, as for a run's start: over TCP the API key alone
+    would read history with no person asked."""
     import asyncio as _asyncio
 
     from ..features.derivation.backfill_runs import BackfillBusy, single_batch, yield_to_owner
     from ..features.derivation.surfaces import BackfillDeferred, run_pack_backfill
+    from ..uds import OWNER_CONFIRMATION_MESSAGE
+
+    if not _confirmed_owner_socket():
+        return _backfill_refusal(403, "owner_confirmation_required", OWNER_CONFIRMATION_MESSAGE)
 
     try:
         await _asyncio.to_thread(yield_to_owner)
