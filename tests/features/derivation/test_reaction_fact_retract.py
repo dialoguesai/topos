@@ -103,7 +103,7 @@ def _ledger(conn, object_id, *sources, pack: str = "work.career", predicate: str
                          rec={"table": table, "record_id": rid, "role": "authored"},
                          a={"predicate": predicate, "value": {} if value is None else value,
                             "verifier_status": status, "occurrence": occurrence},
-                         model="stub-9b", vmodel="stub-9b", written_id=object_id)
+                         model="stub-9b", vmodel="stub-9b", context=None, written_id=object_id)
     conn.commit()
 
 
