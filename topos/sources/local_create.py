@@ -10,12 +10,35 @@ import hashlib
 import io
 import json
 import re
+import unicodedata
 from dataclasses import asdict, fields
 from typing import Any
 
 MAX_BYTES = 2 * 1024 * 1024
 MAX_RECORDS = 200
 ID_RE = re.compile(r"^[a-z][a-z0-9_.-]{0,79}$")
+MAX_NAME_CHARS = 120
+
+
+def has_control_chars(text: str) -> bool:
+    """True for any control or format character (newline, ESC, bidi overrides): text shown in the owner's prompt
+    must not be able to draw its own lines or hide the real question."""
+    return any(unicodedata.category(ch) in {"Cc", "Cf", "Zl", "Zp"} for ch in text)
+
+
+def table_prefix(source_id: str) -> str:
+    return "private_" + re.sub(r"[.-]", "_", source_id) + "_"
+
+
+def _reserved_ids() -> set[str]:
+    # Ids the install service treats as another source's successor or predecessor (Drive's republish). A private
+    # source under one of them would retire, or be retired by, a real connector's install rows.
+    from .install_service import _CANONICAL_SOURCE_SUCCESSORS, _LEGACY_SOURCE_SUCCESSORS
+    ids: set[str] = set()
+    for mapping in (_LEGACY_SOURCE_SUCCESSORS, _CANONICAL_SOURCE_SUCCESSORS):
+        ids.update(mapping)
+        ids.update(mapping.values())
+    return ids
 
 
 def digest(value: Any) -> str:
@@ -107,6 +130,8 @@ def validated_definition(payload: dict) -> tuple[dict, Any]:
         raise ValueError("Definition exceeds 2 MiB")
     if not isinstance(payload.get("display_name"), str) or not payload["display_name"].strip():
         raise ValueError("display_name must be a non-empty string")
+    if has_control_chars(payload["display_name"]) or len(payload["display_name"]) > MAX_NAME_CHARS:
+        raise ValueError(f"display_name must be one line of at most {MAX_NAME_CHARS} characters, with no control characters")
     if payload.get("file_ingest_shape") is not None and not isinstance(payload["file_ingest_shape"], dict):
         raise ValueError("file_ingest_shape must be an object")
     if payload.get("tables") is not None and (not isinstance(payload["tables"], list)
@@ -115,7 +140,7 @@ def validated_definition(payload: dict) -> tuple[dict, Any]:
     sid = payload.get("source_id")
     if not isinstance(sid, str) or not ID_RE.fullmatch(sid):
         raise ValueError("source_id must be a lowercase identifier of at most 80 characters")
-    if sid in BUNDLED_REGISTRY:
+    if sid in BUNDLED_REGISTRY or sid in _reserved_ids():
         raise ValueError("Use a new source_id; this command does not replace bundled sources")
     if payload.get("source_type") not in {"file", "ui_stream"}:
         raise ValueError("Private definitions support file or ui_stream; a new sync adapter needs code")
@@ -135,7 +160,7 @@ def validated_definition(payload: dict) -> tuple[dict, Any]:
         raise ValueError("Custom JSON parsers currently map chat lanes or raw tables. For another lane, use a compatible bundled parser or add an adapter.")
     # A raw data table must belong to this source; never let a new definition write into system tables.
     table_ids = set()
-    prefix = "private_" + re.sub(r"[.-]", "_", sid) + "_"
+    prefix = table_prefix(sid)
     for table in definition.tables or []:
         table_id = table.get("table_id", "")
         if not isinstance(table_id, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", table_id) or not table_id.startswith(prefix):
@@ -148,8 +173,16 @@ def validated_definition(payload: dict) -> tuple[dict, Any]:
     for other_id, other in REGISTRY.items():
         if other_id == sid:
             continue
-        if table_ids & {t.get("table_id") for t in other.tables or []}:
+        other_tables = {t.get("table_id") for t in other.tables or []}
+        if table_ids & other_tables:
             raise ValueError("Data table already belongs to another source")
+        # `a.b`, `a-b` and `a_b` share one prefix, and `a` could claim `private_a_b_x` that `a_b` expects to own.
+        other_prefix = table_prefix(other_id)
+        if other_prefix == prefix:
+            raise ValueError("source_id names the same table namespace as another source; choose a distinct id")
+        if (any(t.startswith(other_prefix) for t in table_ids)
+                or any(isinstance(t, str) and t.startswith(prefix) for t in other_tables)):
+            raise ValueError("Data table name falls inside another source's table namespace")
         if ({definition.schema_id, definition.parser_id} & {other.schema_id, other.parser_id}) - BUNDLED_PARSER_IDS:
             raise ValueError("Custom schema_id/parser_id already belongs to another source")
         if (definition.canonical_mapper_id and definition.canonical_mapper_id == other.canonical_mapper_id
@@ -183,6 +216,9 @@ async def prepare(body: dict) -> dict:
     if sample is not None:
         if not isinstance(sample, dict) or set(sample) != {"file_name", "content"}:
             raise ValueError("sample needs file_name and content only")
+        if (not isinstance(sample["file_name"], str) or has_control_chars(sample["file_name"])
+                or len(sample["file_name"]) > 255):
+            raise ValueError("sample file_name must be one line with no control characters")
         fmt, _ = _sample_rows(sample["file_name"], sample["content"])
         declared_format = (definition.file_ingest_shape or {}).get("format")
         if declared_format and declared_format != fmt:
@@ -199,15 +235,13 @@ async def prepare(body: dict) -> dict:
 
         async def stream():
             yield sample["content"].encode("utf-8")
+        # Every record is checked, not a prefix: the install imports the whole sample, so a duplicate or missing
+        # id past a preview limit would be stored unchecked. The 2 MiB cap bounds the work.
         checked = 0
         seen_ids = set()
         preview = []
-        truncated = False
         async for raw in parse_file(stream(), fmt):
             for row in _expand_file_records(raw, definition):
-                if checked >= MAX_RECORDS:
-                    truncated = True
-                    break
                 # A stable input id is required: row-number fallbacks collide across later imports.
                 record = RawRecord(record_id=str(row.get("id") or ""), payload=row)
                 validation = parser.validate(record)
@@ -222,12 +256,10 @@ async def prepare(body: dict) -> dict:
                 if len(preview) < 3:
                     preview.append(parsed.payload)
                 checked += 1
-            if truncated:
-                break
         if not checked:
             raise ValueError("Sample produced no records; check raw_record_path")
         receipt["sample"] = {"file_name": sample["file_name"], "bytes": len(sample["content"].encode()),
-                             "records_checked": checked, "truncated": truncated, "normalized_preview": preview,
+                             "records_checked": checked, "truncated": False, "normalized_preview": preview,
                              "validation": "parser only; canonical storage and retrieval are verified after import"}
     receipt["plan_sha256"] = digest({"source_definition_json": normalized, "sample": sample})
     return receipt

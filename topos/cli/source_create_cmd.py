@@ -53,19 +53,37 @@ def _tty() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
+def _plain(value) -> str:
+    """One printable line: control characters (newlines, ESC) are shown escaped, never acted on by the terminal."""
+    text = str(value)
+    return "".join(ch if ch.isprintable() else ch.encode("unicode_escape").decode("ascii") for ch in text)
+
+
+_PREVIEW_CHARS = 400
+
+
 def _summary(plan: dict) -> str:
     definition = plan["source_definition_json"]
     sample = plan.get("sample")
-    text = (f"Add {definition['display_name']} ({plan['source_id']}) to the Topos on this computer.\n"
+    lane = definition.get("canonical_group_id")
+    text = (f"Add {_plain(definition['display_name'])} ({plan['source_id']}) to the Topos on this computer.\n"
             f"Definition stays unregistered. Delivery: {definition['delivery']}; "
             f"mapping: {definition.get('canonical_group_id') or 'raw-only'}; "
             f"posture: {definition['posture']}; enrichment: {definition['enrichment_trigger']}.\n")
     if plan.get("target"):
         text += f"Target Topos: {plan['target']['topos_id']}.\n"
     if sample:
-        text += (f"Import {sample['file_name']} ({sample['bytes']} bytes); "
-                 f"checked {sample['records_checked']} records"
-                 + (" (preview limited)" if sample['truncated'] else "") + ".\n")
+        text += (f"Import {_plain(sample['file_name'])} ({sample['bytes']} bytes): "
+                 f"{sample['records_checked']} records, every one checked.\n")
+        if lane in {"conversations", "ai_messages"}:
+            text += (f"These records are stored as {lane} written by you: Topos reads them as your own words, "
+                     f"extracts facts from them, and shares that lane as your existing grants allow.\n")
+        preview = sample.get("normalized_preview") or []
+        if preview:
+            text += f"First {len(preview)} of them as they will be stored:\n"
+            for row in preview:
+                line = json.dumps(row, ensure_ascii=True, sort_keys=True)
+                text += "  " + (line if len(line) <= _PREVIEW_CHARS else line[:_PREVIEW_CHARS] + " ...") + "\n"
     else:
         text += "Install the definition only; no records will be imported.\n"
     text += "\n".join(plan.get("warnings") or [])
