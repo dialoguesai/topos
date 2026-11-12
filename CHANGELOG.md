@@ -45,6 +45,25 @@ The machine-readable twin of each release is
     4 + 4 rows landed under the local identity, the iMessage schedule row was written, and an enrolled coding
     agent's `query_scope(messages:read, raw)` returned rows from both. Not observed: a real Full Disk Access
     grant to a service-run node, and the Keychain request for a real Signal key.
+- **An experimental, separately started gateway that bounds requests to one local model provider.** `[O]`
+  Chat and generation requests sent straight to the provider bypass the Engine HTTP worker budget. A new
+  program, `python -m topos.compute.gateway`, can stand in front of one loopback provider for controlled
+  testing: streaming and non-streaming `/api/chat` and `/api/generate` share one first-in-first-out queue
+  (4 waiting) and one active-request limit (1), the same defaults and the same `compute_busy` /
+  `compute_unavailable` answers as the Engine budget. Nothing changes for a node that does not start it:
+  the node never imports, starts or configures it, no setting turns it on, and
+  `tests/engine/test_provider_gateway_opt_in.py` fails if that stops being true.
+  - *What it guarantees.* An id for each request, and none of its content, is written to a private journal
+    before the request is sent. A request cancelled while queued is never sent. A reply that ends without the provider's `done` leaves the gateway refusing
+    new work, and that state survives a restart: there is no automatic recovery or reset. Two gateways cannot
+    share a state directory.
+  - *What it never does.* It sends the provider nothing by itself and adds nothing to a request. It refuses
+    (400) a request that only loads, warms, unloads or pins a model: no prompt, no messages, or a negative
+    `keep_alive`. It listens on 127.0.0.1 only, needs a bearer secret of 32 characters or more in
+    `TOPOS_PROVIDER_GATEWAY_TOKEN`, follows no redirect and proxies no model-management route.
+  - *What it is not.* Not a drop-in replacement for the provider, not a whole-GPU limit, and not tried
+    against a real model. Do not point the node's own provider setting at it. See
+    `docs/provider-admission-gateway.md`.
 
 ### Changed
 - **Signal Desktop can be read on a plain macOS install.** `[O]` The reader imported `pysqlcipher3`, a
