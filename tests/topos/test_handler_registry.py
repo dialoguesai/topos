@@ -338,6 +338,24 @@ def test_retired_uma_reads_cannot_dispatch():
     assert not {"uma_get_messages", "uma_get_oplog", "uma_get_rows"} & HANDLERS.keys()
 
 
+def test_retired_reflection_doors_cannot_dispatch():
+    """Owner decision G6: the three 1.5.23 reflection doors were removed in 1.5.39. None is a handler, an owner-door
+    open type, a local route or a protocol snapshot entry; an app's read of pack facts is a different type."""
+    import json
+    from pathlib import Path
+
+    import topos.protocol as protocol
+    from topos.core.handlers import OWNER_DOOR_OPEN_TYPES
+    from topos.owner_door_routes import CENSUS
+
+    retired = {"reflection_invitations", "reflection_conversation", "reflection_label"}
+    assert not retired & HANDLERS.keys()
+    assert not retired & OWNER_DOOR_OPEN_TYPES
+    snapshot = json.loads((Path(protocol.__file__).parent / "handled_message_types.json").read_text())
+    assert not retired & {name for names in snapshot.values() for name in names}
+    assert not [rule for rule in CENSUS if any(name in str(rule) for name in retired)]
+
+
 def test_duplicate_registration_rejected():
     with pytest.raises(ValueError, match="duplicate handler registration"):
 

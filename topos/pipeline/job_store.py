@@ -539,6 +539,10 @@ def close_retired_jobs(conn: sqlite3.Connection, retired: Mapping[str, str]) -> 
     ``retired`` maps a kind to the reason written into the row's ``detail_json`` (``{"retired": reason}``). A row
     of a kind with no executor is never claimed, so without this it stays 'queued' for good; it is marked 'done',
     not 'failed', because nothing went wrong: the work was retired. Finished rows are left as they are.
+
+    The commit is unconditional: an UPDATE that matches no row (every start but the first after the upgrade) still
+    opens SQLite's write transaction, and leaving it open past the gate is the lock-order inversion the gate exists
+    to prevent.
     """
     kinds = [str(k) for k in (retired or {}) if k]
     if not kinds:
@@ -557,8 +561,7 @@ def close_retired_jobs(conn: sqlite3.Connection, retired: Mapping[str, str]) -> 
                 (json.dumps({"retired": str(retired[kind])}), kind),
             )
             closed += int(cursor.rowcount or 0)
-        if closed:
-            commit_connection(conn)
+        commit_connection(conn)
     return closed
 
 

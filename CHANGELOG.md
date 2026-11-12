@@ -9,6 +9,14 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **A reflection sweep job left over from before 1.5.39 is closed when the node starts.** `[O]` 1.5.39 removed the
+  reflection doors and their sweep, and a `reflection_sweep` job still queued on an installed node was simply never
+  claimed, so it stayed `queued` for good. The node now closes such a row at startup: queued, or still leased by
+  the old node, it is marked `done` with a `retired` reason in its detail. Finished rows are left as they are,
+  nothing is run, and no table is dropped: `reflection_candidates` and `reflection_labels` stay on disk and stay
+  owner-only. A node that has no such row changes nothing.
+
 ## [1.5.49] — 2026-11-10
 
 ### Added

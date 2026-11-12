@@ -465,9 +465,9 @@ EXECUTORS: Dict[str, ExecutorFn] = {
 #: claims only take kinds in EXECUTORS), so startup closes it as 'done' with this reason instead
 #: (``recover_pipeline_jobs``). Never re-add a kind here to EXECUTORS.
 RETIRED_KINDS: Dict[str, str] = {
-    # The 1.5.23 reflection sweep (GRANT_DECISIONS G6): since 1.5.25 the Moments app reads ``reflection_facts`` and
-    # finds, composes and labels conversations itself, so the node no longer builds reflection candidates.
-    "reflection_sweep": "retired: the Moments app reads reflection_facts and composes itself (G6)",
+    # The 1.5.23 reflection sweep (owner decision G6), removed in 1.5.39: an app reads ``pack_facts`` and finds,
+    # composes and labels conversations itself, so the node no longer builds reflection candidates.
+    "reflection_sweep": "retired in 1.5.39: apps read pack_facts and compose themselves (G6)",
 }
 
 

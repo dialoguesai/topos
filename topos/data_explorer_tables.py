@@ -35,8 +35,8 @@ def is_permission_state_table(table_name: str) -> bool:
 # - truth_checks, truth_labels: the inbound truth lane's claims and the owner's labels of them
 #   (query/truth_checks.py), never shared and never off the node (DISCLOSURE_RULES DR-49). Listed for the
 #   readers that import this set; the rule that hides them is the ``truth_`` prefix below.
-# - reflection_candidates, reflection_labels: written by the 1.5.23 reflection sweep and doors, retired under
-#   GRANT_DECISIONS G6 (DR-60). Nothing writes them now, but they still hold rows on installed nodes and dropping
+# - reflection_candidates, reflection_labels: written by the 1.5.23 reflection sweep and doors, removed in 1.5.39
+#   (owner decision G6, DR-60). Nothing writes them now, but they still hold rows on installed nodes and dropping
 #   the owner's data is the owner's call, so the guard stays until a migration the owner approves drops them.
 OWNER_ONLY_TABLES: frozenset[str] = frozenset(
     {"pipeline_jobs", "mcp_clients", "ai_chat_message_facets", "ai_coding_topos_touches", "truth_checks",
