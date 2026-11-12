@@ -77,18 +77,11 @@ def _record_role_for(row: Dict[str, Any], table: str, posture_for: Callable[[Dic
     return "observed"
 
 
-#: A record this short ("Wow. Okay.", "Thank you!!") says too little alone. DR-62 reads one in a
-#: context pack when its conversation gives it context; every other pack, and a context pack
-#: without context, still never reads it.
-SHORT_RECORD_CHARS = 15
-
-
 def _row_to_record(row: Dict[str, Any], *,
-                   posture_for: Callable[[Dict[str, Any]], str],
-                   keep_short: bool = False) -> Optional[Dict[str, Any]]:
+                   posture_for: Callable[[Dict[str, Any]], str]) -> Optional[Dict[str, Any]]:
     text = str(row.get("content") or row.get("text") or row.get("title") or "")
     short = len(text.strip()) <= SHORT_RECORD_CHARS
-    if short and not (keep_short and text.strip()):
+    if short and not (text.strip() and _reads_short_records()):
         return None
     rid = str(row.get("record_id") or row.get("message_id") or row.get("entry_id")
               or row.get("event_id") or row.get("id") or "")
@@ -96,15 +89,27 @@ def _row_to_record(row: Dict[str, Any], *,
         return None
     table = str(row.get("_table") or row.get("canonical_table") or "")
     role = _record_role_for(row, table, posture_for)
-    if short and not (role == "authored" and table == "conversation_messages"):
-        return None                          # only an owner's message can have a conversation's context
     date = str(row.get("event_at") or row.get("entry_at") or row.get("occurred_at") or "")[:10]
     rec = {"record_id": rid, "table": table or "canonical", "text": text,
            "role": role, "date": date,
            "source_id": str(row.get("source_id") or "")}
     if short:
+        if not (role == "authored" and table == "conversation_messages"):
+            return None                      # only an owner's message can have a conversation's context
         rec["short"] = True
     return rec
+
+
+#: A record this short ("Wow. Okay.", "Thank you!!") says too little alone. DR-62 reads one in a
+#: context pack when its conversation gives it context; every other pack, and a context pack
+#: without context, still never reads it.
+SHORT_RECORD_CHARS = 15
+
+
+def _reads_short_records() -> bool:
+    """Whether any pack reads a short record at all: only while a context pack is on (DR-62)."""
+    from ....features.derivation.template import context_packs
+    return bool(context_packs())
 
 
 #: DR-62: a context turn older than this before the owner's message belongs to another exchange.
@@ -576,6 +581,7 @@ def run_derivation_batch(
     # no conversation to show the parser or the verifier either, and no short message to read.
     ctx_cache: Dict[str, Any] = {"record_only": frozenset(
         pid for pid in all_packs if _tf.routes_to_classifier(pid, tf_model))}
+    ctx_packs = _T.context_packs()
 
     def judge(pack, rec, a, stage):
         """Verify one assertion; high-harm predicate classes get 3-vote majority
@@ -608,9 +614,7 @@ def run_derivation_batch(
             return a
         return _owners_own(apply_verdict(a, last_verdict), context)
 
-    ctx_packs = _T.context_packs()
-    recs = [rec for rec in (_row_to_record(row, posture_for=posture_for, keep_short=bool(ctx_packs))
-                            for row in rows) if rec is not None]
+    recs = [rec for rec in (_row_to_record(row, posture_for=posture_for) for row in rows) if rec is not None]
     _attach_dm_recipients(conn, recs)
     written = 0
     for rec in recs:
@@ -797,19 +801,6 @@ def _iter_history(conn, limit=2000, posture_for=None, since=None):
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role"
             f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15{msg_since}"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")]
-    # DR-62: the owner's short messages, for the context packs only. A query of their own, so
-    # the walk above, and every other pack's history, is exactly what it was.
-    from ....features.derivation.template import context_packs
-    short_ids = set()
-    if context_packs():
-        short_rows = _rows(
-            f"SELECT 'conversation_messages', message_id, content, event_at, actor_role, NULL,"
-            f" is_from_self, sender_id, sender_type, source_id, dataset_id, conversation_id"
-            f" FROM conversation_messages WHERE COALESCE(is_from_self,0)=1 AND content IS NOT NULL"
-            f" AND LENGTH(content)<={SHORT_RECORD_CHARS} AND LENGTH(TRIM(content))>0{msg_since}"
-            f" ORDER BY event_at DESC LIMIT {int(limit)}")
-        short_ids = {str(r[1]) for r in short_rows}
-        msg_rows = list(msg_rows) + list(short_rows)
     # The SENDER of each observed row, from the record — the label an any_with_label pack
     # carries into the prompt so a self-statement lands on the speaker's own node.
     speakers = {}
@@ -830,8 +821,23 @@ def _iter_history(conn, limit=2000, posture_for=None, since=None):
                     "speaker": str(display or "") if eid else "",
                     "speaker_entity_id": str(eid or ""),
                     "conversation_id": str(conv or "")})
-        if str(rid) in short_ids:
-            out[-1]["short"] = True
+    # DR-62: the owner's short messages, after everything else and marked `short`, for the
+    # context packs only. A query and a loop of their own, so the walk above, and every other
+    # pack's history, is exactly what it was, whatever columns that walk comes to carry.
+    if _reads_short_records():
+        for rid, text, at, stored, is_self, sender_id, sender_type, source_id, dataset_id, conv in _rows(
+                f"SELECT message_id, content, event_at, actor_role,"
+                f" is_from_self, sender_id, sender_type, source_id, dataset_id, conversation_id"
+                f" FROM conversation_messages WHERE COALESCE(is_from_self,0)=1 AND content IS NOT NULL"
+                f" AND LENGTH(content)<={SHORT_RECORD_CHARS} AND LENGTH(TRIM(content))>0{msg_since}"
+                f" ORDER BY event_at DESC LIMIT {int(limit)}"):
+            role = _record_role_for({"actor_role": stored, "is_from_self": is_self, "sender_id": sender_id,
+                                     "sender_type": sender_type, "source_id": source_id,
+                                     "dataset_id": dataset_id}, "conversation_messages", posture_for)
+            out.append({"table": "conversation_messages", "record_id": rid, "text": text,
+                        "date": str(at or "")[:10], "role": role, "source_id": "",
+                        "speaker": "", "speaker_entity_id": "",
+                        "conversation_id": str(conv or ""), "short": True})
     # The RECIPIENT of each owner-authored DM, for the same reason the speaker is carried:
     # who the message was addressed to comes from the record, never from the text.
     _attach_dm_recipients(conn, out)
