@@ -35,9 +35,13 @@ def is_permission_state_table(table_name: str) -> bool:
 # - truth_checks, truth_labels: the inbound truth lane's claims and the owner's labels of them
 #   (query/truth_checks.py), never shared and never off the node (DISCLOSURE_RULES DR-49). Listed for the
 #   readers that import this set; the rule that hides them is the ``truth_`` prefix below.
+#
+# - fact_feedback: the owner's reaction and rank on a pack fact (query/fact_feedback.py, DISCLOSURE_RULES DR-72).
+#   An app sees them only with the fact, through ``pack_facts`` and its filters; the raw table would give them, and
+#   the name of the app that recorded each, without those filters.
 OWNER_ONLY_TABLES: frozenset[str] = frozenset(
     {"pipeline_jobs", "mcp_clients", "ai_chat_message_facets", "ai_coding_topos_touches", "truth_checks",
-     "truth_labels", "reflection_candidates", "reflection_labels"}
+     "truth_labels", "reflection_candidates", "reflection_labels", "fact_feedback"}
 )
 
 #: Every table the inbound truth lane creates is owner-only, by name prefix rather than by listing: the lane added

@@ -1421,6 +1421,51 @@ async def put_backfill_auto(
         return _backfill_refusal(400, refused.code, str(refused))
 
 
+# --- facts written from a reaction the owner sent (features/derivation/reaction_retract.py) ----------
+# Counting them is a read. Ending them is the owner's: it changes what the node holds to be true.
+
+
+@router.get("/derivation/reaction-facts")
+async def get_reaction_facts(_api_key: str = Depends(require_api_key)):
+    """The standing pack facts whose every source record is a reaction the owner sent in Messages:
+    `{packs: [{pack_id, facts}], total, kept_confirmed, kept_marked, kept_other_record, kept_timing}`.
+    Pack ids and counts; nothing is written."""
+    import asyncio as _asyncio
+
+    from ..features.derivation import reaction_retract as reactions
+
+    return await _asyncio.to_thread(lambda: reactions.count(_entities_conn()))
+
+
+@router.post("/derivation/reaction-facts/retract")
+async def post_reaction_facts_retract(
+    body: Dict[str, Any] = Body(...),
+    _api_key: str = Depends(require_api_key),
+):
+    """End those facts: `{expected_total: N}`, the count the owner was shown.
+
+    403 `owner_confirmation_required` unless the caller is the app or presents the owner's confirmation
+    on the socket. 400 `reaction_facts_invalid` for a body that is not that. 409 `reaction_facts_changed`,
+    with nothing written, when the count is no longer `expected_total`. Answers the count's shape plus
+    `retracted` and `changed`: pack ids and counts, never a fact's value or a message's text."""
+    import asyncio as _asyncio
+
+    from ..features.derivation import reaction_retract as reactions
+    from ..uds import OWNER_CONFIRMATION_MESSAGE
+
+    if not _confirmed_owner_socket():
+        return _backfill_refusal(403, "owner_confirmation_required", OWNER_CONFIRMATION_MESSAGE)
+    expected = body.get("expected_total") if isinstance(body, dict) else None
+    if not isinstance(body, dict) or set(body) != {"expected_total"} \
+            or not isinstance(expected, int) or isinstance(expected, bool) or expected < 0:
+        return _backfill_refusal(400, "reaction_facts_invalid", "body is {expected_total}")
+    try:
+        return await _asyncio.to_thread(
+            lambda: reactions.retract(_entities_conn(), expected_total=expected))
+    except reactions.RetractRefused as refused:
+        return _backfill_refusal(409, refused.code, str(refused))
+
+
 @router.get("/derivation/backfill/runs/current")
 async def get_backfill_run(_api_key: str = Depends(require_api_key)):
     """The active run, else the last one this node process finished, else `{"run": null}`.

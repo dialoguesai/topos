@@ -30,6 +30,7 @@ from tests.permissions_v2.test_direct_message_evidence import setup as message_s
 from tests.permissions_v2.test_ingest_provenance import ingest_fixture  # noqa: F401 (fixture)
 from tests.permissions_v2.test_journal_family import SOURCE, _entry, _off_limits, _resolver, node  # noqa: F401
 from tests.permissions_v2.test_reconciliation_provenance import legacy  # noqa: F401 (fixture)
+from topos.features.derivation.reaction_retract import CLOSED_REASON as OWNER_ENDED_REACTION_FACT
 from topos.permissions_v2 import message_evidence
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.message_evidence import _floors, closed_fact_release, snapshot_message
@@ -240,6 +241,11 @@ CASES = {
     "source_deleted_sweep": (_raw(valid_to="2026-09-20 10:00:00"), None),
     "unknown_actor": (_raw(updated_by="quarantine_subject_absent"), None),
     "unknown_reason": (_writer("merged"), None),
+    # `topos-node packs retract-reactions --apply`: the owner ended a fact stored from a reaction they sent. It
+    # writes no tombstone, so the same value read later from another record is a machine fact of the same key
+    # made after the close. Neither case releases the reaction the ended fact names.
+    "owner_ended_a_fact_from_their_reaction": (_writer(OWNER_ENDED_REACTION_FACT, successor_model=None), None),
+    "owner_ended_a_fact_from_their_reaction_then_stored_again": (_writer(OWNER_ENDED_REACTION_FACT), None),
     "reason_not_text": (_writer(1), None),
     "legacy_tag_on_another_day": (_raw(valid_to="2026-11-02 10:00:00", updated_by="retired_legacy_20260826"), None),
     "od46_without_its_successor": (_od46(successor_at="2026-09-20T11:00:00Z"), None),

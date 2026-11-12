@@ -141,18 +141,35 @@ def _log_query_failure(
 #: Keys copied from a verify_claim's in-progress audit onto its failure line. All content-free by construction
 #: (verify.py builds them from mode, counts and timings); nothing else the worker might add is copied.
 _VERIFY_FAILURE_AUDIT_KEYS = ("mode", "retrieval_touched", "judge", "evidence_counts", "category", "task_id", "phase")
+#: Every `outcome` a failure line may carry: the request budget's two stop reasons, the three overload codes of
+#: engine/overload.py, and `error`. A stop reason is whatever its raiser passed, so a word not listed here is
+#: logged as `error`, never copied.
+_VERIFY_FAILURE_OUTCOMES = frozenset({"deadline_exceeded", "cancelled", "compute_busy", "compute_unavailable",
+                                      "compute_rate_limited", "error"})
+#: The fixed refusals a request can end on before any work is done. The line names the code; the mode or deadline
+#: the caller sent is never copied.
+_VERIFY_REFUSAL_REASONS = frozenset({"unknown_mode", "caller_app_id_required", "invalid_deadline_s"})
 
 
 def _log_verify_failure_audit(progress: Dict[str, Any], failure: str, caller_app_id: str,
-                              dispatched: float, worker_times: Dict[str, float]) -> None:
+                              dispatched: float, worker_times: Dict[str, float], *,
+                              reason: Any = None, retry_after: Optional[int] = None) -> None:
     """The same `truth verify_claim audit:` line a success writes, for a request that ended without a result.
 
     Before 1.5.39 the line was written only on success, so every 120 s deadline in the 1-2 Nov 2026 stress runs left no
     record of how far the request got. The worker may still be writing `progress` (the handler stops waiting at the
     deadline; the worker stops at its next budget check), so read single keys and copy nested dicts defensively.
+
+    `reason` is the refusal code of a request that never started (kept only when it is one of ours); `retry_after`
+    is the bounded seconds an overloaded model host asked for, under the name the caller's envelope uses.
     """
     now = time.perf_counter()
-    audit: Dict[str, Any] = {"outcome": failure, "caller_app_id": caller_app_id}
+    known = isinstance(failure, str) and failure in _VERIFY_FAILURE_OUTCOMES
+    audit: Dict[str, Any] = {"outcome": failure if known else "error", "caller_app_id": caller_app_id}
+    if isinstance(reason, str) and reason in _VERIFY_REFUSAL_REASONS:
+        audit["reason"] = reason
+    if retry_after is not None:
+        audit["retry_after_seconds"] = retry_after
     for key in _VERIFY_FAILURE_AUDIT_KEYS:
         value = progress.get(key)
         if value is not None:
@@ -210,12 +227,13 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
         from .common import run_db_read
         from ...engine.request_budget import RequestBudget, RequestStopped, budget_scope, await_budgeted, DEFAULT_VERIFY_SECONDS
 
+        dispatched = time.perf_counter()
         try:
             budget = RequestBudget(payload.get("deadline_s", DEFAULT_VERIFY_SECONDS))
         except ValueError:
+            _log_verify_failure_audit({}, "error", caller_app_id, dispatched, {}, reason="invalid_deadline_s")
             return {"id": req_id, "status": "error", "error": "invalid_deadline_s"}
 
-        dispatched = time.perf_counter()
         worker_times = {}
         # Filled by verify_claim as it goes, so a request that never returns still leaves
         # a content-free audit line saying how far it got.
@@ -240,7 +258,7 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
                 logger.info("truth verification worker terminal: stopped=%s elapsed_ms=%.3f",
                             budget.cancelled.is_set(), (worker_times["finished"] - dispatched) * 1000)
 
-        failure = "cancelled"
+        failure, retry_after = "cancelled", None
         try:
             with budget_scope(budget):
                 result = await await_budgeted(run_db_read(run), budget)
@@ -249,16 +267,23 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
             failure = exc.reason
             raise
         except ComputeUnavailable as exc:
-            failure = exc.code
+            # compute_busy, compute_unavailable or compute_rate_limited: the code the caller's envelope carries.
+            failure, retry_after = exc.code, exc.retry_after
             raise
         except Exception:
             failure = "error"
             raise
         finally:
             if failure is not None:
-                _log_verify_failure_audit(progress, failure, caller_app_id, dispatched, worker_times)
+                _log_verify_failure_audit(progress, failure, caller_app_id, dispatched, worker_times,
+                                          retry_after=retry_after)
         received = time.perf_counter()
         audit = result.pop("_audit", None)
+        if not audit and "error" in result:
+            # verify_claim refused the request before it built an audit (unknown mode, no caller_app_id): an exit
+            # like any other, so it gets its line too.
+            _log_verify_failure_audit(progress, "error", caller_app_id, dispatched, worker_times,
+                                      reason=result["error"])
         if audit:
             # Progress markers are for the failure line; a finished request reports its timings instead.
             audit.pop("phase", None)
@@ -625,6 +650,7 @@ async def handle_truth_own_claim_label(message: Dict[str, Any]) -> Optional[Dict
 # ``message_context`` (``query/message_context.py``): the turns around a message. The owner's app, and an owner agent on
 # the socket; the dispatcher has already held an agent to what its grant opens (``owner_agent_allowed_types``), so a
 # coding agent never reaches them. Every other class is refused before the payload is read. Reads: they write nothing.
+# The one write an app has is ``fact_feedback`` below, on a grant of its own.
 def _app_reader(principal: Any) -> Optional[str]:
     """"owner" or "agent" for a class this read serves, None for every other."""
     from ...principal import OWNER_AGENT, OWNER_APP
@@ -675,6 +701,56 @@ async def handle_pack_facts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
         _log_query_failure("pack_facts", req_id, exc)
         return _truth_error(req_id, "pack_facts_unavailable")
     await _record_query_request(message, {}, tool="pack_facts")
+    return {"id": req_id, "status": "ok", "payload": result}
+
+
+# ``fact_feedback`` (``query/fact_feedback.py``, DR-72): the one thing an app may write. Not a read, so it is not in the
+# dispatcher's open types: on the real socket it is a dangerous change for every caller but an enrolled app whose grant
+# opens it (``core/handlers/__init__.py``, ``_app_granted_write``).
+@handles("fact_feedback")
+async def handle_fact_feedback(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"fact_id", "reaction"?: love|like|sad|down|null, "rank"?: -3..3|null}`` -> the owner's reaction and rank on
+    one pack fact as stored after the write. An absent field is left as it was; null (or rank 0) takes it back.
+
+    Only an enrolled app on the socket whose grant gives feedback (``--feedback``), and only for a fact ``pack_facts``
+    would return to it now: any other fact, and an id that does not exist, get the one 404 ``fact_not_available``.
+    Every other class, and an app with reads only, is refused before the payload is read. Fixed codes, never the
+    input."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    from ...mcp_clients import app_agent_of, app_grant_of
+    from ...principal import current_principal
+
+    principal = current_principal()
+    app = app_agent_of(principal) if _app_reader(principal) == "agent" else None
+    grant = app_grant_of(principal)
+    if not app or not grant.feedback:
+        return {"id": req_id, "status": "error", "code": 403, "error": "feedback_grant_required"}
+    from ...query.fact_feedback import (
+        NOT_AVAILABLE, FactFeedbackRequestError, FactNotAvailable, parse_request, record,
+    )
+    from .common import run_db_write
+
+    try:
+        request = parse_request(message.get("payload"))
+    except FactFeedbackRequestError as exc:
+        return _truth_error(req_id, str(exc))
+
+    def run(conn: Any) -> Dict[str, Any]:
+        from ...features.lifecycle.blackhole_guard import guard_from_message
+
+        return record(conn, request, app=app, guard=guard_from_message(conn, message), granted=grant.packs,
+                      feedback=grant.feedback)
+
+    try:
+        result = await run_db_write(run)
+    except FactNotAvailable:
+        return {"id": req_id, "status": "error", "code": 404, "error": NOT_AVAILABLE}
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("fact_feedback", req_id, exc)
+        return _truth_error(req_id, "fact_feedback_unavailable")
+    await _record_query_request(message, {}, tool="fact_feedback")
     return {"id": req_id, "status": "ok", "payload": result}
 
 

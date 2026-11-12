@@ -24,7 +24,7 @@ import re
 import pytest
 
 import topos.control_plane_client as control_plane_client
-from topos.control_plane_client import INBOUND_AGE_BOUND_SECONDS, ControlPlaneClient
+from topos.control_plane_client import INBOUND_AGE_BOUND_SECONDS, INBOUND_GONE_READ_TYPES, ControlPlaneClient
 from topos.permissions_v2 import answer_transport, search_transport
 
 SEARCH, BATCH = "permissions_v2_message_search", "permissions_v2_message_search_batch"
@@ -38,7 +38,8 @@ NEVER_AGED = ("permissions_v2_mutate", "permissions_v2_bind", "permissions_v2_id
               "permissions_v2_share_counts", "get_table_rows", "store_message", "query")
 LINE = re.compile(r"control_plane_inbound_shed window_s=\d+ aged=(\d+) gone=(\d+) oldest_s=(\d+\.\d) "
                   r"aged_search=(\d+) aged_search_batch=(\d+) aged_answer_submit=(\d+) aged_answer_fetch=(\d+) "
-                  r"gone_search=(\d+) gone_search_batch=(\d+) gone_answer_submit=(\d+) gone_answer_fetch=(\d+)")
+                  r"gone_search=(\d+) gone_search_batch=(\d+) gone_answer_submit=(\d+) gone_answer_fetch=(\d+) "
+                  r"gone_read=(\d+)")
 
 
 class Socket:
@@ -198,7 +199,7 @@ async def test_one_line_a_window_with_counts_by_type_and_no_request_named(monkey
         assert match, line
         aged, gone, oldest, *by_type = match.groups()
         assert (int(aged), int(gone)) == (2, 0) and float(oldest) >= 0.2
-        assert [int(count) for count in by_type] == [1, 0, 0, 1, 0, 0, 0, 0]
+        assert [int(count) for count in by_type] == [1, 0, 0, 1, 0, 0, 0, 0, 0]
         assert "an-id-no-line-may-carry" not in line and "another-id" not in line
         # Nothing shed since: no line, however long.
         await node.receive("s-4", SEARCH)
@@ -229,3 +230,117 @@ async def test_a_batch_past_its_own_respond_by_is_not_handled_even_inside_the_bo
     replies = {reply["id"]: reply for reply in node.socket.sent}
     assert replies["gone-by"]["error_code"] == "engine_busy"
     assert node.client.inbound_shed_counts() == {("aged", BATCH): 1}
+
+
+# --- 27 Oct 2026: a read whose connection closed is dropped too ---------------------------------------------------
+
+#: Writes and protocol commands that are applied however late they are reached, their socket closed or not; and
+#: the types added after the list was drawn up (a write and three reads), which stay out of it until someone reads
+#: their handlers for this purpose.
+APPLIED_WHEN_GONE = ("permissions_v2_mutate", "permissions_v2_bind", "permissions_v2_identity_command",
+                     "store_message", "llm_integrations_storage", "upsert_home_chat_session", "query",
+                     "truth_own_claim_label", "pack_facts", "message_context", "messenger_rating_candidates")
+
+
+def test_the_list_is_closed_at_the_twelve_reads_that_were_measured():
+    # A type joins by a change to this test as well as the list: its handler read first (no write the caller asked
+    # for, the same answer when asked again). A new handler is never in it by default.
+    assert INBOUND_GONE_READ_TYPES == {
+        "list_database_tables", "get_table_rows", "list_jsonl_files",
+        "get_sources", "get_sources_overview", "get_source_install_status", "get_disk_status",
+        "permissions_v2_status", "permissions_v2_share_catalog", "permissions_v2_share_counts",
+        "signal_data_health", "truth_weekly_stats"}
+
+
+def test_the_reads_dropped_when_gone_are_registered_reads_and_none_is_aged_or_fast():
+    from topos.core.handlers.registry import HANDLERS
+    import topos.core.handlers  # noqa: F401  (registers every handler)
+
+    assert INBOUND_GONE_READ_TYPES <= set(HANDLERS)
+    assert not INBOUND_GONE_READ_TYPES & set(INBOUND_AGE_BOUND_SECONDS)
+    assert not INBOUND_GONE_READ_TYPES & control_plane_client._FAST_INBOUND_MESSAGE_TYPES
+    assert not INBOUND_GONE_READ_TYPES & set(APPLIED_WHEN_GONE)
+    assert set(APPLIED_WHEN_GONE) <= set(HANDLERS)            # each is a type this node handles today, not a typo
+    assert not set(APPLIED_WHEN_GONE) & control_plane_client._FAST_INBOUND_MESSAGE_TYPES
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", sorted(INBOUND_GONE_READ_TYPES))
+async def test_a_read_whose_connection_closed_while_it_waited_is_dropped_with_no_reply_anywhere(kind, monkeypatch):
+    node = Node(monkeypatch)
+    first = node.socket
+    await node.receive("held", "holds_the_slot")
+    await node.receive("r-1", kind)
+    second = node.connect()                       # the laptop slept; the wake found the socket dead and made another
+    await node.receive("r-2", kind, second)       # asked again on the new connection: handled there
+    await node.drain()
+    assert node.handled == ["held", "r-2"]
+    assert [reply["id"] for reply in first.sent] == ["held"]
+    assert [reply["id"] for reply in second.sent] == ["r-2"]
+    assert node.client.inbound_shed_counts() == {("gone", kind): 1}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", APPLIED_WHEN_GONE)
+async def test_a_write_whose_connection_closed_is_still_applied(kind, monkeypatch):
+    node = Node(monkeypatch)
+    first = node.socket
+    await node.receive("held", "holds_the_slot")
+    await node.receive("w-1", kind)
+    node.connect()
+    await node.drain()
+    assert node.handled == ["held", "w-1"]
+    assert sorted(reply["id"] for reply in first.sent) == ["held", "w-1"]   # as before: sent where it came from
+    assert node.client.inbound_shed_counts() == {}
+
+
+@pytest.mark.asyncio
+async def test_a_read_a_write_and_a_command_behind_one_slot_only_the_read_is_dropped(monkeypatch):
+    # The three in the same position: queued behind one held slot, on the socket that then closed. With more slots
+    # than one too, so the rule is the type's and not the order's.
+    for slots in (1, 3):
+        node = Node(monkeypatch, slots=slots)
+        first = node.socket
+        for held in range(slots):
+            await node.receive(f"held-{held}", "holds_the_slot")
+        await node.receive("read", "get_table_rows")
+        await node.receive("write", "store_message")
+        await node.receive("command", "permissions_v2_bind")
+        node.connect()
+        await node.drain()
+        ran = {f"held-{held}" for held in range(slots)} | {"write", "command"}
+        assert set(node.handled) == ran and len(node.handled) == len(ran)                 # each once; never the read
+        assert {reply["id"] for reply in first.sent} == ran                               # sent where they came from
+        assert node.client.inbound_shed_counts() == {("gone", "get_table_rows"): 1}
+
+
+@pytest.mark.asyncio
+async def test_a_read_on_a_live_connection_is_handled_however_long_it_waited(monkeypatch):
+    bounds(monkeypatch, 0.05)
+    node = Node(monkeypatch)
+    await node.receive("held", "holds_the_slot")
+    await node.receive("late", "truth_weekly_stats")
+    await asyncio.sleep(0.2)
+    await node.drain()
+    assert node.handled == ["held", "late"] and node.client.inbound_shed_counts() == {}
+
+
+@pytest.mark.asyncio
+async def test_the_line_counts_the_dropped_reads(monkeypatch, caplog):
+    monkeypatch.setattr(control_plane_client, "INBOUND_SHED_LOG_SECONDS", 0.1)
+    node = Node(monkeypatch)
+    with caplog.at_level(logging.INFO, logger="topos.control_plane_client"):
+        await node.receive("held", "holds_the_slot")
+        await node.receive("r-1", "get_table_rows")
+        await node.receive("r-2", "truth_weekly_stats")
+        await node.receive("s-1", SEARCH)
+        node.connect()
+        await node.drain()
+        await asyncio.sleep(0.2)
+    [line] = [record.getMessage() for record in caplog.records
+              if "control_plane_inbound_shed" in record.getMessage()]
+    match = LINE.fullmatch(line)
+    assert match, line
+    aged, gone, *_rest = match.groups()
+    assert (int(aged), int(gone), int(match.group(8)), int(match.group(12))) == (0, 3, 1, 2)
+    assert "r-1" not in line and "truth_weekly_stats" not in line

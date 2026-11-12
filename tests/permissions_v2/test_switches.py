@@ -165,7 +165,13 @@ VOFF2 = {**VOWN, P + "OWNER_LANE": True, P + "BACKGROUND_YIELDS_TO_OWNER": True}
 #: member its build admitted is withheld on its own instead of its whole share index going; on bound and unbound
 #: alike, read only while INDEX_NARROW_MEMBERS is on. 65 + 1 = 66.
 VDR70 = {**VOFF2, P + "INDEX_NARROW_INTERESTS": True}
-TABLE = {**V166, **VDR70}
+#: Grant response quality (11 Nov 2026, the parts of topos#102 that need no model to decide), every switch off bound
+#: and unbound alike until a battery with the real writer and real embeddings measures it: the word lane also matches
+#: a query word's regular plural or singular (+ 1), leaves a request's own words out of the query (+ 1), and the
+#: answer prompt shares its room for the items' text between them and cuts at a sentence end (+ 1). 66 + 3 = 69.
+V102 = {**VDR70, P + "SEARCH_PLURAL_FOLD": False, P + "SEARCH_REQUEST_WORDS": False,
+        P + "ANSWER_SHARED_CONTEXT": False}
+TABLE = {**V166, **V102}
 
 
 @pytest.fixture(autouse=True)
@@ -303,8 +309,8 @@ def observe(name, monkeypatch, tmp_path):
 
 def test_the_table_holds_every_name_1_4_4_read_and_no_other():
     assert set(switches.BY_NAME) == set(TABLE)
-    assert len(switches.SWITCHES) == len(TABLE) == 66
-    assert sum(name.startswith(P) for name in switches.BY_NAME) == 65
+    assert len(switches.SWITCHES) == len(TABLE) == 69
+    assert sum(name.startswith(P) for name in switches.BY_NAME) == 68
     for item in switches.SWITCHES:
         assert item.purpose and item.kind in ("bool", "int", "choice", "path", "list"), item.name
 
@@ -544,6 +550,23 @@ def test_the_g1_denied_domain_refusal_is_off_bound_or_not_and_on_is_one_environm
     name = P + "ANSWER_DENIED_DOMAIN_REFUSAL"
     item = switches.lookup(name)
     assert item.unbound == item.bound == V136[name] is False
+    assert switches.value(name) is False
+    monkeypatch.setenv(name, "true")
+    assert switches.value(name) is True
+
+
+@pytest.mark.parametrize("bound", [False, True], ids=["unbound", "bound"])
+@pytest.mark.parametrize("short", ["SEARCH_PLURAL_FOLD", "SEARCH_REQUEST_WORDS", "ANSWER_SHARED_CONTEXT"])
+def test_the_grant_response_quality_switches_are_off_bound_or_not_and_on_is_one_environment_line(
+        short, bound, state, monkeypatch):
+    """The parts of topos#102 that need no model: off with nothing set (the word lane, the prompt and the receipt of
+    1.5.49), read without an `is_bound()` stat; on is one environment line each
+    (`tests/permissions_v2/test_search_word_lane_options.py` and `test_answer_shared_context.py` pin what they do)."""
+    state(bound)
+    name = P + short
+    item = switches.lookup(name)
+    assert item.kind == "bool"
+    assert item.unbound == item.bound == V102[name] is False
     assert switches.value(name) is False
     monkeypatch.setenv(name, "true")
     assert switches.value(name) is True

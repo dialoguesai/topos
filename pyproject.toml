@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "topos-node"
-version = "1.5.49"
+version = "1.5.50"
 description = "Topos personal AI engine (FastAPI): local data, sync, control plane WebSocket client"
 readme = "README.md"
 license = "Apache-2.0"
@@ -80,6 +80,11 @@ dependencies = [
   "pillow>=10.0",
   # Pure-data validation of complete native iMessage archives; no NSUnarchiver.
   "pytypedstream==0.1.0",
+  # Signal Desktop's database is SQLCipher (topos.ingestion.sources.signal_reader). Prebuilt wheels
+  # with SQLCipher inside, so `topos-node sources enable signal` works on a plain install; the old
+  # `signal` extra (pysqlcipher3) only built against a system SQLCipher nobody had. macOS only: that
+  # is where the reader finds Signal's files and its key (the login Keychain).
+  "sqlcipher3>=0.6.2,<0.7; sys_platform == 'darwin'",
 ]
 
 [project.urls]
@@ -122,8 +127,9 @@ engine = [
 ]
 # Backward-compatible alias; local runtime deps are in core dependencies.
 local = []
+# Kept so `topos-node[signal]` still installs the reader on an install that predates it in core.
 signal = [
-  "pysqlcipher3~=1.2.0",
+  "sqlcipher3>=0.6.2,<0.7",
 ]
 dev = [
   "opentelemetry-sdk>=1.39,<2",

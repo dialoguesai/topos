@@ -77,7 +77,8 @@ READERS = {
     # principal (`guard_from_message`: an owner agent on the socket reads the request's own view, `for_request`; the
     # owner's app is the owner's own eyes); the read itself takes that guard and asks the store for a pending rebuild
     # in the guard's view only.
-    "core/handlers/query.py": "pack_facts, message_context and verify_claim: `guard_from_message` from the verified principal "
+    "core/handlers/query.py": "pack_facts, message_context, verify_claim and fact_feedback (an app's write, checked "
+                              "against what pack_facts would give it): `guard_from_message` from the verified principal "
                               "(an owner agent reads the request's own view; the owner's app sees everything); nothing "
                               "else in the module reads the list",
     "query/verify.py": GUARD,  # with no guard passed: every entry, as for a caller the node cannot place
@@ -104,6 +105,9 @@ READERS = {
     "features/derivation/social_bench.py": OWN,
     "features/derivation/person_reading.py": OWN,
     "features/derivation/synthesize.py": OWN,
+    # DR-62 (owner, 26 Oct 2026): the Moments packs read an owner's message with the turns before it, never a turn
+    # the owner's own Off-limits view protects, nor any turn of a conversation with an Off-limits person.
+    "enrichment/jobs/canonical/derivation_job.py": OWN,
     "features/entities/affinity.py": OWN,
     "features/entities/affinity_owner.py": OWN,
     "features/entities/affinity_quality.py": OWN,

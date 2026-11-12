@@ -25,7 +25,14 @@ and no special-class filter, as on every owner read (owner questions read with f
   ``key:``) or a raw phone number or email. A reference that does not resolve to a name is left out, the writer's bound
   ``*_entity_id(s)`` keys are dropped, and any id- or handle-shaped token left in text becomes "someone";
 * the fact's quote, and a source record's text, only when the owner wrote it. A record someone else wrote gives its
-  source and date only. Record ids never leave.
+  source and date only. Record ids never leave;
+* the records a tension or joy fact was read WITH (DR-62: the turns before the owner's message, the payload's
+  ``context_refs``) are never a source and never shown. For an agent they protect the fact as a source does: it is
+  left out when one is protected or names a protected person, is tagged NSFW, or can no longer be read.
+
+Each fact also carries ``reaction`` and ``rank``: what the owner put on it through an app holding the feedback grant
+(``query/fact_feedback.py``, DR-72), or None. They are the owner's, so every reader of the fact gets them; the read
+never orders or filters by them.
 """
 from __future__ import annotations
 
@@ -384,6 +391,18 @@ def _withheld(guard: Any, payload: Dict[str, Any], ids: List[str], raws: List[st
     return False
 
 
+def _context_withheld(guard: Any, context: List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]]) -> bool:
+    """Whether the records a fact was read with (DR-62) leave it out of an agent's read. Off-limits only when the
+    guard filters (``guard`` None otherwise); a record gone, unreadable or tagged NSFW always."""
+    for ref, record in context:
+        if record is None or (record.get("row") or {}).get("content_nsfw"):
+            return True
+        if guard is not None and (guard.blocks_record_id(str(ref["record_id"]))
+                                  or guard.text_mentions_blackholed(record.get("text") or "")):
+            return True
+    return False
+
+
 # --- the read ------------------------------------------------------------------------------------------------------------
 def read(conn: sqlite3.Connection, request: Dict[str, Any], *, agent: bool, guard: Any = None,
          granted: Optional[Tuple[str, ...]] = None, now: Optional[datetime] = None) -> Dict[str, Any]:
@@ -427,16 +446,21 @@ def read(conn: sqlite3.Connection, request: Dict[str, Any], *, agent: bool, guar
         all_raws += raws
         refs = [r for r in (refs if isinstance(refs, list) else [])
                 if isinstance(r, dict) and r.get("table") and r.get("record_id")]
-        parsed.append((object_id, payload, refs, valid_from, str(pack), version, altitude, predicate, value, kinds,
-                       raws, ids))
+        context = [r for r in (payload.get("context_refs") if isinstance(payload.get("context_refs"), list) else [])
+                   if isinstance(r, dict) and r.get("table") and r.get("record_id")]
+        parsed.append((object_id, payload, refs, context, valid_from, str(pack), version, altitude, predicate, value,
+                       kinds, raws, ids))
     names = resolve_people(conn, all_raws)
     cache: Dict[str, Optional[str]] = {}
     limit = int(request.get("limit") or DEFAULT_LIMIT)
-    for object_id, payload, refs, valid_from, pack, version, altitude, predicate, value, kinds, raws, ids in parsed:
+    for (object_id, payload, refs, context, valid_from, pack, version, altitude, predicate, value, kinds, raws,
+         ids) in parsed:
         shown, people = _shown_value(value, kinds, names)
         resolved = [names[r] for r in raws if names.get(r)]
         authored = str(payload.get("actor_role") or "") == "authored"
         sources = _sources(conn, refs, cache)
+        if agent and context and _context_withheld(guard if filtering else None, _sources(conn, context, cache)):
+            continue
         if filtering:
             texts = [*_strings(value), str(payload.get("quote") or ""), str(payload.get("object_value") or "")]
             if _withheld(guard, payload, ids, raws, resolved, texts, sources):
@@ -453,8 +477,22 @@ def read(conn: sqlite3.Connection, request: Dict[str, Any], *, agent: bool, guar
             "at": valid_from, "day": _day(valid_from),
             "sources": [_source(ref, record, valid_from, request.get("include_excerpts", False))
                         for ref, record in sources[:MAX_SOURCES]],
+            "reaction": None, "rank": None,
         })
+    _attach_feedback(conn, result["facts"])
     return result
+
+
+def _attach_feedback(conn: sqlite3.Connection, facts: List[Dict[str, Any]]) -> None:
+    """The owner's reaction and rank on each returned fact (``query/fact_feedback.py``, DR-72): ``reaction`` is one of
+    love, like, sad, down or None, ``rank`` a whole number from -3 to 3 without 0, or None. Looked up only for the
+    facts this reader is being given, after every filter, and never which app recorded them. The node orders nothing by
+    them."""
+    from .fact_feedback import for_facts
+
+    feedback = for_facts(conn, [fact["id"] for fact in facts])
+    for fact in facts:
+        fact["reaction"], fact["rank"] = feedback.get(fact["id"], (None, None))
 
 
 def _source(ref: Dict[str, Any], record: Optional[Dict[str, Any]], at: Any, include_excerpt: bool) -> Dict[str, Any]:
