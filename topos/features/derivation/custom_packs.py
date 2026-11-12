@@ -23,8 +23,11 @@ What is different about a custom pack, all of it decided here and in `registry`:
   records for a bundled pack that is off so it can offer it, never runs for a pack from outside
   the package (`derivation_job._self_gate`).
 * A file that does not validate is refused by `install_pack` with one plain sentence. At run time
-  it is skipped and said once in the log, and the bundled packs keep working: one bad file in the
-  owner's data directory must not take the fact layer down. Every part of a pack the engine reads
+  it is skipped and said once in the log, and every other pack, bundled or added, keeps working:
+  one bad file in the owner's data directory must not take the fact layer down, and must not
+  switch the owner's other packs off. That holds for a file the parser itself chokes on (a date
+  that does not exist, a number too long to read, brackets nested without end): whatever one
+  file raises is that file's problem alone (`_scan`). Every part of a pack the engine reads
   is checked for its shape here (`check_definition`), because the ingest job builds a prefilter
   for every loaded pack, on or off: a shape it cannot iterate would stop every pack's batch.
 * A refusal names a rule, a position, or a name that already passed its own check. It never
@@ -118,9 +121,28 @@ def _one_line(value: Any, low: int, high: int) -> bool:
     return _text(value, low, high) and value.isprintable()
 
 
+def _one_of(value: Any, allowed: Iterable[str]) -> bool:
+    """A word from a fixed list. Asked of text only: a list or a mapping where a word belongs cannot be looked
+    up in a set at all, and the lookup raised instead of refusing."""
+    return isinstance(value, str) and value in allowed
+
+
 def _texts(value: Any, low: int, high: int, longest: int) -> bool:
     return (isinstance(value, list) and low <= len(value) <= high
             and all(_text(item, 1, longest) for item in value))
+
+
+_NOT_UNICODE = "The file holds text that is not valid Unicode. Remove the escape that starts with a backslash and `ud`."
+
+
+def _storable(text: str) -> bool:
+    """Text that can be written down as UTF-8. A YAML escape for half of a surrogate pair parses to text that
+    cannot: the registry digest, the database and the model request would each raise on it."""
+    try:
+        text.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _check_plain_tree(raw: Any) -> None:
@@ -142,12 +164,16 @@ def _check_plain_tree(raw: Any) -> None:
                 if not all(isinstance(key, str) for key in node):
                     _refuse("Every key in the file must be text. Put a key in quotes if it looks like a "
                             "number, a date or yes/no.")
+                if not all(_storable(key) for key in node):
+                    _refuse(_NOT_UNICODE)
                 stack.extend((value, depth + 1) for value in node.values())
             else:
                 stack.extend((value, depth + 1) for value in node)
         elif not isinstance(node, _SCALARS):
             _refuse("The file uses a YAML type a pack cannot hold. Use text, numbers, true/false, lists and "
                     "mappings.")
+        elif isinstance(node, str) and not _storable(node):
+            _refuse(_NOT_UNICODE)
 
 
 def _check_enum(values: Any, where: str) -> None:
@@ -168,7 +194,7 @@ def _check_field(spec: Any, where: str, scales: Dict[str, List[str]]) -> None:
     if isinstance(spec, dict) and set(spec) == {"enum"}:
         return _check_enum(spec["enum"], where)
     if isinstance(spec, dict) and set(spec) == {"scale"}:
-        if spec["scale"] not in scales:
+        if not _one_of(spec["scale"], scales):
             _refuse(f"{where} names a scale Topos does not ship. Use one of: {', '.join(sorted(scales))}.")
         return
     _refuse(f"{where} must be a type name, a list of allowed values, {{enum: [...]}} or {{scale: name}}.")
@@ -194,18 +220,18 @@ def _check_predicate(pred: Any, position: int, seen: set, scales: Dict[str, List
     if name in seen:
         _refuse(f"The predicate {name} is declared twice.")
     seen.add(name)
-    if pred.get("cardinality") not in CARDINALITIES:
+    if not _one_of(pred.get("cardinality"), CARDINALITIES):
         _refuse(f"{name}: `cardinality` must be one of: {', '.join(CARDINALITIES)}.")
-    if pred.get("temporal") not in TEMPORALS:
+    if not _one_of(pred.get("temporal"), TEMPORALS):
         _refuse(f"{name}: `temporal` must be one of: {', '.join(TEMPORALS)}.")
     if pred.get("altitude") != "stated":
         allowed = ", ".join(a for a in ALTITUDES if a != "stated")
         _refuse(f"{name}: `altitude` must be stated. A pack you add reads what a record says; "
                 f"{allowed} facts are not supported in one yet.")
-    if pred.get("sensitivity") is not None and pred.get("sensitivity") not in SENSITIVITY:
+    if pred.get("sensitivity") is not None and not _one_of(pred.get("sensitivity"), SENSITIVITY):
         _refuse(f"{name}: `sensitivity` must be one of: {', '.join(SENSITIVITY)}.")
     value_type = pred.get("value_type")
-    if value_type not in _VALUE_TYPES:
+    if not _one_of(value_type, _VALUE_TYPES):
         _refuse(f"{name}: `value_type` must be structured, enum or one of: {', '.join(sorted(KNOWN_VALUE_TYPES))}.")
     schema, values = pred.get("value_schema"), pred.get("values")
     if value_type == "structured":
@@ -287,13 +313,13 @@ def check_definition(raw: Any, *, scales: Optional[Dict[str, List[str]]] = None)
     if not _one_line(raw.get("title"), 1, 120):
         _refuse("`title` must be a short name for the pack on one line (1 to 120 characters, "
                 "no control characters).")
-    if raw.get("sensitivity_class") not in SENSITIVITY:
+    if not _one_of(raw.get("sensitivity_class"), SENSITIVITY):
         _refuse(f"`sensitivity_class` must be one of: {', '.join(SENSITIVITY)}.")
-    if raw.get("role_policy") not in ROLE_POLICIES:
+    if not _one_of(raw.get("role_policy"), ROLE_POLICIES):
         _refuse(f"`role_policy` must be one of: {', '.join(ROLE_POLICIES)}.")
     if str(raw.get("net_subject") or "deny").strip().lower() != "deny":
         _refuse("A pack you add can only describe you. Remove `net_subject: allow`.")
-    if raw.get("disclosure_default") not in (None, "owner_only"):
+    if raw.get("disclosure_default") is not None and raw.get("disclosure_default") != "owner_only":
         _refuse("`disclosure_default` must be owner_only (or left out).")
     if raw.get("synthesis"):
         _refuse("`synthesis` is not supported in a pack you add yet. Remove it.")
@@ -322,6 +348,10 @@ def check_definition(raw: Any, *, scales: Optional[Dict[str, List[str]]] = None)
     _check_revision(raw.get("revision"), predicates)
 
 
+#: The one sentence for a file no rule names: said instead of whatever a check or the engine's loader raised.
+_UNREADABLE = "The file is not a pack Topos can read."
+
+
 def parse_definition(content: bytes) -> Dict[str, Any]:
     """The pack a file's bytes declare, checked. Raises :class:`CustomPackError`; never echoes the content."""
     if len(content) > MAX_BYTES:
@@ -333,7 +363,23 @@ def parse_definition(content: bytes) -> Dict[str, Any]:
     except yaml.YAMLError as exc:
         mark = getattr(exc, "problem_mark", None)
         _refuse("The file is not valid YAML" + (f" (line {mark.line + 1})." if mark is not None else "."))
-    check_definition(raw)
+    except RecursionError:
+        _refuse(f"The file nests more than {MAX_DEPTH} levels deep.")
+    except Exception:  # noqa: BLE001 -- the parser's own error for a value it cannot build, never passed on
+        # Not a `YAMLError`: the parser raises a bare ValueError for a date that does not exist (2026-13-45) or a
+        # whole number of more than 4300 digits, and KeyError or AttributeError for a value that does not fit the
+        # tag written before it (`!!bool maybe`, `!!timestamp soon`). Its message quotes the value.
+        _refuse("The file holds a value that cannot be read: a date or time that does not exist, a number that "
+                "is too long, or a value that does not fit its `!!` tag. Put it in quotes to keep it as text.")
+    try:
+        check_definition(raw)
+    except CustomPackError:
+        raise
+    except RecursionError:
+        _refuse(f"The file nests more than {MAX_DEPTH} levels deep.")
+    except Exception as exc:  # noqa: BLE001 -- a shape no rule above names; never a raw error to the caller
+        logger.warning("custom fact pack: a check raised %s; the file is refused", type(exc).__name__)
+        _refuse(_UNREADABLE)
     return raw
 
 
@@ -348,7 +394,7 @@ def _load_checked(path: Path) -> Pack:
     except CustomPackError:
         raise
     except Exception as exc:  # noqa: BLE001 -- the loader's refusal, or a shape it did not expect
-        raise CustomPackError("The file is not a pack Topos can read.") from exc
+        raise CustomPackError(_UNREADABLE) from exc
     if pack.first_party or not is_custom_id(pack.pack):
         _refuse("A pack you add cannot be one Topos ships.")
     return pack
@@ -401,6 +447,13 @@ def _scan() -> Tuple[Dict[str, Pack], Dict[str, str]]:
         except OSError:
             problems[_shown_name(path)] = "The file could not be read."
             continue
+        except Exception as exc:  # noqa: BLE001 -- one file's error is that file's problem, whatever it is
+            # Without this, one file the checks raised on (not refused) emptied the whole scan: no added pack
+            # loaded, `packs list` named no file, and the next seeding switched every added pack off.
+            logger.warning("custom fact pack %s: a check raised %s; the file is left out",
+                           _shown_name(path), type(exc).__name__)
+            problems[_shown_name(path)] = _UNREADABLE
+            continue
         packs[pack.pack] = pack
         predicates.update({name: pack.pack for name in pack.predicates})
     return packs, problems
@@ -448,10 +501,13 @@ def check_content(content: bytes) -> Pack:
     raw = parse_definition(content)
     # The loader reads a path, and decides first-party-ness from it: check a private copy of the bytes, so the
     # answer is about what will be written and not about where the owner kept the file.
-    with tempfile.TemporaryDirectory(prefix="topos-pack-check-") as scratch:
-        copy = Path(scratch) / f"{raw['pack']}.yaml"
-        copy.write_bytes(content)
-        pack = _load_checked(copy)
+    try:
+        with tempfile.TemporaryDirectory(prefix="topos-pack-check-") as scratch:
+            copy = Path(scratch) / f"{raw['pack']}.yaml"
+            copy.write_bytes(content)
+            pack = _load_checked(copy)
+    except OSError:
+        _refuse("The file could not be checked: Topos could not write a temporary copy of it.")
     ids, names = _bundled_names()
     if pack.pack in ids or set(pack.predicates) & names:
         _refuse("That pack uses a name Topos ships. Give it and its predicates names of their own.")

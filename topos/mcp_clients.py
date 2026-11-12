@@ -413,6 +413,30 @@ def list_agents(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return rows
 
 
+def apps_granted_pack(conn: sqlite3.Connection, pack_id: str) -> int:
+    """How many connected apps hold a grant that names this pack id. A read; it creates no table.
+
+    A grant stores the pack id, not the definition the id stood for when the owner approved it. So when a pack
+    the owner added is replaced under the same id (a new version, or another file after `packs remove`), a grant
+    approved earlier covers the new definition once the owner switches the pack on. `topos-node packs add` asks
+    this so it can say so before the owner answers. Raises ``sqlite3.Error`` on a database it cannot read; a
+    database with no agents or no grants yet answers 0."""
+    tables = {str(r[0]) for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if MCP_CLIENTS_TABLE not in tables or APP_GRANTS_TABLE not in tables:
+        return 0
+    rows = conn.execute(
+        f"SELECT g.reads_json FROM {APP_GRANTS_TABLE} g JOIN {MCP_CLIENTS_TABLE} c ON c.client_id = g.client_id"
+        f" WHERE c.principal_class = '{AGENT_PRINCIPAL_CLASS}' AND c.revoked_at IS NULL").fetchall()
+    count = 0
+    for (reads_json,) in rows:
+        try:
+            packs = (json.loads(reads_json) or {}).get("packs") or ()
+        except (ValueError, TypeError, AttributeError):
+            continue
+        count += 1 if pack_id in packs else 0
+    return count
+
+
 def _touch_last_used(conn: sqlite3.Connection, client_id: str) -> None:
     try:
         from .core.state import commit_connection, with_db_write

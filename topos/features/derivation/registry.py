@@ -77,7 +77,9 @@ def definition_sha(pack: Pack, *, stamped: bool = True) -> Optional[str]:
         body = repr(getattr(pack, "raw", None))
     if stamped:
         body += "\n" + _install_stamp(pack)
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+    # `backslashreplace`: text that is not valid Unicode (`custom_packs` refuses it) must not raise here, where
+    # one pack's digest is computed inside the seeding of every pack.
+    return hashlib.sha256(body.encode("utf-8", "backslashreplace")).hexdigest()
 
 
 def runs_as_switched_on(conn: sqlite3.Connection, pack: Pack) -> bool:

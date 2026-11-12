@@ -20,18 +20,26 @@ The machine-readable twin of each release is
     packs page, like any pack. Topos never samples your records to suggest it, as it can for a shipped pack
     that is off. The switch records the exact definition you switched on: if the file changes, is removed
     (also when the same file is added again) or stops validating, the pack is switched off and reads nothing
-    until you switch it on again.
+    until you switch it on again. From that moment no app reads the facts it wrote earlier either, until you
+    switch it on again.
   - *It cannot take the place of a pack Topos ships.* Its id and its predicates must start with `custom.`,
     which no shipped pack uses, so neither today's packs nor a later release's can be shadowed or replaced.
   - *A file that is not a valid pack is refused* with one sentence saying what is wrong, and nothing is
-    written. Every part of the file Topos reads is checked, and the title must be one plain line, because it
-    heads what you are asked to approve. If a file already in the directory stops validating, `packs list`
-    names it and every other pack keeps working.
+    written. That includes a file the YAML reader itself cannot read: a date that does not exist, a number
+    thousands of digits long, brackets nested without end. Every part of the file Topos reads is checked, and
+    the title must be one plain line, because it heads what you are asked to approve. If a file already in
+    the directory stops validating, `packs list` names it, and every other pack keeps working and keeps its
+    switch, the other packs you added included.
   - *The same rules as a shipped pack.* It describes you only, its facts are stored owner-only with the
-    sensitivity the pack declares, and a fact about another person is held for review instead of written. An
-    app reads its facts only through a grant that names the pack, with special-class facts and anything
-    Off-limits held back, as for a shipped pack. Which facts are special-class rests on what the file
-    declares, which `packs add` shows you before it asks.
+    sensitivity the pack declares, and a fact about another person is held for review instead of written.
+    Which facts are special-class rests on what the file declares, which `packs add` shows you before it asks.
+  - *Who reads its facts.* An app reads them only through a grant that names the pack, with special-class
+    facts and anything Off-limits held back, as for a shipped pack. A grant names the pack's id, not its
+    definition: if an app's grant already names the id you are adding, `packs add` says how many apps that
+    is before it asks, because that grant will cover the new definition once you switch the pack on. A coding
+    agent you connected and your routines are not apps and need no grant: an answer Topos gives them can
+    draw on this pack's facts, as it can on a shipped pack's. Whether a pack you add should be held back
+    from them is not decided yet.
   - *Not in a share with another person yet.* The fact categories a share can name are a fixed list, and a
     pack you add is not on it, so its facts are refused for every share.
   - *An app cannot add one.* Only the `packs add` command writes to the pack directory, and it asks a person

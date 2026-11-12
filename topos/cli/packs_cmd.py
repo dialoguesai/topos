@@ -43,8 +43,10 @@ A pack of the owner's own is added from a file (`features/derivation/custom_pack
 
 `add` is a change to what the node may write about its owner, so it asks the same way a backfill
 does: on a terminal, once, and there is no flag that answers for the person. It writes the pack file
-and a small stamp beside it in the node's own pack directory and touches nothing else, so it works
-with the node stopped. The pack
+and a small stamp beside it in the node's own pack directory and writes nothing else, so it works
+with the node stopped. Its one other read is the node's database, read-only, to count the apps whose
+grant already names the pack's id (`_apps_granted`): a grant names an id, so it covers whatever
+definition is added under that id, and the prompt says so before the person answers. The pack
 starts switched off; switching it on is the app's Fact packs page, as for every pack. No route,
 relay message or tool adds a pack: an app cannot.
 
@@ -365,6 +367,53 @@ def _unloaded_custom_packs() -> None:
         click.echo(f"Not loaded: {name}. {reason}")
 
 
+def _apps_granted(pack_id: str) -> Optional[int]:
+    """How many connected apps hold a grant that names this pack id, or None when this node's database cannot be
+    read. The database is opened read-only and nothing is created; a node that has no database yet has no apps."""
+    import sqlite3
+
+    try:
+        from topos.mcp_clients import apps_granted_pack
+        from topos.storage.db.paths import resolve_active_database
+
+        path = resolve_active_database().path
+        if not path.is_file():
+            return 0
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            return apps_granted_pack(conn, pack_id)
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 -- a database that cannot be read is said, never guessed as "no apps"
+        return None
+
+
+def _existing_grants_line(pack_id: str) -> Optional[str]:
+    """What to say before the question when an app's grant already names this id; None when no app's does."""
+    count = _apps_granted(pack_id)
+    if count is None:
+        return ("  Topos could not check whether an app already holds a grant that names this id. If one does, "
+                "that grant covers this definition too once you switch the pack on, with no new approval "
+                "(`topos-node agents list --json` shows what each app reads).")
+    if count <= 0:
+        return None
+    apps = "1 app already holds a grant" if count == 1 else f"{count} apps already hold a grant"
+    return (f"  {apps} that names {pack_id}. A grant names the id, not this definition: once you switch the "
+            "pack on, it covers the facts this file writes too, with no new approval "
+            "(`topos-node agents list --json` shows what each app reads).")
+
+
+#: Who reads the facts of a pack the owner adds, as `packs add` says it before it asks. An app is held to a grant
+#: that names the pack (`pack_facts`). A coding agent and a routine are not: they put questions to the node, and
+#: no rule holds a fact back from an answer because its pack is one the owner added (DISCLOSURE_RULES DR-74).
+_WHO_READS = (
+    "  It starts switched off. Once you switch it on: an app reads its facts only if you approve a grant that "
+    "names this pack. A coding agent you connected and your routines need no such grant: an answer Topos gives "
+    "them can draw on this pack's facts, as it can on the facts of the packs Topos ships.")
+#: Said in place of whatever a check raised, when it raised instead of refusing.
+_NOT_A_PACK = "The file is not a pack Topos can read."
+
+
 @packs_group.command("add")
 @click.argument("file", type=click.Path(exists=True, dir_okay=False))
 @click.option("--check", is_flag=True, help="Only say whether the file is a pack Topos can add; add nothing.")
@@ -378,10 +427,14 @@ def packs_add(file: str, check: bool) -> None:
         pack, content = custom_packs.read_candidate(Path(file))
     except custom_packs.CustomPackError as exc:
         _fail(f"Not added. {exc}")
+    except Exception:  # noqa: BLE001 -- the last line: a file from outside never ends this command in a traceback
+        _fail(f"Not added. {_NOT_A_PACK}")
     for line in custom_packs.describe(pack):
         click.echo(line)
-    click.echo("  It starts switched off. Its facts stay with you: an app reads them only if you approve a grant "
-               "that names this pack.")
+    click.echo(_WHO_READS)
+    grants = _existing_grants_line(pack.pack)
+    if grants:
+        click.echo(grants)
     if check:
         click.echo("This file is a pack Topos can add. Nothing was added.")
         return
@@ -399,6 +452,8 @@ def packs_add(file: str, check: bool) -> None:
         added = custom_packs.install_content(content)
     except custom_packs.CustomPackError as exc:
         _fail(f"Not added. {exc}")
+    except Exception:  # noqa: BLE001
+        _fail(f"Not added. {_NOT_A_PACK}")
     if added["unchanged"]:
         click.echo(f"{added['pack_id']} {added['version']} is already added, unchanged.")
         return

@@ -4,8 +4,11 @@ protects: a pack is added only after a person answers `[y/N]` on a terminal. Wit
 one and writes nothing; a no writes nothing; a yes writes exactly one pack file (and its stamp), holding the bytes
 that were checked and shown, even if the file changed while the question was open. `--check` validates without a
 terminal and writes nothing. The first line of the prompt cannot be forged by the file's title. A refusal is `Not added.` and one plain sentence, exit 1, and
-nothing the file holds beyond its id, version, title and predicate names is printed. The command sends nothing to
-the node: adding a pack is not something the owner socket, the relay or any tool can do.
+nothing the file holds beyond its id, version, title and predicate names is printed; that holds for a file the YAML
+parser or a check raises on, with or without `--check`. The prompt says who reads the pack's facts without leaving
+out the coding agents and routines, which need no grant; and when an app's grant already names the pack's id, it
+says before the question that the grant will cover this definition too. The command sends nothing to the node:
+adding a pack is not something the owner socket, the relay or any tool can do.
 
 A terminal and a person are patched (``isatty`` on the module's ``sys``, ``click.confirm``); the pack directory
 is a temp directory. Synthetic only.
@@ -185,6 +188,120 @@ def test_a_malformed_file_is_refused_before_anyone_is_asked(cli, data, says):
     assert result.output.startswith("Not added. ") and says in result.output
     assert PLANTED not in result.output and len(result.output.strip().splitlines()) == 1
     assert cli.asked == [] and cli.files() == []
+
+
+GOOD = yaml.safe_dump(definition())
+
+
+@pytest.mark.parametrize("check", [False, True], ids=["add", "check"])
+@pytest.mark.parametrize("text,says", [
+    (GOOD.replace("value_type: structured", "value_type: [structured]"), "`value_type` must be"),
+    (GOOD.replace("value_type: structured", "value_type: {structured: 1}"), "`value_type` must be"),
+    (GOOD.replace("name: string", "name: {scale: [x]}"), "names a scale Topos does not ship"),
+    (GOOD + "released: 2026-13-45\n", "holds a value that cannot be read"),
+    (GOOD + "extra: " + "9" * 5000 + "\n", "holds a value that cannot be read"),
+    (GOOD + "extra: " + "[" * 20000 + "]" * 20000 + "\n", "nests more than 12 levels"),
+    (GOOD + f'extra: !!bool "{PLANTED}"\n', "holds a value that cannot be read"),
+    (GOOD + 'extra: "\\ud800"\n', "not valid Unicode"),
+], ids=["value-type-list", "value-type-mapping", "scale-list", "no-such-date", "5000-digits", "20000-brackets",
+        "tagged-word", "not-unicode"])
+def test_a_file_the_parser_or_a_check_raises_on_is_refused_in_one_sentence(cli, check, text, says):
+    """Found in the second review: these ended `packs add` and `packs add --check` in a traceback, with no
+    `Not added.` sentence."""
+    assert "value_type: structured" in GOOD and "name: string" in GOOD
+    result = cli.run(["add"] + (["--check"] if check else []) + [cli.write(text)], tty=not check)
+    assert result.exit_code == packs_cmd.EXIT_FAILED, result.output
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+    assert result.output.startswith("Not added. ") and says in result.output
+    assert PLANTED not in result.output and len(result.output.strip().splitlines()) == 1
+    assert cli.asked == [] and cli.files() == [] and cli.stamps() == []
+
+
+@pytest.mark.parametrize("where", ["read_candidate", "install_content"])
+def test_an_error_no_rule_names_still_ends_in_the_one_sentence(cli, where):
+    """The command's own last line. Whatever a check raises for a file from outside, the person reads a sentence."""
+    def boom(*args, **kwargs):
+        raise RuntimeError(f"unexpected {PLANTED}")
+
+    path = cli.write(definition())
+    cli.monkeypatch.setattr(custom_packs, where, boom)
+    result = cli.run(["add", path])
+    assert result.exit_code == packs_cmd.EXIT_FAILED
+    assert result.output.strip().splitlines()[-1] == "Not added. The file is not a pack Topos can read."
+    assert PLANTED not in result.output and cli.files() == []
+
+
+def test_the_prompt_says_who_reads_the_facts_and_does_not_leave_out_agents_and_routines(cli):
+    """Found in the second review: the prompt said the facts stay with the owner and named only the app grant.
+    A connected coding agent and a routine read a pack's facts with no grant that names it."""
+    result = cli.run(["add", "--check", cli.write(definition())], tty=False)
+    out = " ".join(result.output.split())
+    assert "an app reads its facts only if you approve a grant that names this pack" in out
+    assert "A coding agent you connected and your routines need no such grant" in out
+    assert "stay with you" not in out
+    assert "already hold" not in out and "could not check" not in out      # no app's grant names this id
+
+
+@pytest.mark.parametrize("count,says", [
+    (1, "1 app already holds a grant that names custom.gardening"),
+    (3, "3 apps already hold a grant that names custom.gardening"),
+    (None, "Topos could not check whether an app already holds a grant that names this id"),
+])
+def test_an_app_grant_that_already_names_the_id_is_said_before_the_question(cli, count, says):
+    """A grant stores the pack id. A pack replaced under that id is covered by a grant approved for the old one."""
+    asked_for = []
+    cli.monkeypatch.setattr(packs_cmd, "_apps_granted", lambda pack_id: asked_for.append(pack_id) or count)
+    order = []
+    echo = click.echo
+    cli.monkeypatch.setattr(click, "echo", lambda message=None, **kw: (order.append(str(message)), echo(message, **kw))[1])
+    result = cli.run(["add", cli.write(definition())])
+    assert result.exit_code == 0, result.output
+    out = " ".join(result.output.split())
+    assert says in out and "with no new approval" in out and "topos-node agents list --json" in out
+    assert asked_for == [PACK] and cli.asked == ["Add it?"]
+    said_at = next(i for i, line in enumerate(order) if says in " ".join(line.split()))
+    assert said_at < next(i for i, line in enumerate(order) if line.startswith("Added "))
+    # and `--check` says it too: it is what an agent runs for the owner before they add
+    checked = " ".join(cli.run(["add", "--check", cli.write(definition())], tty=False).output.split())
+    assert says in checked
+
+
+def test_the_count_is_of_connected_apps_whose_grant_names_the_id_read_without_writing(cli, tmp_path):
+    """The real count, on a temp database: an app with the pack on its grant counts; one without it, a coding
+    agent and a disconnected app do not. The database is opened read-only."""
+    import sqlite3
+
+    from topos import mcp_clients
+    from topos.mcp_clients import AppGrant
+    from topos.storage.db import paths
+
+    db = tmp_path / "node.db"
+    conn = sqlite3.connect(db)
+    mcp_clients.mint_agent_label(conn, client="reader", approved=True, grant=AppGrant(packs=(PACK, "moments.joy")))
+    mcp_clients.mint_agent_label(conn, client="other", approved=True, grant=AppGrant(packs=("moments.joy",)))
+    mcp_clients.mint_agent_label(conn, client="gone", approved=True, grant=AppGrant(packs=(PACK,)))
+    mcp_clients.mint_agent_label(conn, client="claude-code", approved=True)
+    mcp_clients.revoke_agent(conn, client="gone")
+    conn.commit()
+    assert mcp_clients.apps_granted_pack(conn, PACK) == 1
+    assert mcp_clients.apps_granted_pack(conn, "moments.joy") == 2
+    assert mcp_clients.apps_granted_pack(conn, "custom.never") == 0
+    conn.close()
+
+    cli.monkeypatch.setattr(paths, "resolve_active_database", lambda *a, **kw: SimpleNamespace(path=db))
+    before = db.read_bytes()
+    assert packs_cmd._apps_granted(PACK) == 1
+    assert db.read_bytes() == before
+    empty = tmp_path / "empty.db"
+    sqlite3.connect(empty).close()
+    cli.monkeypatch.setattr(paths, "resolve_active_database", lambda *a, **kw: SimpleNamespace(path=empty))
+    assert packs_cmd._apps_granted(PACK) == 0                      # no agents table yet: no apps, and none created
+    cli.monkeypatch.setattr(paths, "resolve_active_database", lambda *a, **kw: SimpleNamespace(path=tmp_path / "no.db"))
+    assert packs_cmd._apps_granted(PACK) == 0                      # a node with no database yet has no apps
+    broken = tmp_path / "broken.db"
+    broken.write_bytes(b"not a database, " * 200)
+    cli.monkeypatch.setattr(paths, "resolve_active_database", lambda *a, **kw: SimpleNamespace(path=broken))
+    assert packs_cmd._apps_granted(PACK) is None                   # unreadable is said, never guessed as none
 
 
 def test_a_new_version_replaces_the_pack_and_says_so_and_the_same_file_says_unchanged(cli):

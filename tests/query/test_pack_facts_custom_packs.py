@@ -3,8 +3,10 @@
 protects: a pack the owner added obeys the read's rules exactly as a bundled pack does. An app gets its facts only
 when its grant names the pack and the owner switched the pack on; a special-class fact is held back from an app and
 not from the owner; a fact that touches an Off-limits person or record is left out by absence. A pack whose file
-is gone has no definition, so an app gets none of its facts, while the bundled packs are served as before and the
-owner still sees everything.
+is gone has no definition, so an app gets none of its facts, while the bundled packs are served as before. A pack is
+on for this read by the test the ingest job uses: the registry row AND the definition the owner switched on. After
+`packs remove` then `packs add` of the same id, or a new version, the row still says on until the next seeding;
+in that window no reader gets the facts the pack wrote while it was on.
 
 Synthetic only: the fixtures of tests/query/test_pack_facts.py (a migrated temp database with invented people) and
 an invented gardening pack in a temp directory.
@@ -116,4 +118,54 @@ def test_a_pack_whose_file_is_gone_gives_an_app_nothing_and_the_rest_is_served(g
     assert out["status"] == "ok"
     found = by_id(out["payload"])
     assert {f["pack"] for f in found.values()} == {"moments.joy"} and garden.ids.peak in found
-    assert garden.ids.plant in by_id(dispatch(OWNER)["payload"])               # the owner's own read is whole
+    assert out["payload"]["packs_missing"] == [PACK]
+    # The pack is no longer on (its file is gone), so this read lists it for no one; the fact itself is kept.
+    owner = dispatch(OWNER)["payload"]
+    assert PACK not in owner["packs_enabled"] and garden.ids.plant not in by_id(owner)
+    assert garden.conn.execute("SELECT COUNT(*) FROM signal_objects WHERE object_id=? AND valid_to IS NULL",
+                               (garden.ids.plant,)).fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("how", ["removed and added again", "a new version"])
+def test_between_a_re_add_and_the_next_seeding_an_app_reads_nothing_of_the_pack(garden, tmp_path, how):
+    """Found in the second review. `packs add` has just said "It is switched off", and the registry row still
+    says on until something seeds it (an ingest batch, a Fact packs page view; none while the node is stopped).
+    The read asked the row alone, so an app whose grant names the pack still read what it wrote while it was on."""
+    enable(garden.conn, PACK)
+    assert garden.ids.plant in by_id(dispatch(app(PACK))["payload"])
+    source = tmp_path / "again.yaml"
+    if how == "a new version":
+        changed = definition(PACK, "custom.plant")
+        changed["version"] = "2.0.0"
+        changed["predicates"].append({"name": "custom.harvest", "value_type": "string", "cardinality": "multi",
+                                      "temporal": "interval", "altitude": "stated"})
+        source.write_text(yaml.safe_dump(changed))
+    else:
+        source.write_text(yaml.safe_dump(definition(PACK, "custom.plant")))
+        assert custom_packs.remove_pack(PACK) is True
+    assert custom_packs.install_pack(source)["unchanged"] is False
+    # nothing has seeded: the row still says on
+    assert garden.conn.execute("SELECT enabled FROM pack_registry WHERE pack_id=?", (PACK,)).fetchone()[0] == 1
+
+    out = dispatch(app(PACK, "moments.joy"))["payload"]
+    assert out["packs_enabled"] == ["moments.joy"] and out["packs_missing"] == [PACK]
+    assert {f["pack"] for f in out["facts"]} == {"moments.joy"}
+    assert dispatch(app(PACK), {"fact_ids": [garden.ids.plant]})["payload"]["facts"] == []
+    assert PACK not in dispatch(OWNER)["payload"]["packs_enabled"]
+    # the seeding switches it off; the owner switching it on again is what opens the read
+    seed_pack_registry(garden.conn, bundled_pack_dir())
+    assert garden.conn.execute("SELECT enabled FROM pack_registry WHERE pack_id=?", (PACK,)).fetchone()[0] == 0
+    assert dispatch(app(PACK))["payload"]["packs_missing"] == [PACK]
+    enable(garden.conn, PACK)
+    assert garden.ids.plant in by_id(dispatch(app(PACK))["payload"])
+
+
+def test_a_shipped_pack_is_on_by_its_registry_row_alone_as_before(garden):
+    """The definition test is asked of added packs only: a shipped pack's switch is its row, unchanged."""
+    from topos.query.pack_facts import enabled_packs
+
+    on = enabled_packs(garden.conn)
+    rows = sorted(r[0] for r in garden.conn.execute("SELECT pack_id FROM pack_registry WHERE enabled=1"))
+    assert on == rows and "moments.joy" in on and PACK not in on
+    enable(garden.conn, PACK)
+    assert enabled_packs(garden.conn) == sorted(rows + [PACK])

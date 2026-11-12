@@ -12,7 +12,9 @@ protects:
 - while it is off the ingest job reads nothing for it: no shadow trial, no prefilter count, no ledger row;
 - it cannot shadow, replace or collide with a bundled pack. Its id and predicates live in `custom.`, which no
   bundled pack and no grant vocabulary uses; a file dropped into the directory under a bundled id is left out;
-- one bad file in the owner's directory never takes the bundled packs down;
+- one bad file in the owner's directory never takes the bundled packs down, and never switches the owner's other
+  packs off: that holds for a file the YAML parser itself raises on (a date that does not exist, a number too
+  long to read, brackets nested without end) and for one a check raises on, not only for one a rule refuses;
 - it goes through the same fact writer as a bundled pack: owner-only facts with the declared sensitivity, and a
   fact about another person is held, not written;
 - nothing but the `packs add` / `packs remove` commands can add or remove one.
@@ -222,7 +224,44 @@ MALFORMED = [
      "a YAML type a pack cannot hold"),
     ("nesting without end", yaml.safe_dump(definition()) + "extra: " + "[" * 40 + "]" * 40 + "\n",
      "nests more than 12 levels"),
+    # a list or a mapping where one word belongs: the lookup in a set raised instead of refusing
+    ("a value type that is a list", lambda d: d["predicates"][0].update(value_type=["structured"]),
+     "`value_type` must be"),
+    ("a value type that is a mapping", lambda d: d["predicates"][0].update(value_type={"structured": PLANTED}),
+     "`value_type` must be"),
+    ("a scale that is a list", lambda d: d["predicates"][0].update(value_schema={"often": {"scale": [PLANTED]}}),
+     "names a scale Topos does not ship"),
+    ("a scale that is a mapping", lambda d: d["predicates"][0].update(value_schema={"often": {"scale": {"a": 1}}}),
+     "names a scale Topos does not ship"),
+    ("a cardinality that is a list", lambda d: d["predicates"][0].update(cardinality=["multi"]),
+     "`cardinality` must be one of"),
+    ("a sensitivity that is a mapping", lambda d: d.update(sensitivity_class={"personal": 1}),
+     "`sensitivity_class` must be one of"),
+] + [
+    # values the YAML parser raises on with an error that is not a YAML error: each must still be a refusal
+    (label, yaml.safe_dump(definition()) + extra, says) for label, extra, says in [
+        ("a date that does not exist", "released: 2026-13-45\n", "holds a value that cannot be read"),
+        ("a time that does not exist", "released: 2026-01-01 25:61:00\n", "holds a value that cannot be read"),
+        ("a time zone that does not exist", "released: 2026-01-01T00:00:00+99:99\n",
+         "holds a value that cannot be read"),
+        ("a whole number of 5,000 digits", "extra: " + "9" * 5000 + "\n", "holds a value that cannot be read"),
+        ("a word tagged as a number", f'extra: !!int "{PLANTED}"\n', "holds a value that cannot be read"),
+        ("a word tagged as a decimal", f'extra: !!float "{PLANTED}"\n', "holds a value that cannot be read"),
+        ("a word tagged as true or false", 'extra: !!bool "maybe"\n', "holds a value that cannot be read"),
+        ("a word tagged as a date", f'extra: !!timestamp "{PLANTED}"\n', "holds a value that cannot be read"),
+        ("20,000 nested brackets", "extra: " + "[" * 20000 + "]" * 20000 + "\n", "nests more than 12 levels"),
+        ("5,000 nested braces", "extra: " + "{a: " * 5000 + "1" + "}" * 5000 + "\n", "nests more than 12 levels"),
+        ("text that is not valid Unicode", 'extra: "\\ud800"\n', "not valid Unicode"),
+        ("a key that is not valid Unicode", '"\\udfff": extra\n', "not valid Unicode"),
+    ]
 ]
+#: The entries above that no rule refused before: the parser or a check raised instead (found in the second review).
+RAISED = [m for m in MALFORMED if m[0] in {
+    "a value type that is a list", "a value type that is a mapping", "a scale that is a list",
+    "a scale that is a mapping", "a date that does not exist", "a time that does not exist",
+    "a time zone that does not exist", "a whole number of 5,000 digits", "a word tagged as a number",
+    "a word tagged as a decimal", "a word tagged as true or false", "a word tagged as a date",
+    "20,000 nested brackets", "5,000 nested braces"}]
 
 
 @pytest.mark.parametrize("label,change,says", MALFORMED, ids=[m[0] for m in MALFORMED])
@@ -349,6 +388,79 @@ def test_a_broken_file_is_skipped_said_once_and_every_other_pack_still_loads(hom
     assert "not a link" in problems["custom.linked.yaml"]
     said = [r.getMessage() for r in caplog.records if "custom fact pack" in r.getMessage()]
     assert len(said) == 3 and not any(PLANTED in line for line in said)        # once each, never the content
+
+
+@pytest.mark.parametrize("label,change,says", RAISED, ids=[m[0] for m in RAISED])
+def test_a_file_the_parser_or_a_check_raises_on_costs_no_other_pack_its_switch(home, tmp_path, registry, caplog,
+                                                                               label, change, says):
+    """Found in the second review. These shapes raised a raw error instead of a refusal. Dropped into the
+    directory by hand, one such file emptied the whole scan: no added pack loaded, `packs list` named no file,
+    and the next seeding switched every added pack off, where it stayed after the bad file was removed."""
+    add(tmp_path)
+    seed_pack_registry(registry, bundled_pack_dir())
+    switch_on(registry)
+    if callable(change):
+        data = definition(pack="custom.dropped")
+        data["predicates"][0]["name"] = "custom.dropped_thing"
+        change(data)
+        text = yaml.safe_dump(data)
+    else:
+        text = change.replace(f"pack: {PACK}", "pack: custom.dropped").replace("custom.plant", "custom.dropped_thing")
+    (home / "custom.dropped.yaml").write_text(text)
+
+    with caplog.at_level("WARNING"):
+        catalog = load_packs(bundled_pack_dir())
+    assert set(catalog) == set(BUNDLED) | {PACK}                        # the good pack and every shipped one load
+    problems = custom_packs.custom_pack_problems()
+    assert set(problems) == {"custom.dropped.yaml"} and says in problems["custom.dropped.yaml"]
+    assert PLANTED not in problems["custom.dropped.yaml"] and problems["custom.dropped.yaml"].isprintable()
+    assert not [r for r in caplog.records if r.exc_info]                # said in a sentence, not as a traceback
+    assert PACK in enabled_packs(registry, bundled_pack_dir())
+    seed_pack_registry(registry, bundled_pack_dir())
+    assert row(registry)[0] == 1 and PACK in enabled_packs(registry, bundled_pack_dir())
+    (home / "custom.dropped.yaml").unlink()
+    seed_pack_registry(registry, bundled_pack_dir())
+    assert row(registry)[0] == 1
+
+
+def test_whatever_one_file_raises_is_that_files_problem_alone(home, tmp_path, registry, monkeypatch):
+    """The second line behind the checks: an error no rule and no parser case names, raised for one file."""
+    add(tmp_path)
+    seed_pack_registry(registry, bundled_pack_dir())
+    switch_on(registry)
+    (home / "custom.other.yaml").write_text(yaml.safe_dump(definition(
+        pack="custom.other", predicates=[{**definition()["predicates"][0], "name": "custom.other.thing"}])))
+    checked = custom_packs._load_checked
+
+    def load(path):
+        if path.name == "custom.other.yaml":
+            raise RuntimeError(f"unexpected {PLANTED}")
+        return checked(path)
+
+    monkeypatch.setattr(custom_packs, "_load_checked", load)
+    assert set(load_custom_packs()) == {PACK}
+    assert custom_packs.custom_pack_problems() == {"custom.other.yaml": "The file is not a pack Topos can read."}
+    seed_pack_registry(registry, bundled_pack_dir())
+    assert row(registry)[0] == 1
+
+
+def test_a_check_that_raises_is_a_refusal_not_an_error(home, tmp_path, monkeypatch):
+    def check(raw, **kwargs):
+        raise TypeError(f"unhashable type: {PLANTED}")
+
+    monkeypatch.setattr(custom_packs, "check_definition", check)
+    with pytest.raises(CustomPackError) as refusal:
+        add(tmp_path)
+    assert str(refusal.value) == "The file is not a pack Topos can read." and snapshot(home) == {}
+
+
+def test_the_recorded_digest_never_raises_on_text_that_is_not_valid_unicode(home, tmp_path):
+    """`custom_packs` refuses such text. The digest is computed inside the seeding of every pack, so it must
+    not be the place a file that arrived another way stops them all."""
+    add(tmp_path)
+    pack = deepcopy(load_custom_packs()[PACK])
+    pack.raw = {**pack.raw, "extra": "\ud800"}
+    assert len(definition_sha(pack)) == 64 and definition_sha(pack) != definition_sha(load_custom_packs()[PACK])
 
 
 def test_no_directory_means_no_custom_packs(home):
@@ -533,7 +645,8 @@ def test_a_fact_about_another_person_is_held_not_written(home, tmp_path, node_db
 
 
 # --- what the checks accept, the engine can run -----------------------------------------------------------------------------
-_WRONG = (5, "x", [5], {"a": 5}, [["x"]], True, 1.5, [], {})
+_WRONG = (5, "x", [5], {"a": 5}, [["x"]], True, 1.5, [], {}, ["structured"], {"scale": ["x"]}, {"scale": {"a": 1}},
+          {"scale": 5}, {"enum": 5}, {"enum": [["x"]]})
 _ENGINE_READS = [
     ("routing",), ("routing", "descriptors"), ("routing", "exemplars"),
     ("guidance",), ("guidance", "definitions"), ("guidance", "abstention"),
@@ -544,6 +657,12 @@ _ENGINE_READS = [
     ("predicates", 0, "value_schema"), ("predicates", 0, "value_schema", "name"), ("predicates", 0, "sensitivity"),
     ("eval",), ("eval", "gold"), ("eval", "gold", 0), ("eval", "gold", 0, "text"), ("consumers",),
     ("synthesis",), ("title",), ("version",), ("sensitivity_class",), ("role_policy",),
+    # places a word from a fixed list belongs: a list or a mapping there raised in the lookup (second review)
+    ("predicates", 0, "value_type"), ("predicates", 0, "cardinality"), ("predicates", 0, "temporal"),
+    ("predicates", 0, "altitude"), ("predicates", 0, "name"), ("predicates", 0), ("predicates",),
+    ("predicates", 0, "value_schema", "name", "scale"), ("predicates", 0, "value_schema", "name", "enum"),
+    ("pack",), ("net_subject",), ("disclosure_default",), ("eval", "negative_controls"),
+    ("eval", "negative_controls", 0, "text"), ("routing", "descriptors", 0), ("guidance", "abstention", 0),
 ]
 #: Shapes a pack may well use. Each must be accepted, and then run.
 _ALLOWED = [
@@ -616,7 +735,7 @@ def test_a_file_the_checks_accept_is_one_the_engine_can_run(home, node_db, monke
                             event_date="2026-11-01")
             except Exception as exc:  # noqa: BLE001
                 raise AssertionError(f"accepted by the check, then the engine raised: {where}: {exc!r}") from exc
-    assert refused > 150 and accepted >= len(_ALLOWED) + 10, (refused, accepted)
+    assert refused > 500 and accepted >= len(_ALLOWED) + 10, (refused, accepted)
 
 
 @pytest.mark.parametrize("routing", [{"descriptors": 5}, {"exemplars": 5}])
