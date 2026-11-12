@@ -8,9 +8,10 @@ verifier sees the same turns; the turns protect the fact (exclusion, deletion, s
 never a source; the thank-word cue fires only on a thank-word and binds the recipient's label; with the turns
 at 0 and no thank-word every prompt is byte for byte what it was.
 
-One thing the ruling does not name and these tests settle the narrow way: a pack the owner's Topos Facts
-pick reads is read from the one record, so it has no context for the parser or the verifier either, and no
-short message.
+Two things the ruling does not name and these tests settle the narrow way. A reaction ("tapback") is stored
+as a message whose text is the message reacted to: it is never a turn (stepped over, like a system row), and
+a message that is itself a reaction gets no context. A pack the owner's Topos Facts pick reads is read from the
+one record, so it has no context for the parser or the verifier either, and no short message.
 
 Invented people and lines in a migrated temp database; never the owner's node.
 """
@@ -155,6 +156,84 @@ def test_only_the_two_moments_packs_read_it_and_the_switch_narrows_never_widens(
     monkeypatch.setenv("TOPOS_DERIVATION_CONTEXT_TURNS", "0")
     assert T.context_packs() == frozenset() and T.context_turns() == 0
     assert _context_for(node_db, packs["moments.joy"], _owner_rec("m1"), {}) == []
+
+
+# --- reactions are not turns ------------------------------------------------------------------------------------
+
+#: What the Messages reader keeps on a reaction's row, and on an ordinary one.
+REACTION = {"associated_message_guid": "p:0/00000000-0000-0000-0000-000000000000", "associated_message_type": 2000}
+ORDINARY = {"associated_message_type": 0, "message_guid": "g-1"}
+
+
+def _message(conn, mid, text, *, own, at, metadata=None, conv="dm"):
+    conn.execute(
+        "INSERT INTO conversation_messages (message_id, conversation_id, dataset_id, sender_type, sender_id, content,"
+        " event_at, source_id, is_from_self, message_type, actor_role, metadata_json)"
+        " VALUES (?,?,'d',?,?,?,?,'imessage',?,'message',?,?)",
+        (mid, conv, "self" if own else "contact", "self" if own else MAREN, text, at, 1 if own else 0,
+         "authored" if own else "observed", json.dumps(metadata) if metadata is not None else None))
+    conn.commit()
+
+
+def test_a_reaction_from_either_side_is_not_a_turn_and_takes_none_of_the_three(node_db):
+    """Between d3 and the owner's m1: the other person reacts to the owner's question, the owner reacts to
+    their news (the other person's words in a row the owner sent), and one in a language no word list knows."""
+    _message(node_db, "r1", "Loved “how did the interview go”", own=False, at=_ts(minutes=18), metadata=REACTION)
+    _message(node_db, "r2", f"Loved “{NEWS}”", own=True, at=_ts(minutes=16), metadata=REACTION)
+    _message(node_db, "r3", f"A aimé « {NEWS} »", own=True, at=_ts(minutes=14), metadata=REACTION)
+    ctx = _conversation_context(node_db, _owner_rec("m1"), 3)
+    assert [t["record_id"] for t in ctx] == ["d2", "d3"]
+    assert [t["speaker"] for t in ctx if NEWS in t["text"]] == [MAREN_NAME], "their news, once, under their name"
+    assert [t["record_id"] for t in _conversation_context(node_db, _owner_rec("m1"), 1)] == ["d3"], \
+        "three reactions sit between: the one turn is still the message before them"
+    # a row the reader marked ordinary is a turn like any other
+    _message(node_db, "o1", "so happy for you", own=True, at=_ts(minutes=12), metadata=ORDINARY)
+    assert [t["record_id"] for t in _conversation_context(node_db, _owner_rec("m1"), 3)] == ["d2", "d3", "o1"]
+
+
+def test_more_reactions_than_the_reader_steps_over_cost_turns_never_add_one(node_db):
+    from topos.enrichment.jobs.canonical.derivation_job import CONTEXT_REACTION_SLACK
+    for i in range(CONTEXT_REACTION_SLACK + 3):
+        _message(node_db, f"r{i:02d}", f"Liked “{NEWS}”", own=True, at=_ts(minutes=19, seconds=-i),
+                 metadata=REACTION)
+    assert _conversation_context(node_db, _owner_rec("m1"), 3) == []
+
+
+def test_a_message_that_is_a_reaction_gets_no_context_and_a_short_one_is_never_read(node_db, monkeypatch):
+    long, short = f"Loved “{NEWS}”", "Loved “ok”"
+    _message(node_db, "r1", long, own=True, at=_ts(minutes=18), metadata=REACTION)
+    _message(node_db, "r2", short, own=True, at=_ts(minutes=4), metadata=REACTION)
+    assert len(short) <= 15
+    assert _conversation_context(node_db, _owner_rec("r1", long), 3) == []
+    assert _conversation_context(node_db, _owner_rec("r2", short), 3) == []
+    _enable(node_db, "moments.joy")
+    seen = _model(monkeypatch)
+    run_derivation_batch(node_db, [_row("r2", node_db, short), _row("m2", node_db, THANKS)], stats={})
+    assert not [p for p in seen["extract"] if f"---\n{short}\n---" in p], "ingest, catch-up and the trial"
+    thanks = _lens(seen["extract"], "joy", THANKS)
+    assert thanks and not [p for p in thanks if "Loved" in p], "nor is either reaction one of the thank-you's turns"
+    from topos.features.derivation.surfaces import run_pack_backfill
+    monkeypatch.setattr("topos.features.signal.derived_index.index_derived_objects", lambda *a, **kw: {})
+    node_db.execute("DELETE FROM derivation_progress")
+    node_db.commit()
+    seen["extract"].clear()
+    run_pack_backfill(node_db, "moments.joy", use_prefilter=False)
+    assert seen["extract"] and not [p for p in seen["extract"] if f"---\n{short}\n---" in p], "the backfill"
+
+
+def test_a_reaction_stored_with_no_metadata_is_known_by_its_words(node_db):
+    """Runs once `features/facts/reactions.py` has `is_reaction` (dialoguesai/topos#285): before it only the
+    reader's marker says what a row is."""
+    from topos.features.facts import reactions
+    if not hasattr(reactions, "is_reaction"):
+        pytest.skip("this tree knows a reaction by the reader's marker only")
+    _message(node_db, "r1", f"Loved “{NEWS}”", own=True, at=_ts(minutes=18))
+    _message(node_db, "r2", "Laughed at “how did the interview go”", own=False, at=_ts(minutes=16))
+    assert [t["record_id"] for t in _conversation_context(node_db, _owner_rec("m1"), 3)] == ["d2", "d3"]
+    assert _conversation_context(node_db, _owner_rec("r1", f"Loved “{NEWS}”"), 3) == []
+    # the owner's own sentence that only opens like one is a message, and a turn
+    _message(node_db, "o1", "Loved the dinner last night, the soup most of all", own=True, at=_ts(minutes=12))
+    assert [t["record_id"] for t in _conversation_context(node_db, _owner_rec("m1"), 3)] == ["d2", "d3", "o1"]
 
 
 # --- the prompts ------------------------------------------------------------------------------------------------

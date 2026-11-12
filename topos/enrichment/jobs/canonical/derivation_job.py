@@ -112,6 +112,27 @@ CONTEXT_MAX_AGE_DAYS = 7
 #: The messengers whose two-party conversations DR-62 reads. Groups, AI chats, journals and
 #: transcripts get no context.
 _CONTEXT_SOURCES = frozenset({"imessage", "signal"})
+#: How many rows past the k turns one context read may look at to step over reactions.
+CONTEXT_REACTION_SLACK = 12
+
+
+def _is_reaction(metadata: Any, text: Any) -> bool:
+    """A reaction ("tapback") row: never a context turn, and never a message DR-62 gives context.
+
+    Messages stores a reaction as a message from whoever reacted, and its text is the message
+    reacted to, in quotes. Read as a turn it would repeat that message under the wrong speaker
+    (the other person's words on an OWNER line when the owner reacted); read as the owner's
+    message it would put the other person's words where the quote guard looks for the owner's.
+
+    The detection is `features/facts/reactions.py`: the reader's marker in the row's metadata,
+    and, once that module has `is_reaction`, also the fixed form Messages writes a reaction in,
+    for a row stored with no metadata."""
+    from ....features.facts import reactions
+    row = {"metadata_json": metadata}
+    by_marker_or_words = getattr(reactions, "is_reaction", None)
+    if by_marker_or_words is not None:
+        return bool(by_marker_or_words(row, text))
+    return bool(reactions.quotes_another_message(row))
 
 
 def _aware(value: Any):
@@ -133,7 +154,10 @@ def _conversation_context(conn, rec: Dict[str, Any], k: int, *,
     excluded (`lifecycle.exclusions`), one tagged NSFW or one the Off-limits guard withholds
     from the owner's own processing (`for_own_processing`: a protected record, or text naming a
     protected entity). A conversation whose other person is Off-limits gives none. A withheld
-    turn is dropped, not replaced by an older one. Each turn is labelled OWNER or with the
+    turn is dropped, not replaced by an older one. A reaction (`_is_reaction`), the owner's or
+    the other person's, is not a turn: like a system row it is stepped over, and the k turns
+    are the k messages before it. A message that is itself a reaction gets no context: it is
+    not text the owner wrote. Each turn is labelled OWNER or with the
     sender's agreed contact name (`resolve_peer_identities`, "Contact" when none agrees), and
     carries its record id, which the fact keeps as a protection-only ref (`context_refs`).
     `cache` holds the guard, the exclusions and each conversation's verdict across a batch."""
@@ -153,9 +177,12 @@ def _read_conversation_context(conn, rec, k, cache) -> List[Dict[str, Any]]:
     if "columns" not in cache:
         cache["columns"] = {str(r[1]) for r in conn.execute("PRAGMA table_info(conversation_messages)")}
     cols = cache["columns"]
-    found = conn.execute("SELECT conversation_id, event_at, source_id FROM conversation_messages"
+    meta = "metadata_json" if "metadata_json" in cols else "NULL"
+    found = conn.execute(f"SELECT conversation_id, event_at, source_id, {meta} FROM conversation_messages"
                          " WHERE message_id=?", (rid,)).fetchone()
     if not found or not found[0] or str(found[2] or "").lower() not in _CONTEXT_SOURCES:
+        return []
+    if _is_reaction(found[3], rec.get("text")):
         return []
     conv, at = str(found[0]), str(found[1] or "")
     when = _aware(at)
@@ -177,13 +204,17 @@ def _read_conversation_context(conn, rec, k, cache) -> List[Dict[str, Any]]:
     nsfw = "COALESCE(content_nsfw,0)" if "content_nsfw" in cols else "0"
     system = " AND COALESCE(message_type,'')<>'system'" if "message_type" in cols else ""
     rows = conn.execute(
-        f"SELECT message_id, content, event_at, COALESCE(is_from_self,0), {nsfw}"
+        f"SELECT message_id, content, event_at, COALESCE(is_from_self,0), {nsfw}, {meta}"
         f" FROM conversation_messages"
         f" WHERE conversation_id=? AND message_id<>? AND (event_at < ? OR (event_at = ? AND message_id < ?))"
         f" AND content IS NOT NULL AND TRIM(content)<>''{system}"
-        f" ORDER BY event_at DESC, message_id DESC LIMIT ?", (conv, rid, at, at, rid, int(k))).fetchall()
+        f" ORDER BY event_at DESC, message_id DESC LIMIT ?",
+        (conv, rid, at, at, rid, int(k) + CONTEXT_REACTION_SLACK)).fetchall()
+    # Newest first: the k messages before the owner's, stepping over reactions. Only then are
+    # the withheld ones dropped, so a withheld turn is never replaced by an older one.
+    last = [row[:5] for row in rows if not _is_reaction(row[5], row[1])][:int(k)]
     turns = []
-    for mid, text, turn_at, is_self, flagged in reversed(rows):
+    for mid, text, turn_at, is_self, flagged in reversed(last):
         then = _aware(turn_at)
         if then is None or when - then > _dt.timedelta(days=CONTEXT_MAX_AGE_DAYS):
             continue

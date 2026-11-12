@@ -18,9 +18,10 @@ The machine-readable twin of each release is
   or with the other person's contact name. These two packs also read your short messages, when they have such
   turns. Nothing changes for any other pack, and nothing is switched on: a pack you have not turned on reads
   nothing.
-  - *What is never a turn.* A system row, a row you excluded, one tagged NSFW, one your Off-limits list
+  - *What is never a turn.* A system row, a reaction (a "Loved …" row repeats another message under the
+    reactor's name, so it is stepped over), a row you excluded, one tagged NSFW, one your Off-limits list
     protects. No turns at all with an Off-limits person, in a group, in another messenger, an AI chat, a journal
-    or a transcript. Any error means no turns, never a failed batch.
+    or a transcript, or for a message that is itself a reaction. Any error means no turns, never a failed batch.
   - *Only your words are evidence.* A finding whose quote is not in your own message, or that is about anyone
     but you, is dropped before it is checked; the fact check reads the same turns; if it decides the finding is
     about the other person, the finding is rejected, not sent to review. The other person can appear only as
