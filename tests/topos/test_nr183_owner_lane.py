@@ -642,10 +642,12 @@ async def test_an_owners_read_whose_connection_closed_is_dropped_with_the_lane_o
     await node.receive(owner_frame("hold-o"))
     await node.receive(owner_frame("gone-read", "get_table_rows"))
     await node.receive(owner_frame("gone-write", "upsert_home_chat_session"))
+    await node.receive(owner_frame("gone-command", "permissions_v2_bind"))
     node.client._ws = Socket()                                               # the socket was replaced meanwhile
     await node.settle()
     assert "gone-read" not in node.handled and "gone-read" not in node.replies()
     assert "gone-write" in node.handled                                      # a write is applied however late
+    assert "gone-command" in node.handled                                    # and so is a protocol command
     assert node.client.inbound_shed_counts() == {("gone", "get_table_rows"): 1}
 
 

@@ -90,8 +90,16 @@ INBOUND_AGE_BOUND_SECONDS = {
 #: be done for nobody. On 27 Oct 2026 the owner's laptop slept with the lid shut and macOS woke it for ~45 s every
 #: ~15 min; each wake found the socket dead (59 of 67 drops came 1-28 s after a wake), and the reads queued before
 #: the sleep then held the slots for up to 28 min while new requests were refused busy. 307 of the 360 replies sent
-#: to a dead socket on 26-27 Oct were of these types. A type joins only when its handler writes nothing: consent
-#: writes and protocol commands are applied however late they are reached, and ``llm_integrations_storage`` writes.
+#: to a dead socket on 26-27 Oct were of these types.
+#:
+#: A closed list. A type joins only when its handler changes nothing the caller asked for and asking again gives
+#: the same answer: consent writes and protocol commands are applied however late they are reached, and
+#: ``llm_integrations_storage`` carries write ops. Two of these run a lazy, idempotent set-up before they read
+#: (``get_sources`` ensures the install schema, ``list_database_tables`` the one-time legacy config move); the next
+#: call runs it again, so nothing is lost with the dropped one. Re-checked on 11 Nov 2026 against the handlers of
+#: that day: all 12 still registered, none on the fast lane, none writes. The types added since stay out until
+#: someone reads their handlers for this purpose: ``truth_own_claim_label`` writes; ``pack_facts``,
+#: ``message_context`` and ``messenger_rating_candidates`` are reads nobody measured here.
 INBOUND_GONE_READ_TYPES = frozenset({
     "list_database_tables", "get_table_rows", "list_jsonl_files",
     "get_sources", "get_sources_overview", "get_source_install_status", "get_disk_status",

@@ -234,9 +234,22 @@ async def test_a_batch_past_its_own_respond_by_is_not_handled_even_inside_the_bo
 
 # --- 27 Oct 2026: a read whose connection closed is dropped too ---------------------------------------------------
 
-#: Writes and commands that are applied however late they are reached, their socket closed or not.
-APPLIED_WHEN_GONE = ("permissions_v2_mutate", "store_message", "llm_integrations_storage", "upsert_home_chat_session",
-                     "query")
+#: Writes and protocol commands that are applied however late they are reached, their socket closed or not; and
+#: the types added after the list was drawn up (a write and three reads), which stay out of it until someone reads
+#: their handlers for this purpose.
+APPLIED_WHEN_GONE = ("permissions_v2_mutate", "permissions_v2_bind", "permissions_v2_identity_command",
+                     "store_message", "llm_integrations_storage", "upsert_home_chat_session", "query",
+                     "truth_own_claim_label", "pack_facts", "message_context", "messenger_rating_candidates")
+
+
+def test_the_list_is_closed_at_the_twelve_reads_that_were_measured():
+    # A type joins by a change to this test as well as the list: its handler read first (no write the caller asked
+    # for, the same answer when asked again). A new handler is never in it by default.
+    assert INBOUND_GONE_READ_TYPES == {
+        "list_database_tables", "get_table_rows", "list_jsonl_files",
+        "get_sources", "get_sources_overview", "get_source_install_status", "get_disk_status",
+        "permissions_v2_status", "permissions_v2_share_catalog", "permissions_v2_share_counts",
+        "signal_data_health", "truth_weekly_stats"}
 
 
 def test_the_reads_dropped_when_gone_are_registered_reads_and_none_is_aged_or_fast():
@@ -247,6 +260,8 @@ def test_the_reads_dropped_when_gone_are_registered_reads_and_none_is_aged_or_fa
     assert not INBOUND_GONE_READ_TYPES & set(INBOUND_AGE_BOUND_SECONDS)
     assert not INBOUND_GONE_READ_TYPES & control_plane_client._FAST_INBOUND_MESSAGE_TYPES
     assert not INBOUND_GONE_READ_TYPES & set(APPLIED_WHEN_GONE)
+    assert set(APPLIED_WHEN_GONE) <= set(HANDLERS)            # each is a type this node handles today, not a typo
+    assert not set(APPLIED_WHEN_GONE) & control_plane_client._FAST_INBOUND_MESSAGE_TYPES
 
 
 @pytest.mark.asyncio
@@ -277,6 +292,26 @@ async def test_a_write_whose_connection_closed_is_still_applied(kind, monkeypatc
     assert node.handled == ["held", "w-1"]
     assert sorted(reply["id"] for reply in first.sent) == ["held", "w-1"]   # as before: sent where it came from
     assert node.client.inbound_shed_counts() == {}
+
+
+@pytest.mark.asyncio
+async def test_a_read_a_write_and_a_command_behind_one_slot_only_the_read_is_dropped(monkeypatch):
+    # The three in the same position: queued behind one held slot, on the socket that then closed. With more slots
+    # than one too, so the rule is the type's and not the order's.
+    for slots in (1, 3):
+        node = Node(monkeypatch, slots=slots)
+        first = node.socket
+        for held in range(slots):
+            await node.receive(f"held-{held}", "holds_the_slot")
+        await node.receive("read", "get_table_rows")
+        await node.receive("write", "store_message")
+        await node.receive("command", "permissions_v2_bind")
+        node.connect()
+        await node.drain()
+        ran = {f"held-{held}" for held in range(slots)} | {"write", "command"}
+        assert set(node.handled) == ran and len(node.handled) == len(ran)                 # each once; never the read
+        assert {reply["id"] for reply in first.sent} == ran                               # sent where they came from
+        assert node.client.inbound_shed_counts() == {("gone", "get_table_rows"): 1}
 
 
 @pytest.mark.asyncio
