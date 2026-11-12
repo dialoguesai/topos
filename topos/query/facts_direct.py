@@ -101,7 +101,11 @@ def _generic_predicate_index() -> List[tuple]:
         from topos.features.derivation.packs import load_packs
         from topos.features.derivation.registry import bundled_pack_dir
 
-        packs = load_packs(bundled_pack_dir())
+        # The packs Topos ships, not the ones the owner added from a file. This index is built once per
+        # process, so an added pack would join it only after a restart and stay in it after it was removed;
+        # and a pattern generated from a name the owner chose (`custom.plant`) would take every question
+        # holding that word away from the model.
+        packs = load_packs(bundled_pack_dir(), include_custom=False)
         pack_iter = packs.values() if isinstance(packs, dict) else packs
         for pack in pack_iter:
             for name in pack.predicates:

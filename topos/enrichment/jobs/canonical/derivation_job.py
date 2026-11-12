@@ -347,7 +347,18 @@ def run_derivation_batch(
         _tf.release()                    # another provider picked: the encoders go
     _clear_deferral(conn)
 
-    filters = {pid: PackPrefilter(pk) for pid, pk in all_packs.items()}
+    filters = {}
+    for pid, pk in list(all_packs.items()):
+        try:
+            filters[pid] = PackPrefilter(pk)
+        except Exception:  # noqa: BLE001
+            if getattr(pk, "first_party", False):
+                raise
+            # A pack the owner added from a file (`custom_packs`), in a shape its checks let through. It is
+            # left out of this batch; the packs Topos ships still run.
+            logger.warning("derivation: pack %s left out of this batch: no prefilter could be built", pid)
+            all_packs.pop(pid, None)
+            packs.pop(pid, None)
     writer = DerivationWriter(conn, model=model)
     writers = {model: writer}
 
@@ -422,6 +433,8 @@ def run_derivation_batch(
             from ....features.derivation.router import embed_record
             _rec_vec = embed_record(rec["text"])
         for pid, pack in all_packs.items():
+            if pid not in packs and not getattr(pack, "first_party", False):
+                continue                     # an owner-added pack that is off: not counted, not trialled
             hit = rec["role"] in pack.allowed_roles() and filters[pid].passes(rec["text"])
             if not hit and _router_hybrid and rec["role"] in pack.allowed_roles():
                 from ....features.derivation.router import semantic_passes
@@ -682,7 +695,10 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
     whose prefilter keeps hitting; disable nudges come from an enabled pack
     burning calls with zero yield. Special-class packs (health, beliefs) are
     NEVER auto-trialed — extracting their content requires the owner's opt-in
-    first (consent precedes computation)."""
+    first (consent precedes computation). Neither is a pack the owner added from
+    a file (`custom_packs`): it reads nothing until the owner switches it on, and
+    a trial would send records to the model under a prompt Topos did not ship,
+    and under a changed one after the file changed."""
     from ....features.derivation.template import build_prompt, parse_output
     if posture_for is None:
         from ....features.provenance.posture import make_posture_resolver
@@ -699,6 +715,8 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
                             {"calls_30d": calls, "written_30d": 0})
             continue
         if getattr(pack, "sensitivity_class", "personal") == "special":
+            continue
+        if not getattr(pack, "first_party", False):
             continue
         hits = _yield_window(conn, pid, 14, "prefilter_hits")
         if hits < TRIAL_MIN_HITS_14D or _has_recent_offer(conn, pid, "enable_offer"):

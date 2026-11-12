@@ -5,7 +5,6 @@ sensitivity_class: personal
 role_policy: authored_only
 net_subject: deny
 disclosure_default: owner_only
-sharing_domains: [hobbies]
 routing:
   descriptors: [Plants the owner grows in their garden]
   exemplars: [I grow tomatoes, I planted basil]

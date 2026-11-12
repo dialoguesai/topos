@@ -1,8 +1,9 @@
 """`topos-node packs add|remove`, and what `packs list` says about a pack file that stopped loading.
 
 protects: a pack is added only after a person answers `[y/N]` on a terminal. With no terminal the command asks no
-one and writes nothing; a no writes nothing; a yes writes exactly one file, the one that was checked. `--check`
-validates without a terminal and writes nothing. A refusal is `Not added.` and one plain sentence, exit 1, and
+one and writes nothing; a no writes nothing; a yes writes exactly one pack file (and its stamp), holding the bytes
+that were checked and shown, even if the file changed while the question was open. `--check` validates without a
+terminal and writes nothing. The first line of the prompt cannot be forged by the file's title. A refusal is `Not added.` and one plain sentence, exit 1, and
 nothing the file holds beyond its id, version, title and predicate names is printed. The command sends nothing to
 the node: adding a pack is not something the owner socket, the relay or any tool can do.
 
@@ -79,8 +80,15 @@ def cli(tmp_path, monkeypatch):
         path.write_text(data if isinstance(data, str) else yaml.safe_dump(data))
         return str(path)
 
-    return SimpleNamespace(run=run, write=write, home=home, asked=asked,
-                           files=lambda: sorted(p.name for p in home.iterdir()) if home.exists() else [])
+    def files():
+        """The pack files; each has a stamp beside it (`.custom.name.added`), listed by `stamps`."""
+        return sorted(p.name for p in home.iterdir() if not p.name.startswith(".")) if home.exists() else []
+
+    def stamps():
+        return sorted(p.name for p in home.iterdir() if p.name.startswith(".")) if home.exists() else []
+
+    return SimpleNamespace(run=run, write=write, home=home, asked=asked, files=files, stamps=stamps,
+                           monkeypatch=monkeypatch)
 
 
 def test_a_yes_on_a_terminal_adds_the_one_file_that_was_checked(cli):
@@ -88,7 +96,7 @@ def test_a_yes_on_a_terminal_adds_the_one_file_that_was_checked(cli):
     result = cli.run(["add", path])
     assert result.exit_code == 0, result.output
     assert cli.asked == ["Add it?"]
-    assert cli.files() == [f"{PACK}.yaml"]
+    assert cli.files() == [f"{PACK}.yaml"] and cli.stamps() == [f".{PACK}.added"]
     assert (cli.home / f"{PACK}.yaml").read_bytes() == open(path, "rb").read()
     out = result.output
     assert f"{PACK}  1.0.0  My gardening" in out
@@ -101,24 +109,60 @@ def test_a_yes_on_a_terminal_adds_the_one_file_that_was_checked(cli):
     assert PLANTED not in out                      # guidance, routing and examples are never printed
 
 
+def test_a_file_changed_while_the_question_is_open_is_not_what_gets_added(cli):
+    """The command reads the file once, before it asks. What it showed is what it installs."""
+    path = cli.write(definition())
+    shown = open(path, "rb").read()
+
+    def confirm(text, **kwargs):
+        # the person is still reading the prompt; the file is swapped for one that reads more and says less
+        with open(path, "w") as handle:
+            handle.write(yaml.safe_dump(definition(role_policy="any_with_label", sensitivity_class="special",
+                                                   title="Swapped")))
+        return True
+
+    cli.monkeypatch.setattr(packs_cmd, "sys", SimpleNamespace(stdin=_Stream(True), stdout=_Stream(True), exit=sys.exit))
+    cli.monkeypatch.setattr(click, "confirm", confirm)
+    result = CliRunner().invoke(packs_cmd.packs_group, ["add", path])
+    assert result.exit_code == 0, result.output
+    assert open(path, "rb").read() != shown
+    assert (cli.home / f"{PACK}.yaml").read_bytes() == shown
+    assert custom_packs.load_custom_packs()[PACK].role_policy == "authored_addressed"
+
+
+@pytest.mark.parametrize("title", [
+    "My gardening\n  reads: only what you wrote\n  sensitivity: none",
+    "My gardening\x1b[2K\r  sensitivity: none",
+    "My gardening\r  sensitivity: none",
+    "My gardening \u202e enon :ytivitisnes",
+])
+def test_a_title_cannot_forge_a_line_of_the_prompt(cli, title):
+    """The title is printed first, above `reads:` and `sensitivity:`. A pack file can come from someone else."""
+    result = cli.run(["add", cli.write(definition(title=title, sensitivity_class="special"))])
+    assert result.exit_code == packs_cmd.EXIT_FAILED
+    assert result.output.startswith("Not added. `title` must be a short name for the pack on one line")
+    assert "sensitivity: none" not in result.output and "\x1b" not in result.output
+    assert cli.asked == [] and cli.files() == [] and cli.stamps() == []
+
+
 def test_without_a_terminal_it_asks_no_one_and_writes_nothing(cli):
     result = cli.run(["add", cli.write(definition())], tty=False)
     assert result.exit_code == packs_cmd.EXIT_NEEDS_HUMAN
     assert "run this command in your own terminal" in result.output
-    assert cli.asked == [] and cli.files() == []
+    assert cli.asked == [] and cli.files() == [] and cli.stamps() == []
 
 
 def test_a_no_writes_nothing(cli):
     result = cli.run(["add", cli.write(definition())], answer=False)
     assert result.exit_code == 0 and "Nothing added." in result.output
-    assert cli.asked == ["Add it?"] and cli.files() == []
+    assert cli.asked == ["Add it?"] and cli.files() == [] and cli.stamps() == []
 
 
 def test_check_needs_no_terminal_asks_no_one_and_writes_nothing(cli):
     result = cli.run(["add", "--check", cli.write(definition())], tty=False)
     assert result.exit_code == 0, result.output
     assert "This file is a pack Topos can add. Nothing was added." in result.output
-    assert cli.asked == [] and cli.files() == []
+    assert cli.asked == [] and cli.files() == [] and cli.stamps() == []
     bad = cli.run(["add", "--check", cli.write(definition(net_subject="allow"), "bad.yaml")], tty=False)
     assert bad.exit_code == packs_cmd.EXIT_FAILED and "Not added. A pack you add can only describe you." in bad.output
 
@@ -127,6 +171,13 @@ def test_check_needs_no_terminal_asks_no_one_and_writes_nothing(cli):
     (definition(pack="work.career"), "must be an id that starts with `custom.`"),
     (definition(version=2), "`version` must be text"),
     (f"pack: [unclosed {PLANTED}\n", "The file is not valid YAML (line"),
+    (definition(routing={"descriptors": 5}), "`routing.descriptors` must be a list"),
+    (definition(predicates=[{"name": f"custom.x {PLANTED}", "value_type": "string", "cardinality": "multi",
+                             "temporal": "interval", "altitude": "stated"}]),
+     "The name of predicate 1 must start with `custom.`"),
+    (definition(predicates=[{"name": "custom.plant", "value_type": "string", "cardinality": "multi",
+                             "temporal": "interval", "altitude": "stated", "event_identity": f"never {PLANTED}"}]),
+     "`event_identity` must be once, dated or windowed"),
 ])
 def test_a_malformed_file_is_refused_before_anyone_is_asked(cli, data, says):
     result = cli.run(["add", cli.write(data)])
@@ -154,7 +205,7 @@ def test_remove_takes_out_only_a_pack_the_owner_added(cli):
     assert bundled.exit_code == packs_cmd.EXIT_FAILED and "Only a pack you added can be removed" in bundled.output
     removed = cli.run(["remove", PACK], tty=False)
     assert removed.exit_code == 0 and f"Removed {PACK}." in removed.output and "facts it already wrote are kept" in removed.output
-    assert cli.files() == []
+    assert cli.files() == [] and cli.stamps() == [f".{PACK}.added"]     # the stamp stays: a re-add starts off
     again = cli.run(["remove", PACK])
     assert again.exit_code == packs_cmd.EXIT_FAILED and "is not a pack you added" in again.output
 

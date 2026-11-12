@@ -16,23 +16,28 @@ The machine-readable twin of each release is
   your terminal, and copies the file to `fact-packs/` beside the node's environment file. The node needs no
   restart. `packs add --check FILE` only checks the file and adds nothing; `packs remove ID` takes a pack out
   again and keeps the facts it wrote. See `docs/custom-fact-packs.md` and the example beside it.
-  - *It starts switched off.* You switch it on in the app's Fact packs page, like any pack. The switch records
-    the exact definition you switched on: if the file changes, is removed or stops validating, the pack is
-    switched off and reads nothing until you switch it on again.
+  - *It starts switched off, and reads nothing until you switch it on.* You switch it on in the app's Fact
+    packs page, like any pack. Topos never samples your records to suggest it, as it can for a shipped pack
+    that is off. The switch records the exact definition you switched on: if the file changes, is removed
+    (also when the same file is added again) or stops validating, the pack is switched off and reads nothing
+    until you switch it on again.
   - *It cannot take the place of a pack Topos ships.* Its id and its predicates must start with `custom.`,
     which no shipped pack uses, so neither today's packs nor a later release's can be shadowed or replaced.
   - *A file that is not a valid pack is refused* with one sentence saying what is wrong, and nothing is
-    written. If a file already in the directory stops validating, `packs list` names it and every other pack
-    keeps working.
+    written. Every part of the file Topos reads is checked, and the title must be one plain line, because it
+    heads what you are asked to approve. If a file already in the directory stops validating, `packs list`
+    names it and every other pack keeps working.
   - *The same rules as a shipped pack.* It describes you only, its facts are stored owner-only with the
     sensitivity the pack declares, and a fact about another person is held for review instead of written. An
     app reads its facts only through a grant that names the pack, with special-class facts and anything
-    Off-limits held back, as for a shipped pack.
+    Off-limits held back, as for a shipped pack. Which facts are special-class rests on what the file
+    declares, which `packs add` shows you before it asks.
   - *Not in a share with another person yet.* The fact categories a share can name are a fixed list, and a
     pack you add is not on it, so its facts are refused for every share.
   - *An app cannot add one.* Only the `packs add` command writes to the pack directory, and it asks a person
     on a terminal. There is no route, relay message or tool for it.
-  - *Limits.* Stated facts only (no `synthesis`), up to 20 packs of 256 KB each, 50 predicates per pack.
+  - *Limits.* Stated facts only (no `synthesis`), up to 20 packs of 256 KB each, 50 predicates per pack. The
+    quick fact lookup that answers some questions without the model covers shipped packs only.
 
 ## [1.5.49] — 2026-11-10
 

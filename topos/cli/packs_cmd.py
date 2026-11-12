@@ -42,8 +42,9 @@ A pack of the owner's own is added from a file (`features/derivation/custom_pack
     topos-node packs remove custom.gardening
 
 `add` is a change to what the node may write about its owner, so it asks the same way a backfill
-does: on a terminal, once, and there is no flag that answers for the person. It writes one file in
-the node's own pack directory and touches nothing else, so it works with the node stopped. The pack
+does: on a terminal, once, and there is no flag that answers for the person. It writes the pack file
+and a small stamp beside it in the node's own pack directory and touches nothing else, so it works
+with the node stopped. The pack
 starts switched off; switching it on is the app's Fact packs page, as for every pack. No route,
 relay message or tool adds a pack: an app cannot.
 
@@ -374,7 +375,7 @@ def packs_add(file: str, check: bool) -> None:
     from topos.features.derivation import custom_packs
 
     try:
-        pack, _content = custom_packs.read_candidate(Path(file))
+        pack, content = custom_packs.read_candidate(Path(file))
     except custom_packs.CustomPackError as exc:
         _fail(f"Not added. {exc}")
     for line in custom_packs.describe(pack):
@@ -393,7 +394,9 @@ def packs_add(file: str, check: bool) -> None:
         click.echo("Nothing added.")
         sys.exit(EXIT_OK)
     try:
-        added = custom_packs.install_pack(Path(file))
+        # The bytes that were read and shown above, not the file again: a file that changed while the question
+        # was open is not what the owner said yes to.
+        added = custom_packs.install_content(content)
     except custom_packs.CustomPackError as exc:
         _fail(f"Not added. {exc}")
     if added["unchanged"]:

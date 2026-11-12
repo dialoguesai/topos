@@ -49,7 +49,13 @@ def list_packs(conn: sqlite3.Connection, *, time_zone: str = "UTC") -> Dict[str,
             " FROM pack_registry ORDER BY pack_id"):
         p = catalog.get(pid)
         ns = pid.split(".")[0]
-        pending = sum(n for pred, n in conflict_counts.items() if pred.split(".")[0] == ns)
+        if ns == "custom":
+            # Every pack the owner added shares this first part: count by the pack's own predicates, or each
+            # added pack would show the pending conflicts of all of them. A row whose file is gone shows none.
+            own = set(getattr(p, "predicates", {}) or {}) if p else set()
+            pending = sum(n for pred, n in conflict_counts.items() if pred in own)
+        else:
+            pending = sum(n for pred, n in conflict_counts.items() if pred.split(".")[0] == ns)
         outward = bool(p is not None and str(getattr(p, "net_subject", "deny")) == "allow")
         packs.append({
             # Outward packs say so, and say whether the owner has ever consented: a

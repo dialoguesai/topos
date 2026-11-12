@@ -3,8 +3,13 @@
 protects:
 - a pack file is added only when it validates, and a refusal is one plain sentence that never echoes the file;
   a refused add leaves the node's pack directory exactly as it was;
+- a file the checks accept is one the engine can run: every part the engine reads (routing, guidance, revision,
+  key fields, event identity) is held to its shape, so no accepted file can stop the ingest batch of every pack;
+- the title is one printable line: it is the first line of what `packs add` asks the owner to approve;
 - an added pack starts switched off, and runs only as the definition the owner switched on: a changed, removed
-  or re-added file is off again, and nothing reads with the changed definition even before the registry is seeded;
+  or re-added file is off again, and nothing reads with the changed definition even before the registry is seeded
+  (a pack removed and added again with no seeding in between included);
+- while it is off the ingest job reads nothing for it: no shadow trial, no prefilter count, no ledger row;
 - it cannot shadow, replace or collide with a bundled pack. Its id and predicates live in `custom.`, which no
   bundled pack and no grant vocabulary uses; a file dropped into the directory under a bundled id is left out;
 - one bad file in the owner's directory never takes the bundled packs down;
@@ -21,6 +26,7 @@ import re
 import sqlite3
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -74,7 +80,13 @@ def add(tmp_path, **changes):
 
 
 def listing(home):
-    return sorted(p.name for p in home.iterdir()) if home.exists() else []
+    """The pack files. The stamp beside each (`.custom.name.added`) is in `snapshot`."""
+    return sorted(p.name for p in home.iterdir() if not p.name.startswith(".")) if home.exists() else []
+
+
+def snapshot(home):
+    """Every file in the directory and its bytes, stamps included."""
+    return {p.name: p.read_bytes() for p in sorted(home.iterdir())} if home.exists() else {}
 
 
 @pytest.fixture
@@ -154,13 +166,70 @@ MALFORMED = [
      "`eval.negative_controls` must list at least one example"),
     ("no consumers", lambda d: d.pop("consumers"), "`consumers` must list at least one name"),
     ("a bad cardinality", lambda d: d["predicates"][0].update(cardinality="several"), "`cardinality` must be one of"),
+    # every part the engine reads is held to its shape: the ingest job builds a prefilter for every loaded pack
+    ("routing descriptors that are a number", lambda d: d.update(routing={"descriptors": 5}),
+     "`routing.descriptors` must be a list"),
+    ("routing exemplars that are a number", lambda d: d.update(routing={"exemplars": 5}),
+     "`routing.exemplars` must be a list"),
+    ("routing exemplars that are not text", lambda d: d.update(routing={"exemplars": [5, ["nested"]]}),
+     "`routing.exemplars` must be a list"),
+    ("routing that is a list", lambda d: d.update(routing=["plants"]), "`routing` must be a mapping"),
+    ("guidance that is text", lambda d: d.update(guidance=PLANTED), "`guidance` must be a mapping"),
+    ("abstention that is a number", lambda d: d.update(guidance={"abstention": 5}),
+     "`guidance.abstention` must be a list"),
+    ("definitions that are a list", lambda d: d.update(guidance={"definitions": [PLANTED]}),
+     "`guidance.definitions` must be text"),
+    ("key fields that are a number", lambda d: d["predicates"][0].update(key_fields=5),
+     "`key_fields` must list fields"),
+    ("a key field the value does not have", lambda d: d["predicates"][0].update(key_fields=[PLANTED]),
+     "`key_fields` must list fields"),
+    ("required fields that are text", lambda d: d["predicates"][0].update(required_fields="name"),
+     "`required_fields` must list fields"),
+    ("qualifiers that are a list", lambda d: d["predicates"][0].update(qualifiers=[PLANTED]),
+     "`qualifiers` must be a mapping"),
+    ("an event identity Topos does not know", lambda d: d["predicates"][0].update(event_identity=f"never\n{PLANTED}"),
+     "`event_identity` must be once, dated or windowed"),
+    ("a note that is a list", lambda d: d["predicates"][0].update(note=[PLANTED]), "`note` must be text"),
+    ("revision that is a number", lambda d: d.update(revision=5), "`revision` must be a mapping"),
+    ("a revision rule a pack you add cannot hold", lambda d: d.update(revision={"closes": [{"on_value": 5}]}),
+     "`revision` must be a mapping that holds only"),
+    ("supersedes_on for a predicate it does not declare",
+     lambda d: d.update(revision={"supersedes_on": {"custom.other": ["name"]}}), "`revision.supersedes_on` must map"),
+    ("supersedes_on that is a number", lambda d: d.update(revision={"supersedes_on": 5}),
+     "`revision.supersedes_on` must map"),
+    # the title is printed above what the owner approves
+    ("a title of two lines", lambda d: d.update(title=f"My gardening\n  reads: nothing {PLANTED}"),
+     "`title` must be a short name for the pack on one line"),
+    ("a title with a terminal escape", lambda d: d.update(title="My gardening\x1b[2K\rsensitivity: none"),
+     "`title` must be a short name for the pack on one line"),
+    ("a title with a text-direction override", lambda d: d.update(title="My gardening \u202e enon :ytivitisnes"),
+     "`title` must be a short name for the pack on one line"),
+    ("a title that is only a tab", lambda d: d.update(title="\t"), "`title` must be a short name"),
+    # a refusal never carries text from the file that did not pass its own check
+    ("a predicate name that is a sentence", lambda d: d["predicates"][0].update(name=f"custom.x {PLANTED}\nreads"),
+     "The name of predicate 1 must start with `custom.`"),
+    ("a very long predicate name", lambda d: d["predicates"][0].update(name="custom." + "a" * 5000),
+     "The name of predicate 1 must start with `custom.`"),
+    ("a field name that is a sentence", lambda d: d["predicates"][0].update(value_schema={f"N {PLANTED}": "string"}),
+     "the name of field 1 must use lowercase letters"),
+    # plain YAML only: the registry digest and the engine walk the parsed file on every load
+    ("a key that is not text", lambda d: d.update({5: "five"}), "Every key in the file must be text"),
+    ("a nested key that is not text", lambda d: d["guidance"].update({True: "yes"}),
+     "Every key in the file must be text"),
+    ("an anchor repeated by alias",
+     yaml.safe_dump(definition()) + "extra_a: &part [one, two]\nextra_b: *part\n", "YAML anchor or alias"),
+    ("a value that is not plain", yaml.safe_dump(definition()) + "extra: !!binary aGVsbG8=\n",
+     "a YAML type a pack cannot hold"),
+    ("nesting without end", yaml.safe_dump(definition()) + "extra: " + "[" * 40 + "]" * 40 + "\n",
+     "nests more than 12 levels"),
 ]
 
 
 @pytest.mark.parametrize("label,change,says", MALFORMED, ids=[m[0] for m in MALFORMED])
 def test_a_malformed_pack_is_refused_in_a_plain_sentence_and_nothing_is_written(home, tmp_path, label, change, says):
     add(tmp_path)                                    # one good pack is there already
-    before = (home / f"{PACK}.yaml").read_bytes()
+    before = snapshot(home)
+    assert sorted(before) == [f".{PACK}.added", f"{PACK}.yaml"]
     if callable(change):
         data = definition()
         change(data)
@@ -171,8 +240,11 @@ def test_a_malformed_pack_is_refused_in_a_plain_sentence_and_nothing_is_written(
         install_pack(bad)
     message = str(refusal.value)
     assert says in message, message
-    assert PLANTED not in message and "\n" not in message and len(message) < 400
-    assert listing(home) == [f"{PACK}.yaml"] and (home / f"{PACK}.yaml").read_bytes() == before
+    assert PLANTED not in message and message.isprintable() and len(message) < 400
+    assert snapshot(home) == before
+    # the check that runs when the directory is loaded says the same, so a file dropped in by hand is left out
+    with pytest.raises(CustomPackError):
+        custom_packs.parse_definition(bad.read_bytes())
 
 
 def test_a_file_too_large_or_not_text_is_refused(home, tmp_path):
@@ -184,7 +256,7 @@ def test_a_file_too_large_or_not_text_is_refused(home, tmp_path):
     binary.write_bytes(b"\xff\xfe\x00pack")
     with pytest.raises(CustomPackError, match="not UTF-8 text"):
         install_pack(binary)
-    assert listing(home) == []
+    assert snapshot(home) == {}
 
 
 def test_a_changed_pack_needs_a_new_version_and_the_same_file_again_changes_nothing(home, tmp_path):
@@ -202,7 +274,7 @@ def test_two_added_packs_cannot_declare_the_same_predicate(home, tmp_path):
     add(tmp_path)
     with pytest.raises(CustomPackError, match="already declared by custom.gardening"):
         add(tmp_path, pack="custom.orchard")
-    assert listing(home) == [f"{PACK}.yaml"]
+    assert sorted(snapshot(home)) == [f".{PACK}.added", f"{PACK}.yaml"]
 
 
 def test_a_node_holds_a_bounded_number_of_added_packs(home, tmp_path, monkeypatch):
@@ -351,6 +423,40 @@ def test_a_pack_whose_file_is_gone_or_broken_is_switched_off_and_adding_it_again
     assert row(registry)[0] == 0 and PACK not in enabled_packs(registry, bundled_pack_dir())
 
 
+def test_a_pack_removed_and_added_again_with_no_seeding_in_between_starts_off(home, tmp_path, registry):
+    """The node was stopped, or simply idle: no ingest batch and no Fact packs page view ran between the remove
+    and the add, so the registry row still says on and the file is byte for byte the one it was switched on for.
+    The stamp `packs add` and `packs remove` renew is what tells them apart."""
+    add(tmp_path)
+    seed_pack_registry(registry, bundled_pack_dir())
+    switch_on(registry)
+    file_before = (home / f"{PACK}.yaml").read_bytes()
+    stamp_before = (home / f".{PACK}.added").read_bytes()
+    assert PACK in enabled_packs(registry, bundled_pack_dir())
+
+    assert custom_packs.remove_pack(PACK) is True
+    assert listing(home) == [] and (home / f".{PACK}.added").read_bytes() != stamp_before
+    added = add(tmp_path)
+    assert added["unchanged"] is False and (home / f"{PACK}.yaml").read_bytes() == file_before
+    assert row(registry)[0] == 1                                    # nothing has seeded: the row still says on
+    assert PACK not in enabled_packs(registry, bundled_pack_dir())  # and it does not run
+    assert runs_as_switched_on(registry, load_custom_packs()[PACK]) is False
+    seed_pack_registry(registry, bundled_pack_dir())
+    assert row(registry)[0] == 0 and PACK not in enabled_packs(registry, bundled_pack_dir())
+    switch_on(registry)
+    assert PACK in enabled_packs(registry, bundled_pack_dir())
+
+
+def test_adding_the_same_file_again_leaves_the_stamp_and_the_switch_alone(home, tmp_path, registry):
+    add(tmp_path)
+    seed_pack_registry(registry, bundled_pack_dir())
+    switch_on(registry)
+    before = snapshot(home)
+    assert add(tmp_path)["unchanged"] is True and snapshot(home) == before
+    seed_pack_registry(registry, bundled_pack_dir())
+    assert row(registry)[0] == 1 and PACK in enabled_packs(registry, bundled_pack_dir())
+
+
 def test_only_a_pack_the_owner_added_can_be_removed(home, tmp_path):
     for pack_id in ("work.career", "../escape", "custom", "custom/../x"):
         with pytest.raises(CustomPackError, match="Only a pack you added"):
@@ -426,13 +532,293 @@ def test_a_fact_about_another_person_is_held_not_written(home, tmp_path, node_db
     assert node_db.execute("SELECT COUNT(*) FROM signal_objects WHERE ontology_id=?", (PACK,)).fetchone()[0] == 0
 
 
+# --- what the checks accept, the engine can run -----------------------------------------------------------------------------
+_WRONG = (5, "x", [5], {"a": 5}, [["x"]], True, 1.5, [], {})
+_ENGINE_READS = [
+    ("routing",), ("routing", "descriptors"), ("routing", "exemplars"),
+    ("guidance",), ("guidance", "definitions"), ("guidance", "abstention"),
+    ("revision",), ("revision", "supersedes_on"), ("revision", "noop_when"), ("revision", "closes"),
+    ("revision", "exclusive_with"), ("revision", "supersedes_on", "custom.plant"),
+    ("predicates", 0, "key_fields"), ("predicates", 0, "required_fields"), ("predicates", 0, "qualifiers"),
+    ("predicates", 0, "event_identity"), ("predicates", 0, "note"), ("predicates", 0, "values"),
+    ("predicates", 0, "value_schema"), ("predicates", 0, "value_schema", "name"), ("predicates", 0, "sensitivity"),
+    ("eval",), ("eval", "gold"), ("eval", "gold", 0), ("eval", "gold", 0, "text"), ("consumers",),
+    ("synthesis",), ("title",), ("version",), ("sensitivity_class",), ("role_policy",),
+]
+#: Shapes a pack may well use. Each must be accepted, and then run.
+_ALLOWED = [
+    (("predicates", 0, "key_fields"), ["name"]), (("predicates", 0, "required_fields"), ["name"]),
+    (("predicates", 0, "event_identity"), "once"), (("predicates", 0, "event_identity"), "windowed:30"),
+    (("predicates", 0, "temporal"), "episodic"), (("predicates", 0, "cardinality"), "single"),
+    (("predicates", 0, "qualifiers"), {"season": "text"}), (("predicates", 0, "note"), "Only plants in the ground."),
+    (("predicates", 0, "value_schema"), {"name": "string", "kind": ["herb", "fruit"], "since": "date_or_approx"}),
+    (("predicates", 0, "sensitivity"), "special"), (("routing",), None), (("guidance",), None), (("revision",), None),
+    (("guidance", "abstention"), ["Not plants in fiction."]), (("routing", "exemplars"), []),
+]
+
+
+def _mutated(path, value):
+    data = definition(revision={"supersedes_on": {"custom.plant": ["name"]}, "noop_when": "same value"})
+    node = data
+    for step in path[:-1]:
+        if isinstance(node, dict) and not isinstance(node.get(step), (dict, list)):
+            node[step] = {}
+        node = node[step]
+    node[path[-1]] = value
+    return data
+
+
+def test_a_file_the_checks_accept_is_one_the_engine_can_run(home, node_db, monkeypatch):
+    """A wrong shape at every place the engine reads a pack: each is refused, or the pack runs end to end.
+
+    Found in review: `routing: {descriptors: 5}` was accepted, and the ingest job, which builds a prefilter for
+    every loaded pack on or off, then raised on every batch for every bundled pack."""
+    from topos.features.derivation import router
+    from topos.features.derivation.prefilter import PackPrefilter
+    from topos.features.derivation.template import build_prompt, parse_output
+    from topos.features.derivation.verify import lens_note_for
+    from topos.features.derivation.writer import DerivationWriter
+
+    monkeypatch.setattr(router, "_embed", lambda text: None)       # no embedding model in a test
+    home.mkdir(parents=True)
+    reply = json.dumps({"assertions": [{"predicate": "custom.plant", "value": {"name": "tomatoes"}, "about": "owner",
+                                        "occurrence_date": None, "confidence": 0.9, "quote": "I grow tomatoes"}]})
+    accepted = refused = 0
+    cases = [(path, value, False) for path in _ENGINE_READS for value in _WRONG]
+    for path, value, must_pass in cases + [(path, value, True) for path, value in _ALLOWED]:
+        if True:
+            data = _mutated(path, value)
+            where = f"{'.'.join(map(str, path))} = {value!r}"
+            try:
+                custom_packs.check_definition(data)
+            except CustomPackError:
+                assert not must_pass, f"a shape a pack may use was refused: {where}"
+                refused += 1
+                continue
+            accepted += 1
+            (home / f"{PACK}.yaml").write_text(yaml.safe_dump(data))
+            pack = load_custom_packs().get(PACK)
+            assert pack is not None, f"accepted by the check but not loaded: {where}"
+            try:
+                assert definition_sha(pack)
+                PackPrefilter(pack).passes("I grow tomatoes in my garden")
+                router.pack_centroid(pack)
+                build_prompt(pack, "I grow tomatoes", "2026-11-01", "authored")
+                lens_note_for(pack)
+                valid, _rejects = parse_output(reply, pack, record_text="I grow tomatoes")
+                writer = DerivationWriter(node_db, "synthetic-model")
+                for assertion in valid:
+                    for plant in ("tomatoes", "basil"):
+                        writer.assert_pack_fact(
+                            pack=pack, predicate=assertion["predicate"], subject_entity_id="self-owner",
+                            value={"name": plant}, actor_role="authored", quote=f"I grow {plant}",
+                            source_refs=[{"table": "conversation_messages", "record_id": "synthetic-source"}],
+                            event_date="2026-11-01")
+            except Exception as exc:  # noqa: BLE001
+                raise AssertionError(f"accepted by the check, then the engine raised: {where}: {exc!r}") from exc
+    assert refused > 150 and accepted >= len(_ALLOWED) + 10, (refused, accepted)
+
+
+@pytest.mark.parametrize("routing", [{"descriptors": 5}, {"exemplars": 5}])
+def test_the_shape_that_stopped_every_batch_is_refused_and_left_out_at_load(home, tmp_path, routing):
+    with pytest.raises(CustomPackError, match="must be a list"):
+        add(tmp_path, routing=routing)
+    home.mkdir(parents=True, exist_ok=True)
+    (home / f"{PACK}.yaml").write_text(yaml.safe_dump(definition(routing=routing)))     # dropped in by hand
+    assert set(load_packs(bundled_pack_dir())) == set(BUNDLED)
+    assert "must be a list" in custom_packs.custom_pack_problems()[f"{PACK}.yaml"]
+
+
+def test_the_engine_loaders_own_refusal_is_not_passed_on(home, tmp_path, monkeypatch):
+    """The loader quotes the value it refused. Whatever it says, the owner and the node log get a fixed sentence."""
+    from topos.features.derivation.packs import PackValidationError
+
+    def refuse(path, **kwargs):
+        raise PackValidationError(f"pack custom.gardening: bad thing {PLANTED!r}\nreads: nothing")
+
+    monkeypatch.setattr(custom_packs, "load_pack", refuse)
+    with pytest.raises(CustomPackError) as refusal:
+        add(tmp_path)
+    assert str(refusal.value) == "The file is not a pack Topos can read."
+
+
+def test_the_prompt_lines_are_printable_and_hold_only_checked_text(home, tmp_path):
+    add(tmp_path)
+    lines = custom_packs.describe(load_custom_packs()[PACK])
+    assert lines[0] == f"{PACK}  1.0.0  My gardening" and len(lines) == 4
+    assert all(line.isprintable() and PLANTED not in line for line in lines)
+
+
+# --- while it is off, the ingest job reads nothing for it -------------------------------------------------------------------
+GARDEN_ROW = {"content": "I planted basil and tomatoes in the raised bed today", "message_id": "garden-1",
+              "_table": "conversation_messages", "actor_role": "authored", "event_at": "2026-11-01",
+              "source_id": "synthetic"}
+
+
+@pytest.fixture
+def ingest(tmp_path, monkeypatch):
+    """The ingest batch on a temp database, with a stubbed model that records every prompt it is sent. No model
+    is loaded."""
+    from topos.engine.backends import ollama
+    from topos.enrichment.jobs.canonical.derivation_job import run_derivation_batch
+    from topos.storage.db.migrations import apply_all_migrations
+
+    node_db = sqlite3.connect(tmp_path / "ingest.db")
+    apply_all_migrations(node_db)
+    node_db.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json, is_self)"
+                    " VALUES ('self-owner','person','Owner','owner','[]',1)")
+    node_db.execute("CREATE TABLE IF NOT EXISTS conversation_messages (message_id TEXT PRIMARY KEY, content TEXT,"
+                    " event_at TEXT, actor_role TEXT, source_id TEXT)")
+    prompts = []
+    extract = json.dumps({"assertions": [{"predicate": "custom.plant", "value": {"name": "basil"}, "about": "owner",
+                                          "occurrence_date": None, "confidence": 0.9, "quote": "I planted basil"}]})
+    verify = json.dumps({"supported": True, "about": "owner", "fields_ok": True, "reason": "stated"})
+
+    def generate(self, model, prompt, **kwargs):
+        if "Respond with exactly" in prompt:
+            return {"text": "ok"}
+        prompts.append(prompt)
+        return {"text": verify if "strict fact-checker" in prompt else extract}
+
+    monkeypatch.setattr(ollama.OllamaAdapter, "_generate", generate)
+    monkeypatch.setattr("topos.features.facts.llm_extract._resolved_extraction_model", lambda s, c: "stub-model")
+    # what the shadow trial needs before it samples: prefilter hits on record, and recent records that match
+    node_db.execute("INSERT OR IGNORE INTO pack_yield (pack_id, day, prefilter_hits) VALUES (?, date('now'), 40)",
+                    (PACK,))
+    for n in range(12):
+        node_db.execute(
+            "INSERT INTO conversation_messages (message_id, content, event_at, actor_role, source_id)"
+            " VALUES (?, ?, datetime('now'), 'authored', 'synthetic')",
+            (f"recent-{n}", "I planted basil in the garden again and I grow tomatoes too"))
+    node_db.commit()
+
+    def run(rows=(GARDEN_ROW,)):
+        stats = {}
+        written = run_derivation_batch(node_db, list(rows), stats=stats)
+        return written, stats
+
+    def about_the_pack():
+        return [prompt for prompt in prompts if "My gardening" in prompt]
+
+    def count(sql, *args):
+        return node_db.execute(sql, args).fetchone()[0]
+
+    yield SimpleNamespace(run=run, prompts=prompts, about_the_pack=about_the_pack, count=count, db=node_db)
+    node_db.close()
+
+
+def test_a_pack_that_was_never_switched_on_is_not_trialled_counted_or_read(home, tmp_path, ingest):
+    """Found in review: the ingest job's shadow trial runs every pack that is off, and nothing left out an added
+    one: 12 records went to the model under its prompt and 12 rows landed in the training ledger."""
+    add(tmp_path)
+    _written, stats = ingest.run()
+    assert ingest.about_the_pack() == []
+    assert f"trial_{PACK}" not in stats
+    assert ingest.count("SELECT COUNT(*) FROM derivation_training_ledger WHERE pack_id=?", PACK) == 0
+    assert ingest.count("SELECT COUNT(*) FROM pack_offers WHERE pack_id=?", PACK) == 0
+    assert ingest.count("SELECT COALESCE(SUM(prefilter_hits),0) FROM pack_yield WHERE pack_id=?", PACK) == 40
+    assert ingest.count("SELECT COUNT(*) FROM signal_objects WHERE ontology_id=?", PACK) == 0
+    assert ingest.count("SELECT enabled FROM pack_registry WHERE pack_id=?", PACK) == 0
+
+
+def test_a_file_dropped_in_by_hand_is_not_trialled_either(home, ingest):
+    home.mkdir(parents=True)
+    (home / f"{PACK}.yaml").write_text(yaml.safe_dump(definition()))
+    _written, stats = ingest.run()
+    assert ingest.about_the_pack() == [] and f"trial_{PACK}" not in stats
+    assert ingest.count("SELECT COUNT(*) FROM derivation_training_ledger WHERE pack_id=?", PACK) == 0
+
+
+def test_a_pack_switched_off_because_its_file_changed_is_not_trialled_with_the_changed_definition(home, tmp_path,
+                                                                                                  ingest):
+    add(tmp_path)
+    seed_pack_registry(ingest.db, bundled_pack_dir())
+    switch_on(ingest.db)
+    add(tmp_path, version="1.1.0", title="My gardening, changed")
+    _written, stats = ingest.run()                # this batch is the seeding that switches the changed pack off
+    assert ingest.about_the_pack() == [] and f"trial_{PACK}" not in stats
+    assert ingest.count("SELECT enabled FROM pack_registry WHERE pack_id=?", PACK) == 0
+    assert ingest.count("SELECT COUNT(*) FROM derivation_training_ledger WHERE pack_id=?", PACK) == 0
+    assert ingest.count("SELECT COUNT(*) FROM signal_objects WHERE ontology_id=?", PACK) == 0
+
+
+def test_once_the_owner_switches_it_on_the_ingest_job_reads_for_it(home, tmp_path, ingest):
+    add(tmp_path)
+    ingest.run()                                               # seeds the registry row, off
+    switch_on(ingest.db)
+    written, _stats = ingest.run([{**GARDEN_ROW, "message_id": "garden-2"}])
+    assert written >= 1 and ingest.about_the_pack()
+    assert ingest.count("SELECT COUNT(*) FROM signal_objects WHERE ontology_id=?", PACK) == 1
+    assert ingest.count("SELECT COUNT(*) FROM derivation_training_ledger WHERE pack_id=? AND stage='trial'", PACK) == 0
+
+
+def test_an_added_pack_no_prefilter_can_be_built_for_is_left_out_and_the_batch_still_runs(home, tmp_path, ingest,
+                                                                                         monkeypatch, caplog):
+    """The second line of defence: whatever shape gets past the checks, the packs Topos ships still run."""
+    from topos.features.derivation import prefilter
+
+    add(tmp_path)
+    ingest.run()
+    switch_on(ingest.db)
+    build = prefilter.PackPrefilter.__init__
+
+    def init(self, pack):
+        if pack.pack == PACK:
+            raise TypeError("'int' object is not iterable")
+        build(self, pack)
+
+    monkeypatch.setattr(prefilter.PackPrefilter, "__init__", init)
+    before = len(ingest.prompts)
+    both = {**GARDEN_ROW, "message_id": "garden-2",
+            "content": "Signed the offer, starting as Staff Engineer in March. I planted basil to celebrate."}
+    with caplog.at_level("WARNING"):
+        _written, stats = ingest.run([both])
+    assert "skipped" not in stats and "deferred" not in stats
+    assert len(ingest.prompts) > before                       # a pack Topos ships read the record
+    assert [p for p in ingest.prompts[before:] if "My gardening" in p] == []
+    assert any(PACK in record.getMessage() and "left out" in record.getMessage() for record in caplog.records)
+
+
+# --- the Fact packs page and the direct-answer lane -------------------------------------------------------------------
+def test_each_added_pack_shows_only_its_own_pending_conflicts(home, tmp_path, node_db):
+    from topos.features.derivation.surfaces import list_packs
+
+    add(tmp_path)
+    add(tmp_path, pack="custom.orchard", predicates=[{**definition()["predicates"][0], "name": "custom.tree"}])
+    seed_pack_registry(node_db, bundled_pack_dir())
+    for n, predicate in enumerate(["custom.plant", "custom.plant", "custom.tree"]):
+        node_db.execute(
+            "INSERT INTO fact_conflicts (conflict_id, subject_entity_id, predicate, incumbent_object_id,"
+            " challenger_value, status) VALUES (?, 'self-owner', ?, 'synthetic-object', 'synthetic', 'pending')",
+            (f"synthetic-conflict-{n}", predicate))
+    node_db.commit()
+    shown = {p["pack_id"]: p["pending_conflicts"] for p in list_packs(node_db)["packs"]}
+    assert shown[PACK] == 2 and shown["custom.orchard"] == 1
+    custom_packs.remove_pack("custom.orchard")                # a row whose file is gone claims none
+    shown = {p["pack_id"]: p["pending_conflicts"] for p in list_packs(node_db)["packs"]}
+    assert shown[PACK] == 2 and shown["custom.orchard"] == 0
+
+
+def test_the_direct_answer_lane_indexes_only_the_predicates_topos_ships(home, tmp_path, monkeypatch):
+    """Its index is built once per process and matches a question on a predicate's last word. An added pack's
+    predicate stays out: `custom.plant` would otherwise take every question holding "plant" away from the model,
+    only after a restart, and still after the pack was removed."""
+    from topos.query import facts_direct
+
+    add(tmp_path)
+    monkeypatch.setattr(facts_direct, "_generic_index_cache", None)
+    names = {name for _pattern, name, _special in facts_direct._generic_predicate_index()}
+    assert len(names) > 100 and not [name for name in names if name.startswith("custom.")]
+    monkeypatch.setattr(facts_direct, "_generic_index_cache", None)
+
+
 # --- nothing else adds one ---------------------------------------------------------------------------------------------
 def test_only_the_packs_command_can_add_or_remove_a_pack():
     """An app reaches the node through handlers, routes and tools. None of them may add a pack, so the functions
     that write the owner's pack directory are named in exactly two modules: where they live and the terminal
     command that asks a person first."""
     root = Path(custom_packs.__file__).resolve().parents[2]
-    writers = re.compile(r"\b(install_pack|remove_pack)\b")
+    writers = re.compile(r"\b(install_pack|install_content|remove_pack|_renew_stamp|_write_beside)\b")
     found = sorted(str(path.relative_to(root)) for path in root.rglob("*.py") if writers.search(path.read_text()))
     assert found == ["cli/packs_cmd.py", "features/derivation/custom_packs.py"]
     # and the directory itself is written nowhere else
