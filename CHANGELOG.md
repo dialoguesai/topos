@@ -16,8 +16,14 @@ The machine-readable twin of each release is
   - *What it counts.* A standing pack fact whose every source record is a reaction the owner sent, by the same
     test the packs and the commitments lane apply (the marker Messages puts on the stored row, or the English
     text form). A fact with any other source (a journal entry, a message you typed, a contact's message, a
-    record that is no longer stored) is left alone. So is a fact you confirmed or corrected in the app; those
-    are counted apart and said.
+    record that is no longer stored) is left alone.
+  - *What it leaves although the fact names only reactions.* A fact you made yourself in the app (confirmed,
+    corrected, revised, or added from an assertion held for review): counted apart and said. A fact about when
+    you are active, which cites records for their time and not their words. And a fact whose list of records
+    is not the whole story: an event told again in a later record keeps only the later record in its list, so
+    an event first read from a journal entry can end up naming only a reaction. Topos keeps its own log of
+    every record a fact was stored from; when that log shows another record, or cannot account for every time
+    an event was stored, the fact is left, counted apart and said.
   - *By itself it only counts.* `topos-node packs retract-reactions` prints pack ids and counts, needs no
     terminal and writes nothing (`--json` for the same as data). It never prints a fact or a message.
   - *`--apply` ends them, after asking you.* It shows the count, asks `[y/N]` once on a terminal, and sends one
@@ -33,8 +39,14 @@ The machine-readable twin of each release is
   - Limits: facts that did not come from a pack are not looked at. Assertions held for review and the training
     ledger's rows from a reaction stay. For sharing, an ended fact is a closed fact the node has no rule for,
     and such a fact withholds the message it names: the reaction it was read from is not released to a share
-    from then on (the owner has not ruled otherwise). Not run on a real node: the tests use an invented
-    database, a stubbed model and the real owner socket gate.
+    from then on (the owner has not ruled otherwise; a test now pins it). The English text form is wider than
+    a reaction: a message you typed that starts with a reaction word and a curly quote and ends with a curly
+    quote (`Loved “one title” and now reading “another”`) reads as a reaction too, even when Messages marked
+    the row as ordinary. The packs skip such a message, and a fact read only from it is counted here and ended
+    on your yes; you are shown counts, not the facts, so you cannot pick it out first. The writer still
+    replaces an event's list of records when the event is told again (not fixed here; this command reads
+    Topos's log to get around it). Not run on a real node: the tests use an invented database, a stubbed model
+    and the real owner socket gate.
 
 ### Fixed
 - **A reaction the owner sent in Messages is no longer read by fact packs as text the owner wrote.**

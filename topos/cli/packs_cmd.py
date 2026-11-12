@@ -678,7 +678,8 @@ def _reaction_facts(body: Any) -> Optional[Dict[str, Any]]:
     packs = [{"pack_id": str(row["pack_id"]), "facts": _int(row.get("facts"))}
              for row in body["packs"]
              if isinstance(row, dict) and _PACK_ID_RE.match(str(row.get("pack_id") or "")) and _int(row.get("facts"))]
-    out = {"packs": packs, "total": sum(p["facts"] for p in packs), "kept_confirmed": _int(body.get("kept_confirmed"))}
+    out = {"packs": packs, "total": sum(p["facts"] for p in packs), "kept_confirmed": _int(body.get("kept_confirmed")),
+           "kept_other_record": _int(body.get("kept_other_record"))}
     for key in ("retracted", "changed"):
         if key in body:
             out[key] = _int(body.get(key))
@@ -696,8 +697,13 @@ def _reaction_lines(found: Dict[str, Any], verb: str) -> List[str]:
     kept = found["kept_confirmed"]
     if kept:
         lines.append(f"{kept:,} more of the same kind {'is' if kept == 1 else 'are'} left as "
-                     f"{'it is' if kept == 1 else 'they are'}: you confirmed or corrected "
+                     f"{'it is' if kept == 1 else 'they are'}: you confirmed, corrected or added "
                      f"{'it' if kept == 1 else 'them'} in the app.")
+    other = found["kept_other_record"]
+    if other:
+        lines.append(f"{other:,} more {'names' if other == 1 else 'name'} only a reaction and "
+                     f"{'is' if other == 1 else 'are'} left as {'it is' if other == 1 else 'they are'}: Topos also "
+                     f"stored {'it' if other == 1 else 'them'} from another record, or cannot tell that it did not.")
     return lines
 
 

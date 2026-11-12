@@ -100,7 +100,7 @@ AUTO_ON = {**AUTO_OFF, "enabled": True, "changed_at": "2026-11-11T14:02:00Z",
 #: What the node answers for the facts stored from the owner's reactions: two packs, one row that is not a pack.
 REACTION_FACTS = {"packs": [{"pack_id": JOY, "facts": 2, "sample": PLANTED}, {"pack_id": EVENTS, "facts": 1},
                             {"pack_id": "../../etc/passwd", "facts": 9}],
-                  "total": 12, "kept_confirmed": 1, "note": PLANTED}
+                  "total": 12, "kept_confirmed": 1, "kept_other_record": 2, "note": PLANTED}
 STOPPED = _snap("stopped", [{"pack_id": EVENTS, "state": "stopped", "batches": [_batch(1, 57)]}, {"pack_id": JOY}],
                 reason="stopped")
 
@@ -185,7 +185,7 @@ class _Socket:
             return self.reaction_facts
         if (method, path) == ("POST", packs_cmd.RETRACT_PATH):
             ended = {**self.reaction_facts, "retracted": 3, "changed": 0}
-            self.reaction_facts = {"packs": [], "total": 0, "kept_confirmed": self.reaction_facts["kept_confirmed"]}
+            self.reaction_facts = {**self.reaction_facts, "packs": [], "total": 0}
             return ended
         raise AssertionError(f"unexpected request {method} {path}")
 
@@ -690,12 +690,14 @@ def test_retract_reactions_counts_per_pack_and_changes_nothing_by_default(cli):
     assert out.prompts == [] and out.tokens == [] and _posts(out) == []
     assert "  moments.joy      2" in out.out and "  life.events      1" in out.out
     assert "3 facts in 2 packs standing." in out.out, "counted from the rows that are packs, not the body's total"
-    assert "1 more of the same kind is left as it is: you confirmed or corrected it in the app." in out.out
+    assert "1 more of the same kind is left as it is: you confirmed, corrected or added it in the app." in out.out
+    assert ("2 more name only a reaction and are left as they are: Topos also stored them from another record, "
+            "or cannot tell that it did not.") in out.out
     assert "Nothing changed. `topos-node packs retract-reactions --apply` ends them, after asking you." in out.out
     assert "passwd" not in out.out
     doc = json.loads(cli("retract-reactions", "--json", tty=False).out)["reaction_facts"]
     assert doc == {"packs": [{"pack_id": JOY, "facts": 2}, {"pack_id": EVENTS, "facts": 1}], "total": 3,
-                   "kept_confirmed": 1}
+                   "kept_confirmed": 1, "kept_other_record": 2}
 
 
 def test_retract_reactions_apply_shows_the_count_asks_once_and_sends_one_confirmed_change(cli):
@@ -735,7 +737,7 @@ def test_retract_reactions_has_no_flag_that_answers_for_the_person(cli):
 
 
 def test_retract_reactions_with_nothing_to_end_asks_nothing(cli):
-    none = {"packs": [], "total": 0, "kept_confirmed": 0}
+    none = {"packs": [], "total": 0, "kept_confirmed": 0, "kept_other_record": 0}
     for args in ((), ("--apply",)):
         out = cli("retract-reactions", *args, socket=_Socket(reaction_facts=none))
         assert out.code == packs_cmd.EXIT_OK and "Nothing to end." in out.out
