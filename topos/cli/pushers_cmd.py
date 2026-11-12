@@ -47,6 +47,19 @@ def _connect(path: Path) -> sqlite3.Connection:
     return sqlite3.connect(str(path))
 
 
+def _source_registry():
+    """Include custom runtime installs when granting a local producer its sources."""
+    from topos.mcp_server import NodeSocket, NodeDown, NodeRefused
+    from topos.sources.definitions import definition_from_payload
+    try:
+        result = NodeSocket().request_sync("GET", "/sources")
+    except NodeDown:
+        raise click.ClickException('Topos isn\'t running — say "start Topos".') from None
+    except NodeRefused as exc:
+        raise click.ClickException(f"Topos refused the source list ({exc.code or exc.status}).") from None
+    return {row["source_id"]: definition_from_payload(row) for row in result.get("sources", [])}
+
+
 def _echo(payload, as_json: bool, human: str) -> None:
     click.echo(json.dumps(payload, indent=2, sort_keys=True) if as_json else human)
 
@@ -79,18 +92,18 @@ def pushers_add(app: str, sources: str, origins: tuple, display_name: str, as_js
         _fail(f"{app!r} can't be an app name. Use lowercase letters, digits and hyphens.")
         raise AssertionError  # unreachable
     display = str(display_name or "").strip() or local_pushers.PUSHER_DISPLAY_NAMES.get(short, short)
+    db_path = _database_path()
+    if not db_path.is_file():
+        _fail("Topos hasn't been started on this computer yet. Run `topos-node start --headless` "
+              "(or open Topos), then try again.")
     try:
         grant = local_pushers.PusherGrant(
-            local_pushers.parse_sources(sources.split(",")),
+            local_pushers.parse_sources(sources.split(","), registry=_source_registry()),
             local_pushers.parse_origins(origins),
         )
     except local_pushers.PusherRefused as exc:
         _fail(f"Could not connect {display}: {exc}")
         raise AssertionError  # unreachable
-    db_path = _database_path()
-    if not db_path.is_file():
-        _fail("Topos hasn't been started on this computer yet. Run `topos-node start --headless` "
-              "(or open Topos), then try again.")
     if not _can_prompt():
         _fail(f"Connecting {display} needs a yes from you in a terminal. Run "
               f"`topos-node pushers add {short} --sources {sources}` yourself.")

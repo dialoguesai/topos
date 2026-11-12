@@ -27,6 +27,8 @@ def db(tmp_path, monkeypatch) -> Path:
     path = tmp_path / "node.db"
     sqlite3.connect(str(path)).close()
     monkeypatch.setattr(pushers_cmd, "_database_path", lambda: path)
+    from topos.sources.registry import REGISTRY
+    monkeypatch.setattr(pushers_cmd, "_source_registry", lambda: REGISTRY)
     return path
 
 
