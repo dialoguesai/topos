@@ -1519,6 +1519,15 @@
       ]
     },
     {
+      "version": "1.5.52",
+      "summary": "Restore owner coherence for legacy journal timestamps and add configurable rolling windows.",
+      "steps": [],
+      "notes": [
+        "Owner-only read calculation; no schema migration, reprocessing, model call or label change.",
+        "Rolling windows accept 30\u2013365 days and default to 30. Deploy with matching control-plane forwarding and web settings."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

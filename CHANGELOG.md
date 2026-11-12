@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.52] — 2026-11-12
+
 ### Fixed
 - **Home self-coherence includes legacy journal timestamps.** `[O]` Uses the same
   node-local timestamp interpretation as Calibrate, instead of dropping sources
