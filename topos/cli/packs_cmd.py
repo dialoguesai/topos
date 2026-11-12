@@ -36,7 +36,8 @@ protects and need no terminal.
 Messages quotes someone else (`features/derivation/reaction_retract`). By itself it only counts them,
 per pack, and is a read. `retract-reactions --apply` ends them (each stays in the history, closed; no
 row is deleted, no message is touched) and is the same kind of change as a backfill: a terminal, the
-count, one `[y/N]`, one confirmation, one request that carries the count that was shown.
+count, one `[y/N]`, one confirmation, one request that carries the count that was shown. It puts
+nothing back: a fact one of these replaced stays closed, and the command says so before it asks.
 
     topos-node packs retract-reactions
     topos-node packs retract-reactions --apply
@@ -679,7 +680,7 @@ def _reaction_facts(body: Any) -> Optional[Dict[str, Any]]:
              for row in body["packs"]
              if isinstance(row, dict) and _PACK_ID_RE.match(str(row.get("pack_id") or "")) and _int(row.get("facts"))]
     out = {"packs": packs, "total": sum(p["facts"] for p in packs), "kept_confirmed": _int(body.get("kept_confirmed")),
-           "kept_other_record": _int(body.get("kept_other_record"))}
+           "kept_marked": _int(body.get("kept_marked")), "kept_other_record": _int(body.get("kept_other_record"))}
     for key in ("retracted", "changed"):
         if key in body:
             out[key] = _int(body.get(key))
@@ -699,6 +700,11 @@ def _reaction_lines(found: Dict[str, Any], verb: str) -> List[str]:
         lines.append(f"{kept:,} more of the same kind {'is' if kept == 1 else 'are'} left as "
                      f"{'it is' if kept == 1 else 'they are'}: you confirmed, corrected or added "
                      f"{'it' if kept == 1 else 'them'} in the app.")
+    marked = found["kept_marked"]
+    if marked:
+        lines.append(f"{marked:,} more of the same kind {'is' if marked == 1 else 'are'} left as "
+                     f"{'it is' if marked == 1 else 'they are'}: you marked {'it' if marked == 1 else 'them'} "
+                     "in an app (a reaction or a rank).")
     other = found["kept_other_record"]
     if other:
         lines.append(f"{other:,} more {'names' if other == 1 else 'name'} only a reaction and "
@@ -712,7 +718,12 @@ def _reaction_lines(found: Dict[str, Any], verb: str) -> List[str]:
               help="End those facts. Asks you once, on a terminal (default: count them and change nothing).")
 @_JSON_OPTION
 def packs_retract_reactions(apply: bool, as_json: bool) -> None:
-    """Facts stored from a reaction you sent in Messages: counts them per pack; --apply ends them."""
+    """Facts stored from a reaction you sent in Messages: counts them per pack; --apply ends them.
+
+    Ending puts nothing back. If one of these facts took the place of an earlier fact, the earlier
+    fact stays closed. If a reaction changed a detail of a fact you also wrote yourself, that fact is
+    left as it is, with the changed detail.
+    """
     if apply and as_json:
         raise click.UsageError("--json is for the count; --apply asks you on a terminal.")
     if apply and not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -738,6 +749,9 @@ def packs_retract_reactions(apply: bool, as_json: bool) -> None:
         sys.exit(EXIT_OK)
     click.echo("Ending a fact closes it as of now: it stays in the history, no row is deleted and no message is "
                "touched. A reaction is not read again, so a later backfill does not bring these back.")
+    click.echo("Ending puts nothing back. If one of these facts took the place of an earlier fact, the earlier "
+               "fact stays closed. If a reaction changed a detail of a fact you also wrote yourself, that fact is "
+               "left as it is, with the changed detail.")
     if not click.confirm("End them?", default=False, err=True):
         click.echo("Nothing changed.")
         sys.exit(EXIT_OK)

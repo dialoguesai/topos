@@ -100,7 +100,7 @@ AUTO_ON = {**AUTO_OFF, "enabled": True, "changed_at": "2026-11-11T14:02:00Z",
 #: What the node answers for the facts stored from the owner's reactions: two packs, one row that is not a pack.
 REACTION_FACTS = {"packs": [{"pack_id": JOY, "facts": 2, "sample": PLANTED}, {"pack_id": EVENTS, "facts": 1},
                             {"pack_id": "../../etc/passwd", "facts": 9}],
-                  "total": 12, "kept_confirmed": 1, "kept_other_record": 2, "note": PLANTED}
+                  "total": 12, "kept_confirmed": 1, "kept_marked": 4, "kept_other_record": 2, "note": PLANTED}
 STOPPED = _snap("stopped", [{"pack_id": EVENTS, "state": "stopped", "batches": [_batch(1, 57)]}, {"pack_id": JOY}],
                 reason="stopped")
 
@@ -691,13 +691,14 @@ def test_retract_reactions_counts_per_pack_and_changes_nothing_by_default(cli):
     assert "  moments.joy      2" in out.out and "  life.events      1" in out.out
     assert "3 facts in 2 packs standing." in out.out, "counted from the rows that are packs, not the body's total"
     assert "1 more of the same kind is left as it is: you confirmed, corrected or added it in the app." in out.out
+    assert "4 more of the same kind are left as they are: you marked them in an app (a reaction or a rank)." in out.out
     assert ("2 more name only a reaction and are left as they are: Topos also stored them from another record, "
             "or cannot tell that it did not.") in out.out
     assert "Nothing changed. `topos-node packs retract-reactions --apply` ends them, after asking you." in out.out
     assert "passwd" not in out.out
     doc = json.loads(cli("retract-reactions", "--json", tty=False).out)["reaction_facts"]
     assert doc == {"packs": [{"pack_id": JOY, "facts": 2}, {"pack_id": EVENTS, "facts": 1}], "total": 3,
-                   "kept_confirmed": 1, "kept_other_record": 2}
+                   "kept_confirmed": 1, "kept_marked": 4, "kept_other_record": 2}
 
 
 def test_retract_reactions_apply_shows_the_count_asks_once_and_sends_one_confirmed_change(cli):
@@ -710,6 +711,10 @@ def test_retract_reactions_apply_shows_the_count_asks_once_and_sends_one_confirm
     assert post["headers"] == {"X-Topos-Owner-Confirm": "confirm-token"}
     shown, _, after = out.out.partition("no row is deleted and no message is touched")
     assert "3 facts in 2 packs standing." in shown and "3 facts in 2 packs ended." in after
+    said, _, ended = after.partition("3 facts in 2 packs ended.")
+    assert ("Ending puts nothing back. If one of these facts took the place of an earlier fact, the earlier fact "
+            "stays closed.") in said, "the limit is said before the question, not after the change"
+    assert "puts nothing back" not in ended
 
 
 def test_retract_reactions_apply_without_a_terminal_asks_no_one_and_touches_nothing(cli):
@@ -737,7 +742,7 @@ def test_retract_reactions_has_no_flag_that_answers_for_the_person(cli):
 
 
 def test_retract_reactions_with_nothing_to_end_asks_nothing(cli):
-    none = {"packs": [], "total": 0, "kept_confirmed": 0, "kept_other_record": 0}
+    none = {"packs": [], "total": 0, "kept_confirmed": 0, "kept_marked": 0, "kept_other_record": 0}
     for args in ((), ("--apply",)):
         out = cli("retract-reactions", *args, socket=_Socket(reaction_facts=none))
         assert out.code == packs_cmd.EXIT_OK and "Nothing to end." in out.out

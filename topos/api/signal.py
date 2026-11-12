@@ -1428,8 +1428,8 @@ async def put_backfill_auto(
 @router.get("/derivation/reaction-facts")
 async def get_reaction_facts(_api_key: str = Depends(require_api_key)):
     """The standing pack facts whose every source record is a reaction the owner sent in Messages:
-    `{packs: [{pack_id, facts}], total, kept_confirmed, kept_other_record}`. Pack ids and counts; nothing
-    is written."""
+    `{packs: [{pack_id, facts}], total, kept_confirmed, kept_marked, kept_other_record}`. Pack ids and
+    counts; nothing is written."""
     import asyncio as _asyncio
 
     from ..features.derivation import reaction_retract as reactions
