@@ -67,7 +67,8 @@ STOPPING_ERROR = "Engine is stopping. Retry shortly."
 #: on 13 Oct 2026). A batch also carries the control plane's own ``respond_by``; where that is earlier, it is used.
 #: The node should not have to guess: the control plane should send its budget with every relayed request.
 #:
-#: A closed table. A type that is not in it is never aged out and never dropped. That leaves out, on purpose:
+#: A closed table. A type that is not in it is never aged out, and is never dropped unless it is one of the reads in
+#: ``INBOUND_GONE_READ_TYPES`` below whose connection closed. That leaves out, on purpose:
 #: every consent write and protocol command (``permissions_v2_mutate``, ``_bind``, ``_identity_command``,
 #: ``_ingest_snapshot``, the evidence and projection review records and revokes, the opt-out and opt-in,
 #: ``_message_review``, ``_entailment_review``, ``_permitted_derivation``, ``_message_search_rebuild``), which are
@@ -94,10 +95,13 @@ INBOUND_AGE_BOUND_SECONDS = {
 #:
 #: A closed list. A type joins only when its handler changes nothing the caller asked for and asking again gives
 #: the same answer: consent writes and protocol commands are applied however late they are reached, and
-#: ``llm_integrations_storage`` carries write ops. Two of these run a lazy, idempotent set-up before they read
-#: (``get_sources`` ensures the install schema, ``list_database_tables`` the one-time legacy config move); the next
-#: call runs it again, so nothing is lost with the dropped one. Re-checked on 11 Nov 2026 against the handlers of
-#: that day: all 12 still registered, none on the fast lane, none writes. The types added since stay out until
+#: ``llm_integrations_storage`` carries write ops. Some of these do lazy bookkeeping before they read:
+#: ``get_sources`` ensures the install schema and retires superseded installs, ``list_database_tables`` runs the
+#: one-time legacy config move, ``permissions_v2_status`` syncs the protection revision, and
+#: ``permissions_v2_share_counts`` may move the review high-water. Each is idempotent and the next call repeats it
+#: (every release path syncs protection itself), so nothing is lost with the dropped one. Re-checked on 11 Nov 2026
+#: against the handlers of that day: all 12 still registered, none on the fast lane, none makes a change the caller
+#: asked for. The types added since stay out until
 #: someone reads their handlers for this purpose: ``truth_own_claim_label`` writes; ``pack_facts``,
 #: ``message_context`` and ``messenger_rating_candidates`` are reads nobody measured here.
 INBOUND_GONE_READ_TYPES = frozenset({
