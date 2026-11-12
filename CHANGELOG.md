@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.52] — 2026-11-12
+
+### Fixed
+- **Home self-coherence includes legacy journal timestamps.** `[O]` Uses the same
+  node-local timestamp interpretation as Calibrate, instead of dropping sources
+  without an explicit offset. Missing or invalid timestamps still do not vote.
+
+### Added
+- **Configurable self-coherence rolling window.** `[O]` Owner dashboard requests
+  accept `coherence_window_days` from 30 through 365, defaulting to 30. The response
+  reports the actual window; comparison rules and owner-only access are unchanged.
+
 ## [1.5.51] — 2026-11-12
 
 ### Added

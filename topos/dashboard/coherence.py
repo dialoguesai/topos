@@ -18,14 +18,9 @@ SOURCES = {"conversation_messages": ("message_id", "event_at"),
            "transcript_segments": ("segment_id", "event_at")}
 
 
-def _stamp(value):
-    if not isinstance(value, str):
-        return None
-    try:
-        stamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return stamp.astimezone(timezone.utc) if stamp.tzinfo else None
-    except ValueError:
-        return None
+# Share Calibrate's canonical clock: naive stored source times are node-local,
+# explicit offsets are honored, and date-only/malformed values are not instants.
+from ..query.truth_checks import instant as _stamp
 
 
 def _columns(conn, table):
@@ -111,7 +106,14 @@ def _identity(row, zone):
     return (row.get("category"), period, mode, text), polarity, at
 
 
-def coherence_series(rows, start, end, *, now=None, zone=timezone.utc):
+def validate_window_days(value):
+    if type(value) is not int or not 30 <= value <= 365:
+        raise ValueError("Expected a coherence window of 30–365 days")
+    return value
+
+
+def coherence_series(rows, start, end, *, now=None, zone=timezone.utc, window_days=WINDOW_DAYS):
+    window_days = validate_window_days(window_days)
     first, last = date.fromisoformat(start), date.fromisoformat(end)
     if first.isoformat() != start or last.isoformat() != end or not 0 < (last - first).days <= 366:
         raise ValueError("Expected 1–366 days and an exclusive end")
@@ -134,7 +136,7 @@ def coherence_series(rows, start, end, *, now=None, zone=timezone.utc):
     buckets, day = [], first
     while day < last:
         end_at = datetime.combine(day + timedelta(days=1), time.min, zone).astimezone(timezone.utc)
-        start_at = datetime.combine(day - timedelta(days=WINDOW_DAYS-1), time.min, zone).astimezone(timezone.utc)
+        start_at = datetime.combine(day - timedelta(days=window_days-1), time.min, zone).astimezone(timezone.utc)
         in_future = day > now.astimezone(zone).date()
         candidates = [identity for at, identity in prepared if start_at <= at < end_at and at <= now] if not in_future else []
         groups = defaultdict(dict)
@@ -162,5 +164,5 @@ def coherence_series(rows, start, end, *, now=None, zone=timezone.utc):
                         "aligned_groups": aligned, "tension_groups": tension,
                         "score": aligned / n if available and n else None})
         day += timedelta(days=1)
-    return {"method": METHOD, "window_days": WINDOW_DAYS, "history_basis": "current_retained_checks",
+    return {"method": METHOD, "window_days": window_days, "history_basis": "current_retained_checks",
             "population": "owner_literal_claim_groups", "buckets": buckets}
