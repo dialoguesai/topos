@@ -504,7 +504,7 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                 a = dict(a); a["verifier_status"] = "skipped"
             if a.get("verifier_status") == "rejected":
                 _ledger_write(conn, stage="backfill", pack=pack, rec=rec, a=a,
-                              model=extract_model, vmodel=vmodel)
+                              model=extract_model, vmodel=vmodel, context=context)
                 continue
             stats["accepted"] += 1
             _bump_yield(conn, pack_id, accepted=1)
@@ -526,7 +526,7 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                 stats["written"] += 1
                 _bump_yield(conn, pack_id, written=1)
             _ledger_write(conn, stage="backfill", pack=pack, rec=rec, a=a,
-                          model=extract_model, vmodel=vmodel,
+                          model=extract_model, vmodel=vmodel, context=context,
                           written_id=out.get("object_id") if stored else None)
         conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
         conn.commit()

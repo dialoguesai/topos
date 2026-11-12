@@ -22,17 +22,21 @@ The machine-readable twin of each release is
   - *It needs the fact check.* The ruling is for a reading the fact check verifies against the same turns. With
     the fact check switched off (`TOPOS_DERIVATION_VERIFY=off`) the two packs read exactly as in 1.5.49: one
     message at a time, no turns, no short messages, no thank-word rule and no recipient label; the prompts,
-    what the parser keeps and what is written are the same. A finding read with turns whose fact-check call
-    fails is not written; read alone it is still stored and flagged, as before.
-  - *Not Signal yet.* The ruling names iMessage and Signal. Signal conversations get no turns in this release:
-    nothing Topos stores for a Signal message says whether its conversation is a group, so a group in which one
-    other member has written could not be told from a two-party conversation. Messages names every chat a
-    group or a direct chat, and that is checked. Signal follows once its reader stores the same.
+    what the parser keeps and what is written are the same, except the template stamp: facts and ledger rows
+    written by any pack carry `shadow-11` where 1.5.49 wrote `shadow-10`. A finding read with turns whose
+    fact-check call fails is not written; read alone it is still stored and flagged, as before.
+  - *Only a chat Messages names a direct chat; not Signal yet.* The ruling names iMessage and Signal. A group
+    in which only one other member has written cannot be told from a two-party conversation by counting who
+    wrote, so a conversation gets turns only when one of its stored rows (your message, or one read for its
+    turns) carries the name Messages gives a direct chat (`chat_guid` `<service>;-;<id>`). A conversation whose
+    rows have no metadata or no chat name, such as an older import, gets none; one row naming a group takes
+    them away. Signal conversations get no turns in this release: nothing Topos stores for a Signal message
+    says whether its conversation is a group. Signal follows once its reader stores the same.
   - *What is never a turn.* A system row, a reaction (a "Loved …" row repeats another message under the
     reactor's name, so it is stepped over), a row you excluded, one tagged NSFW, one your Off-limits list
     protects. No turns at all with an Off-limits person, in a group (more than one other person has written,
-    or Messages itself names the chat a group), in Signal or any other messenger, an AI chat, a journal or a
-    transcript, or for a message that is itself a reaction. Any error means no turns, never a failed batch. A
+    or Messages itself names the chat a group), in a conversation no stored row names a direct chat, in Signal
+    or any other messenger, an AI chat, a journal or a transcript, or for a message that is itself a reaction. Any error means no turns, never a failed batch. A
     long batch looks at your exclusions and Off-limits list again every 30 seconds, and a finding is not
     written when you excluded one of its turns while it was being read.
   - *Only your words are evidence.* A finding whose quote is not in your own message, or that is about anyone
@@ -43,6 +47,13 @@ The machine-readable twin of each release is
     turn) is dropped before it is checked, unless your own message has the same words. Case, punctuation and
     spacing do not matter; a script written without spaces is counted by character. Dropped findings are
     counted (`context_copied`), and their text is not kept or logged. The prompt asks the model not to copy.
+    A date the model gives for the moment is kept only as a YYYY-MM-DD date; anything else there is dropped
+    and the finding kept.
+  - *The training ledger.* Every judged finding leaves a row in `derivation_training_ledger`, which keeps no
+    turns to take it out by. For a finding read with turns the row keeps its status, your quote and the date,
+    and no value, no fact-check reason (a fixed line instead: the checker read the turns and its reason could
+    repeat them) and no name in `about` (`other`, not `other:<name>`). Findings read from one message alone
+    are logged as before.
   - *Moments never shows the other person's words.* The fact rests on your message alone. The turns are kept
     beside it as `context_refs` and only protect it: excluding, deleting or scrubbing one, or retention removing
     it, takes the fact out, and an app's `pack_facts` read leaves the fact out when one is protected, names an

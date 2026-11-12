@@ -10,6 +10,7 @@ import json
 import os
 import re
 import unicodedata
+from datetime import date as _date
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -648,6 +649,25 @@ def normalise_runner_label(value: Any, runner_labels: Any) -> Any:
     return value
 
 
+_ISO_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+
+
+def _iso_date(value: Any) -> bool:
+    """Whether `value` is exactly a calendar date written YYYY-MM-DD.
+
+    An assertion read with context (DR-62) keeps `occurrence_date` only then: it becomes the
+    fact's `valid_from` and part of its key, and it is outside the copy guard, so any other
+    text there ("Dad died.", cut to ten characters) could carry the other person's words."""
+    text = str(value or "").strip()
+    if not _ISO_DATE_RE.match(text):
+        return False
+    try:
+        _date.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
+
+
 def parse_output(raw: str, pack: Pack, record_text: str = None,
                  grounded_exempt: Any = (), runner_labels: Any = (),
                  context: Optional[Sequence[Mapping[str, Any]]] = None,
@@ -810,8 +830,11 @@ def parse_output(raw: str, pack: Pack, record_text: str = None,
             conf = min(1.0, max(0.0, float(a.get("confidence") or 0.5)))
         except (TypeError, ValueError):
             conf = 0.5
+        occurrence = str(a.get("occurrence_date"))[:10] if a.get("occurrence_date") else None
+        if context and occurrence is not None and not _iso_date(occurrence):
+            occurrence = None          # read with other people's words: a date, or no date at all
         entry = {"predicate": pred.name, "value": val, "confidence": conf, "about": about,
-                      "occurrence": (str(a.get("occurrence_date"))[:10] if a.get("occurrence_date") else None),
+                      "occurrence": occurrence,
                       "quote": str(a.get("quote") or "")[:200]}
         if a.get("new_person"):
             entry["new_person"] = True

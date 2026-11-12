@@ -22,6 +22,11 @@ owner's own message has the same run. A Signal conversation gets no context: not
 group. With the fact check off the thank-word cue is off too, so the two packs read exactly as 1.5.49 did. An
 enable offer keeps no example of a finding read with context, and the node log holds an offer's numbers only.
 
+And after the third. A Messages conversation gets context only when a stored row names it a direct chat
+(`chat_guid` `<service>;-;<id>`); no metadata or no chat name is no context. A ledger row of a finding read with
+context keeps no value, no verifier reason (a fixed one instead) and no name in `about`. Read with context, an
+`occurrence_date` that is not a YYYY-MM-DD date is dropped, the finding kept.
+
 Invented people and lines in a migrated temp database; never the owner's node.
 """
 import contextlib
@@ -107,12 +112,14 @@ def _node(path):
     ]
     for mid, conv, text, sender, at, source, kind in rows:
         own = sender == "self"
+        # the DM's rows carry the chat name Messages gives a direct chat, as the reader stores it: the one
+        # positive sign DR-62 context waits for. The group's and the other messenger's carry none.
         conn.execute(
             "INSERT INTO conversation_messages (message_id, conversation_id, dataset_id, sender_type, sender_id,"
-            " content, event_at, source_id, is_from_self, message_type, actor_role)"
-            " VALUES (?,?,'d',?,?,?,?,?,?,?,?)",
+            " content, event_at, source_id, is_from_self, message_type, actor_role, metadata_json)"
+            " VALUES (?,?,'d',?,?,?,?,?,?,?,?,?)",
             (mid, conv, "self" if own else "contact", sender, text, at, source, 1 if own else 0, kind,
-             "authored" if own else "observed"))
+             "authored" if own else "observed", json.dumps(DIRECT_CHAT) if conv == "dm" else None))
     conn.commit()
     return conn
 
@@ -236,6 +243,39 @@ def test_a_signal_conversation_gets_no_context_until_a_stored_row_can_say_it_is_
     assert seen["verify"] and not [v for v in seen["verify"] if NEWS in v]
     ((_refs, payload),) = _facts(node_db, "moments.joy")
     assert not payload.get("context_refs")
+
+
+def test_context_waits_for_a_stored_row_that_names_a_direct_chat(node_db):
+    """The third review: a conversation whose rows carry no metadata, or metadata with no chat name, fell back to
+    the sender count, and a group where one other member has written passes that. No positive sign, no context."""
+    from topos.enrichment.jobs.canonical.derivation_job import _other_party
+    from topos.features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+    from topos.features.lifecycle.off_limits_view import for_own_processing
+    guard = BlackholeGuard(node_db, caller_class=CallerClass.UNKNOWN, view=for_own_processing())
+    for conv, metadata in (("bare", None), ("unnamed", ORDINARY)):
+        _message(node_db, f"{conv}-1", NEWS, own=False, at=_ts(minutes=9), metadata=metadata, conv=conv)
+        _message(node_db, f"{conv}-2", PROUD, own=True, at=_ts(minutes=8), metadata=metadata, conv=conv)
+        assert _other_party(node_db, conv, guard, T.is_diarisation_label) is not None, "the sender count: two-party"
+        assert _conversation_context(node_db, _owner_rec(f"{conv}-2"), 3) == [], conv
+    # the fixture's DM without its chat name gives none either, and its short thank-you is not read
+    node_db.execute("UPDATE conversation_messages SET metadata_json=NULL WHERE conversation_id='dm'")
+    node_db.commit()
+    assert _conversation_context(node_db, _owner_rec("m1"), 3) == []
+    assert _conversation_context(node_db, _owner_rec("m2", THANKS), 3) == []
+    # one stored row naming the direct chat is the sign, the owner's or one read for the turns
+    _message(node_db, "bare-3", "and it starts in March", own=False, at=_ts(minutes=7, seconds=30),
+             metadata=DIRECT_CHAT, conv="bare")
+    _message(node_db, "bare-4", PROUD + "!", own=True, at=_ts(minutes=7), conv="bare")
+    assert [t["record_id"] for t in _conversation_context(node_db, _owner_rec("bare-4", PROUD + "!"), 3)] == \
+        ["bare-1", "bare-2", "bare-3"]
+    _message(node_db, "unnamed-3", PROUD + "!!", own=True, at=_ts(minutes=7), metadata=DIRECT_CHAT, conv="unnamed")
+    assert [t["record_id"] for t in _conversation_context(node_db, _owner_rec("unnamed-3", PROUD + "!!"), 3)] == \
+        ["unnamed-1", "unnamed-2"]
+    # a chat named direct with two other people writing is still a group by the sender count
+    node_db.execute("UPDATE conversation_messages SET metadata_json=? WHERE conversation_id='grp'",
+                    (json.dumps(DIRECT_CHAT),))
+    node_db.commit()
+    assert _conversation_context(node_db, _owner_rec("g2"), 3) == []
 
 
 def test_a_turn_excluded_while_a_batch_runs_stops_being_read(node_db, monkeypatch):
@@ -616,6 +656,19 @@ def test_a_script_written_without_spaces_is_counted_by_character(packs):
     assert _kept(packs, "新しい仕事", turns=theirs)
 
 
+def test_read_with_context_an_occurrence_is_a_date_or_nothing(packs):
+    """The third review: `occurrence_date` is outside the copy guard and was cut to ten characters, so "Dad died."
+    from the other person's turn was kept as the date, and became the fact's valid_from and part of its key."""
+    joy = packs["moments.joy"]
+    for given, kept in (("2026-11-05", "2026-11-05"), ("2026-11-05T09:30:00", "2026-11-05"), ("Dad died.", None),
+                        ("2026-13-45", None), ("last week", None), ("Nov 5 2026", None), (None, None)):
+        raw = _reply(dict(_peak("this made my whole week"), occurrence_date=given))
+        (a,), rejects = T.parse_output(raw, joy, record_text=PROUD, context=_their("Dad died."))
+        assert (a["occurrence"], rejects) == (kept, 0), "the field is dropped, never the finding"
+        (alone,), _ = T.parse_output(raw, joy, record_text=PROUD)
+        assert alone["occurrence"] == (str(given)[:10] if given else None), "read alone the parser is what it was"
+
+
 def test_the_other_persons_line_as_a_description_is_counted_and_never_written_or_logged(node_db, monkeypatch):
     _enable(node_db, "moments.joy")
     _ingest_only(monkeypatch)
@@ -949,6 +1002,70 @@ def test_an_enable_offer_keeps_no_example_read_with_context_and_its_log_line_is_
     assert "examples_withheld" in minted and "'examples'" not in minted
     logged = "\n".join(lines)
     assert "a good week" not in logged and "Rotterdam" not in logged and "whole week" not in logged
+
+
+#: The reviewer's probe: a verifier whose reason repeats the other person's turn.
+QUOTING = f"the other person wrote: {NEWS}"
+
+
+def _ledger(conn, stage):
+    return [tuple(r) for r in conn.execute("SELECT record_id, value_json, about, occurrence, quote, vstatus, vreason"
+                                           " FROM derivation_training_ledger WHERE stage=? ORDER BY record_id",
+                                           (stage,)).fetchall()]
+
+
+def test_a_ledger_row_read_with_context_keeps_no_verifier_text_no_value_and_no_name(node_db, monkeypatch):
+    """The third review: the training ledger stored the verifier's own reason and the value, written by models that
+    read the turns, and it keeps no `context_refs`, so excluding the turn left them there. Read alone, as before."""
+    from topos.enrichment.jobs.canonical.derivation_job import CONTEXT_LEDGER_REASON, CONTEXT_NOT_THE_OWNERS
+    from topos.features.derivation.surfaces import run_pack_backfill
+    _enable(node_db, "moments.joy")
+    _ingest_only(monkeypatch)
+    peak = _reply(_peak("this made my whole week", description="a good week"))
+    _model(monkeypatch, {"joy": peak}, verdict={"supported": True, "about": "owner", "fields_ok": True,
+                                                "reason": QUOTING})
+    run_derivation_batch(node_db, [_row("m1", node_db)], stats={})
+    assert _ledger(node_db, "ingest") == [("m1", None, "owner", None, "this made my whole week", "accepted",
+                                           CONTEXT_LEDGER_REASON)]
+    assert len(_facts(node_db, "moments.joy")) == 1, "the value is on the fact, which its turns protect"
+    # the owner's backfill, with a verifier that names the other person: rejected, and neither name nor reason kept
+    _model(monkeypatch, {"joy": peak}, verdict={"supported": True, "about": f"other:{MAREN_NAME}", "fields_ok": True,
+                                                "reason": QUOTING})
+    monkeypatch.setattr("topos.features.signal.derived_index.index_derived_objects", lambda *a, **kw: {})
+    node_db.execute("DELETE FROM derivation_progress")
+    node_db.commit()
+    run_pack_backfill(node_db, "moments.joy", use_prefilter=False)
+    rows = {r[0]: r for r in _ledger(node_db, "backfill")}
+    assert rows["m1"][1:] == (None, "other", None, "this made my whole week", "rejected", CONTEXT_NOT_THE_OWNERS)
+    for alone in ("g2", "t1"):
+        assert rows[alone][6] == QUOTING and rows[alone][2] == f"other:{MAREN_NAME}", "read alone: as before"
+        assert json.loads(rows[alone][1])["description"] == "a good week"
+    from topos.features.lifecycle.exclusions import ExclusionStore
+    ExclusionStore(node_db).exclude_record(record_id="d3")
+    node_db.commit()
+    left = [tuple(r) for r in node_db.execute("SELECT * FROM derivation_training_ledger WHERE record_id='m1'")]
+    assert len(left) == 2 and "Rotterdam" not in json.dumps(left) and MAREN_NAME not in json.dumps(left)
+
+
+def test_a_trial_ledger_row_read_with_context_keeps_no_verifier_text_and_no_value(node_db, monkeypatch):
+    """The trial behind an enable offer writes the ledger for a pack that is switched off: the same rule."""
+    from topos.enrichment.jobs.canonical.derivation_job import CONTEXT_LEDGER_REASON
+    _enable(node_db)
+    node_db.execute("INSERT OR IGNORE INTO pack_yield (pack_id, day, prefilter_hits)"
+                    " VALUES ('moments.joy', date('now'), 40)")
+    for i in range(5):
+        _message(node_db, f"x{i}", f"{PROUD} ({i})", own=True, at=_ts(minutes=4 - i * 0.1))
+    _model(monkeypatch, {"joy": _reply(_peak("this made my whole week", description="a good week"))},
+           verdict={"supported": True, "about": "owner", "fields_ok": True, "reason": QUOTING})
+    run_derivation_batch(node_db, [], stats={})
+    rows = {r[0]: r for r in _ledger(node_db, "trial")}
+    in_dm = {"m1", "x0", "x1", "x2", "x3", "x4"}
+    assert in_dm <= set(rows) and {"g2", "t1"} <= set(rows)
+    for rid in in_dm:
+        assert rows[rid][1] is None and rows[rid][6] == CONTEXT_LEDGER_REASON, rid
+    assert "Rotterdam" not in json.dumps([rows[rid] for rid in in_dm])
+    for alone in ("g2", "t1"):
+        assert rows[alone][6] == QUOTING and json.loads(rows[alone][1])["description"] == "a good week"
 
 
 def _left_behind(conn, seen, stats, backfill):

@@ -119,7 +119,7 @@ CONTEXT_MAX_AGE_DAYS = 7
 #: reader stores no group marker, so a Signal group in which one other member has written
 #: cannot be told from a two-party conversation (`_other_party` counts senders), and DR-62
 #: gives a group none. Signal joins this set when a stored row can prove the conversation is
-#: two-party, the way `chat_guid` does for Messages (`_sent_in_a_group`).
+#: two-party, the way `chat_guid` does for Messages (`_sent_in_a_direct_chat`).
 _CONTEXT_SOURCES = frozenset({"imessage"})
 #: How many rows past the k turns one context read may look at to step over reactions.
 CONTEXT_REACTION_SLACK = 12
@@ -148,24 +148,40 @@ def _is_reaction(metadata: Any, text: Any) -> bool:
     return bool(reactions.quotes_another_message(row))
 
 
-def _sent_in_a_group(metadata: Any) -> bool:
-    """Whether a stored row's metadata says it was sent in a group chat.
+def _chat_style(metadata: Any) -> str:
+    """The style of the chat a stored row names: "+" a group, "-" a direct chat, "" unknown.
 
-    `_other_party` calls a conversation two-party when one other person has written in it, so
-    a group in which only one other member has written so far would pass. Messages names every
-    chat `<service>;<style>;<identifier>` and the style is `+` for a group and `-` for a direct
-    chat; the reader keeps that name as `chat_guid`. This can only take context away: a row
-    with no such name (an older import) is left to the sender count. A messenger whose rows
-    never carry one is not in `_CONTEXT_SOURCES`."""
+    Messages names every chat `<service>;<style>;<identifier>`; the reader keeps that name as
+    `chat_guid`. A row with no metadata, or none with a chat name (an older import), says
+    nothing."""
     if isinstance(metadata, (str, bytes)) and metadata:
         try:
             metadata = _json.loads(metadata)
         except (TypeError, ValueError):
-            return False
+            return ""
     if not isinstance(metadata, dict):
-        return False
+        return ""
     parts = str(metadata.get("chat_guid") or "").split(";")
-    return len(parts) >= 3 and parts[1] == "+"
+    return parts[1] if len(parts) >= 3 and parts[1] in ("+", "-") else ""
+
+
+def _sent_in_a_group(metadata: Any) -> bool:
+    """Whether a stored row's metadata says it was sent in a group chat.
+
+    `_other_party` calls a conversation two-party when one other person has written in it, so
+    a group in which only one other member has written so far would pass. One such row takes
+    context away, whatever the other rows say."""
+    return _chat_style(metadata) == "+"
+
+
+def _sent_in_a_direct_chat(metadata: Any) -> bool:
+    """Whether a stored row's metadata names a direct chat (`chat_guid` `<service>;-;<id>`).
+
+    DR-62 gives context only on a positive sign: when none of the rows read for a message
+    names a direct chat (no metadata, or no `chat_guid`), it gets none, because a group in which
+    one other member has written cannot be told from it by counting senders. The sender count
+    (`_other_party`) still has to agree."""
+    return _chat_style(metadata) == "-"
 
 
 def _aware(value: Any):
@@ -195,7 +211,9 @@ def _conversation_context(conn, rec: Dict[str, Any], k: int, *,
     sender's agreed contact name (`resolve_peer_identities`, "Contact" when none agrees), and
     carries its record id, which the fact keeps as a protection-only ref (`context_refs`).
     A conversation Messages itself calls a group gives none, whoever has written in it
-    (`_sent_in_a_group`). `cache` holds the guard, the exclusions and each conversation's
+    (`_sent_in_a_group`), and so does one in which neither the owner's message nor a row read
+    for its turns names a direct chat (`_sent_in_a_direct_chat`: no metadata, no `chat_guid`).
+    `cache` holds the guard, the exclusions and each conversation's
     verdict across a batch, re-read every CONTEXT_PROTECTIONS_MAX_AGE_S."""
     if k <= 0 or rec.get("role") != "authored" or rec.get("table") != "conversation_messages":
         return []
@@ -251,6 +269,8 @@ def _read_conversation_context(conn, rec, k, cache) -> List[Dict[str, Any]]:
     if any(_sent_in_a_group(row[5]) for row in rows):
         cache["conversations"][conv] = None
         return []
+    if not (_sent_in_a_direct_chat(found[3]) or any(_sent_in_a_direct_chat(row[5]) for row in rows)):
+        return []                      # nothing stored names a direct chat: no positive sign
     # Newest first: the k messages before the owner's, stepping over reactions. Only then are
     # the withheld ones dropped, so a withheld turn is never replaced by an older one.
     last = [row[:5] for row in rows if not _is_reaction(row[5], row[1])][:int(k)]
@@ -312,6 +332,15 @@ def _context_refs(context: Optional[List[Dict[str, Any]]]) -> List[Dict[str, str
     return [{"table": t["table"], "record_id": t["record_id"]} for t in (context or ())]
 
 
+#: DR-62: the `vreason` a ledger row of a finding read with context carries: one of these fixed
+#: lines, never the verifier's own reason. The verifier read the other person's turns, so its
+#: reason may repeat them; the status is in `vstatus`.
+CONTEXT_LEDGER_REASON = "read with context"
+CONTEXT_NOT_THE_OWNERS = "read with context, not about the owner"
+CONTEXT_NOT_CHECKED = "read with context, not fact-checked"
+_CONTEXT_REASONS = frozenset({CONTEXT_LEDGER_REASON, CONTEXT_NOT_THE_OWNERS, CONTEXT_NOT_CHECKED})
+
+
 def _owners_own(a: Dict[str, Any], context) -> Dict[str, Any]:
     """DR-62: nothing read with someone else's words is written about anyone but the owner, not
     even to the review queue. A verifier that moves `about` off the owner rejects it instead.
@@ -324,11 +353,11 @@ def _owners_own(a: Dict[str, Any], context) -> Dict[str, Any]:
     if context and a.get("verifier_status") == "rerouted":
         a = dict(a)
         a["verifier_status"] = "rejected"
-        a["verifier_reason"] = f"read with context, not about the owner ({a.get('about')})"[:120]
+        a["verifier_reason"] = CONTEXT_NOT_THE_OWNERS
     elif context and a.get("verifier_status") == "error":
         a = dict(a)
         a["verifier_status"] = "rejected"
-        a["verifier_reason"] = "read with context, not fact-checked"
+        a["verifier_reason"] = CONTEXT_NOT_CHECKED
     return a
 
 
@@ -403,11 +432,26 @@ def _recipient_parse_args(pack, rec: Dict[str, Any]) -> Dict[str, Any]:
             "grounded_exempt": (name,) if labels and name and name != UNNAMED_RECIPIENT else ()}
 
 
-def _ledger_write(conn, *, stage, pack, rec, a, model, vmodel, written_id=None):
+def _ledger_write(conn, *, stage, pack, rec, a, model, vmodel, written_id=None, context=None):
     """Training-data factory: EVERY judged assertion lands here, accepted or not
-    (rejects are the hard negatives; quotes+record refs recover spans)."""
+    (rejects are the hard negatives; quotes+record refs recover spans).
+
+    A finding read with context (DR-62) keeps its status and no model text a turn could have
+    reached: no value (an accepted one is on the fact, where its `context_refs` protect it; a
+    rejected one is kept nowhere), a fixed reason (`_CONTEXT_REASONS`) in place
+    of the verifier's, and `about` without the name a verifier may give ("other:<name>"
+    is kept as "other"). The ledger keeps no `context_refs`, so nothing here could be taken out
+    when the owner excludes or deletes a turn. The quote is the owner's own message
+    (`template.quote_in_record`) and the occurrence an ISO date (`parse_output`)."""
     import uuid as _uuid
     from ....features.derivation import template as _T
+    value_json = _json.dumps(a.get("value"), default=str)
+    about, reason = a.get("about"), a.get("verifier_reason")
+    if context:
+        value_json = None
+        reason = reason if reason in _CONTEXT_REASONS else CONTEXT_LEDGER_REASON
+        if isinstance(about, str) and about.startswith("other:"):
+            about = "other"
     conn.execute(
         """INSERT INTO derivation_training_ledger
            (ledger_id, stage, pack_id, pack_version, template_version, extract_model,
@@ -416,9 +460,9 @@ def _ledger_write(conn, *, stage, pack, rec, a, model, vmodel, written_id=None):
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (f"dtl_{_uuid.uuid4().hex[:16]}", stage, pack.pack, pack.version,
          _T.TEMPLATE_VERSION, model, vmodel, rec["table"], rec["record_id"],
-         rec["role"], a.get("predicate"), _json.dumps(a.get("value"), default=str),
-         a.get("about"), a.get("occurrence"), a.get("quote"), a.get("confidence"),
-         a.get("verifier_status"), a.get("verifier_reason"), written_id))
+         rec["role"], a.get("predicate"), value_json,
+         about, a.get("occurrence"), a.get("quote"), a.get("confidence"),
+         a.get("verifier_status"), reason, written_id))
 
 
 def _note_deferral(conn, reason: str) -> None:
@@ -711,7 +755,7 @@ def run_derivation_batch(
                 st[f"v_{a.get('verifier_status')}"] = st.get(f"v_{a.get('verifier_status')}", 0) + 1
                 if a.get("verifier_status") == "rejected":
                     _ledger_write(conn, stage="ingest", pack=pack, rec=rec, a=a,
-                                  model=used, vmodel=vmodel)
+                                  model=used, vmodel=vmodel, context=context)
                     continue
                 _bump_yield(conn, pid, accepted=1)
                 out = writer_for(used).assert_pack_fact(
@@ -729,7 +773,7 @@ def run_derivation_batch(
                     written += 1
                     _bump_yield(conn, pid, written=1)
                 _ledger_write(conn, stage="ingest", pack=pack, rec=rec, a=a,
-                              model=used, vmodel=vmodel,
+                              model=used, vmodel=vmodel, context=context,
                               written_id=out.get("object_id") if stored else None)
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
         conn.commit()
@@ -936,7 +980,7 @@ def _drip_catchup(conn, *, packs, filters, pack_raw, judge, writer_for, owner, d
                 a = judge(pack, rec, a, "catchup")
                 if a.get("verifier_status") == "rejected":
                     _ledger_write(conn, stage="catchup", pack=pack, rec=rec, a=a,
-                                  model=used, vmodel="(job)", )
+                                  model=used, vmodel="(job)", context=context)
                     continue
                 _bump_yield(conn, pid, accepted=1)
                 out = writer_for(used).assert_pack_fact(
@@ -952,7 +996,7 @@ def _drip_catchup(conn, *, packs, filters, pack_raw, judge, writer_for, owner, d
                     _bump_yield(conn, pid, written=1)
                     st["catchup_written"] = st.get("catchup_written", 0) + 1
                 _ledger_write(conn, stage="catchup", pack=pack, rec=rec, a=a,
-                              model=used, vmodel="(job)",
+                              model=used, vmodel="(job)", context=context,
                               written_id=out.get("object_id") if stored else None)
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
             done.add(key)
@@ -1067,7 +1111,7 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
                 a = judge(pack, rec, a, "trial")
                 n_assert += 1
                 _ledger_write(conn, stage="trial", pack=pack, rec=rec, a=a,
-                              model=model, vmodel=vmodel)
+                              model=model, vmodel=vmodel, context=context)
                 if a.get("verifier_status") in ("accepted", "rerouted"):
                     n_acc += 1
                     # The bounded shadow trial must retain every accepted finding,
