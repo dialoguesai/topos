@@ -432,9 +432,12 @@ def _recipient_parse_args(pack, rec: Dict[str, Any]) -> Dict[str, Any]:
             "grounded_exempt": (name,) if labels and name and name != UNNAMED_RECIPIENT else ()}
 
 
-def _ledger_write(conn, *, stage, pack, rec, a, model, vmodel, written_id=None, context=None):
+def _ledger_write(conn, *, stage, pack, rec, a, model, vmodel, context, written_id=None):
     """Training-data factory: EVERY judged assertion lands here, accepted or not
     (rejects are the hard negatives; quotes+record refs recover spans).
+
+    `context` has no default: every caller says what the finding was read with (None or []
+    for a record read alone), so a new call site cannot forget it and keep model text.
 
     A finding read with context (DR-62) keeps its status and no model text a turn could have
     reached: no value (an accepted one is on the fact, where its `context_refs` protect it; a

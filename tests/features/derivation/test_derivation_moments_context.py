@@ -27,6 +27,9 @@ And after the third. A Messages conversation gets context only when a stored row
 context keeps no value, no verifier reason (a fixed one instead) and no name in `about`. Read with context, an
 `occurrence_date` that is not a YYYY-MM-DD date is dropped, the finding kept.
 
+And after the fourth. Catch-up's ledger rows follow the same rule (and `_ledger_write` takes `context` with no
+default). A finding read with context is never queued as a conflict: it is counted and dropped.
+
 Invented people and lines in a migrated temp database; never the owner's node.
 """
 import contextlib
@@ -1066,6 +1069,88 @@ def test_a_trial_ledger_row_read_with_context_keeps_no_verifier_text_and_no_valu
     assert "Rotterdam" not in json.dumps([rows[rid] for rid in in_dm])
     for alone in ("g2", "t1"):
         assert rows[alone][6] == QUOTING and json.loads(rows[alone][1])["description"] == "a good week"
+
+
+def test_a_catch_up_ledger_row_read_with_context_keeps_no_verifier_text_no_value_and_no_name(node_db, monkeypatch):
+    """The fourth review: catch-up writes the ledger at two places (a rejected finding, a judged one) and no test
+    read either, so a call that dropped its `context` stayed green. `context` is now a required argument too."""
+    from topos.enrichment.jobs.canonical import derivation_job
+    from topos.enrichment.jobs.canonical.derivation_job import CONTEXT_LEDGER_REASON, CONTEXT_NOT_THE_OWNERS
+    _enable(node_db, "moments.joy")
+    monkeypatch.setattr(derivation_job, "_self_gate", lambda *a, **kw: None)
+    monkeypatch.setattr("topos.features.signal.derived_index.index_derived_objects", lambda *a, **kw: {})
+    peak = _reply(_peak("this made my whole week", description="a good week"))
+
+    def catch_up(about):
+        node_db.execute("DELETE FROM derivation_progress")
+        node_db.commit()
+        _model(monkeypatch, {"joy": peak}, verdict={"supported": True, "about": about, "fields_ok": True,
+                                                    "reason": QUOTING})
+        run_derivation_batch(node_db, [], stats={})        # no new rows: only catch-up reads history
+        rows = {r[0]: r for r in _ledger(node_db, "catchup")}
+        node_db.execute("DELETE FROM derivation_training_ledger")
+        node_db.commit()
+        return rows
+
+    judged = catch_up("owner")                             # the call after the writer
+    assert judged["m1"][1:] == (None, "owner", None, "this made my whole week", "accepted", CONTEXT_LEDGER_REASON)
+    rejected = catch_up(f"other:{MAREN_NAME}")             # the call for a rejected finding
+    assert rejected["m1"][1:] == (None, "other", None, "this made my whole week", "rejected", CONTEXT_NOT_THE_OWNERS)
+    for alone in ("g2", "t1"):                             # read alone: as before
+        assert judged[alone][6] == QUOTING and json.loads(judged[alone][1])["description"] == "a good week"
+        assert rejected[alone][2] == f"other:{MAREN_NAME}" and rejected[alone][6] == QUOTING
+    import inspect
+    assert inspect.signature(derivation_job._ledger_write).parameters["context"].default is inspect.Parameter.empty
+
+
+def test_a_finding_read_with_context_is_never_queued_as_a_conflict(node_db, packs):
+    """The fourth review: a conflict row keeps the challenger's value with neither `source_refs` nor
+    `context_refs`, so excluding a turn left it there and promoting it gave a fact no turn protects. Read with
+    context it is counted and dropped; the incumbent stands. Read alone, it is queued as before."""
+    from topos.features.derivation.writer import DerivationWriter
+    writer = DerivationWriter(node_db, model="stub-9b")
+    turn = [{"table": MESSAGE, "record_id": "d3"}]
+
+    def conflicts():
+        return node_db.execute("SELECT COUNT(*) FROM fact_conflicts").fetchone()[0]
+
+    def tension(status, confidence, context_refs=None):
+        return writer.assert_pack_fact(
+            pack=packs["moments.tension"], predicate="moment.tension", subject_entity_id="ent_owner",
+            value={"kind": "conflict", "description": "the argument about the move", "status": status},
+            actor_role="authored", source_refs=[{"table": MESSAGE, "record_id": "m1"}], confidence=confidence,
+            quote="this made my whole week", context_refs=context_refs)
+
+    def peak(description, confidence, context_refs=None):
+        return writer.assert_pack_fact(
+            pack=packs["moments.joy"], predicate="moment.peak", subject_entity_id="ent_owner",
+            value={"kind": "accomplished", "description": description}, actor_role="authored",
+            source_refs=[{"table": MESSAGE, "record_id": "m1"}], confidence=confidence,
+            quote="this made my whole week", context_refs=context_refs)
+
+    def partner(role, confidence, context_refs=None):     # the other conflict: an exclusive pair of values
+        return writer.assert_pack_fact(
+            pack=packs["relationships.social"], predicate="rel.relationship", subject_entity_id="ent_owner",
+            value={"person": "Dana", "role": role, "status": "active"}, actor_role="authored",
+            source_refs=[{"table": MESSAGE, "record_id": "m1"}], confidence=confidence, context_refs=context_refs)
+
+    assert tension("open", 1.0)["outcome"] == "written"
+    assert tension("resolved", 0.6, turn)["outcome"] == "context_conflict_dropped"
+    # a longer description that keys the same instance (the key keeps 48 characters of its sorted words)
+    long = "a big bright busy afternoon at the bakery after all the boxes"
+    assert peak(long, 1.0)["outcome"] == "written"
+    assert peak(long + " with zesty zucchini", 0.6, turn)["outcome"] == "context_conflict_dropped"
+    assert partner("partner", 0.95)["outcome"] == "written"
+    assert partner("ex_partner", 0.9, turn)["outcome"] == "context_conflict_dropped"
+    assert conflicts() == 0 and writer.stats["context_conflict_dropped"] == 3 and writer.stats["conflicts"] == 0
+    live = node_db.execute("SELECT payload_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL"
+                           " AND ontology_id='moments.tension'").fetchall()
+    assert [json.loads(p)["value_struct"]["status"] for (p,) in live] == ["open"], "the incumbent stands"
+    # read alone, each is queued as before
+    assert tension("resolved", 0.6)["outcome"] == "conflict_queued"
+    assert peak(long + " with zesty zucchini", 0.6)["outcome"] == "conflict_queued"
+    assert partner("ex_partner", 0.9)["outcome"] == "conflict_queued"
+    assert conflicts() == 3 and writer.stats["context_conflict_dropped"] == 3
 
 
 def _left_behind(conn, seen, stats, backfill):

@@ -54,6 +54,11 @@ The machine-readable twin of each release is
     and no value, no fact-check reason (a fixed line instead: the checker read the turns and its reason could
     repeat them) and no name in `about` (`other`, not `other:<name>`). Findings read from one message alone
     are logged as before.
+  - *No conflict queued from turns.* A finding read with turns that would contradict a stronger fact already
+    held is counted (`context_conflict_dropped`) and dropped; the fact held stands. It used to wait in the
+    conflict queue (`fact_conflicts`), whose row keeps the value with no sources and no turns, so excluding a
+    turn would not have taken it out, and accepting it would have made a fact no turn protects. A finding read
+    from one message alone is queued as before.
   - *Moments never shows the other person's words.* The fact rests on your message alone. The turns are kept
     beside it as `context_refs` and only protect it: excluding, deleting or scrubbing one, or retention removing
     it, takes the fact out, and an app's `pack_facts` read leaves the fact out when one is protected, names an

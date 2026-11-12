@@ -420,6 +420,8 @@ class DerivationWriter:
             self.stats["role_rejects"] += 1
             return {"outcome": "role_reject", "reason": f"{actor_role} not allowed for {pack.role_policy}"}
         _ex_incumbent = self._exclusive_conflict(pack, pred, subject_entity_id, value)
+        if _ex_incumbent and context_refs:
+            return self._context_conflict_dropped()
         if _ex_incumbent:
             self.store._queue_conflict(
                 subject_entity_id=subject_entity_id, predicate=pred.name,
@@ -490,6 +492,8 @@ class DerivationWriter:
                     return {"outcome": "field_update", "object_id": incumbent["object_id"], "changed": sorted(changed)}
 
             if float(confidence) < float(inc_payload.get("confidence") or 0.0) - CONFLICT_CONFIDENCE_MARGIN:
+                if context_refs:
+                    return self._context_conflict_dropped()
                 self.store._queue_conflict(subject_entity_id, normalize_predicate(predicate),
                                            incumbent["object_id"], _canon_value(value), confidence)
                 self.stats["conflicts"] += 1
@@ -659,6 +663,15 @@ class DerivationWriter:
             if new_d is None or old_d is None or abs((new_d - old_d).days) <= days:
                 return {"object_id": r[0], "object_key": r[1], "payload_json": r[2]}
         return None
+
+    def _context_conflict_dropped(self) -> Dict[str, Any]:
+        """DR-62: a finding read with context that would be queued as a conflict is counted and
+        dropped. `fact_conflicts.challenger_value` keeps the value with neither `source_refs` nor
+        `context_refs`, so excluding or deleting a turn it was read with would not take it out,
+        and promoting it would mint a fact no turn protects. The incumbent stands, as it does
+        while a conflict waits."""
+        self.stats["context_conflict_dropped"] = self.stats.get("context_conflict_dropped", 0) + 1
+        return {"outcome": "context_conflict_dropped", "reason": "read with context: not queued as a conflict"}
 
     def _read_with_an_excluded_record(self, context_refs: List[Dict[str, Any]]) -> bool:
         """DR-62: whether the owner has excluded a record this reading was made with.
