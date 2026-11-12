@@ -351,6 +351,8 @@ def daily_measurements(conn, start: str, end: str, *, now=None, time_zone=None):
         conn.execute("SAVEPOINT dashboard_read")
         coverage = dict(conn.execute("SELECT family, measured_since FROM dashboard_measurement_coverage"))
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        from .coherence import read_claims, coherence_series
+        coherence_rows = read_claims(conn)
         triggers = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
         # Every zone in use is a whole number of minutes from UTC, so a minute never
         # straddles a local midnight.
@@ -423,4 +425,5 @@ def daily_measurements(conn, start: str, end: str, *, now=None, time_zone=None):
     serve = serve_activity(serve_earliest, serve_rows, start, end, now=now, zone=zone)
     return {"available": True, "schema_version": 1, "scope": "owner_node", "period_start": start,
             "period_end": end, "time_zone": zone_name, "as_of": as_of, "metrics": metrics, "requests": requests,
-            "callers": callers, "verify_claim": verification, "routine_runs": routines, "serve": serve, "inbound_bytes": None}
+            "callers": callers, "verify_claim": verification, "routine_runs": routines, "serve": serve, "inbound_bytes": None,
+            "self_coherence": coherence_series(coherence_rows, start, end, now=now, zone=zone)}

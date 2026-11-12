@@ -9,10 +9,12 @@ records takes over an hour on the local models and a full history needs hundreds
 So the yes authorises a RUN, not a request. `start_run` takes the plan the owner was shown (the
 packs, the batch size, one batch each or until done, how far back) and the node works through it on its own
 thread: packs one after another, batch after batch, each batch the same `run_pack_backfill` the
-app's control calls. Nothing else starts a run: the only caller is the start route in
-`api/signal.py`, which the owner socket's census names dangerous (`owner_door_routes`) and which
-checks the confirmed socket peer itself. A caller follows a run through `current()` (counts, seconds
-and model names only) and ends it with `stop()`.
+app's control calls. Two things start a run. The start route in `api/signal.py`, which the owner
+socket's census names dangerous (`owner_door_routes`) and which checks the confirmed socket peer
+itself: the owner's run (`origin` `owner`). And `auto_catchup`, only while the owner's standing
+switch is on (`topos-node packs auto on`, the same kind of yes): an automatic run (`origin`
+`auto`) over the records that landed since the last one. A caller follows a run through `current()`
+(counts, seconds and model names only) and ends it with `stop()`.
 
 What bounds a run:
 
@@ -22,9 +24,14 @@ What bounds a run:
   the run ends (`topos_facts_unavailable`) with nothing marked done;
 * one run at a time, and never beside one of the app's single batches (`single_batch`), so a run
   never puts two backfills on the local models at once;
-* it lives in this process only. A node restart ends it and nothing restarts it: the owner asks
-  again, and the rerun resumes where the last one stopped because every finished record is keyed
-  in `derivation_progress`;
+* the owner's backfill wins over an automatic run. Starting an owner run while an automatic one is
+  working is not refused: the automatic run is asked to stop after the record in hand, the owner's
+  run takes the slot at once and starts its first batch when the automatic one has ended
+  (`waiting_for` in its snapshot until then). One of the app's single batches waits the same way
+  (`yield_to_owner`). An automatic run never starts beside anything;
+* it lives in this process only. A node restart ends it. Nothing restarts an owner's run: the owner
+  asks again, and the rerun resumes where the last one stopped because every finished record is
+  keyed in `derivation_progress`. An automatic run is started again by its own trigger;
 * it stops between records on `stop()` and on node shutdown;
 * between records it yields to the owner's own requests (`core.owner_requests.pace`), like the other long
   background work on the node;
@@ -60,6 +67,12 @@ STOPPING = "stopping"
 DONE = "done"
 STOPPED = "stopped"
 FAILED = "failed"
+
+#: Who started a run: the owner's yes for this run, or the owner's standing switch (`auto_catchup`).
+OWNER = "owner"
+AUTO = "auto"
+#: How long one of the app's single batches waits for an automatic run to end after asking it to stop.
+OWNER_YIELD_WAIT_S = 300.0
 
 _COUNT_KEYS = ("processed", "assertions", "accepted", "written", "quarantined", "llm_errors")
 #: Wall seconds a batch spent in extraction calls and in verifier calls, kept apart: the extractor may
@@ -124,12 +137,20 @@ class BackfillRun:
     read and checked each pack: no record text or ids."""
 
     def __init__(self, pack_ids: Sequence[str], limit: int, until_done: bool,
-                 since: Optional[str] = None) -> None:
+                 since: Optional[str] = None, *, origin: str = OWNER,
+                 on_end: Optional[Callable[[Dict[str, Any]], None]] = None) -> None:
         self.run_id = f"bfr_{uuid.uuid4().hex[:12]}"
         self.pack_ids = list(pack_ids)
         self.limit = int(limit)
         self.until_done = bool(until_done)
         self.since = since
+        self.origin = AUTO if origin == AUTO else OWNER
+        #: Called once with the final snapshot, on the worker thread, after the run has ended.
+        self._on_end = on_end
+        #: An automatic run this (owner's) run asked to stop and waits for before its first batch.
+        self._waits_for: Optional["BackfillRun"] = None
+        #: Set when the worker has ended and reported: what a waiting run and `yield_to_owner` wait on.
+        self.ended = threading.Event()
         self.state = RUNNING
         self.reason: Optional[str] = None
         self.started_at = _now()
@@ -164,16 +185,22 @@ class BackfillRun:
             for key in _TIME_KEYS:
                 totals[key] = round(float(totals[key]), 1)
             return {"run_id": self.run_id, "state": self.state, "reason": self.reason,
+                    "origin": self.origin,
+                    "waiting_for": "automatic_run" if self._waits_for is not None else None,
                     "pack_ids": list(self.pack_ids), "limit": self.limit, "until_done": self.until_done,
                     "since": self.since,
                     "started_at": self.started_at, "finished_at": self.finished_at,
                     "elapsed_s": round(end - self._began, 1), "packs": packs, "totals": totals}
 
     # ------------------------------------------------------------------ control
-    def request_stop(self) -> None:
+    def request_stop(self, reason: Optional[str] = None) -> None:
+        """Stop after the record in hand. `reason` (a plain word) is kept when the stop is the first
+        one and it does end the run early; a plain stop reads `stopped`."""
         with self._lock:
             if self.state == RUNNING:
                 self.state = STOPPING
+                if reason and not self.reason:
+                    self.reason = reason
         self._cancel.set()
 
     # ------------------------------------------------------------------ the worker's writes
@@ -221,6 +248,37 @@ def current() -> Optional[Dict[str, Any]]:
     with _state_lock:
         run = _active or _last
     return run.snapshot() if run is not None else None
+
+
+def busy() -> bool:
+    """A run holds the slot, or one of the app's single batches is in flight."""
+    with _state_lock:
+        return _active is not None or _single_batches > 0
+
+
+def stop_automatic(reason: str) -> bool:
+    """Ask the active run to stop after the record in hand if it is an automatic one; whether it was."""
+    with _state_lock:
+        run = _active
+    if run is None or run.origin != AUTO:
+        return False
+    run.request_stop(reason)
+    return True
+
+
+def yield_to_owner(timeout_s: float = OWNER_YIELD_WAIT_S) -> bool:
+    """Before one of the app's single batches: the owner's backfill wins over an automatic run.
+
+    An automatic run that holds the slot is asked to stop after the record in hand, and this waits
+    (on the caller's worker thread, never the event loop) until it has ended, at most `timeout_s`.
+    True when no automatic run holds the slot afterwards; the caller then takes `single_batch()`,
+    which still refuses beside an owner's run. Does nothing when no automatic run is active."""
+    with _state_lock:
+        run = _active
+    if run is None or run.origin != AUTO:
+        return True
+    run.request_stop("owner_backfill")
+    return run.ended.wait(timeout_s)
 
 
 def stop() -> Optional[Dict[str, Any]]:
@@ -271,23 +329,44 @@ def validate_plan(conn: sqlite3.Connection, pack_ids: Any, limit: Any) -> List[s
 
 
 def start_run(pack_ids: Sequence[str], limit: int = DEFAULT_BATCH_LIMIT, until_done: bool = False, *,
-              since: Optional[str] = None, run_batch: Optional[BatchRunner] = None) -> BackfillRun:
+              since: Optional[str] = None, run_batch: Optional[BatchRunner] = None,
+              origin: str = OWNER, on_end: Optional[Callable[[Dict[str, Any]], None]] = None) -> BackfillRun:
     """Start the one run. The caller has validated the plan (`validate_plan`, `validate_since`) and
-    holds the owner's yes."""
+    holds the owner's yes: for this run (`origin` `owner`, the start route), or the standing one
+    (`origin` `auto`, `auto_catchup` only).
+
+    An owner's run started while an automatic run is working takes the slot now and the automatic
+    run is asked to stop after the record in hand; the owner's first batch starts when it has ended.
+    Everything else that finds the slot taken is `BackfillBusy`, as before."""
     global _active
-    run = BackfillRun(pack_ids, limit, until_done, since)
+    run = BackfillRun(pack_ids, limit, until_done, since, origin=origin, on_end=on_end)
     with _state_lock:
-        if _active is not None or _single_batches:
+        if _single_batches:
             raise BackfillBusy("a backfill is already running")
+        if _active is not None:
+            if not (run.origin == OWNER and _active.origin == AUTO):
+                raise BackfillBusy("a backfill is already running")
+            run._waits_for = _active
         _active = run
+    if run._waits_for is not None:
+        run._waits_for.request_stop("owner_backfill")
     from ...runtime_shutdown import current_generation, stop_checker
 
     should_stop = stop_checker(current_generation(), run._cancel)
     run.thread = threading.Thread(target=_work, args=(run, run_batch or _run_batch, should_stop),
                                   name=THREAD_NAME, daemon=True)
-    run.thread.start()
-    logger.info("pack backfill run %s started: %d packs, %d per batch, until_done=%s, since=%s",
-                run.run_id, len(run.pack_ids), run.limit, run.until_done, run.since or "-")
+    try:
+        run.thread.start()
+    except BaseException:
+        with _state_lock:
+            if _active is run:
+                _active = None
+        run.ended.set()
+        raise
+    logger.info("pack backfill run %s started (%s): %d packs, %d per batch, until_done=%s, since=%s%s",
+                run.run_id, "automatic" if run.origin == AUTO else "owner", len(run.pack_ids), run.limit,
+                run.until_done, run.since or "-",
+                "; waiting for the automatic run to end" if run._waits_for is not None else "")
     return run
 
 
@@ -305,6 +384,14 @@ def _run_batch(pack_id: str, limit: int, should_stop: Callable[[], bool],
 def _work(run: BackfillRun, run_batch: BatchRunner, should_stop: Callable[[], bool]) -> None:
     global _active, _last
     try:
+        prior = run._waits_for
+        if prior is not None:
+            # The automatic run was told to stop; it ends after the record in hand. Waited out even
+            # when this run is itself stopped meanwhile: the slot is this run's, and letting it go
+            # while the automatic run still has a model call in flight would let a third start beside it.
+            prior.ended.wait()
+            with run._lock:
+                run._waits_for = None
         for index in range(len(run.pack_ids)):
             if should_stop():
                 break
@@ -322,12 +409,21 @@ def _work(run: BackfillRun, run_batch: BatchRunner, should_stop: Callable[[], bo
             run.reason = "node_stopping"
             run._cancel.set()
         run._finish()
-        with _state_lock:
-            _last = run
-            if _active is run:
-                _active = None
         logger.info("pack backfill run %s ended: %s%s", run.run_id, run.state,
                     f" ({run.reason})" if run.reason else "")
+        try:
+            # Before the slot is released: an automatic run's end is on record before anything can
+            # start the next run, so a look never reads a run that has ended as still running.
+            if run._on_end is not None:
+                run._on_end(run.snapshot())
+        except BaseException:  # noqa: BLE001 -- bookkeeping after the run; the run's own state stands
+            logger.exception("pack backfill run %s: the end callback failed", run.run_id)
+        finally:
+            with _state_lock:
+                _last = run
+                if _active is run:
+                    _active = None
+            run.ended.set()
 
 
 def _work_pack(run: BackfillRun, index: int, run_batch: BatchRunner, should_stop: Callable[[], bool]) -> None:
@@ -422,12 +518,10 @@ def backfill_plan(conn: sqlite3.Connection, pack_ids: Sequence[str], since: Opti
     """
     from ...config.facts_llm import facts_classifier_version
     from ...config.settings import settings as _settings
-    from ...enrichment.jobs.canonical.derivation_job import _iter_history, _verify_mode
+    from ...enrichment.jobs.canonical.derivation_job import _verify_mode
     from ...features.facts.llm_extract import _resolved_extraction_model  # type: ignore
-    from ..provenance.posture import make_posture_resolver
     from . import topos_facts as _tf
     from .packs import load_packs
-    from .prefilter import PackPrefilter, _tokens
     from .registry import bundled_pack_dir
     from .surfaces import BACKFILL_HISTORY_WINDOW
     from .verify import verifier_model
@@ -442,21 +536,7 @@ def backfill_plan(conn: sqlite3.Connection, pack_ids: Sequence[str], since: Opti
     enabled = {str(r[0]): bool(r[1]) for r in conn.execute("SELECT pack_id, enabled FROM pack_registry")}
     countable = [pid for pid in asked if enabled.get(pid) and catalog.get(pid) is not None]
 
-    waiting = {pid: 0 for pid in countable}
-    history = {"journal_entries": 0, "conversation_messages": 0}
-    if countable:
-        filters = {pid: PackPrefilter(catalog[pid]) for pid in countable}
-        roles = {pid: catalog[pid].allowed_roles() for pid in countable}
-        done = {pid: _done_keys(conn, f"{pid}@{catalog[pid].version}:") for pid in countable}
-        for rec in _iter_history(conn, limit=BACKFILL_HISTORY_WINDOW, posture_for=make_posture_resolver(conn),
-                                 since=since):
-            history[rec["table"]] = history.get(rec["table"], 0) + 1
-            low = (rec["text"] or "").lower()
-            tokens = _tokens(low)
-            suffix = f"{rec['table']}:{rec['record_id']}"
-            for pid in countable:
-                if rec["role"] in roles[pid] and suffix not in done[pid] and filters[pid].matches(low, tokens):
-                    waiting[pid] += 1
+    waiting, history = waiting_counts(conn, catalog, countable, since)
 
     llm_model = str(_resolved_extraction_model(_settings, conn) or "")
     picked = bool(facts_classifier_version(conn))
@@ -486,6 +566,48 @@ def backfill_plan(conn: sqlite3.Connection, pack_ids: Sequence[str], since: Opti
                            "classifier_model": _tf.MODEL_ID if picked else None,
                            "classifier_spec_on_disk": spec is not None if picked else None},
             "verify_model": verifier_model() if _verify_mode() != "off" else None}
+
+
+def waiting_counts(conn: sqlite3.Connection, catalog: Dict[str, Any], pack_ids: Sequence[str],
+                   since: Optional[str], *, per_record: bool = False) -> tuple:
+    """`(waiting per pack, records walked per table)`: the one counting rule, for the plan the owner
+    reads and for the automatic catch-up's look before it starts anything.
+
+    A record waits for a pack when the pack's role gate lets it in, its prefilter passes it and
+    `derivation_progress` does not hold it yet. `per_record` asks the progress table once per record
+    that got that far instead of loading each pack's whole key range first: the right trade for the
+    few days the automatic catch-up counts, the wrong one for a full history. Reads only."""
+    from ...enrichment.jobs.canonical.derivation_job import _iter_history
+    from ..provenance.posture import make_posture_resolver
+    from .prefilter import PackPrefilter, _tokens
+    from .surfaces import BACKFILL_HISTORY_WINDOW
+
+    pack_ids = list(pack_ids)
+    waiting = {pid: 0 for pid in pack_ids}
+    history = {"journal_entries": 0, "conversation_messages": 0}
+    if not pack_ids:
+        return waiting, history
+    filters = {pid: PackPrefilter(catalog[pid]) for pid in pack_ids}
+    roles = {pid: catalog[pid].allowed_roles() for pid in pack_ids}
+    prefix = {pid: f"{pid}@{catalog[pid].version}:" for pid in pack_ids}
+    done = {} if per_record else {pid: _done_keys(conn, prefix[pid]) for pid in pack_ids}
+
+    def keyed(pid: str, suffix: str) -> bool:
+        if not per_record:
+            return suffix in done[pid]
+        return conn.execute("SELECT 1 FROM derivation_progress WHERE key = ?",
+                            (prefix[pid] + suffix,)).fetchone() is not None
+
+    for rec in _iter_history(conn, limit=BACKFILL_HISTORY_WINDOW, posture_for=make_posture_resolver(conn),
+                             since=since):
+        history[rec["table"]] = history.get(rec["table"], 0) + 1
+        low = (rec["text"] or "").lower()
+        tokens = _tokens(low)
+        suffix = f"{rec['table']}:{rec['record_id']}"
+        for pid in pack_ids:
+            if rec["role"] in roles[pid] and filters[pid].matches(low, tokens) and not keyed(pid, suffix):
+                waiting[pid] += 1
+    return waiting, history
 
 
 def _done_keys(conn: sqlite3.Connection, prefix: str) -> set:

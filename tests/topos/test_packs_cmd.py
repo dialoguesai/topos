@@ -1,11 +1,14 @@
-"""`topos-node packs list|backfill|status|stop`: what it asks, what it sends, what it prints.
+"""`topos-node packs list|backfill|status|stop|auto`: what it asks, what it sends, what it prints.
 
 protects: a backfill starts only after a person answers `[y/N]` on a terminal. With no terminal the command asks no
 one, sends nothing and mints no confirmation; a no sends nothing; a yes mints exactly one confirmation and sends ONE
 start carrying the plan that was shown (the packs, the batch size, one batch each or until done). The command then
 follows the run by reading its status, prints each batch, and on Ctrl-C asks the node to stop and waits for it. It
 prints a projection (pack ids, counts, state words), never a response body. Every path it sends is a route the node
-serves, and the start is the one the owner socket's census names dangerous.
+serves, and the start is the one the owner socket's census names dangerous. `packs auto on` and `packs auto off`
+set the owner's standing switch the same way: a terminal, one `[y/N]`, one confirmation, one request; `packs auto
+status` and the automatic lines of `packs status` are reads. A backfill asked for while an automatic run is working
+is not turned away.
 
 A terminal and a person are patched (``isatty`` on the module's ``sys``, ``click.confirm``); the owner socket is an
 in-memory fake that records each request and plays a scripted run.
@@ -81,6 +84,17 @@ HALF = _snap("running", [{"pack_id": EVENTS, "state": "done", "batches": [_batch
                          {"pack_id": JOY, "state": "running", "batches": [_batch(1, 200)], "current": _batch(2, 3)}])
 FINISHED = _snap("done", [{"pack_id": EVENTS, "state": "done", "batches": [_batch(1, 96)]},
                           {"pack_id": JOY, "state": "done", "batches": [_batch(1, 200), _batch(2, 4)]}])
+AUTO_WORKING = {"run": {**WORKING["run"], "origin": "auto", "run_id": "bfr_auto"}}
+AUTO_OFF = {"enabled": False, "kill_switch": False, "changed_at": None, "quiet_s": 600, "min_gap_s": 3600,
+            "quiet_set": False, "min_gap_set": False, "first_window_days": 7, "max_window_days": 30, "last": None,
+            "next": {"state": "off", "not_before": None}, "planted": PLANTED}
+AUTO_ON = {**AUTO_OFF, "enabled": True, "changed_at": "2026-11-11T14:02:00Z",
+           "last": {"run_id": "bfr_auto", "state": "done", "reason": None, "started_at": "2026-11-11T15:00:00Z",
+                    "finished_at": "2026-11-11T15:03:12Z", "since": "2026-11-10", "packs": 2, "waiting": 9,
+                    "new_records": 14, "older_records": 3, "note": PLANTED,
+                    "totals": {"processed": 9, "assertions": 11, "accepted": 8, "written": 7, "quarantined": 1,
+                               "llm_errors": 0, "extract_s": 15.0, "verify_s": 96.0}},
+           "next": {"state": "waiting_for_gap", "not_before": "2026-11-11T16:03:12Z"}}
 STOPPED = _snap("stopped", [{"pack_id": EVENTS, "state": "stopped", "batches": [_batch(1, 57)]}, {"pack_id": JOY}],
                 reason="stopped")
 
@@ -92,8 +106,10 @@ class _Socket:
     def __init__(self, *, before: Optional[Dict[str, Any]] = None, status: Optional[List[Any]] = None,
                  answers: Optional[Dict[tuple, Any]] = None, packs: Optional[Dict[str, Any]] = None,
                  waiting: Optional[Dict[str, int]] = None, started: bool = False,
-                 provider: str = "llm", spec_on_disk: bool = True, truncated: bool = False) -> None:
+                 provider: str = "llm", spec_on_disk: bool = True, truncated: bool = False,
+                 auto: Optional[Dict[str, Any]] = None) -> None:
         self.provider, self.spec_on_disk, self.truncated = provider, spec_on_disk, truncated
+        self.auto = dict(auto if auto is not None else AUTO_OFF)
         self.calls: List[Dict[str, Any]] = []
         self.before = before if before is not None else {"run": None}
         self.status = list(status if status is not None else [FINISHED])
@@ -149,6 +165,15 @@ class _Socket:
             return frame
         if (method, path) == ("POST", packs_cmd.STOP_PATH):
             return {"stopping": True, "run": None}
+        if (method, path) == ("GET", packs_cmd.AUTO_PATH):
+            return self.auto
+        if (method, path) == ("PUT", packs_cmd.AUTO_PATH):
+            self.auto = {**(AUTO_ON if json_body["enabled"] else AUTO_OFF), "last": self.auto["last"],
+                         "quiet_s": json_body.get("quiet_s", self.auto["quiet_s"]),
+                         "min_gap_s": json_body.get("min_gap_s", self.auto["min_gap_s"])}
+            if json_body["enabled"]:
+                self.auto["next"] = {"state": "waiting_for_quiet", "not_before": "2026-11-11T14:12:00Z"}
+            return self.auto
         raise AssertionError(f"unexpected request {method} {path}")
 
 
@@ -195,7 +220,7 @@ def cli(monkeypatch):
 
 
 def _posts(out) -> List[Dict[str, Any]]:
-    return [c for c in out.calls if c["method"] == "POST"]
+    return [c for c in out.calls if c["method"] in ("POST", "PUT")]
 
 
 # ----------------------------------------------------------------------------- the yes
@@ -471,8 +496,9 @@ def test_list_prints_ids_switches_counts_and_last_runs(cli):
 def test_status_reads_the_run_and_needs_no_terminal(cli):
     none = cli("status", tty=False)
     assert none.code == 0 and "No backfill run since the node started." in none.out
+    assert "Automatic catch-up: off." in none.out
     out = cli("status", tty=False, socket=_Socket(before=HALF))
-    assert out.code == 0 and out.sock.sent() == [("GET", packs_cmd.CURRENT_PATH)]
+    assert out.code == 0 and out.sock.sent() == [("GET", packs_cmd.CURRENT_PATH), ("GET", packs_cmd.AUTO_PATH)]
     assert "Run bfr_1: running, started 2026-11-10 09:00:00 UTC, 2h 03m." in out.out
     assert (f"  {EVENTS}: done, 1 batch: 96 processed, 192 assertions, 96 accepted, 95 written, 1 quarantined "
             f"(extraction 1m 36s, verification 1h 34m); read by {CLASSIFIER}") in out.out
@@ -500,6 +526,147 @@ def test_stop_asks_the_node_and_needs_no_confirmation(cli):
     assert idle.code == 0 and "No backfill run is active." in idle.out
 
 
+# ----------------------------------------------------------------------------- the standing switch (`packs auto`)
+
+
+def _auto_put(out) -> Dict[str, Any]:
+    puts = [c for c in out.calls if (c["method"], c["path"]) == ("PUT", packs_cmd.AUTO_PATH)]
+    assert len(puts) == 1, "exactly one change is sent"
+    return puts[0]
+
+
+def test_auto_on_says_what_it_will_do_asks_once_and_sends_one_confirmed_change(cli):
+    out = cli("auto", "on")
+    assert out.code == packs_cmd.EXIT_OK, out.out
+    assert out.prompts == ["Turn it on?"] and out.tokens == ["confirm-token"]
+    put = _auto_put(out)
+    assert put["json"] == {"enabled": True} and put["headers"] == {"X-Topos-Owner-Confirm": "confirm-token"}
+    asked = out.out.index("Automatic catch-up: on")
+    for said in ("2 of 3 packs are switched on", "none has arrived for 10m 00s", "at most one look every 1h 00m",
+                 "The first look reads the last 7 days", "never more than 30 days back",
+                 "Older history stays `topos-node packs backfill`", "Waiting now among records dated",
+                 f"Read by the local model {LLM}; every fact found is checked by {VERIFIER}.",
+                 "changes no setting", "No model is loaded when nothing is waiting",
+                 "`topos-node packs auto off` turns it off"):
+        assert said in out.out and out.out.index(said) < asked, f"said before the yes: {said}"
+    plan = [c for c in out.calls if c["path"] == packs_cmd.PLAN_PATH][0]
+    assert plan["params"]["pack_id"] == sorted([JOY, EVENTS]) and plan["params"]["since"], "the first window's count"
+    assert "Next: not before 2026-11-11 14:12:00 UTC (arrivals have to go quiet first)." in out.out
+    facts = cli("auto", "on", socket=_Socket(provider="topos_facts"))
+    assert f"Read by Topos Facts ({CLASSIFIER}) for the packs it knows and the local model {LLM} for the rest" in facts.out
+
+
+def test_auto_on_takes_the_two_periods_and_sends_them_in_seconds(cli):
+    out = cli("auto", "on", "--quiet-minutes", "5", "--min-gap-minutes", "30")
+    assert _auto_put(out)["json"] == {"enabled": True, "quiet_s": 300, "min_gap_s": 1800}
+    assert "none has arrived for 5m 00s" in out.out and "at most one look every 30m 00s" in out.out
+    change = cli("auto", "on", "--min-gap-minutes", "120", socket=_Socket(auto=AUTO_ON))
+    assert change.prompts == ["Change it?"] and _auto_put(change)["json"] == {"enabled": True, "min_gap_s": 7200}
+    for bad in (("--quiet-minutes", "0"), ("--min-gap-minutes", "4"), ("--quiet-minutes", "ten")):
+        refused = cli("auto", "on", *bad)
+        assert refused.code == 2 and refused.calls == [] and refused.prompts == []
+
+
+@pytest.mark.parametrize("command, already", [("on", AUTO_OFF), ("off", AUTO_ON)])
+def test_auto_without_a_terminal_or_with_a_no_changes_nothing(cli, command, already):
+    piped = cli("auto", command, tty=False, socket=_Socket(auto=already))
+    assert piped.code == packs_cmd.EXIT_NEEDS_HUMAN and "your own terminal" in piped.out
+    assert piped.calls == [] and piped.prompts == [] and piped.tokens == []
+    no = cli("auto", command, answer=False, socket=_Socket(auto=already))
+    assert no.code == packs_cmd.EXIT_OK and "Nothing changed." in no.out
+    assert len(no.prompts) == 1 and no.tokens == [] and _posts(no) == []
+
+
+@pytest.mark.parametrize("command", ["on", "off"])
+def test_auto_has_no_flag_that_answers_for_the_person(cli, command):
+    for flag in ("--yes", "-y", "--force", "--no-input"):
+        out = cli("auto", command, flag)
+        assert out.code == 2 and out.calls == [] and out.tokens == []
+
+
+def test_auto_off_asks_once_and_sends_one_confirmed_change(cli):
+    out = cli("auto", "off", socket=_Socket(auto=AUTO_ON))
+    assert out.code == packs_cmd.EXIT_OK and out.prompts == ["Turn it off?"] and out.tokens == ["confirm-token"]
+    put = _auto_put(out)
+    assert put["json"] == {"enabled": False} and put["headers"] == {"X-Topos-Owner-Confirm": "confirm-token"}
+    assert "Automatic catch-up: off." in out.out
+    assert "A run it started stops after the record in hand" in out.out
+
+
+def test_auto_on_when_on_and_off_when_off_ask_nothing(cli):
+    on = cli("auto", "on", socket=_Socket(auto=AUTO_ON))
+    assert on.code == packs_cmd.EXIT_OK and "Already on." in on.out
+    off = cli("auto", "off")
+    assert off.code == packs_cmd.EXIT_OK and "Already off." in off.out
+    for out in (on, off):
+        assert out.prompts == [] and out.tokens == [] and _posts(out) == []
+
+
+def test_a_refused_change_says_so(cli):
+    refused = NodeRefused(403, "owner_confirmation_required")
+    out = cli("auto", "on", socket=_Socket(answers={("PUT", packs_cmd.AUTO_PATH): refused}))
+    assert out.code == packs_cmd.EXIT_FAILED and "refused the change (owner_confirmation_required)" in out.out
+    assert "Nothing changed." in out.out
+    down = cli("auto", "status", tty=False, socket=_Socket(answers={("GET", packs_cmd.AUTO_PATH): NodeDown("down")}))
+    assert down.code == packs_cmd.EXIT_NODE_DOWN
+
+
+def test_auto_status_is_a_read_and_says_the_last_look_and_the_next(cli):
+    out = cli("auto", "status", tty=False, socket=_Socket(auto=AUTO_ON))
+    assert out.code == 0 and out.sock.sent() == [("GET", packs_cmd.AUTO_PATH)] and out.tokens == []
+    lines = out.out.splitlines()
+    assert lines[0] == "Automatic catch-up: on since 2026-11-11 14:02:00 UTC."
+    assert lines[1] == ("  It looks when new journal entries or messages have landed and none has arrived for "
+                        "10m 00s, at most once every 1h 00m.")
+    assert lines[2] == ("  Last automatic run bfr_auto: done, started 2026-11-11 15:00:00 UTC, records dated "
+                        "2026-11-10 or later, 2 packs: 9 processed, 11 assertions, 8 accepted, 7 written, "
+                        "1 quarantined (extraction 15s, verification 1m 36s).")
+    assert lines[3].startswith("  3 of the records that landed carry a date before that and were left")
+    assert lines[4] == "  Next: not before 2026-11-11 16:03:12 UTC (the minimum gap between looks)."
+    doc = json.loads(cli("auto", "status", "--json", tty=False, socket=_Socket(auto=AUTO_ON)).out)["auto"]
+    assert doc["enabled"] is True and doc["last"]["totals"]["written"] == 7 and "planted" not in doc
+    assert set(doc["last"]) == {"run_id", "state", "reason", "started_at", "finished_at", "since", "packs", "waiting",
+                                "new_records", "older_records", "totals"}
+
+    nothing = {**AUTO_ON, "last": {**AUTO_ON["last"], "run_id": None, "state": "nothing_waiting", "totals": None,
+                                   "older_records": 0},
+               "next": {"state": "waiting_for_records", "not_before": None}}
+    quiet = cli("auto", "status", tty=False, socket=_Socket(auto=nothing))
+    assert ("  Last look 2026-11-11 15:00:00 UTC: nothing waiting among records dated 2026-11-10 or later; "
+            "no run, no model loaded.") in quiet.out
+    assert "  Next: when new journal entries or messages land." in quiet.out
+    held = cli("auto", "status", tty=False, socket=_Socket(auto={**AUTO_ON, "kill_switch": True}))
+    assert "held off by TOPOS_PACKS_AUTO_CATCHUP in the node's environment (your switch is on)." in held.out
+    assert "Next:" not in held.out
+
+
+def test_status_says_when_the_run_was_automatic_and_shows_the_switch(cli):
+    out = cli("status", tty=False, socket=_Socket(before=AUTO_WORKING, auto=AUTO_ON))
+    assert out.code == 0 and "Run bfr_auto (automatic catch-up): running, started" in out.out
+    assert "Automatic catch-up: on since 2026-11-11 14:02:00 UTC." in out.out
+    assert "Last automatic run bfr_auto: done" in out.out and "Next: not before 2026-11-11 16:03:12 UTC" in out.out
+    doc = json.loads(cli("status", "--json", tty=False, socket=_Socket(before=AUTO_WORKING, auto=AUTO_ON)).out)
+    assert doc["run"]["origin"] == "auto" and doc["auto"]["enabled"] is True
+    owners = json.loads(cli("status", "--json", tty=False, socket=_Socket(before=HALF)).out)
+    assert owners["run"]["origin"] == "owner" and owners["auto"]["enabled"] is False
+    old_node = cli("status", tty=False, socket=_Socket(before=HALF, answers={
+        ("GET", packs_cmd.AUTO_PATH): NodeRefused(404, "not_found")}))
+    assert old_node.code == 0 and "Run bfr_1: running" in old_node.out and "Automatic" not in old_node.out
+
+
+def test_a_backfill_asked_for_while_the_automatic_run_works_is_not_turned_away(cli):
+    waiting = _snap("running", [{"pack_id": EVENTS}, {"pack_id": JOY}])
+    waiting["run"]["waiting_for"] = "automatic_run"
+    out = cli("backfill", "--all-enabled", "--until-done",
+              socket=_Socket(before=AUTO_WORKING, status=[waiting, HALF, FINISHED]))
+    assert out.code == packs_cmd.EXIT_OK, out.out
+    assert out.prompts == ["Run it?"] and len(_posts(out)) == 1
+    said = "The automatic catch-up is working right now. Your run wins"
+    assert said in out.out and out.out.index(said) < out.out.index("Waiting for the automatic catch-up")
+    assert out.out.count("Waiting for the automatic catch-up to finish the record in hand...") == 1
+    assert "Done: 300 processed" in out.out
+
+
 # ----------------------------------------------------------------------------- the node serves what the CLI sends
 
 
@@ -514,11 +681,13 @@ def _served(method: str, path: str) -> bool:
 
 def test_every_path_the_commands_send_is_a_route_the_node_serves(cli):
     sent = set()
-    for args, sock in ((("list",), None), (("status",), None), (("stop",), None),
+    for args, sock in ((("list",), None), (("status",), None), (("stop",), None), (("auto", "on"), None),
+                       (("auto", "off"), _Socket(auto=AUTO_ON)), (("auto", "status"), None),
                        (("backfill", "--all-enabled"), _Socket(status=[WORKING, KeyboardInterrupt(), STOPPED]))):
         sent |= set(cli(*args, socket=sock).sock.sent())
     assert sent == {("GET", packs_cmd.PACKS_PATH), ("GET", packs_cmd.PLAN_PATH), ("GET", packs_cmd.CURRENT_PATH),
-                    ("POST", packs_cmd.RUNS_PATH), ("POST", packs_cmd.STOP_PATH)}
+                    ("POST", packs_cmd.RUNS_PATH), ("POST", packs_cmd.STOP_PATH),
+                    ("GET", packs_cmd.AUTO_PATH), ("PUT", packs_cmd.AUTO_PATH)}
     missing = sorted(f"{m} {p}" for m, p in sent if not _served(m, p))
     assert not missing, f"the CLI sends paths the node does not serve: {missing}"
 
@@ -526,7 +695,8 @@ def test_every_path_the_commands_send_is_a_route_the_node_serves(cli):
 def test_only_the_start_needs_the_yes_and_it_is_the_dangerous_one():
     assert census.lookup("POST", packs_cmd.RUNS_PATH).verdict == census.DANGEROUS
     assert census.lookup("POST", packs_cmd.STOP_PATH).verdict == census.OPEN
-    for path in (packs_cmd.PACKS_PATH, packs_cmd.PLAN_PATH, packs_cmd.CURRENT_PATH):
+    assert census.lookup("PUT", packs_cmd.AUTO_PATH).verdict == census.DANGEROUS, "the standing switch is a yes too"
+    for path in (packs_cmd.PACKS_PATH, packs_cmd.PLAN_PATH, packs_cmd.CURRENT_PATH, packs_cmd.AUTO_PATH):
         assert census.lookup("GET", path).verdict == census.READ
 
 
@@ -534,4 +704,5 @@ def test_the_group_is_on_the_node_cli():
     from topos.cli.commands import main
 
     assert main.commands["packs"] is packs_cmd.packs_group
-    assert set(packs_cmd.packs_group.commands) == {"list", "backfill", "status", "stop"}
+    assert set(packs_cmd.packs_group.commands) == {"list", "backfill", "status", "stop", "auto"}
+    assert set(packs_cmd.packs_group.commands["auto"].commands) == {"on", "off", "status"}

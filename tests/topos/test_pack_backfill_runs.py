@@ -364,8 +364,9 @@ def test_the_status_carries_states_counts_and_stamps_only() -> None:
     run = runs.start_run(["a.one"], 2, True, run_batch=script)
     _until(lambda: run.snapshot()["packs"][0]["current"] is not None, "the first batch")
     live = run.snapshot()
-    assert set(live) == {"run_id", "state", "reason", "pack_ids", "limit", "until_done", "since", "started_at",
-                         "finished_at", "elapsed_s", "packs", "totals"}
+    assert set(live) == {"run_id", "state", "reason", "origin", "waiting_for", "pack_ids", "limit", "until_done",
+                         "since", "started_at", "finished_at", "elapsed_s", "packs", "totals"}
+    assert (live["origin"], live["waiting_for"]) == ("owner", None), "the owner's yes started this one"
     assert set(live["packs"][0]) == {"pack_id", "state", "error", "batches", "current", "extract_model",
                                      "verify_model"}
     assert set(live["packs"][0]["current"]) == BATCH_KEYS

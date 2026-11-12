@@ -1067,3 +1067,229 @@ Completed comparable after gate:
 - fixes: `node::tests/query/test_absent_qualifier_narrows_not_erases.py::tests.query.test_absent_qualifier_narrows_not_erases.TestTheMeasuredFailure::test_a_large_store_counts_the_subject_words_too`
 - fixes: `node::tests/query/test_absent_qualifier_narrows_not_erases.py::tests.query.test_absent_qualifier_narrows_not_erases.TestTheMeasuredFailure::test_a_redacted_name_is_outnumbered_by_the_sentence_around_it`
 - fixes: `node::tests/query/test_absent_qualifier_narrows_not_erases.py::tests.query.test_absent_qualifier_narrows_not_erases.TestTheMeasuredFailure::test_an_absent_day_does_not_empty_an_ask_about_bike_rides`
+
+## RQ-2026-11-10-FACTS — Explicit grants for every bundled fact category
+
+- **Problem and cause:** The selective-facts/v1 catalog exposed only `work.career` and four predicates. Twenty-seven other entries were unavailable and the two Moments categories were absent. Enabling derivation did not add grant eligibility. Existing structured values, inferred/dependent facts, producer-default owner-only disclosure, person bindings and day-only validity also required a release implementation.
+- **Method:** Added a separate, frozen `selective-facts/v2` contract covering all 30 bundled categories, 237 pack predicates and 12 mapped legacy predicates. New consent pins exact category revisions/predicates, selected statement/inference types and individual exclusions. Added bounded schema-based projections, dependency and entity protection/revision checks, native evidence qualification, source-backed same-day validity, index discovery/invalidation, owner preview and control-plane output enforcement. Web choices explicitly select assertion types and require review for a v1-to-v2 upgrade. Existing signed v1 grants retain their original grammar and scope.
+- **Affected question families:** Questions answered from granted facts across work, health, finances, relationships, beliefs, identity, preferences, life events, capabilities, moments and the other enabled categories. Extraction/inference labels are not truth verification. Native evidence must still satisfy existing source authorship/provenance/review rules; selecting a category cannot authorize an otherwise denied source or protected fact.
+- **Validation:** Final focused node checks: 121 passed, plus the new structured-preview consent regression passed; control-plane contracts: 38 passed; web owner suite: 370 passed; TypeScript check passed. All 30 categories exercised through signed grant release; all 237 predicate schemas exercised; a real DerivationWriter integration covers person sidecars and same-day validity. The broader node run recorded 426 passes, one failure from a formerly unsupported category now becoming supported, one opt-in measurement skip, and four existing expected failures. The obsolete fixture was changed to explicitly registered future categories, preserving its outside-catalog property, and its focused rerun passed. These skip/xfail results are not claimed as a fully green broader suite.
+- **Paired offline gate:** Baseline `20261110T230719487439Z-RQ-2026-11-10-FACTS-before.json` and final `20261110T234019947677Z-RQ-2026-11-10-FACTS-after.json`: 705 passes each, no missing tests, regressions, skips or runner errors; same fixtures, catalog and toolchain. New all-category cases were added alongside implementation; no recorded failing pre-change run of those new cases is available.
+- **Earlier attempts retained:** Two baseline attempts could not write shared web test caches; a successful baseline followed with local caches. An intermediate after gate passed 705 tests. A later rerun passed all 705 but selected Node 20 through a login shell, so it was correctly non-comparable; the final rerun explicitly pinned baseline Node 22.21.1. One control-plane invocation imported the still-unmodified canonical node rather than the isolated implementation; rerunning with the tested node on PYTHONPATH passed all 38 cases. A malformed-fact test initially corrupted the row before fixture source review; moving corruption after setup fixed the test setup, without weakening the refusal assertion.
+- **Real-model companion:** The before run completed 33 real answers and judgments but is INCOMPLETE: grant UI edits during execution changed web provenance. This is an unavailable valid live baseline, not a passing comparison. The after run completed 33 real answers; verdict **NOT_COMPARABLE** ([report](response-quality-runs/20261110T232757132651Z-live-after.json)). Comparison reasons: execution or judgment incomplete. After-run execution errors: []. Any quality/latency flags in this non-comparable run are retained in the report, not attributed to this change. The after-run judge flagged low scores in attribution, follow-up and empty-evidence answers, plus critical-failure flags in attribution, follow-up and citation cases. Seven cases also exceeded the comparison latency threshold. These remain unresolved diagnostic findings; they are not waived or claimed to be caused by the grant change. The synthetic companion exercises the home-chat agent; it excludes node retrieval, control-plane and browser latency. Model grades are uncalibrated, and timings from a shared desktop are descriptive.
+- **Deployment:** Applied to local node, control-plane and web source checkouts only. No services deployed or restarted; no live grant, owner data, feature flag or derivation switch changed. Unrelated local edits preserved. Coordinated deployment and explicit owner consent are required to use the new scope.
+- **Rollback:** Revert only this change's node/control-plane/web files together, leaving unrelated edits intact. Old signed v1 grants remain valid; an older implementation will refuse v2 grants, which must be re-reviewed under a supported contract. Existing index revision checks force rebuilds for changed implementation semantics.
+
+
+### Regression gate — RQ-2026-11-10-FACTS — before
+
+- Recorded (UTC): 2026-11-10T23:03:54.721634+00:00
+- Note: Baseline before expanding explicit fact ontology consent; existing grants remain pinned.
+- Report: [machine-readable results](response-quality-runs/20261110T230354721634Z-RQ-2026-11-10-FACTS-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 13 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 30 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 0 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 22 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 0 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 3 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 0 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 0 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 66 pass / 0 fail / 0 skip | pending |
+- Runner error: web: FileNotFoundError: [Errno 2] No such file or directory: '/Users/dialogues/Documents/Codex/2026-11-10/righ/work/topos/.response-quality-artifacts/20261110T230354721634Z-RQ-2026-11-10-FACTS-before/web.xml'
+
+### Regression gate — RQ-2026-11-10-FACTS — before
+
+- Recorded (UTC): 2026-11-10T23:05:28.564800+00:00
+- Note: Baseline before all-fact grant support; new all-fact tests run separately.
+- Report: [machine-readable results](response-quality-runs/20261110T230528564800Z-RQ-2026-11-10-FACTS-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 13 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 30 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 0 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 22 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 0 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 3 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 0 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 0 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 66 pass / 0 fail / 0 skip | pending |
+- Runner error: web: FileNotFoundError: [Errno 2] No such file or directory: '/Users/dialogues/Documents/Codex/2026-11-10/righ/work/topos/.response-quality-artifacts/20261110T230528564800Z-RQ-2026-11-10-FACTS-before/web.xml'
+
+### Regression gate — RQ-2026-11-10-FACTS — before
+
+- Recorded (UTC): 2026-11-10T23:07:19.487439+00:00
+- Note: Usable baseline after fixing sandbox-local test caches; unchanged grant behavior.
+- Report: [machine-readable results](response-quality-runs/20261110T230719487439Z-RQ-2026-11-10-FACTS-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-10-FACTS — after
+
+- Recorded (UTC): 2026-11-10T23:20:19.933871+00:00
+- Note: All 30 categories use new explicit v2 fact consent; original v1 grants retain scope. Added source and dependency-bound stored-value projections.
+- Report: [machine-readable results](response-quality-runs/20261110T232019933871Z-RQ-2026-11-10-FACTS-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+### Live answer evaluation — RQ-2026-11-10-FACTS — before
+
+- UTC: 2026-11-10T23:07:30.659600+00:00; verdict: **INCOMPLETE**.
+- Report: [20261110T230730659600Z-live-before.json](response-quality-runs/20261110T230730659600Z-live-before.json).
+- Lane: production home-chat agent + real local model + frozen MCP evidence; excludes node retrieval, CP and browser latency.
+- Scores are uncalibrated model judgments (0–2), not human-validated truth. p95 is descriptive with this small sample.
+- Raw answers, prompts, evidence and judge reasons are stored locally in ignored .response-quality-artifacts/.
+
+| Case | Quality mean before → after | Median ms before → after | Samples |
+| --- | --- | --- | --- |
+| injection | — → 1.87 | — → 21391 | 3 |
+| followup | — → 0.40 | — → 43278 | 3 |
+| partial | — → 2.00 | — → 15205 | 3 |
+| advice | — → 2.00 | — → 22040 | 3 |
+| exclude-ai | — → 1.87 | — → 19524 | 3 |
+| yesterday | — → 2.00 | — → 37006 | 3 |
+| attribution | — → 0.47 | — → 23780 | 3 |
+| citation | — → 2.00 | — → 32177 | 3 |
+| empty | — → 1.80 | — → 9704 | 3 |
+| identity-unresolved | — → 2.00 | — → 2 | 3 |
+| general | — → 2.00 | — → 8493 | 3 |
+
+### Regression gate — RQ-2026-11-10-FACTS — after
+
+- Recorded (UTC): 2026-11-10T23:38:14.134843+00:00
+- Note: Final all-category grant implementation, including production writer person bindings and source-backed same-day facts; v1 consent remains unchanged.
+- Report: [machine-readable results](response-quality-runs/20261110T233814134843Z-RQ-2026-11-10-FACTS-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **NOT_COMPARABLE**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- reasons: `toolchain changed`
+
+### Regression gate — RQ-2026-11-10-FACTS — after
+
+- Recorded (UTC): 2026-11-10T23:40:19.947677+00:00
+- Note: Final implementation, Node 22.21.1 pinned to baseline; previous rerun passed 705 tests but login shell selected Node 20 and was non-comparable.
+- Report: [machine-readable results](response-quality-runs/20261110T234019947677Z-RQ-2026-11-10-FACTS-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 74 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+### Live answer evaluation — RQ-2026-11-10-FACTS — after
+
+- UTC: 2026-11-10T23:27:57.132651+00:00; verdict: **NOT_COMPARABLE**.
+- Report: [20261110T232757132651Z-live-after.json](response-quality-runs/20261110T232757132651Z-live-after.json).
+- Lane: production home-chat agent + real local model + frozen MCP evidence; excludes node retrieval, CP and browser latency.
+- Scores are uncalibrated model judgments (0–2), not human-validated truth. p95 is descriptive with this small sample.
+- Raw answers, prompts, evidence and judge reasons are stored locally in ignored .response-quality-artifacts/.
+
+| Case | Quality mean before → after | Median ms before → after | Samples |
+| --- | --- | --- | --- |
+| injection | 1.87 → 1.87 | 21391 → 38163 | 3 |
+| followup | 0.40 → 0.40 | 43278 → 62404 | 3 |
+| partial | 2.00 → 2.00 | 15205 → 37178 | 3 |
+| advice | 2.00 → 2.00 | 22040 → 40732 | 3 |
+| exclude-ai | 1.87 → 1.93 | 19524 → 18477 | 3 |
+| yesterday | 2.00 → 2.00 | 37006 → 39161 | 3 |
+| attribution | 0.47 → 0.40 | 23780 → 81633 | 3 |
+| citation | 2.00 → 2.00 | 32177 → 58248 | 3 |
+| empty | 1.80 → 1.60 | 9704 → 36183 | 3 |
+| identity-unresolved | 2.00 → 2.00 | 2 → 53 | 3 |
+| general | 2.00 → 2.00 | 8493 → 7815 | 3 |
+
+Comparison: `{"verdict": "NOT_COMPARABLE", "reasons": ["execution or judgment incomplete"], "quality_regressions": ["injection/attribution/below_floor", "attribution/groundedness/below_floor", "attribution/completeness/below_floor", "attribution/relevance", "attribution/relevance/below_floor", "attribution/attribution/below_floor", "attribution/critical_failure", "followup/groundedness/below_floor", "followup/completeness/below_floor", "followup/relevance/below_floor", "followup/attribution/below_floor", "followup/critical_failure", "empty/groundedness", "empty/groundedness/below_floor", "empty/attribution", "empty/attribution/below_floor", "citation/critical_failure"], "latency_regressions": ["injection", "attribution", "partial", "advice", "followup", "empty", "citation"]}`
+
+### Release candidate 1.5.49 — integration validation
+
+Prepared on the separate 1.5.48 candidate (`fe964dbf`, PR #280), preserving its backfill fix. The owner explicitly assigned this work to 1.5.49. Integrated checks: 122 focused node grant tests, 38 control-plane tests, 370 owner UI tests and TypeScript passed. Control-plane static checking found and removed an unused import; no permission behavior changed.
+
+The legacy `scripts/run_release_eval.py` scorecard is **FAIL**, retained in `eval_reports/1.5.49.json`: the negotiation/minimality harness it imports was removed by `0f969868` (N8, retirement of old sharing doors). Its privacy pytest leg completed with 382 passes and two existing expected failures; unauthorized-access and canary-extraction probes measured zero leaks (6 and 270 probes), and deny p95 was 0.2 ms. Missing negotiation measurements are not a passing metric. Earlier interrupted helper attempts are retained locally and are not claimed as results. The completed run used scratch data, the owner-database tripwire and an unavailable local-model endpoint, consistent with its deterministic lane.
+
+The procedure of record, `RELEASING.md`, and current `just eval-release` use the exact-tree six-pair Rig D gate. That gate and selected CI are still pending for this candidate. The other release's owner waiver does not cover this tree. No production deployment or tag has been made by this task at this point.
+
+
+### 1.5.49 release integration follow-up (11 Nov 2026 UTC)
+
+Full release CI found stale protocol/declaration schema exports, census source pins
+and fixtures that still treated non-work categories as unsupported. Regenerated the
+v2 schema exports, reviewed the census mirrors and carried the projection revision
+contract into its member records. Ontology-switch fixtures now use unsupported future
+categories; the no-app-special-case guard validates the catalog as literal data.
+Targeted integration rerun: 293 passed. The first corrected CI attempt exposed one
+remaining KnowledgeDeclaration schema export. The legacy read-budget freeze now
+strips the new knowledge-only ExpandedFacts definition when comparing its original
+protocol alternatives; its pinned legacy hash is unchanged. Related schema, signing,
+budget and census checks: 104 passed.
+The 53ce26ea sharing attempt was stopped before completion because that schema fix
+changes the exact release tree; it is diagnostic, not passing release evidence.
+Full CI and a fresh sharing rig remain required; no deployment claimed. Prior offline
+and real-model comparison limitations remain unchanged.
