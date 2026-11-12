@@ -1454,3 +1454,137 @@ and real-model comparison limitations remain unchanged.
 | query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
 
 - Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+### Regression gate — RQ-CUSTOM-SHARE — before
+
+- Recorded (UTC): 2026-11-12T17:11:10.200056+00:00
+- Note: Custom pack v3 consent must preserve existing source protections and answer contracts
+- Report: [machine-readable results](response-quality-runs/20261112T171110200056Z-RQ-CUSTOM-SHARE-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | pending |
+
+### RQ-CUSTOM-SHARE — implementation and limits
+
+- Failure: person-sharing consent used a frozen bundled catalog, so owner-added fact packs could never participate.
+- Cause/method: add portable v3 consent without global registration; verify exact installed definition, registry switch, fact producer digest and supporting-source protections at recipient reads. Preserve v1/v2 consent.
+- Families: cache/access boundaries, citations/attribution, evidence filtering. No prompt, model or generation changes.
+- The new targeted custom-pack regression tests were prepared before the contract baseline but were not executed as a failing pre-change run. The frozen 717-test contract catalog is the paired regression baseline; feature tests are additional coverage.
+- Live companion baseline unavailable: the released node and web trees do not contain the referenced live runner/catalog/web harness. An older uncommitted workspace copy is not a comparable release baseline. No actual-answer quality or latency improvement is claimed. Rig D separately measures sharing isolation and refusal timing.
+- Deployment: pending coordinated node, control-plane and web release. Rollback: revert all three feature commits; earlier consent remains valid, v3 custom sharing becomes unavailable. No data migration or automatic model backfill.
+
+### Regression gate — RQ-CUSTOM-SHARE — after
+
+- Recorded (UTC): 2026-11-12T17:16:11.221697+00:00
+- Note: Exact custom-pack consent and producer provenance; old consent unchanged
+- Report: [machine-readable results](response-quality-runs/20261112T171611221697Z-RQ-CUSTOM-SHARE-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | 86 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+### Regression gate — RQ-CUSTOM-SHARE — after
+
+- Recorded (UTC): 2026-11-12T17:23:51.270975+00:00
+- Note: Final provenance handling also re-extracts stale event retellings without inheriting old evidence
+- Report: [machine-readable results](response-quality-runs/20261112T172351270975Z-RQ-CUSTOM-SHARE-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | 86 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+- Release tooling check (1.5.53): the legacy `run_release_eval.py` wrapper failed because it imports `tests.evals.privacy.negotiation`, intentionally removed with retired sharing doors in N8 (`0f969868`). Its underlying current privacy battery passed: 382 passed, 2 expected failures. The failed legacy scorecard is retained in this task's validation artifacts and is not represented as passing. The current procedure of record, `RELEASING.md`, gates publication on selected CI (including the privacy battery), package/upgrade checks, and exact-tree Rig D; those requirements remain in force. No retired production path or test harness was restored to make the obsolete wrapper green.
+
+### Regression gate — RQ-CUSTOM-SHARE — after
+
+- Recorded (UTC): 2026-11-12T17:43:50.070685+00:00
+- Note: Preserve existing custom consent when unrelated manifests fill the wire catalog budget
+- Report: [machine-readable results](response-quality-runs/20261112T174350070685Z-RQ-CUSTOM-SHARE-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **NOT_COMPARABLE**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | 86 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- reasons: `toolchain changed`
+
+### Regression gate — RQ-CUSTOM-SHARE — after
+
+- Recorded (UTC): 2026-11-12T17:46:12.284154+00:00
+- Note: Final source with baseline dependency lock frozen; only the source project version differs from the release lock, and package/upgrade CI verifies the stamped release separately
+- Report: [machine-readable results](response-quality-runs/20261112T174612284154Z-RQ-CUSTOM-SHARE-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | 86 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+- Catalog-capacity regression: reproduced an existing custom grant becoming unavailable when an unrelated large manifest filled the bounded wire catalog. Runtime definition checks now validate each installed pack independently; only the picker applies the combined wire budget. The regression failed before the fix and all 23 custom-sharing cases passed afterward.
+- Stamped-release comparison: all 717 contracts passed, but the initial comparison correctly reported NOT_COMPARABLE because `uv.lock` includes the source package's version. Parsing both locks confirmed every field except `topos-node`'s own version was identical. The paired rerun used the original frozen dependency lock with the final source, unchanged installed third-party dependencies and test fixtures; it passed 717/717. The release lock was restored immediately afterward. Packaging/upgrade CI checks the actual version-stamped release separately. The non-comparable report is retained.
+- Protocol exports: regenerated only the SignedMutation and KnowledgeDeclaration schema snapshots for v3 on node and control plane, after asserting their model schemas match. Historical signed golden vectors were unchanged.
