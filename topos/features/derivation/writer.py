@@ -466,6 +466,19 @@ class DerivationWriter:
         anchor = (str(occurrence)[:10] if occurrence else None) or \
                  (str(event_date)[:10] if event_date else None) or now
 
+        if incumbent is not None and not pack.first_party:
+            # Only a new extraction can attest an old fact to the current definition.
+            # Replacing the row keeps fresh evidence separate from the old reading.
+            from .registry import definition_sha
+            if (incumbent["payload"].get("extractor") or {}).get("definition_digest") != definition_sha(pack, stamped=False):
+                with self._revision():
+                    self._close(incumbent, reason="correction", at=now)
+                    row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
+                                       confidence, object_entity_id, occurrence, quote,
+                                       valid_from=anchor, key=key, context_refs=context_refs)
+                self.stats["corrected"] += 1
+                return {"outcome": "corrected", "object_id": row}
+
         if incumbent is not None:
             inc_payload = incumbent["payload"]
             inc_refs = incumbent.get("source_refs") or []
@@ -796,6 +809,9 @@ class DerivationWriter:
             "extractor": {"model": self.model, "pack_version": pack.version,
                           "template": TEMPLATE_VERSION, "ts": _now_iso()},
         }
+        if not pack.first_party:
+            from .registry import definition_sha
+            payload["extractor"]["definition_digest"] = definition_sha(pack, stamped=False)
         if isinstance(value, dict):
             payload["value_struct"] = value
         if quote:

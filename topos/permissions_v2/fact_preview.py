@@ -2,7 +2,9 @@
 import json
 
 from .canonical import PolicyError
-from .expanded_facts import ExpandedFacts, PACKS
+from .expanded_facts import ExpandedFacts
+from .custom_facts import CustomFacts
+from .custom_fact_runtime import current_packs
 from .evidence import _json, _key
 from .knowledge_projections import candidates, fact_projection
 from .predicate_classes import scalar
@@ -34,6 +36,7 @@ REASONS = {
 
 def preview(walk, identities):
     items = []
+    packs = current_packs()
     for table, fid in sorted(set(candidates(walk.conn, identities, ["fact"]))):
         rows = walk.conn.execute("SELECT * FROM signal_objects WHERE object_id=?", (fid,)).fetchmany(2)
         if len(rows) != 1:
@@ -65,11 +68,11 @@ def preview(walk, identities):
             code = exc.code if exc.code in REASONS else "could_not_check"
         predicate = payload.get("predicate") if isinstance(payload.get("predicate"), str) else "unknown"
         value = scalar(predicate, payload)
-        expanded = isinstance(walk.policy.search.selective_facts, ExpandedFacts)
-        if expanded and value is None and oid in PACKS:
+        expanded = isinstance(walk.policy.search.selective_facts, (ExpandedFacts, CustomFacts))
+        if expanded and value is None and oid in packs:
             from .expanded_fact_projection import stored_value
             try:
-                stored = stored_value(oid, {**payload, "predicate": predicate})
+                stored = stored_value(oid, {**payload, "predicate": predicate}, packs=packs)
                 value = stored if isinstance(stored, str) else json.dumps(stored, ensure_ascii=False, sort_keys=True)
             except PolicyError:
                 pass

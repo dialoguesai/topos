@@ -310,7 +310,8 @@ def _support(resolver,conn,floor,reviews,review_db,refs,policy,lower_us,upper_us
 
 def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us):
     from .expanded_facts import ExpandedFacts
-    if isinstance(getattr(policy.search, 'selective_facts', None), ExpandedFacts):
+    from .custom_facts import CustomFacts
+    if isinstance(getattr(policy.search, 'selective_facts', None), (ExpandedFacts, CustomFacts)):
         from .expanded_fact_projection import project
         return project(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us)
     if row.get('object_type')!='fact' or row.get('valid_to') is not None:

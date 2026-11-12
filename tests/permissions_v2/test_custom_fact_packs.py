@@ -1,14 +1,4 @@
-"""A share with another person never carries a fact from a pack the owner added from a file.
-
-protects: the fact categories a share can name are a closed vocabulary the node and the control plane agree on
-(`fact_catalog_v2`, `selective_facts`). A pack the owner added is outside it, so adding one changes nothing a
-share says or signs: the catalog the node offers is byte-for-byte the one it offered before, a selection signed
-before still parses to itself, and a stored fact of such a pack is refused by both consent versions with the
-codes a share already counts as "outside this grant". Opening shares to added packs needs a new consent version
-on the node, the control plane and the web app together; until then this is the boundary.
-
-Synthetic only: an invented gardening pack in a temp directory and hand-built fact rows.
-"""
+"""Pre-v3 grants stay closed to custom packs, including older facts without provenance."""
 from __future__ import annotations
 
 import pytest
@@ -53,14 +43,15 @@ def stored_fact():
     return row, payload
 
 
-def test_adding_a_pack_changes_nothing_a_share_offers_or_signed(added):
-    assert sf.catalog() == added
-    assert PACK not in {item["ontology_id"] for item in sf.catalog()["ontologies"]}
+def test_adding_a_pack_extends_only_the_new_catalog_not_old_consent(added):
+    assert sf.catalog()["version"] == "selective-facts/v3"
+    assert PACK in {item["ontology_id"] for item in sf.catalog()["ontologies"]}
+    assert expanded_facts.catalog() == added
     old = sf.selection_v2(["work.career"], assertions=["inferred"])
     assert sf.parse_selection(old).model_dump() == old
 
 
-def test_no_selection_can_name_an_added_pack(added):
+def test_v2_selection_cannot_name_an_added_pack(added):
     with pytest.raises(KeyError):
         sf.selection_v2([PACK], assertions=["inferred"])
     forged = sf.selection_v2(["work.career"], assertions=["inferred"])
