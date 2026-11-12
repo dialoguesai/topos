@@ -689,8 +689,10 @@ def install_source(
             )
 
 
-def list_installs(*, scope: Optional[Dict[str, Any]] = None, source_id: Optional[str] = None) -> List[InstallRecord]:
-    ensure_install_schema()
+def list_installs(*, scope: Optional[Dict[str, Any]] = None, source_id: Optional[str] = None,
+                 initialize_schema: bool = True) -> List[InstallRecord]:
+    if initialize_schema:
+        ensure_install_schema()
     clauses: List[str] = []
     params: List[Any] = []
     if source_id:

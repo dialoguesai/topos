@@ -280,3 +280,10 @@ The default lane is hermetic — temporary databases only. Lanes that touch your
 ## License
 
 [Apache 2.0](LICENSE)
+
+### Create a private source
+
+Use the Topos plugin’s `topos-add-source` skill to turn a JSON/JSONL/CSV sample into a
+private local source without an account or developer key. The agent prepares and checks
+the definition; you approve installation and the initial import once in your terminal.
+See [Private sources](docs/private-sources.md) for commands, receipts and current limits.
