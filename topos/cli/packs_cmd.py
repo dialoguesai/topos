@@ -680,7 +680,8 @@ def _reaction_facts(body: Any) -> Optional[Dict[str, Any]]:
              for row in body["packs"]
              if isinstance(row, dict) and _PACK_ID_RE.match(str(row.get("pack_id") or "")) and _int(row.get("facts"))]
     out = {"packs": packs, "total": sum(p["facts"] for p in packs), "kept_confirmed": _int(body.get("kept_confirmed")),
-           "kept_marked": _int(body.get("kept_marked")), "kept_other_record": _int(body.get("kept_other_record"))}
+           "kept_marked": _int(body.get("kept_marked")), "kept_other_record": _int(body.get("kept_other_record")),
+           "kept_timing": _int(body.get("kept_timing"))}
     for key in ("retracted", "changed"):
         if key in body:
             out[key] = _int(body.get(key))
@@ -710,6 +711,11 @@ def _reaction_lines(found: Dict[str, Any], verb: str) -> List[str]:
         lines.append(f"{other:,} more {'names' if other == 1 else 'name'} only a reaction and "
                      f"{'is' if other == 1 else 'are'} left as {'it is' if other == 1 else 'they are'}: Topos also "
                      f"stored {'it' if other == 1 else 'them'} from another record, or cannot tell that it did not.")
+    timing = found["kept_timing"]
+    if timing:
+        lines.append(f"{timing:,} more {'names' if timing == 1 else 'name'} only reactions and "
+                     f"{'is' if timing == 1 else 'are'} left as {'it is' if timing == 1 else 'they are'}: "
+                     f"{'it is' if timing == 1 else 'they are'} about when you send messages, not what they say.")
     return lines
 
 

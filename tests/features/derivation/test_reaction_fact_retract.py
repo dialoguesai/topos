@@ -10,10 +10,12 @@ facts whose every source record is a reaction the owner sent, by the test the pa
 apply; a fact with any other source, a contact's reaction, a record that is gone, or the owner's own confirmation
 stays. So does a fact any owner door made (confirm, correct, revise, promote, declare, override, an attribution
 repaired in place, a promotion that landed on a fact already standing), a fact the owner marked in an app (a row
-in `fact_feedback`), a fact that cites its records only for when they were sent, and a fact the derivation ledger
-shows, or cannot rule out, rests on a record that is not a reaction: one it was also stored from (the writer can
-replace an event's source list when the event is told again), one that repeated it and was stored nowhere (the
-writer's `noop`), or a store the ledger does not hold at all. What is judged before the write gate is judged
+in `fact_feedback`), a fact that cites its records only for when they were sent (counted apart), and a fact the
+derivation ledger shows, or cannot rule out, rests on a record that is not a reaction: one it was also stored from
+(the writer can replace an event's source list when the event is told again), one that repeated it or read the
+same instance and was stored nowhere (the writer's `noop`, a reading held for review), a store the ledger does not
+hold at all, a row the lanes skip only because its metadata cannot be read, or a fact stored before a retention
+floor deleted ledger rows. What is judged before the write gate is judged
 again inside it. An ended fact keeps its row and its value (it is closed, the way a superseded fact is), no
 message row changes, the write is made under the write gate and committed, a later backfill does not bring it
 back, and a fact it had replaced is not put back. Nothing but pack ids and counts is answered. Every row here
@@ -77,30 +79,30 @@ def node(tmp_path, monkeypatch):
 
 def _plant(conn, pack: str, predicate: str, value: Any, *sources, model: str = "stub-9b",
            role: str = "authored", occurrence: str = None, outcome: str = "written", ledger: bool = True,
-           event_date: str = "2026-09-20") -> str:
+           event_date: str = "2026-09-20", confidence: float = 0.9) -> str:
     """One assertion read from these records, put to the packs' own writer the way the lanes put it, and the
     id of the fact it landed on. `ledger` adds the row the lanes write for an assertion that reached the writer:
     it carries the fact's id only when the outcome stored something."""
     loaded = load_packs(bundled_pack_dir())[pack]
     out = DerivationWriter(conn, model=model).assert_pack_fact(
         pack=loaded, predicate=predicate, subject_entity_id="ent_owner", value=value,
-        actor_role=role, confidence=0.9, quote="Signed the offer", event_date=event_date, occurrence=occurrence,
+        actor_role=role, confidence=confidence, quote="Signed the offer", event_date=event_date, occurrence=occurrence,
         source_refs=[{"table": table, "record_id": rid} for table, rid in sources])
     assert out["outcome"] == outcome, out
     if ledger:
         _ledger(conn, out["object_id"] if outcome in STORED else None, *sources, pack=pack, predicate=predicate,
-                value=value)
+                value=value, occurrence=occurrence)
     return out["object_id"]
 
 
 def _ledger(conn, object_id, *sources, pack: str = "work.career", predicate: str = "work.career_event",
-            value: Any = None, status: str = "accepted") -> None:
+            value: Any = None, status: str = "accepted", occurrence: str = None, stage: str = "backfill") -> None:
     """The ledger row of one judged assertion per record. `object_id` None: nothing was stored for it."""
     for table, rid in sources:
-        dj._ledger_write(conn, stage="backfill", pack=load_packs(bundled_pack_dir())[pack],
+        dj._ledger_write(conn, stage=stage, pack=load_packs(bundled_pack_dir())[pack],
                          rec={"table": table, "record_id": rid, "role": "authored"},
                          a={"predicate": predicate, "value": {} if value is None else value,
-                            "verifier_status": status},
+                            "verifier_status": status, "occurrence": occurrence},
                          model="stub-9b", vmodel="stub-9b", written_id=object_id)
     conn.commit()
 
@@ -157,8 +159,8 @@ def _messages(conn) -> List[tuple]:
 
 
 EXPECTED = {"packs": [{"pack_id": JOY, "facts": 1}, {"pack_id": CAREER, "facts": 2}], "total": 3, "kept_confirmed": 1,
-            "kept_marked": 0, "kept_other_record": 0}
-NONE = {"packs": [], "total": 0, "kept_confirmed": 0, "kept_marked": 0, "kept_other_record": 0}
+            "kept_marked": 0, "kept_other_record": 0, "kept_timing": 0}
+NONE = {"packs": [], "total": 0, "kept_confirmed": 0, "kept_marked": 0, "kept_other_record": 0, "kept_timing": 0}
 
 
 # ----------------------------------------------------------------------------- the count
@@ -299,7 +301,13 @@ def _a_mark_in_an_app(conn, fact_id: str) -> None:
     conn.execute("INSERT INTO fact_feedback VALUES (?, 'love')", (fact_id,))
 
 
-@pytest.mark.parametrize("arrives", [_a_typed_repeat, _a_mark_in_an_app])
+def _a_reading_held_for_review(conn, fact_id: str) -> None:
+    conn.execute("INSERT INTO fact_conflicts (conflict_id, subject_entity_id, predicate, incumbent_object_id,"
+                 " challenger_value, challenger_confidence) VALUES ('cfl_1', 'ent_owner', 'work.employer', ?, '{}', 0.5)",
+                 (fact_id,))
+
+
+@pytest.mark.parametrize("arrives", [_a_typed_repeat, _a_mark_in_an_app, _a_reading_held_for_review])
 def test_what_arrives_while_the_yes_waits_for_the_write_gate_keeps_the_fact(node, stored, monkeypatch, arrives) -> None:
     """Neither a repeat that was stored nowhere nor a mark made in an app changes the fact's own row, so the
     row's guard cannot see them, and the wait for the gate can be long. The facts are judged again inside it."""
@@ -318,12 +326,12 @@ def _standing(conn) -> set:
     return {oid for oid, row in _facts(conn).items() if row[1] is None}
 
 
-def _left(conn, *, confirmed: int = 0, marked: int = 0, other: int = 0) -> None:
+def _left(conn, *, confirmed: int = 0, marked: int = 0, other: int = 0, timing: int = 0) -> None:
     """Nothing is listed, the count says why, and a yes ends nothing."""
     before = _facts(conn)
     assert retract.find(conn).facts == []
     assert retract.count(conn) == {**NONE, "kept_confirmed": confirmed, "kept_marked": marked,
-                                   "kept_other_record": other}
+                                   "kept_other_record": other, "kept_timing": timing}
     assert retract.retract(conn, expected_total=0)["retracted"] == 0
     assert _facts(conn) == before
 
@@ -497,9 +505,9 @@ def test_marks_that_cannot_be_read_keep_every_fact(node, stored) -> None:
     _left(node.conn, confirmed=1, marked=3)
 
 
-def test_a_fact_that_cites_records_for_their_timing_is_left(node) -> None:
+def test_a_fact_that_cites_records_for_their_timing_is_left_and_counted_apart(node) -> None:
     """The rhythm kernel (`synthesize.py`) cites a sample of the records the owner sent for WHEN they were sent.
-    A reaction was sent by the owner at that time, whatever it quotes."""
+    A reaction was sent by the owner at that time, whatever it quotes. It is left, and the count says so."""
     conn = node.conn
     sources = []
     for n in range(3):
@@ -508,7 +516,7 @@ def test_a_fact_that_cites_records_for_their_timing_is_left(node) -> None:
     label = "Mon 06:00-08:00"
     _plant(conn, "behavior.habits", "behavior.routine_block",
            {"label": label, "time_of_week": label, "activity_kind": "authored_activity"}, *sources, role="synthesis")
-    _left(conn)
+    _left(conn, timing=1)
 
 
 # ----------------------------------------------------------------------------- a source list that is not the whole story
@@ -694,6 +702,164 @@ def test_a_repeat_judged_before_a_reaction_changed_the_facts_fields_still_keeps_
         _left(conn, other=1)
     else:
         assert [f.object_id for f in retract.find(conn).facts] == [fact_id]
+
+
+# ----------------------------------------------------------------------------- a reading held, or of the same instance
+
+
+def test_a_typed_message_that_restates_the_fact_with_more_at_lower_confidence_keeps_it(node) -> None:
+    """The writer holds a reading that disagrees with the standing fact of the same key at lower confidence
+    (`conflict_queued`): no store, a ledger row with no fact id, a row in the review queue. A typed message that
+    tells the same event with one more field is such a reading. The fact still names the reaction alone."""
+    conn = node.conn
+    _message(conn, "r-words", f"Loved “{THEIRS}”")
+    _message(conn, "own", THEIRS, metadata=ORDINARY_METADATA)
+    fact_id = _event(conn, (MESSAGES, "r-words"), "2026-09-01")
+    assert retract.count(conn)["total"] == 1
+    held = _plant(conn, CAREER, "work.career_event", {**EVENT, "date": "2026-09-01"}, (MESSAGES, "own"),
+                  occurrence="2026-09-01", confidence=0.7, outcome="conflict_queued")
+    assert held == fact_id and _refs(conn, fact_id) == ["r-words"]
+    assert conn.execute("SELECT record_id, written_object_id FROM derivation_training_ledger ORDER BY rowid"
+                        ).fetchall() == [("r-words", fact_id), ("own", None)]
+    _left(conn, other=1)
+
+
+@pytest.mark.parametrize("reading, occurrence, left", [
+    pytest.param({**EVENT, "date": "2026-09-01"}, "2026-09-01", True, id="the_same_event_with_one_more_field"),
+    pytest.param("not json", "2026-09-01", True, id="a_value_that_cannot_be_read"),
+    pytest.param({"event": "hired", "org": "Northwind"}, "2026-09-01", False, id="another_event"),
+    pytest.param({**EVENT, "date": "2026-09-01"}, "2026-03-01", False, id="the_same_kind_of_event_on_another_date"),
+])
+def test_a_reading_of_the_same_instance_that_was_stored_nowhere_keeps_it(node, reading, occurrence, left) -> None:
+    """The trial lane reads a typed message for the same event, with one more field, and stores nothing: no
+    review row, only the ledger's. For a predicate whose key names the instance, a reading whose key is the
+    fact's keeps it, whatever else it says. Another instance does not."""
+    conn = node.conn
+    _message(conn, "r-words", f"Loved “{THEIRS}”")
+    _message(conn, "own", THEIRS, metadata=ORDINARY_METADATA)
+    fact_id = _event(conn, (MESSAGES, "r-words"), "2026-09-01")
+    _ledger(conn, None, (MESSAGES, "own"), predicate="work.career_event", value=reading, occurrence=occurrence,
+            stage="trial")
+    if reading == "not json":
+        conn.execute("UPDATE derivation_training_ledger SET value_json='{' WHERE written_object_id IS NULL")
+        conn.commit()
+    assert conn.execute("SELECT COUNT(*) FROM fact_conflicts").fetchone() == (0,)
+    if left:
+        _left(conn, other=1)
+    else:
+        assert [f.object_id for f in retract.find(conn).facts] == [fact_id]
+
+
+def test_a_reading_held_against_a_single_valued_fact_keeps_it_and_a_key_alone_does_not(node) -> None:
+    """A single-valued predicate's key is the predicate itself, so the key says nothing about the reading:
+    a typed reading of another value stored nowhere does not keep the fact. One the writer held for review
+    against it does, pending or after the owner dismissed it: the queue does not say where it was read."""
+    conn = node.conn
+    _message(conn, "r-words", f"Loved “{THEIRS}”")
+    _message(conn, "own", THEIRS, metadata=ORDINARY_METADATA)
+    fact_id = _plant(conn, "life.events", "life.stage", "working", (MESSAGES, "r-words"))
+    _ledger(conn, None, (MESSAGES, "own"), pack="life.events", predicate="life.stage", value="studying",
+            stage="trial")
+    assert [f.object_id for f in retract.find(conn).facts] == [fact_id], "a key alone does not keep it"
+    held = _plant(conn, "life.events", "life.stage", "working full time", (MESSAGES, "own"), confidence=0.7,
+                  outcome="conflict_queued")
+    assert held == fact_id
+    _left(conn, other=1)
+    conn.execute("UPDATE fact_conflicts SET status='dismissed'")
+    conn.commit()
+    _left(conn, other=1)
+
+
+# ----------------------------------------------------------------------------- what the ledger cannot show
+
+
+@pytest.mark.parametrize("content, ended", [
+    pytest.param(THEIRS, False, id="ordinary_words"),
+    pytest.param(f"Loved “{THEIRS}”", True, id="the_reaction_text_form"),
+])
+def test_a_row_the_lanes_skip_on_unreadable_metadata_alone_does_not_end_its_fact(node, content, ended) -> None:
+    """The lanes skip a row whose metadata cannot be read (it cannot show the row is ordinary). Ending needs a
+    positive sign: a marker that can be read, or the text form. Unreadable metadata and ordinary words show
+    neither, so the fact is left and counted."""
+    conn = node.conn
+    _message(conn, "unreadable", content)
+    conn.execute("UPDATE conversation_messages SET metadata_json='{not json' WHERE message_id='unreadable'")
+    conn.commit()
+    judged = retract._owner_reactions(conn, ["unreadable"])["unreadable"]
+    assert judged.by_role and judged.by_flag, "the lanes skip it"
+    fact_id = _employer(conn, "Meridian", (MESSAGES, "unreadable"))
+    if ended:
+        assert [f.object_id for f in retract.find(conn).facts] == [fact_id]
+    else:
+        _left(conn, other=1)
+
+
+def test_a_typed_repeat_a_retention_floor_deleted_still_keeps_the_fact(node) -> None:
+    """A reaction stores the fact, a message the owner typed repeats it (`noop`), and a retention floor then
+    removes that message: it deletes the message's ledger rows with it, so the ledger no longer shows the
+    repeat. A fact stored before a floor was applied is left."""
+    from topos.sources.retention import apply_retention
+    conn = node.conn
+    _message(conn, "r-words", f"Loved “{THEIRS}”", event_at=RECENT)
+    _message(conn, "own", THEIRS, metadata=ORDINARY_METADATA, event_at="2026-01-10T10:00:00+00:00")
+    fact_id = _fresh_employer(conn, "Meridian", (MESSAGES, "r-words"))
+    assert _fresh_employer(conn, "Meridian", (MESSAGES, "own"), outcome="noop") == fact_id
+    _left(conn, other=1)
+    report = apply_retention(conn, "imessage", "2026-06-01")
+    assert report["rows_removed"] == 1 and report["tables"].get("derivation_training_ledger") == 1, report
+    assert [r[0] for r in conn.execute("SELECT record_id FROM derivation_training_ledger")] == ["r-words"]
+    assert _refs(conn, fact_id) == ["r-words"]
+    _left(conn, other=1)
+
+
+@pytest.mark.parametrize("state, applied_at, left", [
+    pytest.param("done", "now", True, id="applied_after_the_fact_was_stored"),
+    pytest.param("removing", None, True, id="still_removing"),
+    pytest.param("done", "not a time", True, id="a_stamp_that_cannot_be_read"),
+    pytest.param("done", "2026-01-01T00:00:00+00:00", False, id="applied_before_the_fact_was_stored"),
+])
+def test_a_retention_floor_leaves_the_facts_stored_before_it_was_applied(node, state, applied_at, left) -> None:
+    from topos.sources.retention import set_retention_floor
+    conn = node.conn
+    _message(conn, "r-words", f"Loved “{THEIRS}”")
+    fact_id = _employer(conn, "Meridian", (MESSAGES, "r-words"))
+    set_retention_floor(conn, "imessage", "2026-01-01T00:00:00+00:00")
+    stamp = datetime.now(timezone.utc).replace(microsecond=0).isoformat() if applied_at == "now" else applied_at
+    conn.execute("UPDATE source_retention_floors SET state=?, applied_at=?", (state, stamp))
+    conn.commit()
+    if left:
+        _left(conn, other=1)
+    else:
+        assert [f.object_id for f in retract.find(conn).facts] == [fact_id]
+
+
+def test_a_repeat_judged_before_an_entity_merge_still_keeps_the_fact(node) -> None:
+    """The writer binds the person a value names to an entity id (`_bind_entity_refs`), and the repeat's ledger
+    row carries that id. An entity merge then rewrites the id in the fact's payload, not in the ledger. The
+    comparison leaves the person ids out, so the repeat still matches the fact."""
+    from topos.features.derivation.writer import _canon_value
+    from topos.features.entities.resolver import _remap_derivation_corpus
+    conn = node.conn
+    for entity_id, name in (("ent_sam_a", "Sam Lee"), ("ent_sam_b", "Samuel Lee")):
+        conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json)"
+                     " VALUES (?, 'person', ?, ?, '[]')", (entity_id, name, name.lower()))
+    _message(conn, "r-marker", OTHER_LANGUAGE, metadata=REACTION_METADATA)
+    _message(conn, "own", THEIRS, metadata=ORDINARY_METADATA)
+    gratitude = {"person": "Sam Lee", "what": "the lift home"}
+    fact_id = _plant(conn, JOY, "moment.gratitude", dict(gratitude), (MESSAGES, "r-marker"), event_date=RECENT[:10])
+    assert _plant(conn, JOY, "moment.gratitude", dict(gratitude), (MESSAGES, "own"), outcome="noop",
+                  event_date=RECENT[:10]) == fact_id
+    (value_json,) = conn.execute("SELECT value_json FROM derivation_training_ledger WHERE record_id='own'").fetchone()
+    assert json.loads(value_json)["person_entity_id"] == "ent_sam_a", "the repeat's row carries the bound id"
+    _left(conn, other=1)
+
+    _remap_derivation_corpus(conn, keep_id="ent_sam_b", absorb_id="ent_sam_a")
+    conn.commit()
+    fact_value = json.loads(_facts(conn)[fact_id][2])["value_struct"]
+    assert fact_value["person_entity_id"] == "ent_sam_b", "the merge rewrote the fact's id"
+    assert _canon_value(json.loads(value_json)) != _canon_value(fact_value), "the writer's equality no longer holds"
+    assert retract._same_value(value_json, retract._comparable(fact_value)), "the person ids are left out"
+    _left(conn, other=1)
 
 
 # ----------------------------------------------------------------------------- what ending does not put back

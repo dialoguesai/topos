@@ -16,20 +16,29 @@ The machine-readable twin of each release is
   - *What it counts.* A standing pack fact whose every source record is a reaction the owner sent, by the same
     test the packs and the commitments lane apply (the marker Messages puts on the stored row, or the English
     text form). A fact with any other source (a journal entry, a message you typed, a contact's message, a
-    record that is no longer stored) is left alone.
+    record that is no longer stored) is left alone. The packs also skip a message whose stored metadata
+    cannot be read; that alone does not end a fact here: a message counts as a reaction only when its
+    metadata can be read and carries the marker, or its words are the text form. A fact read from a message
+    of that kind is left, counted apart and said.
   - *What it leaves although the fact names only reactions.* A fact you made yourself in the app (confirmed,
     corrected, revised, added from an assertion held for review, or given another author): counted apart and
     said. A fact you marked in an app with a reaction or a rank of your own: counted apart and said. A fact
-    about when you are active, which cites records for their time and not their words. And a fact whose list
-    of records is not the whole story, or cannot be shown to be. The list falls short in three ways: an event
-    told again in a later record keeps only the later record in its list; a record can change a detail of a
-    fact without joining its list; and a fact read a second time within seven days by the same model stores
-    nothing at all, so a fact first read from a reaction and then from a message you typed still names only
-    the reaction. Topos keeps its own log of every reading that reached the fact writer, stored or not. A fact
-    is ended only when that log accounts for it: the log holds the fact's first store and each later merge,
-    every one from a reaction you sent, and holds no reading of the same value from any other record. When
-    the log shows another record, is missing a store, or is not there, the fact is left, counted apart and
-    said.
+    about when you are active, which cites records for their time and not their words: counted apart and
+    said. And a fact whose list of records is not the whole story, or cannot be shown to be. The list falls
+    short in four ways: an event told again in a later record keeps only the later record in its list; a
+    record can change a detail of a fact without joining its list; a fact read a second time within seven
+    days by the same model stores nothing at all, so a fact first read from a reaction and then from a
+    message you typed still names only the reaction; and a reading that disagrees with the fact at lower
+    confidence (a message you typed that tells the same event with one more detail) is held for review and
+    stores nothing. Topos keeps its own log of every reading that reached the fact writer, stored or not. A
+    fact is ended only when that log accounts for it: the log holds the fact's first store and each later
+    merge, every one from a reaction you sent; it holds no reading from any other record of the same value
+    or, for a kind of fact that holds many values or is an event, of the same one; and no reading held for
+    review names the fact, whatever became of it. When the log shows another record, is missing a store, or
+    is not there, the fact is left, counted apart and said. So is a fact stored before a retention floor was
+    applied (`POST /v1/sources/retention`: keep a source's data only from a date onward), or while one is
+    being applied: the floor deletes the log's rows for the messages it removes, so the log is then known to
+    be short. Removing a source or a single record leaves the log as it is.
   - *By itself it only counts.* `topos-node packs retract-reactions` prints pack ids and counts, needs no
     terminal and writes nothing (`--json` for the same as data). It never prints a fact or a message.
   - *`--apply` ends them, after asking you.* It shows the count, asks `[y/N]` once on a terminal, and sends one
@@ -63,8 +72,15 @@ The machine-readable twin of each release is
     the row as ordinary. The packs skip such a message, and a fact read only from it is counted here and ended
     on your yes; you are shown counts, not the facts, so you cannot pick it out first. The writer still
     replaces an event's list of records when the event is told again (not fixed here; this command reads
-    Topos's log to get around it). Not run on a real node: the tests use an invented database, a stubbed model
-    and the real owner socket gate.
+    Topos's log to get around it). An edit you make to a fact in the app that leaves it exactly as it was
+    leaves no mark on it, so it cannot be seen and does not keep the fact. Facts that Topos builds from other
+    facts (a summary of your work history or of how visible your work is, `work.venture_history` and
+    `work.professional_visibility`) are not looked at, and stay standing when a fact they were built from is
+    ended. A retention floor that was lifted afterwards takes its record with it, so the log it shortened is
+    then read as whole. The facts are judged again once the change holds the write gate, but the fact lanes
+    write their log without the gate: a reading committed in the moment between that judgement and the
+    change is not seen. Not run on a real node: the tests use an invented database, a stubbed model and the
+    real owner socket gate.
 
 ### Fixed
 - **A reaction the owner sent in Messages is no longer read by fact packs as text the owner wrote.**

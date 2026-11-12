@@ -13,26 +13,40 @@ So what is ended is what a pack would no longer read. A fact with any other sour
 a message the owner typed, a contact's message, a record that is no longer stored, a source list this
 cannot read) is left alone: it has evidence the reaction rule says nothing about.
 
+The lanes' test fails closed: a row whose metadata cannot be read is skipped as if it were a reaction.
+Ending a fact is the other direction, so here a row counts only on a positive sign (a reaction marker
+in metadata that can be read, or the text form). A fact that cites a row the lanes skip on unreadable
+metadata alone is left, and counted with the facts another record may be behind.
+
 Four more kinds are left although every record they cite is such a reaction:
 - a fact an owner action made (confirmed, corrected, revised or promoted in the app, declared or
   overridden, its attribution repaired): that is the owner's own statement and a batch does not undo
-  it. Counted apart.
+  it. Counted apart (`kept_confirmed`).
 - a fact the owner marked in an app (a row in `fact_feedback`: their own reaction or rank on the
   fact). The owner looked at it and said something about it; whether that should keep it is theirs to
-  rule, so it is kept. Counted apart.
+  rule, so it is kept. Counted apart (`kept_marked`).
 - a fact that cites its records for when they were sent, not for what they say (`actor_role`
   `synthesis`, the rhythm kernel): a reaction was sent by the owner at that time whatever it quotes.
-- a fact whose source list is not the whole story, or cannot be shown to be. The list can be short
-  of what the fact rests on in three ways: the writer replaces an event's list when the event is
-  told again in another record; it changes a fact's fields from a record it does not add to the
-  list; and it stores nothing at all for the same value read again within seven days by the same
-  model (`noop`), so a fact stored from a reaction and then read in a message the owner typed still
-  cites the reaction alone. The derivation ledger has a row for every assertion that reached the
-  writer, stored or not. A fact is ended only when the ledger shows the whole of it: a store for the
-  fact's first write and for each later merge, every one of them from such a reaction, and no
-  reading from any other record that was a repeat of the fact and stored nowhere. A fact the ledger
-  holds no store for (no ledger, a row made some other way) is left: nothing shows what it rests on.
-  Counted apart.
+  Counted apart (`kept_timing`).
+- a fact whose source list is not the whole story, or cannot be shown to be. Counted apart
+  (`kept_other_record`). The list can be short of what the fact rests on in four ways: the writer
+  replaces an event's list when the event is told again in another record; it changes a fact's fields
+  from a record it does not add to the list; it stores nothing at all for the same value read again
+  within seven days by the same model (`noop`), so a fact stored from a reaction and then read in a
+  message the owner typed still cites the reaction alone; and it holds a reading that disagrees with a
+  standing fact at lower confidence for review (`conflict_queued`) and stores nothing. The derivation
+  ledger has a row for every assertion that reached the writer, stored or not. A fact is ended only
+  when the ledger shows the whole of it: a store for the fact's first write and for each later merge,
+  every one of them from such a reaction; no reading from any other record that was a repeat of the
+  fact, or (for a predicate whose key names the instance: one that holds many, or an event) a reading
+  of the same instance, and stored nowhere; and no reading held for review against it (any row in
+  `fact_conflicts` that names it, whatever its state). A fact the ledger holds no store for (no
+  ledger, a row made some other way) is left: nothing shows what it rests on. So is a fact stored
+  before a retention floor was applied (`source_retention_floors`), or while one is being applied:
+  the floor deletes the ledger rows of the records it removes, a repeat's among them, so the ledger is
+  then known to be short. The other paths that remove records (a source scrub, the owner's
+  remove-this-record) leave the ledger as it is; a repeat whose record they removed is a reading from
+  a record that is no longer stored, and keeps its fact.
 
 What ending means: the row's `valid_to` is set and `closed_reason` is stamped in its payload, the way
 `DerivationWriter._close` ends a superseded fact. No row is deleted and no source record is touched,
@@ -44,7 +58,14 @@ later backfill cannot bring the ended fact back from it.
 What ending does not do: put anything back. A fact that was closed when a reaction's value took its
 place (`superseded`, `correction`, a `closes` rule) stays closed, and a fact with another source
 whose fields a reaction changed keeps those fields and is not ended. Finding and restoring those is
-not built here.
+not built here. Nor does it follow an ended fact into what was built from it: a fact synthesised
+from it (`synthesize_trajectory`) is not looked at and is not closed.
+
+What it cannot see: an owner edit (`verdicts.edit_fact`) that leaves the payload as it was leaves no
+mark, so it keeps nothing; a retention floor that was lifted afterwards takes its row with it, and
+the ledger it shortened is then read as whole; and a lane that commits a repeat between the judgement
+made inside the write gate and the UPDATE (a lane that writes the ledger without the gate) is not
+seen by that judgement.
 
 `find` and `count` read; only `retract` writes, in one gated, committed batch with nothing else open
 on the connection. Its caller holds the owner's confirmation (the route in `api/signal.py` checks the
@@ -57,6 +78,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, NamedTuple, Optional
 
 logger = logging.getLogger("topos.derivation.reaction_retract")
@@ -74,6 +96,14 @@ _EXTRACTIONS_KEPT = 12
 #: module creates the table on its first write and is not in every build, so the table is looked for
 #: by name and never imported.
 FEEDBACK_TABLE = "fact_feedback"
+#: The review queue (`DerivationWriter._quarantine`, `FactStore._queue_conflict`): a reading the writer
+#: held instead of storing names the fact it disagrees with in `incumbent_object_id`.
+CONFLICTS_TABLE = "fact_conflicts"
+#: A retention floor stamps `applied_at` with whole seconds after its last batch: a fact stored up to a
+#: second after the stamp may still have been stored while the floor removed records.
+_FLOOR_SLACK = timedelta(seconds=1)
+#: "Every fact": a floor whose state or stamp says it may still be removing, or a table this cannot read.
+_ALWAYS = datetime.max.replace(tzinfo=timezone.utc)
 
 
 class RetractRefused(ValueError):
@@ -100,6 +130,9 @@ class Found(NamedTuple):
     #: Per pack: facts that qualify by the sources they list and are left because the ledger shows, or
     #: cannot rule out, a record that is not a reaction among the ones they rest on.
     kept_other_record: Dict[str, int]
+    #: Per pack: facts that cite only such reactions, for when they were sent (`actor_role`
+    #: `synthesis`), and are left.
+    kept_timing: Dict[str, int]
 
     def by_pack(self) -> Dict[str, int]:
         counts: Dict[str, int] = {}
@@ -133,12 +166,34 @@ class _Reaction(NamedTuple):
     #: whatever the source's posture (`commitments.promise_shaped_records`: `is_from_self=1`, then
     #: `is_reaction`).
     by_flag: bool
+    #: A positive sign that the row is a reaction: a marker in metadata that can be read, or the text
+    #: form. The lanes' test also skips a row whose metadata cannot be read (it cannot show the row is
+    #: ordinary); that is right for not reading it and not enough for ending what was read from it.
+    sure: bool
+
+
+def _positive_sign(metadata_json: Any, text: Any) -> bool:
+    """Whether the row shows it is a reaction: the text form Messages writes, or metadata that parses
+    and carries the marker. Unreadable metadata shows nothing either way."""
+    from ..facts.reactions import quotes_another_message, reads_as_reaction
+    if reads_as_reaction(text):
+        return True
+    if isinstance(metadata_json, (bytes, bytearray)):
+        metadata_json = metadata_json.decode("utf-8", "replace")
+    if not isinstance(metadata_json, str) or not metadata_json.strip():
+        return False
+    try:
+        metadata = json.loads(metadata_json)
+    except (TypeError, ValueError):
+        return False
+    return isinstance(metadata, dict) and quotes_another_message({"metadata_json": metadata})
 
 
 def _owner_reactions(conn: sqlite3.Connection, message_ids: List[str],
                      posture_for: Optional[Callable[[Dict[str, Any]], str]] = None) -> Dict[str, _Reaction]:
     """For each stored message id: whether the row is a reaction the owner sent, by each lane's own
-    test. An id with no stored row is absent from the answer."""
+    test, and whether it shows a positive sign of being one. An id with no stored row is absent from
+    the answer."""
     from ...enrichment.jobs.canonical.derivation_job import _owner_reaction, _record_role_for
     from ..facts.reactions import is_reaction, stored_metadata_column
 
@@ -159,7 +214,7 @@ def _owner_reactions(conn: sqlite3.Connection, message_ids: List[str],
             marker, text = {"metadata_json": values[-1]}, row["content"]
             by_role = _owner_reaction(_record_role_for(row, MESSAGES, posture_for), MESSAGES, marker, text)
             by_flag = row["is_from_self"] in (1, True, "1") and is_reaction(marker, text)
-            out[str(row["message_id"])] = _Reaction(bool(by_role), bool(by_flag))
+            out[str(row["message_id"])] = _Reaction(bool(by_role), bool(by_flag), _positive_sign(values[-1], text))
     return out
 
 
@@ -240,31 +295,119 @@ def _stored_from(conn: sqlite3.Connection, object_ids: List[str]) -> Dict[str, L
 
 
 def _repeats_not_stored(conn: sqlite3.Connection, pack_ids: List[str]) -> Dict[tuple, List[tuple]]:
-    """Per `(pack id, predicate)`: the `(table, record id, value json)` of every reading in the ledger
-    that reached the writer and was stored nowhere.
+    """Per `(pack id, predicate)`: the `(table, record id, value json, occurrence)` of every reading in
+    the ledger that reached the writer and was stored nowhere.
 
     The lanes write one ledger row per judged assertion. One the verifier rejected never reaches the
     writer. Every other one does, and its row carries the fact id only for an outcome that wrote
     (`derivation_job.run_derivation_batch`, `_drip_catchup`, `surfaces.run_pack_backfill`: `stored`).
-    `noop` is the outcome that matters here: the same value as a standing fact, read from another
-    record within the writer's window, adds no source and leaves only this row. The trial lane's
-    accepted rows are of this shape too (read, judged true of the record, stored nowhere) and count
-    the same: the record says it."""
+    Two outcomes matter here. `noop`: the same value as a standing fact, read from another record
+    within the writer's window, adds no source and leaves only this row. `conflict_queued`: a value
+    that disagrees with the standing fact of the same key at lower confidence (one more field, say)
+    is held for review and leaves only this row and a `fact_conflicts` row. The trial lane's accepted
+    rows are of this shape too (read, judged true of the record, stored nowhere) and count the same:
+    the record says it."""
     from ..facts.store import normalize_predicate
     out: Dict[tuple, List[tuple]] = {}
     try:
         for start in range(0, len(pack_ids), _CHUNK):
             chunk = pack_ids[start:start + _CHUNK]
-            for pack_id, predicate, table, record_id, value_json in conn.execute(
-                    "SELECT pack_id, predicate, source_table, record_id, value_json"
+            for pack_id, predicate, table, record_id, value_json, occurrence in conn.execute(
+                    "SELECT pack_id, predicate, source_table, record_id, value_json, occurrence"
                     " FROM derivation_training_ledger"
                     " WHERE written_object_id IS NULL AND vstatus IS NOT 'rejected'"
                     f" AND pack_id IN ({','.join('?' for _ in chunk)})", chunk):
                 out.setdefault((str(pack_id), normalize_predicate(predicate)), []).append(
-                    (table, record_id, value_json))
+                    (table, record_id, value_json, occurrence))
     except sqlite3.OperationalError:
         return {}
     return out
+
+
+def _held_for_review(conn: sqlite3.Connection, object_ids: List[str]) -> set:
+    """Which of these facts a row in the review queue names as the fact it disagrees with, in any
+    state: pending, or one the owner has accepted or dismissed. The queue keeps no record of where the
+    held reading came from, so nothing shows it was not a message the owner typed. A database without
+    the table has none; a table this cannot read names them all."""
+    if not object_ids or conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                                      (CONFLICTS_TABLE,)).fetchone() is None:
+        return set()
+    held: set = set()
+    try:
+        for start in range(0, len(object_ids), _CHUNK):
+            chunk = object_ids[start:start + _CHUNK]
+            held.update(str(row[0]) for row in conn.execute(
+                f"SELECT incumbent_object_id FROM {CONFLICTS_TABLE}"
+                f" WHERE incumbent_object_id IN ({','.join('?' for _ in chunk)})", chunk))
+    except sqlite3.OperationalError:
+        return set(object_ids)
+    return held
+
+
+def _ledger_pruned_until(conn: sqlite3.Connection) -> Optional[datetime]:
+    """The instant before which a fact's ledger rows may have been deleted, or None when none can
+    have been.
+
+    Applying a retention floor (`sources/retention.py` `apply_retention`) deletes every row that names
+    a removed record by `record_id`, the derivation ledger's among them. A repeat read in a message
+    below the floor then leaves no row, and a fact stored before the floor was applied may rest on a
+    reading the ledger no longer holds. A floor still removing (or whose stamp cannot be read) covers
+    every fact. Every other path that removes a record leaves the ledger (a source scrub deletes by
+    `source_id`, which the ledger does not carry; the owner's remove-this-record does not list it)."""
+    from ...sources.retention import STATE_DONE, TABLE, parse_instant
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (TABLE,)).fetchone() is None:
+        return None
+    try:
+        floors = conn.execute(f"SELECT state, applied_at FROM {TABLE}").fetchall()
+    except sqlite3.OperationalError:
+        return _ALWAYS
+    until: Optional[datetime] = None
+    for state, applied_at in floors:
+        applied = parse_instant(applied_at) if state == STATE_DONE else None
+        if applied is None:
+            return _ALWAYS
+        applied += _FLOOR_SLACK
+        until = applied if until is None or applied > until else until
+    return until
+
+
+def _stored_before(created_at: Any, until: Optional[datetime]) -> bool:
+    """Whether a fact stored at `created_at` is older than `until`. A stamp this cannot read is."""
+    if until is None:
+        return False
+    from ...sources.retention import parse_instant
+    created = parse_instant(created_at)
+    return created is None or created < until
+
+
+def _predicate(packs: Dict[str, Any], pack_id: str, name: str) -> Any:
+    """The pack's predicate whose normalized name is `name`, or None when this cannot look it up."""
+    from ..facts.store import normalize_predicate
+    pack = packs.get(pack_id)
+    if pack is None:
+        return None
+    return next((p for n, p in pack.predicates.items() if normalize_predicate(n) == name), None)
+
+
+def _same_instance(pred: Any, value_json: Any, occurrence: Any, object_key: Any) -> bool:
+    """Whether a ledger reading is of the fact's own instance: the writer's key for it
+    (`DerivationWriter.object_key`) is the fact's.
+
+    Only for a predicate whose key names the instance (one that holds many values, or an event): the
+    key of a single-valued predicate is the predicate itself, and every reading of it would match.
+    The subject is left out of the comparison (the ledger does not carry it; an entity merge rewrites
+    it in the fact's key). A predicate this cannot look up, or a value it cannot read, counts as the
+    same: nothing shows otherwise."""
+    if pred is None:
+        return True
+    if pred.temporal != "episodic" and pred.cardinality != "multi":
+        return False
+    from .writer import DerivationWriter
+    try:
+        key = object.__new__(DerivationWriter).object_key("", pred, json.loads(value_json), occurrence)
+    except Exception:  # noqa: BLE001 - an unreadable value must not end a fact
+        return True
+    return str(object_key or "").endswith(key[len("fact:"):])
 
 
 def _comparable(value: Any) -> str:
@@ -313,10 +456,7 @@ def _list_may_be_replaced(packs: Dict[str, Any], pack_id: str, payload: Dict[str
     told = payload.get("extractions")
     if not told:
         return False
-    from ..facts.store import normalize_predicate
-    name = str(payload.get("predicate") or "")
-    pack = packs.get(pack_id)
-    pred = next((p for n, p in pack.predicates.items() if normalize_predicate(n) == name), None) if pack else None
+    pred = _predicate(packs, pack_id, str(payload.get("predicate") or ""))
     if pred is not None and (pred.temporal != "episodic" or getattr(pred, "event_identity", "") == "dated"):
         return False
     # The writer keeps the last twelve entries: a full list may have dropped earlier ones.
@@ -335,6 +475,13 @@ def _bundled_packs() -> Dict[str, Any]:
         return {}
 
 
+class _Candidate(NamedTuple):
+    fact: _Fact
+    payload: Dict[str, Any]
+    created_at: Any
+    object_key: Any
+
+
 def find(conn: sqlite3.Connection, *,
          posture_for: Optional[Callable[[Dict[str, Any]], str]] = None) -> Found:
     """The standing pack facts whose every source record is a reaction the owner sent. Reads only.
@@ -344,18 +491,20 @@ def find(conn: sqlite3.Connection, *,
     (a source the owner marked ambient) is still read by a pack that takes observed text, so a fact
     another pack holds from it is not one this ends: the next backfill could store it again.
 
-    Of the facts that pass, the module's four kinds are left: an owner action made it; the owner
-    marked it in an app; it cites its records for their timing; the ledger shows, or cannot rule
-    out, another record behind it (a store from one, a repeat read in one and stored nowhere, or no
-    ledger row for a store the fact records).
+    Of the facts that pass, the module's four kinds are left, each counted: an owner action made it;
+    the owner marked it in an app; it cites its records for their timing; the ledger shows, or cannot
+    rule out, another record behind it (a source the lanes skip on unreadable metadata alone, a store
+    from another record, a repeat or a reading of the same instance read in one and stored nowhere, a
+    reading held for review against it, no ledger row for a store the fact records, or a retention
+    floor applied after it was stored).
 
     A database that has no pack facts yet (no `ontology_id` column) or no messages table holds none."""
     from .commitments import PACK_ID as COMMITMENTS_PACK
-    none = Found([], {}, {}, {})
+    none = Found([], {}, {}, {}, {})
     try:
         rows = conn.execute(
-            "SELECT object_id, ontology_id, source_refs_json, payload_json, created_by, extractor_version"
-            " FROM signal_objects"
+            "SELECT object_id, ontology_id, source_refs_json, payload_json, created_by, extractor_version,"
+            " created_at, object_key FROM signal_objects"
             " WHERE object_type='fact' AND valid_to IS NULL AND ontology_id IS NOT NULL AND ontology_id<>''"
             " ORDER BY ontology_id, object_id").fetchall()
     except sqlite3.OperationalError:
@@ -373,57 +522,78 @@ def find(conn: sqlite3.Connection, *,
         return none
 
     def owner_reaction(pack_id: str, message_id: str) -> bool:
+        """The lane's own test: what it skips."""
         judged = reaction.get(message_id)
         return judged is not None and (judged.by_role or (pack_id == COMMITMENTS_PACK and judged.by_flag))
 
+    def shown_reaction(pack_id: str, message_id: str) -> bool:
+        """The lane's test, and a positive sign: what a fact may be ended for."""
+        return owner_reaction(pack_id, message_id) and reaction[message_id].sure
+
     kept: Dict[str, int] = {}
-    candidates: List[tuple] = []
-    for object_id, pack_id, refs_json, payload_json, created_by, extractor_version in rows:
+    timing: Dict[str, int] = {}
+    candidates: List[_Candidate] = []
+    for object_id, pack_id, refs_json, payload_json, created_by, extractor_version, created_at, key in rows:
         ids, pack_id = cited.get(str(object_id)), str(pack_id)
         if ids is None or not all(owner_reaction(pack_id, mid) for mid in ids):
             continue
         payload = _payload(payload_json)
         if _owner_made(created_by, extractor_version, payload):
             kept[pack_id] = kept.get(pack_id, 0) + 1
-        elif payload.get("actor_role") != "synthesis":   # synthesize.py: a sample of records, for their timing
-            candidates.append((_Fact(str(object_id), pack_id, refs_json, payload_json), payload))
+        elif payload.get("actor_role") == "synthesis":   # synthesize.py: a sample of records, for their timing
+            timing[pack_id] = timing.get(pack_id, 0) + 1
+        else:
+            candidates.append(_Candidate(_Fact(str(object_id), pack_id, refs_json, payload_json), payload,
+                                         created_at, key))
 
     # The owner's own reaction or rank on the fact, recorded through an app.
-    in_an_app = _marked_in_an_app(conn, [fact.object_id for fact, _ in candidates])
+    in_an_app = _marked_in_an_app(conn, [c.fact.object_id for c in candidates])
     marked: Dict[str, int] = {}
-    for fact, _ in candidates:
-        if fact.object_id in in_an_app:
-            marked[fact.pack_id] = marked.get(fact.pack_id, 0) + 1
-    candidates = [(fact, payload) for fact, payload in candidates if fact.object_id not in in_an_app]
+    for c in candidates:
+        if c.fact.object_id in in_an_app:
+            marked[c.fact.pack_id] = marked.get(c.fact.pack_id, 0) + 1
+    candidates = [c for c in candidates if c.fact.object_id not in in_an_app]
 
     # What the ledger says each one rests on: the source list can be short of it.
-    ledger = _stored_from(conn, [fact.object_id for fact, _ in candidates])
-    repeats = _repeats_not_stored(conn, sorted({fact.pack_id for fact, _ in candidates}))
+    ledger = _stored_from(conn, [c.fact.object_id for c in candidates])
+    repeats = _repeats_not_stored(conn, sorted({c.fact.pack_id for c in candidates}))
+    held = _held_for_review(conn, [c.fact.object_id for c in candidates])
+    pruned_until = _ledger_pruned_until(conn) if candidates else None
+    packs: Optional[Dict[str, Any]] = None
     behind: Dict[str, List[tuple]] = {}
-    for fact, payload in candidates:
-        records = ledger.get(fact.object_id, [])
-        told = payload.get("extractions") or []
+    for c in candidates:
+        records = ledger.get(c.fact.object_id, [])
+        told = c.payload.get("extractions") or []
         # More stores than a first write and its merges: a record changed the fact's fields
         # (`_update_fields` leaves no other trace), so the value a repeat was compared with may not
         # be the value the fact has now. Any reading of the predicate that was not stored then counts.
         refielded = isinstance(told, list) and len(records) > 1 + len(told)
-        value = _comparable(payload.get("value_struct") or payload.get("object_value"))
-        behind[fact.object_id] = records + [
-            (table, rid) for table, rid, value_json
-            in repeats.get((fact.pack_id, str(payload.get("predicate") or "")), [])
-            if refielded or _same_value(value_json, value)]
+        value = _comparable(c.payload.get("value_struct") or c.payload.get("object_value"))
+        name = str(c.payload.get("predicate") or "")
+        readings = repeats.get((c.fact.pack_id, name), [])
+        pred = None
+        if readings:
+            packs = _bundled_packs() if packs is None else packs
+            pred = _predicate(packs, c.fact.pack_id, name)
+        behind[c.fact.object_id] = records + [
+            (table, rid) for table, rid, value_json, occurrence in readings
+            if refielded or _same_value(value_json, value)
+            or _same_instance(pred, value_json, occurrence, c.object_key)]
     unjudged = sorted({str(rid) for records in behind.values() for table, rid in records
                        if table == MESSAGES and rid not in (None, "") and str(rid) not in reaction})
     if unjudged:
         reaction.update(_owner_reactions(conn, unjudged, posture_for))
-    packs: Optional[Dict[str, Any]] = None
     facts: List[_Fact] = []
     other: Dict[str, int] = {}
-    for fact, payload in candidates:
+    for c in candidates:
+        fact, payload = c.fact, c.payload
         stores = len(ledger.get(fact.object_id, []))
-        unsure = _ledger_is_short(payload, stores) or any(
-            table != MESSAGES or rid in (None, "") or not owner_reaction(fact.pack_id, str(rid))
-            for table, rid in behind[fact.object_id])
+        unsure = (fact.object_id in held
+                  or _stored_before(c.created_at, pruned_until)
+                  or not all(shown_reaction(fact.pack_id, mid) for mid in cited[fact.object_id])
+                  or _ledger_is_short(payload, stores)
+                  or any(table != MESSAGES or rid in (None, "") or not shown_reaction(fact.pack_id, str(rid))
+                         for table, rid in behind[fact.object_id]))
         if not unsure and payload.get("extractions"):
             packs = _bundled_packs() if packs is None else packs
             # Every ledger row names a reaction (checked above); an event told again whose stores
@@ -433,7 +603,7 @@ def find(conn: sqlite3.Connection, *,
             other[fact.pack_id] = other.get(fact.pack_id, 0) + 1
         else:
             facts.append(fact)
-    return Found(facts, kept, marked, other)
+    return Found(facts, kept, marked, other, timing)
 
 
 def _summary(by_pack: Dict[str, int], found: Found) -> Dict[str, Any]:
@@ -441,14 +611,15 @@ def _summary(by_pack: Dict[str, int], found: Found) -> Dict[str, Any]:
             "total": sum(by_pack.values()),
             "kept_confirmed": sum(found.kept_confirmed.values()),
             "kept_marked": sum(found.kept_marked.values()),
-            "kept_other_record": sum(found.kept_other_record.values())}
+            "kept_other_record": sum(found.kept_other_record.values()),
+            "kept_timing": sum(found.kept_timing.values())}
 
 
 def count(conn: sqlite3.Connection) -> Dict[str, Any]:
-    """`{packs: [{pack_id, facts}], total, kept_confirmed, kept_marked, kept_other_record}`: what a
-    yes would end, per pack, and how many facts that cite only such reactions stay: because an owner
-    action made them, because the owner marked them in an app, and because another record is or may
-    be behind them. Writes nothing."""
+    """`{packs: [{pack_id, facts}], total, kept_confirmed, kept_marked, kept_other_record, kept_timing}`:
+    what a yes would end, per pack, and how many facts that cite only such reactions stay: because an
+    owner action made them, because the owner marked them in an app, because another record is or may
+    be behind them, and because they cite the reactions for when they were sent. Writes nothing."""
     found = find(conn)
     return _summary(found.by_pack(), found)
 
@@ -462,11 +633,14 @@ def retract(conn: sqlite3.Connection, *, expected_total: Optional[int] = None) -
     One gated batch, one commit, and nothing open on this connection when the gate is asked for:
     waiting for the write gate while holding SQLite's write lock stalls every gated writer for as
     long as the wait lasts (topos#279). The wait can be long, and what keeps a fact is not all on its
-    own row: a repeat read in a typed message leaves only a ledger row, a mark made in an app only a
-    `fact_feedback` row. So the facts are judged again inside the gate, where no gated writer can
-    add either, and a fact is ended only if it is named both times and is still standing with the
-    sources and payload that were judged. One that is not (a second source added, the owner's
-    verdict, a repeat or a mark that arrived during the wait) is left and counted under `changed`.
+    own row: a repeat read in a typed message leaves only a ledger row, a reading held for review a
+    `fact_conflicts` row, a mark made in an app only a `fact_feedback` row, a retention floor a row
+    of its own. So the facts are judged again inside the gate, where no gated writer can add any of
+    them, and a fact is ended only if it is named both times and is still standing with the sources
+    and payload that were judged. One that is not (a second source added, the owner's verdict, a
+    repeat, a held reading or a mark that arrived during the wait) is left and counted under
+    `changed`. A lane that writes the ledger without the gate and commits between that judgement and
+    the UPDATE is not seen (a limit, in the module docstring).
 
     Nothing is put back: a fact one of these replaced stays closed (the module docstring).
 
@@ -508,7 +682,7 @@ def retract(conn: sqlite3.Connection, *, expected_total: Optional[int] = None) -
     out["changed"] = changed
     logger.info("facts written from the owner's reactions: %d ended in %d pack(s) by the owner, %d changed "
                 "since the count and left, %d made by the owner and left, %d marked in an app and left, "
-                "%d with another record behind them left",
+                "%d with another record behind them left, %d citing them for their timing left",
                 out["retracted"], len(ended), changed, out["kept_confirmed"], out["kept_marked"],
-                out["kept_other_record"])
+                out["kept_other_record"], out["kept_timing"])
     return out
