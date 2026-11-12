@@ -1,4 +1,4 @@
-"""`topos-node packs list|backfill|status|stop|auto` — fact packs and their history backfill, from a terminal.
+"""`topos-node packs list|add|remove|backfill|status|stop|auto` — fact packs and their history backfill, from a terminal.
 
 A fact pack reads new records as they arrive only for the sources whose lane runs it; everything
 else, and the history from before a pack was switched on, is read when the owner asks (a backfill).
@@ -34,6 +34,18 @@ protects and need no terminal.
 
 The extractor is whatever the owner has picked for facts (Topos Facts for the packs it knows, the
 local model for the rest); this command names it and never changes it.
+
+A pack of the owner's own is added from a file (`features/derivation/custom_packs`):
+
+    topos-node packs add --check my-pack.yaml     says whether the file is a pack, adds nothing
+    topos-node packs add my-pack.yaml             shows what it would read and write, asks `[y/N]`
+    topos-node packs remove custom.gardening
+
+`add` is a change to what the node may write about its owner, so it asks the same way a backfill
+does: on a terminal, once, and there is no flag that answers for the person. It writes one file in
+the node's own pack directory and touches nothing else, so it works with the node stopped. The pack
+starts switched off; switching it on is the app's Fact packs page, as for every pack. No route,
+relay message or tool adds a pack: an app cannot.
 
 What is printed is a projection: pack ids, counts, state words, model names, times. Never a response body.
 """
@@ -319,7 +331,7 @@ def _times(counts: Dict[str, Any]) -> str:
 # ----------------------------------------------------------------------------- the group
 @click.group("packs")
 def packs_group() -> None:
-    """List fact packs and backfill their history."""
+    """List fact packs, add your own, and backfill their history."""
 
 
 @packs_group.command("list")
@@ -340,6 +352,72 @@ def packs_list(as_json: bool) -> None:
                    f"{p['last_run_at'] or 'never'}")
     on = sum(1 for p in packs if p["enabled"])
     click.echo(f"{on} of {len(packs)} switched on. `topos-node packs backfill --all-enabled` reads their history.")
+    _unloaded_custom_packs()
+
+
+def _unloaded_custom_packs() -> None:
+    """Say which files in this node's own pack directory are not loading, and why: a pack the owner added that
+    stopped validating is otherwise only missing from the list."""
+    from topos.features.derivation.custom_packs import custom_pack_problems
+
+    for name, reason in sorted(custom_pack_problems().items()):
+        click.echo(f"Not loaded: {name}. {reason}")
+
+
+@packs_group.command("add")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False))
+@click.option("--check", is_flag=True, help="Only say whether the file is a pack Topos can add; add nothing.")
+def packs_add(file: str, check: bool) -> None:
+    """Add a fact pack of your own from a YAML file: shows what it would read and write, asks you once."""
+    from pathlib import Path
+
+    from topos.features.derivation import custom_packs
+
+    try:
+        pack, _content = custom_packs.read_candidate(Path(file))
+    except custom_packs.CustomPackError as exc:
+        _fail(f"Not added. {exc}")
+    for line in custom_packs.describe(pack):
+        click.echo(line)
+    click.echo("  It starts switched off. Its facts stay with you: an app reads them only if you approve a grant "
+               "that names this pack.")
+    if check:
+        click.echo("This file is a pack Topos can add. Nothing was added.")
+        return
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        _fail("Adding a pack changes what Topos may write about you, so it asks you first: "
+              "run this command in your own terminal.", EXIT_NEEDS_HUMAN)
+    click.echo("If a pack with this id is already added, this file replaces it and the pack is switched off "
+               "until you switch it on again.")
+    if not click.confirm("Add it?", default=False, err=True):
+        click.echo("Nothing added.")
+        sys.exit(EXIT_OK)
+    try:
+        added = custom_packs.install_pack(Path(file))
+    except custom_packs.CustomPackError as exc:
+        _fail(f"Not added. {exc}")
+    if added["unchanged"]:
+        click.echo(f"{added['pack_id']} {added['version']} is already added, unchanged.")
+        return
+    click.echo(f"Added {added['pack_id']} {added['version']}"
+               + (f" (it replaces {added['replaced']})." if added["replaced"] else "."))
+    click.echo("It is switched off. Switch it on in the app (Data → Fact packs); "
+               f"`topos-node packs backfill --pack {added['pack_id']}` then reads your history.")
+
+
+@packs_group.command("remove")
+@click.argument("pack_id", type=PACK, metavar="ID")
+def packs_remove(pack_id: str) -> None:
+    """Remove a fact pack you added. The facts it already wrote are kept."""
+    from topos.features.derivation import custom_packs
+
+    try:
+        removed = custom_packs.remove_pack(pack_id)
+    except custom_packs.CustomPackError as exc:
+        _fail(f"Not removed. {exc}")
+    if not removed:
+        _fail(f"{pack_id} is not a pack you added (see `topos-node packs list`).")
+    click.echo(f"Removed {pack_id}. It reads nothing from now on; the facts it already wrote are kept.")
 
 
 @packs_group.command("backfill")

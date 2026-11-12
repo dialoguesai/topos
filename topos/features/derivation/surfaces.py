@@ -367,6 +367,10 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     pack = load_packs(pack_dir, only=[pack_id]).get(pack_id)
     if pack is None:
         raise ValueError(f"unknown pack {pack_id}")
+    from .registry import runs_as_switched_on
+    if not runs_as_switched_on(conn, pack):
+        # A pack the owner added whose file changed since they switched it on (`registry`).
+        raise ValueError(f"pack {pack_id} is not enabled")
     from ..entities.owner import fact_owner_subject
     _owner = fact_owner_subject(conn)
     owner_row = (_owner,) if _owner else None
