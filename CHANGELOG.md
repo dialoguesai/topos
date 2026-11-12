@@ -38,8 +38,11 @@ The machine-readable twin of each release is
     definition: if an app's grant already names the id you are adding, `packs add` says how many apps that
     is before it asks, because that grant will cover the new definition once you switch the pack on. A coding
     agent you connected and your routines are not apps and need no grant: an answer Topos gives them can
-    draw on this pack's facts, as it can on a shipped pack's. Whether a pack you add should be held back
-    from them is not decided yet.
+    draw on this pack's facts, exactly as it can on a shipped pack's, and nothing is held back from them
+    (owner ruling DR-74, 12 Nov 2026).
+  - *Marks and clean-up work as for a shipped pack.* An app records your reaction and rank on its facts only
+    with a `--feedback` grant naming the pack; `packs retract-reactions` counts and ends its facts by the same
+    rules; and it never reads the turns before a message, which DR-62 rules for the two Moments packs only.
   - *Not in a share with another person yet.* The fact categories a share can name are a fixed list, and a
     pack you add is not on it, so its facts are refused for every share.
   - *An app cannot add one.* Only the `packs add` command writes to the pack directory, and it asks a person

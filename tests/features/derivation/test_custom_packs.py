@@ -950,3 +950,71 @@ def test_the_example_in_the_docs_is_a_pack_that_can_be_added(home):
     example = Path(__file__).resolve().parents[3] / "docs" / "examples" / "custom.gardening.yaml"
     added = install_pack(example)
     assert added["pack_id"] == "custom.gardening" and listing(home) == ["custom.gardening.yaml"]
+
+
+# --- the owner's ways to end or mark a fact work on an added pack's fact as on a shipped pack's -------------------------
+def test_retract_reactions_ends_an_added_packs_fact_that_rests_on_a_reaction_alone(home, tmp_path, monkeypatch):
+    """`packs retract-reactions` (topos#288) reads every pack's facts by the same rules: a fact an added pack stored
+    from a reaction the owner sent, and from nothing else the ledger knows of, is counted under the pack's id and
+    ended on a yes; one that also rests on a message the owner typed is left. Synthetic messages only."""
+    from tests.features.derivation.test_owner_reactions import ORDINARY_METADATA, THEIRS, _message
+    from topos.enrichment.jobs.canonical import derivation_job as dj
+    from topos.features.derivation import reaction_retract as retract
+    from topos.features.derivation.writer import DerivationWriter
+    from topos.storage.canonical.conversations_tables import ensure_all_tables
+    from topos.storage.db.migrations import apply_all_migrations
+
+    monkeypatch.setattr("topos.features.signal.derived_index.index_derived_objects", lambda *a, **kw: {"embedded": 0})
+    conn = sqlite3.connect(str(tmp_path / "node.db"), check_same_thread=False)
+    try:
+        ensure_all_tables(conn)
+        apply_all_migrations(conn)
+        conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json,"
+                     " is_self) VALUES ('self-owner','person','Owner','owner','[]',1)")
+        conn.execute("CREATE TABLE IF NOT EXISTS engine_config (key TEXT PRIMARY KEY, value TEXT)")
+        conn.commit()
+        add(tmp_path)
+        pack = load_packs(bundled_pack_dir(), only=[PACK])[PACK]
+        _message(conn, "r-words", f"Loved “{THEIRS}”")
+        _message(conn, "own", THEIRS, metadata=ORDINARY_METADATA)
+
+        def plant(name, *record_ids):
+            refs = [{"table": "conversation_messages", "record_id": rid} for rid in record_ids]
+            out = DerivationWriter(conn, model="stub-9b").assert_pack_fact(
+                pack=pack, predicate="custom.plant", subject_entity_id="self-owner", value={"name": name},
+                actor_role="authored", confidence=0.9, quote="I grow them", event_date="2026-09-20",
+                source_refs=refs)
+            assert out["outcome"] == "written", out
+            for rid in record_ids:     # the ledger row a lane writes; a record read alone carries no context
+                dj._ledger_write(conn, stage="backfill", pack=pack,
+                                 rec={"table": "conversation_messages", "record_id": rid, "role": "authored"},
+                                 a={"predicate": "custom.plant", "value": {"name": name},
+                                    "verifier_status": "accepted", "occurrence": None},
+                                 model="stub-9b", vmodel="stub-9b", context=None, written_id=out["object_id"])
+            conn.commit()
+            return out["object_id"]
+
+        from_reaction = plant("tomatoes", "r-words")
+        also_typed = plant("beans", "r-words", "own")
+        assert retract.count(conn) == {"packs": [{"pack_id": PACK, "facts": 1}], "total": 1, "kept_confirmed": 0,
+                                       "kept_marked": 0, "kept_other_record": 0, "kept_timing": 0}
+        assert retract.retract(conn, expected_total=1)["retracted"] == 1
+        standing = {r[0] for r in conn.execute(
+            "SELECT object_id FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL")}
+        assert from_reaction not in standing and also_typed in standing
+    finally:
+        conn.close()
+
+
+def test_an_added_pack_never_reads_with_the_conversation_turns(home, tmp_path, monkeypatch):
+    """DR-62 rules on the two Moments packs only. Naming an added pack in `TOPOS_DERIVATION_CONTEXT_PACKS` does not
+    give it the turns before a message, so it reads one record at a time, as every other pack does."""
+    from topos.features.derivation.template import context_packs
+
+    add(tmp_path)
+    monkeypatch.setenv("TOPOS_DERIVATION_VERIFY", "required")
+    monkeypatch.setenv("TOPOS_DERIVATION_CONTEXT_TURNS", "3")
+    monkeypatch.setenv("TOPOS_DERIVATION_CONTEXT_PACKS", f"{PACK},moments.joy")
+    assert context_packs() == frozenset({"moments.joy"})
+    monkeypatch.delenv("TOPOS_DERIVATION_CONTEXT_PACKS")
+    assert PACK not in context_packs() and context_packs() <= {"moments.tension", "moments.joy"}

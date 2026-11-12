@@ -169,3 +169,41 @@ def test_a_shipped_pack_is_on_by_its_registry_row_alone_as_before(garden):
     assert on == rows and "moments.joy" in on and PACK not in on
     enable(garden.conn, PACK)
     assert enabled_packs(garden.conn) == sorted(rows + [PACK])
+
+
+# --- the owner's reaction and rank on an added pack's fact (DR-72, `fact_feedback`) -------------------------------------
+FEEDBACK_NOT_AVAILABLE = {"id": "r1", "status": "error", "code": 404, "error": "fact_not_available"}
+
+
+def recorder(*packs, feedback=None):
+    """An app that reads these packs and may record on `feedback` (all of them when not given)."""
+    return Principal(cls="owner_agent", channel="uds", client_id="agent-recorder",
+                     app_grant=AppGrant(packs=packs, feedback=tuple(packs if feedback is None else feedback)))
+
+
+def feedback(principal, fact_id, **fields):
+    return dispatch(principal, {"fact_id": fact_id, **fields}, "fact_feedback")
+
+
+def test_an_app_records_on_an_added_packs_fact_only_with_a_feedback_grant_that_names_the_pack(garden):
+    """The same door and the same rules as a shipped pack's fact: `--feedback facts:custom.gardening` lets the app
+    record, a grant that only reads the pack does not, nor one that may record on another pack only."""
+    enable(garden.conn, PACK)
+    assert feedback(recorder(PACK, feedback=()), garden.ids.plant, reaction="love") == {
+        "id": "r1", "status": "error", "code": 403, "error": "owner_agent_not_allowed"}
+    assert feedback(recorder(PACK, "moments.joy", feedback=("moments.joy",)), garden.ids.plant,
+                    reaction="love") == FEEDBACK_NOT_AVAILABLE
+    out = feedback(recorder(PACK), garden.ids.plant, reaction="love", rank=2)
+    assert out["status"] == "ok", out
+    assert by_id(dispatch(app(PACK))["payload"])[garden.ids.plant]["reaction"] == "love"
+
+
+def test_feedback_never_reaches_an_added_packs_fact_an_app_could_not_read(garden):
+    """Switched off, special-class, or re-added and not yet switched on again: the same refusal as for a fact that
+    does not exist, and nothing is stored."""
+    assert feedback(recorder(PACK), garden.ids.plant, reaction="love") == FEEDBACK_NOT_AVAILABLE    # off
+    enable(garden.conn, PACK, PRIVATE)
+    assert feedback(recorder(PACK, PRIVATE), garden.ids.visit, reaction="love") == FEEDBACK_NOT_AVAILABLE
+    assert custom_packs.remove_pack(PACK) is True                                               # the row still says on
+    assert feedback(recorder(PACK), garden.ids.plant, reaction="love") == FEEDBACK_NOT_AVAILABLE
+    assert garden.conn.execute("SELECT name FROM sqlite_master WHERE name='fact_feedback'").fetchone() is None
