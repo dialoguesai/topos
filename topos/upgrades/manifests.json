@@ -1510,6 +1510,15 @@
       ]
     },
     {
+      "version": "1.5.51",
+      "summary": "The owner can add a fact pack of their own from a file with topos-node packs add, confirmed on a terminal. An added pack starts switched off; an app reads its facts only on a grant naming the pack, and coding agents and routines read them as a shipped pack's (DR-74). No pack is added or switched on by the upgrade.",
+      "steps": [],
+      "notes": [
+        "[E:derivation] [O] topos-node packs add FILE checks a YAML pack definition, shows what it would read and write, asks [y/N] once on a terminal and copies it to fact-packs/ beside the node's environment file; packs add --check only checks, packs remove ID takes a pack out and keeps its facts. Ids and predicates must start with custom., so a shipped pack cannot be shadowed. An added pack starts switched off, and a changed, removed or invalid file switches it off again. No app or route can add one.",
+        "[P] DR-74: an app reads an added pack's facts only through a grant naming the pack (special-class and Off-limits held back as for shipped packs); a connected coding agent and a routine read them as they read a shipped pack's. Added packs are not shareable with another person. No migration and no reprocessing; nothing changes until the owner adds and switches on a pack."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

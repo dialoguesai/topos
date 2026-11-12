@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.51] — 2026-11-12
+
 ### Added
 - **You can add a fact pack of your own from a file: `topos-node packs add my-pack.yaml`.** `[E:derivation]` `[O]`
   A fact pack tells Topos one kind of fact to look for in your records. Until now the only packs were the ones
