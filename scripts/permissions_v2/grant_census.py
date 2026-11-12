@@ -2828,6 +2828,10 @@ def _what_if_main(args) -> int:
 # construction now carries revision_contract too. Legacy RD11 what-ifs still model
 # the legacy projection only; they are not a v2 coverage estimate. Native evidence
 # rules and the actual census membership remain the node's own qualification calls.
+# Custom-fact grants v3: fact_projection sends CustomFacts through the same expanded
+# projection path as v2. Re-read: run calls qualify_projection with the signed policy,
+# so custom definition/provenance checks and refusal codes remain the engine's own.
+# No census branch duplicates this dispatch; legacy RD11 what-ifs remain legacy-only.
 PINNED: dict[str, str] = {
     "ai_chat_capture.attested_datasets":
         "fcbc8279d58b0af032d8f269be820e6c7de7a5350c3708e9a83cb8646d0df9ee",
@@ -2848,7 +2852,7 @@ PINNED: dict[str, str] = {
     "knowledge_projections.goal_projection":
         "50174909a47472fba1aa56c6dcdd00cca3adaa7242ef70e33e4fec552ffe3c1a",
     "knowledge_projections.fact_projection":
-        "1a62e81fb82921adad7828e11d390575f9b1d3b109e7f4543184030550f5d5a6",
+        "4aebd33a2e522fc7f7da0a823b20360ff0f3829148cc6a94e00e3d7dddc0c01d",
     "inferred_facts.enabled":
         "659c4f01c08e7437979d1770f09c79afe6390cab2f4425d613375a4ff83880bb",
     "inferred_facts.refusal":
