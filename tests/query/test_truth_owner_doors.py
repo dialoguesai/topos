@@ -228,7 +228,8 @@ def test_every_open_claim_is_returned_and_the_app_chooses_how_many_to_show(node)
 
 
 # --- the four doors ---------------------------------------------------------------------------------------------------
-DOORS = ("truth_inbound_settings", "truth_weekly_stats", "truth_claim_cards", "truth_claim_label")
+DOORS = ("truth_inbound_settings", "truth_weekly_stats", "truth_claim_cards", "truth_claim_label",
+         "truth_own_claim_label")
 
 
 class Untouchable(dict):
@@ -315,7 +316,7 @@ def test_on_the_owner_socket_the_reads_are_open_and_the_changes_need_the_app():
     import topos.core.handlers as hub
 
     assert {"truth_weekly_stats", "truth_claim_cards"} <= hub.owner_door_open_types()
-    assert {"truth_inbound_settings", "truth_claim_label"} <= hub.DANGEROUS_TYPES
+    assert {"truth_inbound_settings", "truth_claim_label", "truth_own_claim_label"} <= hub.DANGEROUS_TYPES
 
 
 def test_the_protocol_snapshot_names_the_four_doors():

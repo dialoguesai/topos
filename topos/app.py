@@ -10,6 +10,8 @@ import threading
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .api.local_pushers import LocalPusherCORS
+
 from .__version__ import __version__
 from .api import (
     agent_dispatch as agent_dispatch_routes,
@@ -28,6 +30,7 @@ from .api import (
     ingestion_compat as ingestion_compat_routes,
     ingestion_api as ingestion_routes,
     ingestion_sources as ingestion_sources_routes,
+    local_pushers as local_pusher_routes,
     permissions_ai_chat_capture as permissions_ai_chat_capture_routes,
     permissions_capture_receipts as permissions_capture_receipts_routes,
     permissions_source_installs as permissions_source_installs_routes,
@@ -138,6 +141,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+# Outermost: the pusher doors answer CORS for the exact extension origins the owner enrolled
+# (api/local_pushers.py), read per request; every other path and origin falls through to the above.
+app.add_middleware(LocalPusherCORS)
 
 app.include_router(health_routes.router)
 app.include_router(shell_routes.router)
@@ -164,6 +170,7 @@ app.include_router(signal_routes.router, prefix="/v1")
 app.include_router(connected_apps_routes.router, prefix="/v1")
 app.include_router(ingestion_routes.router, prefix="/v1")
 app.include_router(ingestion_sources_routes.router)
+app.include_router(local_pusher_routes.router)  # local pushers: batch write + me (local_pushers.py)
 app.include_router(permissions_ingestion_routes.router)
 app.include_router(permissions_identity_routes.router)
 app.include_router(permissions_ai_chat_capture_routes.router)
@@ -499,6 +506,15 @@ async def startup_event() -> None:
     except Exception as e:  # noqa: BLE001
         logger.warning("Local sync scheduler at startup failed (non-fatal): %s", e)
     try:
+        # The owner's automatic catch-up for fact packs (features.derivation.auto_catchup). The loop waits out
+        # startup, then looks once a minute; with the owner's switch off (the default) a look reads one row.
+        from .core.state import get_db_connection as _get_conn_for_packs_auto
+        from .features.derivation.auto_catchup import start_scheduler as _start_packs_auto
+
+        _start_packs_auto(_spawn_background, _get_conn_for_packs_auto)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Fact-pack automatic catch-up at startup failed (non-fatal): %s", type(e).__name__)
+    try:
         # The NSFW tag sweep (disclosure.nsfw_tags): every canonical row with text is evaluated by the
         # explicit-wording rule, rows no tagger decided are tagged and classifier flags the rule does not
         # confirm are cleared, in bounded gated batches on a worker thread; then a re-check on an interval.
@@ -537,6 +553,14 @@ async def startup_event() -> None:
         _start_search_refresh()
     except Exception as e:  # noqa: BLE001
         logger.warning("Search refresh at startup failed (non-fatal): %s", type(e).__name__)
+    try:
+        # Unload an idle model when a node request is stuck waiting for the host to load another
+        # (topos/local_serving.py: the 30-minute stall behind home chat's keep_alive).
+        from . import local_serving
+
+        _spawn_background(local_serving.watchdog(settings.engine_ollama_base_url), name="local-model-watchdog")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Local model watchdog at startup failed (non-fatal): %s", type(e).__name__)
     if getattr(settings, "sanitization_prewarm_on_startup", True):
         async def _prewarm_sanitization() -> None:
             try:
@@ -547,7 +571,54 @@ async def startup_event() -> None:
                 logger.warning("Sanitization prewarm at startup failed (non-fatal): %s", prewarm_exc)
 
         _spawn_background(_prewarm_sanitization(), name="startup-prewarm-sanitization")
-    if settings.topos_control_plane_url:
+
+    if settings.local_only or settings.topos_control_plane_url:
+        # Dual-mint (install-flow invariant): ensure an owner key exists so the
+        # fabric's floors/stamps/tier resolution auto-activate on every node —
+        # fresh or upgraded — with no manual step. Set it on the live settings
+        # singleton too, so enforcement sees it THIS boot (settings loaded its
+        # env before this mint could run). Account or not: the owner key is local.
+        # A keyed node with NO control-plane URL is the test and dev configuration:
+        # it keeps the legacy TCP bearer's write pass (auth.require_owner_unless_legacy),
+        # so the mint stays off there exactly as it was.
+        from .owner_key import ensure_owner_key
+
+        _ok = ensure_owner_key()
+        if _ok and not getattr(settings, "topos_owner_key", None):
+            settings.topos_owner_key = _ok
+
+        # P4: the owner socket — kernel-gated (0600) owner_app lane, no secret. It
+        # used to start inside the control-plane block; a local-only node (no
+        # account yet) needs it just the same, for `topos-node status`, the agents
+        # and the plugin's MCP server.
+        from .uds import start_uds_server
+
+        start_uds_server(app)
+
+    if settings.local_only:
+        # No key, no lease: this Topos runs without an account (local_identity.py).
+        # Mint the local owner and Topos ids so ingestion and queries have a scope;
+        # `connection_info` moves the rows to the account when one is connected.
+        try:
+            from .local_identity import ensure_local_identity
+
+            def _mint_local_identity() -> None:
+                # Off the loop, on the worker thread's own connection: the write gate
+                # warns when a write is taken on the event loop (1.5.44).
+                from .core.state import close_thread_db_connection, get_db_connection
+
+                try:
+                    conn = get_db_connection()
+                    if conn is not None:
+                        ensure_local_identity(conn)
+                finally:
+                    close_thread_db_connection()
+
+            await asyncio.to_thread(_mint_local_identity)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Local identity at startup failed (non-fatal): %s", type(e).__name__)
+        logger.info("Local-only mode: no account connected; the control plane is not contacted.")
+    elif settings.topos_control_plane_url:
         if settings.hosted_pool_lease_enabled:
             try:
                 state.hosted_pool_lease_client = HostedPoolLeaseClient(
@@ -603,22 +674,6 @@ async def startup_event() -> None:
             from .core.handlers import dispatch_relay_message
 
             return await dispatch_relay_message(message)
-
-        # Dual-mint (install-flow invariant): ensure an owner key exists so the
-        # fabric's floors/stamps/tier resolution auto-activate on every node —
-        # fresh or upgraded — with no manual step. Set it on the live settings
-        # singleton too, so enforcement sees it THIS boot (settings loaded its
-        # env before this mint could run).
-        from .owner_key import ensure_owner_key
-
-        _ok = ensure_owner_key()
-        if _ok and not getattr(settings, "topos_owner_key", None):
-            settings.topos_owner_key = _ok
-
-        # P4: the owner socket — kernel-gated (0600) owner_app lane, no secret.
-        from .uds import start_uds_server
-
-        start_uds_server(app)
 
         # P5: pin the CP's stamp verification key on first boot (TOFU over the
         # same TLS channel the relay already trusts). Threaded: a slow or down

@@ -743,9 +743,20 @@ def _evidence_edge_writes(
 def _apply_stable_names(conn, community_cores, labels_by_rank, names, eigen):
     """Stable naming pass (PLAN_COMMUNITY_NAMING S2): history match first, LLM
     for new cores (budgeted), deterministic label as ever-present fallback."""
+    from ...storage.db.write_gate import with_db_write
     from .community_names import core_fingerprint, match_name, record_name, touch_name
     from .community_naming import (MAX_NEW_NAMES_PER_REBUILD, derive_community_name,
                                    distinctive_terms, resolve_naming_model, valid_label)
+
+    def _write(op, *args, **kwargs):
+        # Each name written in its own short hold and committed at once, never left open into the next community's
+        # model call. Uncommitted, the first name kept SQLite's write lock through every naming call after it (up to
+        # MAX_NEW_NAMES_PER_REBUILD, 45 s each), and the rebuild's child process holds that lock against the whole
+        # node: on 7 Nov a job claim held the node's write gate 18.4 s waiting for it, two more waited 14.6 s.
+        with with_db_write():
+            result = op(conn, *args, **kwargs)
+            conn.commit()
+        return result
 
     all_names_by_comm = {
         r: [names.get(eid, "") for eid in core[:10] if names.get(eid, "").strip()]
@@ -772,7 +783,7 @@ def _apply_stable_names(conn, community_cores, labels_by_rank, names, eigen):
         hit = match_name(conn, fp)
         if hit is not None:
             labels_by_rank[r] = hit["name"]
-            touch_name(conn, str(hit["name_id"]), fp)
+            _write(touch_name, str(hit["name_id"]), fp)
             continue
         derived = None
         if new_budget > 0:
@@ -801,9 +812,8 @@ def _apply_stable_names(conn, community_cores, labels_by_rank, names, eigen):
         final = derived or labels_by_rank.get(r)
         if final and valid_label(str(final)):
             labels_by_rank[r] = final
-            record_name(conn, str(final), fp,
-                        source="llm" if derived else "deterministic",
-                        model=resolve_naming_model(conn) if derived else None)
+            model = resolve_naming_model(conn) if derived else None
+            _write(record_name, str(final), fp, source="llm" if derived else "deterministic", model=model)
 
 
 def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
@@ -1250,6 +1260,9 @@ def rebuild_entity_graph(
         # How the goal lane clustered: "embeddings", or "tokens" when the
         # embedder was unavailable.
         "goal_clustering": enrich.get("goal_clustering"),
+        # Goal groups, and how many of them this rebuild scored (the rest came from goal_pair_cache).
+        "goal_items": enrich.get("goal_items"),
+        "goal_items_scored": enrich.get("goal_items_scored"),
         "incomplete": incomplete,
         "rows_written": written,
     }

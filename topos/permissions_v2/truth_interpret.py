@@ -49,6 +49,7 @@ import urllib.request
 from dataclasses import dataclass, field
 
 from .truth_contract import BY_ID, PACK
+from .. import local_serving
 
 VERSION = "icebreakers-high/v4"
 #: In the node's heartbeat capabilities (``engine.registration``): 1 means this node reads a free statement here and
@@ -379,10 +380,12 @@ class PinnedChat:
         self._lock = threading.Lock()
 
     def _post(self, path, body, timeout):
-        request = urllib.request.Request(self.base_url + path, data=json.dumps(body).encode("utf-8"),
-                                         headers={"Content-Type": "application/json"}, method="POST")
-        with self._opener.open(request, timeout=max(0.5, timeout)) as response:
-            return json.loads(response.read().decode("utf-8"))
+        started = time.monotonic()
+        with local_serving.request(body, limit=timeout) as body:
+            request = urllib.request.Request(self.base_url + path, data=json.dumps(body).encode("utf-8"),
+                                             headers={"Content-Type": "application/json"}, method="POST")
+            with self._opener.open(request, timeout=max(0.5, timeout - (time.monotonic() - started))) as response:
+                return json.loads(response.read().decode("utf-8"))
 
     def verify(self) -> None:
         with self._lock:

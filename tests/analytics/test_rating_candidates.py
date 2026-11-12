@@ -10,6 +10,7 @@ from a fraction of the rows, in milliseconds.
 
 from __future__ import annotations
 
+import gc
 import json
 import sqlite3
 import time
@@ -272,6 +273,11 @@ class TestReadsStayReads:
             _mention(c, f"m-{i}", 1 + i % 3)
         c.commit()
         read_rating_candidates(c, dataset_id=DS, limit=25)  # warm
+        # Full-suite collection leaves a large old-generation pytest object graph.
+        # Reclaim setup/earlier-test garbage before measuring this read: on Linux
+        # that unrelated sweep took 592 ms of a 790 ms sample. GC stays enabled
+        # during the measurement, and the read still has the same 300 ms budget.
+        gc.collect()
         start = time.perf_counter()
         out = read_rating_candidates(c, dataset_id=DS, limit=25)
         elapsed_ms = (time.perf_counter() - start) * 1000

@@ -66,13 +66,16 @@ class FactExtractionJob(BaseEnrichmentJob):
         cancel = threading.Event()
         llm_stats: Dict[str, Any] = {}
         try:
-            written = await asyncio.to_thread(
-                extract_facts_from_batch,
-                conn,
-                canonical_messages,
-                cancel=cancel,
-                llm_stats=llm_stats,
-            )
+            def _extract():
+                # The worker's own handle; `conn` above belongs to this coroutine's thread.
+                return extract_facts_from_batch(
+                    get_db_connection(),
+                    canonical_messages,
+                    cancel=cancel,
+                    llm_stats=llm_stats,
+                )
+
+            written = await asyncio.to_thread(_extract)
         except asyncio.CancelledError:
             cancel.set()
             raise

@@ -83,8 +83,14 @@ async def get_disk_status_core(conn: Any = None) -> Dict[str, Any]:
     Off the event loop: it stats a volume and asks Ollama for its tag list, and
     a slow or wedged daemon must not stall every other request on this node.
     """
-    resolved = conn if conn is not None else get_db_connection()
-    return await asyncio.to_thread(_status_sync, resolved)
+    from ..core import state as _state
+
+    # Resolved on the worker, where it is used, and through the module rather than
+    # the name imported above, so a test that replaces state.get_db_connection
+    # reaches this hop too. A caller that passes a handle (tests) keeps it.
+    return await asyncio.to_thread(
+        lambda: _status_sync(conn if conn is not None else _state.get_db_connection())
+    )
 
 
 @router.get("/v1/disk-space-policy", dependencies=[Depends(require_api_key)])

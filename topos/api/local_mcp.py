@@ -141,35 +141,6 @@ async def _owner_truth_door(request: Request, response: Response, principal, msg
     return out.get("payload", {})
 
 
-@router.post("/reflection_invitations")
-async def local_reflection_invitations(
-    request: Request,
-    response: Response,
-    principal=Depends(_truth_door("reflection_invitations")),  # noqa: B008
-) -> dict:
-    """The reflection doors (REFLECTION_PROGRAM.md §2a): owner class only; the body is read after the door admitted
-    the caller; an empty body is ``{}``."""
-    return await _owner_truth_door(request, response, principal, "reflection_invitations")
-
-
-@router.post("/reflection_conversation")
-async def local_reflection_conversation(
-    request: Request,
-    response: Response,
-    principal=Depends(_truth_door("reflection_conversation")),  # noqa: B008
-) -> dict:
-    return await _owner_truth_door(request, response, principal, "reflection_conversation")
-
-
-@router.post("/reflection_label")
-async def local_reflection_label(
-    request: Request,
-    response: Response,
-    principal=Depends(_truth_door("reflection_label")),  # noqa: B008
-) -> dict:
-    return await _owner_truth_door(request, response, principal, "reflection_label")
-
-
 @router.post("/truth_inbound_settings")
 async def local_truth_inbound_settings(
     request: Request,
@@ -209,6 +180,17 @@ async def local_truth_claim_label(
 ) -> dict:
     """The owner's label of one claim. Body: {"check_id": "...", "label": "true"|"partly"|"false", "note": "..."}."""
     return await _owner_truth_door(request, response, principal, "truth_claim_label")
+
+
+@router.post("/truth_own_claim_label")
+async def local_truth_own_claim_label(
+    request: Request,
+    response: Response,
+    principal=Depends(_truth_door("truth_own_claim_label")),  # noqa: B008
+) -> dict:
+    """The owner's own mark on a claim they typed. Body: {"statement": "...", "label": "true"|"partly"|"false",
+    "note": "..."}; {"statement", "label": null} removes it; {"statement"} reads it."""
+    return await _owner_truth_door(request, response, principal, "truth_own_claim_label")
 
 
 @router.post("/truth_prompts")

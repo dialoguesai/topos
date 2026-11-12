@@ -24,6 +24,7 @@ class ModelSlot(str, Enum):
     PRIVACY_FILTER = "privacy_filter"
     RERANKER = "reranker"
     SCOPE_HEAD = "scope_head"
+    TOPOS_FACTS = "topos_facts"
 
 
 _SUBTYPE_TO_SLOT: Dict[str, ModelSlot] = {
@@ -43,13 +44,18 @@ _SUBTYPE_TO_SLOT: Dict[str, ModelSlot] = {
 
 
 class _CacheEntry:
-    __slots__ = ("handle", "model_id", "last_used", "loader")
+    __slots__ = ("handle", "model_id", "last_used", "loader", "pinned", "pin_idle_sec")
 
-    def __init__(self, handle: Any, model_id: str, loader: Callable[[], Any]) -> None:
+    def __init__(self, handle: Any, model_id: str, loader: Callable[[], Any], *,
+                 pinned: bool = False, pin_idle_sec: float = 0.0) -> None:
         self.handle = handle
         self.model_id = model_id
         self.last_used = time.monotonic()
         self.loader = loader
+        #: A pinned entry sits outside the LRU budget: capacity counts the others, and
+        #: nothing but ``evict_slot`` or its own idle time (``pin_idle_sec`` > 0) removes it.
+        self.pinned = pinned
+        self.pin_idle_sec = pin_idle_sec
 
 
 class ModelCache:
@@ -78,14 +84,28 @@ class ModelCache:
         slot: ModelSlot,
         model_id: str,
         loader: Callable[[], Any],
+        *,
+        pinned: bool = False,
+        pin_idle_sec: float = 0.0,
     ) -> Tuple[Any, bool]:
-        """Return (handle, cache_hit). Loads via loader when missing or model_id changed."""
+        """Return (handle, cache_hit). Loads via loader when missing or model_id changed.
+
+        ``pinned`` keeps the entry out of the LRU budget. The budget is sized for the
+        small enrichment encoders that every ingest chunk cycles through (privacy filter,
+        embeddings, NER, emotion, sentiment: more slots than ``max_resident``), so a large
+        model that joins that rotation is evicted and reloaded on every chunk — measured
+        6 Nov 2026: the 5 GiB Topos Facts encoders loaded 8 times in 8 derivation batches.
+        A pinned entry is released by ``evict_slot`` or, with ``pin_idle_sec`` > 0, by
+        ``trim_to_budget`` once it has sat unused that long.
+        """
         model_id = (model_id or "").strip() or slot.value
         with self._load_done:
             while True:
                 entry = self._entries.get(slot)
                 if entry is not None and entry.model_id == model_id:
                     entry.last_used = time.monotonic()
+                    if pinned:
+                        entry.pinned, entry.pin_idle_sec = True, float(pin_idle_sec)
                     return entry.handle, True
                 if slot not in self._loading:
                     break
@@ -100,7 +120,8 @@ class ModelCache:
             # neither map, so residency can briefly overshoot by the number of
             # concurrent loads. Acceptable: the alternative is the pre-fix
             # behaviour of serializing every load behind one cache-wide lock.
-            self._ensure_capacity_unlocked(exclude=slot)
+            if not pinned:
+                self._ensure_capacity_unlocked(exclude=slot)
             self._loading[slot] = model_id
         # Load OUTSIDE the lock. Holding the cache-wide lock across a slow (or
         # wedged — hung MPS load, 2026-08-07) loader starves every model user
@@ -114,7 +135,8 @@ class ModelCache:
             raise
         with self._load_done:
             self._loading.pop(slot, None)
-            self._entries[slot] = _CacheEntry(handle, model_id, loader)
+            self._entries[slot] = _CacheEntry(handle, model_id, loader,
+                                              pinned=pinned, pin_idle_sec=float(pin_idle_sec))
             self._load_done.notify_all()
         return handle, False
 
@@ -127,25 +149,40 @@ class ModelCache:
     def trim_to_budget(self) -> None:
         """Evict idle and excess entries; flush torch cache when over RSS soft limit."""
         with self._lock:
-            if self._idle_ttl_sec > 0:
-                now = time.monotonic()
-                for slot in list(self._entries.keys()):
-                    entry = self._entries.get(slot)
-                    if entry and now - entry.last_used >= self._idle_ttl_sec:
-                        self._evict_unlocked(slot, entry)
-                        self._entries.pop(slot, None)
-            while len(self._entries) > self._max_resident:
+            now = time.monotonic()
+            for slot in list(self._entries.keys()):
+                entry = self._entries.get(slot)
+                if entry is None:
+                    continue
+                ttl = entry.pin_idle_sec if entry.pinned else self._idle_ttl_sec
+                if ttl > 0 and now - entry.last_used >= ttl:
+                    self._evict_unlocked(slot, entry)
+                    self._entries.pop(slot, None)
+            while self._unpinned_count_unlocked() > self._max_resident:
                 self._evict_lru_unlocked()
             if self._rss_soft_limit_mb > 0:
                 rss = get_process_rss_mb()
                 if rss is not None and rss > self._rss_soft_limit_mb:
-                    while len(self._entries) > 1:
+                    while self._unpinned_count_unlocked() > 1:
                         self._evict_lru_unlocked()
                     release_ml_memory()
 
     def resident_slots(self) -> List[str]:
         with self._lock:
             return [slot.value for slot in self._entries.keys()]
+
+    def pinned_slots(self) -> List[str]:
+        with self._lock:
+            return [slot.value for slot, entry in self._entries.items() if entry.pinned]
+
+    def idle_for(self, slot: ModelSlot) -> Optional[float]:
+        """Seconds since the slot's handle was last acquired; None when it is not resident."""
+        with self._lock:
+            entry = self._entries.get(slot)
+            return None if entry is None else time.monotonic() - entry.last_used
+
+    def _unpinned_count_unlocked(self) -> int:
+        return sum(1 for entry in self._entries.values() if not entry.pinned)
 
     @property
     def evictions_total(self) -> int:
@@ -174,7 +211,7 @@ class ModelCache:
             return False
 
     def _ensure_capacity_unlocked(self, *, exclude: Optional[ModelSlot] = None) -> None:
-        while len(self._entries) >= self._max_resident:
+        while self._unpinned_count_unlocked() >= self._max_resident:
             evicted = self._evict_lru_unlocked(exclude=exclude)
             if not evicted:
                 break
@@ -183,7 +220,7 @@ class ModelCache:
         candidates = [
             (slot, entry)
             for slot, entry in self._entries.items()
-            if slot != exclude
+            if slot != exclude and not entry.pinned
         ]
         if not candidates:
             return False

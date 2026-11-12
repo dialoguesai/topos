@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import uuid
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
@@ -64,11 +66,47 @@ def _query_work_stays_on_loop(adapters=None) -> bool:
         return True
 
 
+#: True inside work that ``_offload_query_work`` moved to a worker thread. Set on
+#: the worker itself, so "am I on an offload worker?" has one answer that depends
+#: neither on a running loop nor on which Connection object this thread holds.
+#: ``_query_work_stays_on_loop`` cannot give that answer: it begins with
+#: ``asyncio.get_running_loop()``, which a worker thread does not have, so asked
+#: from a worker it is always True. That is how, from 2026-09-08 through 1.5.43,
+#: every offloaded session write, retrieve and facts-lane read ran on the event
+#: loop's Connection from a pool thread (see ``_worker_db_connection``).
+_on_offload_worker: ContextVar[bool] = ContextVar("query_offload_worker", default=False)
+
+
+def _run_on_offload_worker(fn, /, *args):
+    token = _on_offload_worker.set(True)
+    try:
+        return fn(*args)
+    finally:
+        _on_offload_worker.reset(token)
+
+
 async def _offload_query_work(fn, /, *args, adapters=None):
     """Run sync query work on a worker when this orchestrator is the live node."""
     if _query_work_stays_on_loop(adapters):
         return fn(*args)
-    return await asyncio.to_thread(fn, *args)
+    return await asyncio.to_thread(_run_on_offload_worker, fn, *args)
+
+
+#: The adapter bundle built on each worker thread's own connection, one per
+#: thread: ``AdapterFactory.create`` re-tunes the handle and re-checks the schema
+#: on every build, and a worker's connection lives as long as the worker does.
+_thread_bundles = threading.local()
+
+
+def _bundle_for_thread_conn(conn):
+    if getattr(_thread_bundles, "conn", None) is conn:
+        return _thread_bundles.bundle
+    from .runtime import adapter_bundle_for_conn
+
+    bundle = adapter_bundle_for_conn(conn)
+    _thread_bundles.conn = conn
+    _thread_bundles.bundle = bundle
+    return bundle
 
 
 #: Turn outcomes that ended the turn without retrieving anything. An empty answer
@@ -241,33 +279,49 @@ class QueryPipelineOrchestrator:
     def _session_store(self):
         return self._adapters.query_session
 
+    def _worker_db_connection(self):
+        """This offload worker's own handle to the runtime database, or None.
+
+        None means the orchestrator's own adapters are the right ones here: the
+        work never left the loop (injected tmp/memory adapters, tests), this
+        thread has no handle, or this thread already owns the bound handle (an
+        in-memory database is shared by design, see ``state.get_db_connection``).
+
+        A ``sqlite3.Connection`` holds one transaction state, one statement
+        cache and one last-error code, so a pool thread must not write through
+        the loop's handle while the loop reads on it. Under the 2026-11-04/05
+        stress runs that is what happened: a query artifact's INSERT failed a
+        constraint and held the write lock for 11.5 minutes, and two session
+        ``put`` calls failed with "another row available" — SQLITE_ROW, which a
+        failing INSERT can only report when another thread stepped a statement
+        on the same handle between the failure and the read of its error code.
+        """
+        if not _on_offload_worker.get():
+            return None
+        from ..core.state import get_db_connection
+
+        conn = get_db_connection()
+        if conn is None or conn is _db_conn_from_adapters(self._adapters):
+            return None
+        return conn
+
     def _thread_session_store(self):
         """Session store on the calling thread's DB handle.
 
         On a file-backed node the event-loop connection must not be used from
         ``asyncio.to_thread`` workers (one Connection, one transaction state).
         """
-        if _query_work_stays_on_loop(self._adapters):
-            return self._session_store()
-        from ..core.state import get_db_connection
-        from .runtime import adapter_bundle_for_conn
-
-        conn = get_db_connection()
+        conn = self._worker_db_connection()
         if conn is None:
             return self._session_store()
-        return adapter_bundle_for_conn(conn).query_session
+        return _bundle_for_thread_conn(conn).query_session
 
     def _retrieve_on_calling_thread(self, request: RetrievalRequest):
         """``retrieve()`` using a handle that is safe for this thread."""
-        if _query_work_stays_on_loop(self._adapters):
-            return self._retrieval.retrieve(request)
-        from ..core.state import get_db_connection
-        from .runtime import adapter_bundle_for_conn
-
-        conn = get_db_connection()
+        conn = self._worker_db_connection()
         if conn is None:
             return self._retrieval.retrieve(request)
-        return DefaultSignalRetrievalAdapter(adapter_bundle_for_conn(conn)).retrieve(
+        return DefaultSignalRetrievalAdapter(_bundle_for_thread_conn(conn)).retrieve(
             request
         )
 
@@ -732,11 +786,7 @@ class QueryPipelineOrchestrator:
             # the lens dispatcher existed; before that the predicate was empty and the
             # closeness lane below was the only answer.
             def _facts_lane_conn():
-                if _query_work_stays_on_loop(self._adapters):
-                    return db_conn
-                from ..core.state import get_db_connection
-
-                return get_db_connection() or db_conn
+                return self._worker_db_connection() or db_conn
 
             try:
                 from .facts_direct import try_facts_direct

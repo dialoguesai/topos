@@ -594,12 +594,16 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                     prov_full = {**provenance, "sync_batch_id": sync_batch_id, "source_id": source_id}
 
                     def _persist_records(conn_w: Any, adapters_w: Any, *, _job: str = job_name, _records: List[Dict[str, Any]] = records, _prov: Dict[str, Any] = prov_full, _job_obj: Any = job, _messages: List[Dict[str, Any]] = job_messages) -> int:
-                        tables = self.tables_manager
                         if runtime_bound and conn_w is not None:
                             # The orchestrator's manager is bound to the loop
                             # thread's connection; this write runs on a worker
-                            # thread, so rebind (DDL is cached per connection).
+                            # thread, so bind to this thread's handle instead
+                            # (DDL is cached per connection). Not through the
+                            # property: on first use it builds a manager on the
+                            # owner's global handle, DDL included, from here.
                             tables = DerivedTablesManager(conn_w)
+                        else:
+                            tables = self.tables_manager
                         # Same hook as the canonical lane: a job with its own
                         # atomic writer (entities) lands its typed rows and
                         # its spine link together; the facts and graph

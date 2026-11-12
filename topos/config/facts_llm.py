@@ -31,6 +31,17 @@ logger = logging.getLogger("topos.config.facts_llm")
 
 ENGINE_CONFIG_KEY_FACTS_LLM_MODEL = "facts_llm_model"
 ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER = "facts_llm_provider"
+#: The per-pack pass's last deferral (JSON: reason, at, batches), written by the derivation
+#: job when a batch could not run and cleared by the next batch that could. Before 6 Nov 2026
+#: a deferral was one WARNING line per batch: a picked provider whose weights never loaded
+#: looked, from the app, exactly like one that was working.
+ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL = "derivation_last_deferral"
+
+#: Not an LLM: the per-pack pass runs Topos Facts (features.derivation.topos_facts) for the
+#: packs it knows. Every LLM reader of this config sees the local default chain instead,
+#: so the triple pass, the packs routed to the LLM and the model manager keep a real model.
+TOPOS_FACTS_PROVIDER = "topos_facts"
+TOPOS_FACTS_MODELS = frozenset({"v0.1"})
 
 _MAX_MODEL_NAME_LEN = 200
 
@@ -59,7 +70,31 @@ def device_facts_llm_model(conn: Optional[sqlite3.Connection]) -> str:
 
 def device_facts_llm_provider(conn: Optional[sqlite3.Connection]) -> str:
     """The device provider override, or "" when unset (⇒ ollama/legacy)."""
-    return normalize_provider(_read_engine_config_value(conn, ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER))
+    raw = str(_read_engine_config_value(conn, ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER) or "").strip().lower()
+    return TOPOS_FACTS_PROVIDER if raw == TOPOS_FACTS_PROVIDER else normalize_provider(raw)
+
+
+def facts_classifier_version(conn: Optional[sqlite3.Connection]) -> str:
+    """The Topos Facts version the per-pack pass should run, or "" when the owner has not
+    picked it (the default)."""
+    if device_facts_llm_provider(conn) != TOPOS_FACTS_PROVIDER:
+        return ""
+    model = device_facts_llm_model(conn)
+    return model if model in TOPOS_FACTS_MODELS else "v0.1"
+
+
+def derivation_deferral(conn: Optional[sqlite3.Connection]) -> Optional[Dict[str, Any]]:
+    """The standing deferral of the per-pack pass, or None when its last batch ran."""
+    import json
+
+    raw = _read_engine_config_value(conn, ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL)
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except ValueError:
+        return {"reason": str(raw), "at": None, "batches": None}
+    return value if isinstance(value, dict) else None
 
 
 def resolve_facts_llm_model(settings: Any, conn: Optional[sqlite3.Connection] = None) -> str:
@@ -75,7 +110,7 @@ def resolve_facts_llm_model(settings: Any, conn: Optional[sqlite3.Connection] = 
     Ollama either way.
     """
     override = device_facts_llm_model(conn)
-    if override:
+    if override and device_facts_llm_provider(conn) != TOPOS_FACTS_PROVIDER:
         return override
     for attr in ("facts_llm_model", "ollama_extraction_model", "ollama_query_model"):
         value = str(getattr(settings, attr, "") or "").strip()
@@ -95,7 +130,7 @@ def resolve_facts_llm_request(
     that provider's own default — never the Ollama env chain.
     """
     provider = device_facts_llm_provider(conn) or "ollama"
-    if provider == "ollama":
+    if provider in ("ollama", TOPOS_FACTS_PROVIDER):
         return "ollama", resolve_facts_llm_model(settings, conn)
     override = device_facts_llm_model(conn)
     return provider, override or hosted_default_model(settings, provider)
@@ -145,6 +180,11 @@ def normalize_put_config(payload: Any) -> Tuple[str, str]:
     model = _validate_model_name(payload.get("model") or "")
     if not provider or provider == "ollama":
         return "", model
+    if provider == TOPOS_FACTS_PROVIDER:
+        model = model or "v0.1"
+        if model not in TOPOS_FACTS_MODELS:
+            raise ValueError(f"model must be one of: {', '.join(sorted(TOPOS_FACTS_MODELS))}")
+        return provider, model
     if provider not in NODE_FUNCTION_LLM_PROVIDERS:
         raise ValueError(f"provider must be one of: {', '.join(sorted(NODE_FUNCTION_LLM_PROVIDERS))}")
     if provider != "platform" and not model:
@@ -162,6 +202,9 @@ def effective_config_for_api(settings: Any, conn: Optional[sqlite3.Connection]) 
     override = device_facts_llm_model(conn)
     provider_override = device_facts_llm_provider(conn)
     provider, effective = resolve_facts_llm_request(settings, conn)
+    llm_model = effective
+    if provider_override == TOPOS_FACTS_PROVIDER:
+        provider, effective = TOPOS_FACTS_PROVIDER, facts_classifier_version(conn)
     if override or provider_override:
         source = "device_override"
     elif str(getattr(settings, "facts_llm_model", "") or "").strip():
@@ -195,5 +238,9 @@ def effective_config_for_api(settings: Any, conn: Optional[sqlite3.Connection]) 
         "env_default": str(getattr(settings, "facts_llm_model", "") or "").strip(),
         "extraction_model": str(getattr(settings, "ollama_extraction_model", "") or "").strip(),
         "query_model": str(getattr(settings, "ollama_query_model", "") or "").strip(),
+        # The LLM still serving the triple pass and the packs routed to it ("" when none).
+        "llm_model": llm_model,
+        # None, or {reason, at, batches}: the pass is not running with this pick.
+        "deferral": derivation_deferral(conn),
         "available_models": available,
     }

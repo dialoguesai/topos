@@ -70,6 +70,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Iterable
 
+from ..core import owner_requests
 from .canonical import PolicyError
 from .opaque_ids import private_file
 from .search_contract import RELEASABLE_SEARCH_CAPABILITIES
@@ -264,6 +265,10 @@ class IndexRebuilds:
                 if grant_id is None:
                     return
                 self._running = grant_id
+            # Between shares: while one of the owner's own frames is being handled, the next build waits for it
+            # (core/owner_requests.py `pace`, bounded), so a restart's rebuild of every share stretches around the
+            # owner's screens instead of queueing them.
+            owner_requests.pace()
             result = self._build(grant_id)
             with self._cond:
                 self._running = None

@@ -14,6 +14,7 @@ trailing sentences (`dropped_to_fit`) instead of failing. Invented data only; no
 """
 from __future__ import annotations
 
+from topos import local_serving
 import asyncio
 import json
 import time
@@ -361,6 +362,8 @@ def test_a_v4_job_over_more_than_sixteen_items_gets_a_12288_token_context(monkey
 
 @pytest.mark.parametrize("cap, items, expected", [(K_ANSWER_V4, 17, 12_288), (K_ANSWER, 16, 8192)], ids=["v4", "v3"])
 def test_the_writer_is_asked_with_that_context(monkeypatch, cap, items, expected):
+    # The caller's own context; the serving layer (topos/local_serving.py) raises it on the wire, tested there.
+    monkeypatch.setattr(local_serving, "CONTEXT", 0)
     from topos.permissions_v2 import shadow_labeler_local as sl
     posted = []
 

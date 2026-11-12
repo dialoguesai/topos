@@ -15,9 +15,9 @@ Query language, limits and worked examples live in
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Dict, Optional
 
+from .common import run_db_read
 from .registry import handles
 
 
@@ -37,8 +37,7 @@ async def handle_graph_cypher_query(message: Dict[str, Any]) -> Optional[Dict[st
 
         from ...features.entities.cypher import DEFAULT_ROW_LIMIT, CypherQueryError, run_cypher
 
-        conn = hub.get_db_connection()
-        if conn is None:
+        if hub.get_db_connection() is None:
             return {"id": req_id, "status": "error", "error": "Database not available", "code": 503}
 
         try:
@@ -52,9 +51,8 @@ async def handle_graph_cypher_query(message: Dict[str, Any]) -> Optional[Dict[st
 
         try:
             # Materialise-then-match is CPU-bound; keep it off the event loop.
-            result = await asyncio.to_thread(
+            result = await run_db_read(
                 run_cypher,
-                conn,
                 str(payload.get("query") or ""),
                 limit=limit,
                 min_weight=min_weight,
