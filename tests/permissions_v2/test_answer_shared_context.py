@@ -7,8 +7,9 @@ negation or condition at its end. With the switch on:
   - a short item's unused room goes to the long ones, in equal shares, and the whole is what the same number of items
     (eight when there are fewer) could take before, so the prompt's ceiling does not move;
   - no item gets less room than before;
-  - an item that still does not fit ends at its last whole sentence that fits, and when not even its first sentence
-    fits it is cut at its room, as before;
+  - an item that still does not fit ends at its last whole sentence that fits; when the whole sentences that fit
+    would fill less than half its room (its first sentence does not fit, or a short opening comes before one long
+    sentence) it is cut at its room, as before, so it never shows less than half of what the fixed cut showed;
   - the Off-limits item filter (Fix A) reads each item exactly as the prompt will show it, again after a withheld
     item's room has gone to the others;
   - the owner's private receipt says `context_budget: shared`.
@@ -170,6 +171,66 @@ def test_on_an_item_whose_first_sentence_does_not_fit_is_cut_at_its_room_as_befo
     shown = shown_items([message(DIGITS[number], run_on) for number in range(8)], "none")
     assert all(item.body == collapsed(run_on)[:BODY_CHARS] == shown_item(message("1", run_on), "none").body
                for item in shown)
+
+
+#: A message or an AI-chat reply: a one-word opening sentence, then one long sentence with no further full stop.
+OPENING = "Thanks. "
+RUN_ON = OPENING + "Then " + "the kiln and the glaze and the shelf " * 65       # 8 + 2,410 characters
+
+
+def test_on_a_short_opening_before_a_long_sentence_is_cut_at_its_room_not_after_the_opening(on):
+    """Eight such items showed 7 characters each ("Thanks.") where the fixed cut showed 420: the one whole sentence
+    that fits is under half the room, so the item is cut at its room, as the fixed cut cuts it."""
+    assert len(collapsed(RUN_ON)) > 2400
+    records = [message(DIGITS[number], RUN_ON) for number in range(8)]
+    shown = shown_items(records, "none")
+    for record, item in zip(records, shown):
+        assert item.body == collapsed(RUN_ON)[:BODY_CHARS] == shown_item(record, "none").body
+        assert len(item.body) == BODY_CHARS
+    # Beside short items it takes their room, and still shows that room, not the opening alone.
+    beside = shown_items([message("1", RUN_ON), message("2", "The kiln has cooled.")], "none")[0]
+    assert beside.body == collapsed(RUN_ON)[:8 * BODY_CHARS - len("The kiln has cooled.")]
+
+
+def test_on_the_sentence_cut_keeps_at_least_half_the_room_or_gives_way_to_the_cut_at_the_room(on):
+    """The floor, at its edge: whole sentences that fill half the room or more are what is shown (the worst case:
+    210 characters of 420); one character under half and the item is cut at its room."""
+    tail = " " + "B" * 400                                                     # a sentence that never fits
+    at_half = "a" * (BODY_CHARS // 2 - 1) + "."                                 # 210 characters
+    under = "a" * (BODY_CHARS // 2 - 2) + "."                                   # 209
+    assert _clip_sentences(at_half + tail, BODY_CHARS) == at_half
+    assert _clip_sentences(under + tail, BODY_CHARS) == (under + tail)[:BODY_CHARS]
+    shown = shown_items([journal(DIGITS[number], at_half + tail) for number in range(8)], "none")
+    assert all(item.body == at_half for item in shown)
+    rng = random.Random(290)
+    for _ in range(300):
+        text = " ".join("W" + "w" * rng.randint(0, 12) + rng.choice(["", "", ".", "!", "?"])
+                        for _ in range(rng.randint(1, 200)))
+        limit = rng.randint(1, 700)
+        cut = _clip_sentences(text, limit)
+        assert text.startswith(cut) and len(cut) <= limit
+        assert cut == text or 2 * len(cut) >= limit, (text, limit)
+
+
+def test_on_a_supporting_line_that_does_not_fit_ends_at_its_last_whole_sentence(on):
+    """Nine long supporting lines have 160 characters each, as before, and each ends at a sentence end: three whole
+    filler sentences (128 characters), where the fixed cut stops inside the fourth."""
+    records = [goal(DIGITS[number], "Fix the kiln", LONG) for number in range(9)]
+    shown = shown_items(records, "none")
+    for record, item in zip(records, shown):
+        assert item.support == (FILLER * 3).strip() and item.support.endswith("chairs.")
+        assert collapsed(LONG).startswith(item.support + " ")
+        assert shown_item(record, "none").support == LONG[:SUPPORT_CHARS] != item.support   # off: inside the fourth
+    prompt = prompt_for(records)
+    assert all(block.endswith("Supporting text: " + (FILLER * 3).strip()) for block in prompt.item_lines)
+    assert prompt.user.count("Supporting text: ") == 9
+    assert "Supporting text: " + LONG[:SUPPORT_CHARS] not in prompt.user
+
+
+def test_on_a_supporting_line_with_a_short_opening_is_cut_at_its_room_as_before(on):
+    records = [goal(DIGITS[number], "Fix the kiln", RUN_ON) for number in range(9)]
+    for record, item in zip(records, shown_items(records, "none")):
+        assert item.support == collapsed(RUN_ON)[:SUPPORT_CHARS] == shown_item(record, "none").support
 
 
 @pytest.mark.parametrize("limit", [1, 10, 46, 47, 48, 100, 420, 600, 613, 614, 615])

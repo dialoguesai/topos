@@ -117,7 +117,9 @@ def lexical(index: LoadedIndex, query: str, *, plural_fold: bool = False,
     word is the sum over those forms and its document frequency counts a member holding any of them, so a word asked
     in the singular and written in the plural is one word, scored once. A query that holds both forms of a word
     ("project" and "projects") counts it once too, and a stored form stands for one query word only: the first, in
-    sorted order, that reaches it. Two query words that are different spellings of one plural ("potatos" and
+    sorted order, that reaches it. A query word an earlier one already reached ("lens" after "len") is that same
+    word, and its own further forms ("lenses") join it, so no form of a query word goes unread: "len lens" scores
+    what "lens" alone scores. Two query words that are different spellings of one plural ("potatos" and
     "potatoes") both reach "potato", and an item that says "potato" is scored for it once, as it is for either
     alone. Off, the default: exact words, as before."""
     words = set(tokenize(query))
@@ -128,11 +130,16 @@ def lexical(index: LoadedIndex, query: str, *, plural_fold: bool = False,
     count = len(members)
     average = sum(member.doc_len for member in members) / count or 1.0
     if plural_fold:
-        groups, taken = [], set()
-        for term in terms:
-            if term not in taken:       # sorted, so a singular comes before its own plural and stands for both
-                groups.append(tuple(form for form in _variants(term) if form not in taken))
-                taken.update(groups[-1])
+        groups, group_of = [], {}
+        for term in terms:              # sorted, so a singular comes before its own plural and stands for both
+            group = group_of.get(term)
+            if group is None:
+                group = []
+                groups.append(group)
+            for form in _variants(term):
+                if form not in group_of:
+                    group_of[form] = group
+                    group.append(form)
         counts = [[sum(member.terms.get(form, 0) for form in group) for group in groups] for member in members]
     else:
         counts = [[member.terms.get(term, 0) for term in terms] for member in members]

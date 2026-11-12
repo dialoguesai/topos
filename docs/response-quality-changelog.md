@@ -1310,8 +1310,9 @@ and real-model comparison limitations remain unchanged.
   rebuild, no vocabulary scan). `SEARCH_REQUEST_WORDS`: a closed list of thirteen request words is left out of the
   query when it has any other word. `ANSWER_SHARED_CONTEXT`: the items' bodies share 420 characters each (counted
   as eight items when there are fewer), likewise the supporting lines at 160; an item that still does not fit
-  ends at a sentence end, or at its room when its first sentence does not fit; Fix A re-reads the items after a
-  withheld item's room is shared out. The writer's and the judge's templates are unchanged.
+  ends at a sentence end, or at its room when the whole sentences that fit would fill less than half of it (its
+  first sentence does not fit, or a short opening is followed by one long sentence); Fix A re-reads the items
+  after a withheld item's room is shared out. The writer's and the judge's templates are unchanged.
 - **Affected question families:** Questions to a share (named search, batch, answers). Home chat, owner search and
   the query pipeline are not touched: none of this code is on those paths.
 - **What was sorted out of the draft:** already on main in another form: statistics and fusion inside the effective
@@ -1340,7 +1341,11 @@ and real-model comparison limitations remain unchanged.
   when `rank` scored the word lane over the whole index and filtered to the window afterwards. It now uses data
   on which the members outside the window would reverse the order of the two inside, records the members `rank`
   hands the word lane, and the twin-corpus families B and C of `test_message_search_boundary.py` run again with
-  the plural forms on and with both switches on; that mutant fails all three.
+  the plural forms on and with both switches on; that mutant fails all three. After the second review: the
+  half-room floor of the sentence cut, a test of the supporting line's sentence cut (none failed when it was
+  replaced by a raw cut), and a query word that an earlier query word already reached ("lens" beside "len") now
+  brings its own further forms ("lenses") instead of being dropped with them. The table above was run again on
+  that code and is unchanged.
 - **Limits:** The corpus was authored for the draft, its held-out groups included, and was read while this was
   built: it is an exposed regression set, not a fresh holdout, and its cases are correlated variants. It has no
   embeddings, so it says nothing about the meaning lane or fusion on a real index. The plural reading conflates a
@@ -1348,8 +1353,13 @@ and real-model comparison limitations remain unchanged.
   read as a possible plural ("lens" also matches "len", "series" looks up "serie" and "sery"), and a word of
   three or more letters also matches itself with "-s" or "-es" ("los" also matches "loses"). The request-word reading drops a subject that is itself a request word. The
   shared context changes what the writer reads: its effect on answers is unmeasured. An item among many long
-  ones can show somewhat less text than the fixed cut did (the sentence that does not fit is left out whole and
-  its room is not handed on: 386 characters against 420 for eight long items of 43-character sentences). Among
+  ones can show less text than the fixed cut did (the sentence that does not fit is left out whole and its room
+  is not handed on: 386 characters against 420 for eight long items of 43-character sentences). The worst case
+  is half of what the fixed cut showed, 210 characters against 420 and 80 against 160 for a supporting line:
+  below half its room an item is cut at the room instead, as the fixed cut cuts it, and that cut can fall
+  inside a sentence. A second review found the case this floor closes: a one-word opening sentence followed by
+  about 2,400 characters with no further full stop (a chat message, an AI-chat reply) showed its opening alone,
+  7 characters against 420, in each of eight such items. Among
   short ones it shows more of each item, so while the Off-limits item filter is off, a shown item that names an Off-limits entry in a form the
   release's veto passes can refuse a whole answer more often (the body check still refuses; nothing is released).
 - **Paired offline gate:** NOT RUN, before or after. The gate's catalog covers the home-chat and query paths, which

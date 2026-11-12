@@ -260,8 +260,13 @@ def _clip_sentences(text: str, limit: int) -> str:
 
     A cut inside a sentence can lose the negation, condition or attribution at its end ("I agreed to go" of "I agreed
     to go only if the roof is fixed"), so the sentence that does not fit is left out whole. The result is always the
-    start of `text`, cut where `split_sentences` ends a sentence. When not even the first sentence fits, the text is
-    cut at `limit` as `_clip` cuts it: an item never shows nothing because its one sentence is long."""
+    start of `text`, cut where `split_sentences` ends a sentence.
+
+    The floor: when the whole sentences that fit fill less than half of `limit`, the text is cut at `limit` as
+    `_clip` cuts it, inside a sentence if that is where it falls. That is the text whose first sentence does not
+    fit, and the one that opens with a short sentence before a long one ("Thanks." and then 2,000 characters with
+    no full stop, the shape of a chat message or an AI-chat reply), which would otherwise show its opening alone.
+    So a text longer than `limit` shows at least half of `limit` and at most `limit`, never nothing."""
     if len(text) <= limit:
         return text
     kept, used = [], 0
@@ -272,7 +277,7 @@ def _clip_sentences(text: str, limit: int) -> str:
         kept.append(sentence)
         used += size
     whole = " ".join(kept)
-    return whole if whole and text.startswith(whole) else text[:limit]
+    return whole if 2 * len(whole) >= limit and text.startswith(whole) else text[:limit]
 
 
 def _shared_room(lengths: list[int], least: int, slots: int) -> list[int]:
@@ -351,13 +356,16 @@ def shown_items(records: list, precision: str) -> list[ShownItem]:
     `BODY_CHARS` for each of them, and the supporting lines `SUPPORT_CHARS` for each of them, counted as eight when
     there are fewer (`K_ANSWER_LEGACY`, the most items a prompt held when the cuts were set): a short text's unused
     room goes to the long ones (`_shared_room`), so the prompt can be no longer than the fixed cuts allow that many
-    items, and a text that still does not fit ends at a sentence end (`_clip_sentences`). What one record shows
+    items, and a text that still does not fit ends at a sentence end, or at its room when the whole sentences that
+    fit would fill less than half of it (`_clip_sentences`). What one record shows
     then depends on the others beside it, so `build_prompt` and Fix A (`withhold_protected_items`) both read this,
     over the same list. Nothing but these records' own text is read, and each text shown is the start of the
     record's own (its body, or its first citation's): more or less of a released record, never another record.
     Less happens too: no text gets less room than the fixed cut, but the sentence that does not fit is left out
     whole and the room it leaves is not dealt again, so eight long records of 43-character sentences show 386
-    characters each where the fixed cut showed 420 (`test_answer_shared_context.py` pins it)."""
+    characters each where the fixed cut showed 420. The least a text longer than its room can show is half that
+    room: 210 characters of a body where the fixed cut showed 420, 80 of a supporting line where it showed 160
+    (`test_answer_shared_context.py` pins both)."""
     if not shared_context_on():
         return [shown_item(record, precision) for record in records]
     bodies = [" ".join(record.content.split()) for record in records]
@@ -392,8 +400,8 @@ def withhold_protected_items(records: list, *, boundary, precision: str) -> tupl
     while True:
         passing = [record for record, shown in zip(kept, shown_items(kept, precision))
                    if not boundary.mentions_protected(*shown.texts())]
-        # ANSWER_SHARED_CONTEXT: a withheld record's room goes to the ones left, which then show more of their own
-        # text, so they are read again as the prompt will show them, until a pass withholds nothing. Off, what a
+        # ANSWER_SHARED_CONTEXT: a withheld record's room goes to the ones left, which then show another cut of their
+        # own text, so they are read again as the prompt will show them, until a pass withholds nothing. Off, what a
         # record shows does not depend on the others and one pass is the answer, as before.
         if len(passing) == len(kept) or not shared_context_on():
             return passing, len(records) - len(passing)

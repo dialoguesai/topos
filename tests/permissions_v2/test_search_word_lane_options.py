@@ -228,6 +228,20 @@ def test_a_stored_form_two_query_words_reach_is_scored_once(question, alone, tex
     assert scored == lexical(index, alone, plural_fold=True)
 
 
+def test_a_query_word_an_earlier_one_reached_still_brings_its_own_further_forms():
+    """"lens" is a form of "len" and has a plural of its own. Asked beside "len" it was taken by that word's group
+    and "lenses" was never looked up, so the item "lens" alone finds went unscored."""
+    index = index_for(["Two lenses here.", "A completely unrelated item.", "Another unrelated item."])
+    alone = lexical(index, "lens", plural_fold=True)
+    assert [opaque for opaque, _score in alone] == [index.members[0].opaque_id]
+    assert lexical(index, "len lens", plural_fold=True) == alone
+    assert lexical(index, "len lens lenses", plural_fold=True) == alone
+    assert lexical(index, "len", plural_fold=True) == []                 # "lenses" is no plural of "len"
+    # The forms the two words share are still one word, counted once.
+    index = index_for(["One len. A lens. Two lenses.", "A lens.", "Unrelated note."])
+    assert lexical(index, "len lens", plural_fold=True) == lexical(index, "lens", plural_fold=True)
+
+
 # Two items inside the window and five permitted ones outside it. Inside, "project" and "kiln" are each in one item
 # of two, and the first holds its word twice, so it is first on the words. The five outside each hold the word and
 # its plural: scored over the whole index "project" would be in six items of seven and worth a fraction of "kiln",
