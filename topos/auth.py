@@ -83,7 +83,8 @@ def _owner_agent_on_socket(label: str) -> Principal:
     row = verify_agent_label(conn, label) if conn else None
     if row is None:
         raise AgentLabelRefused(status_code=status.HTTP_401_UNAUTHORIZED, detail=dict(AGENT_DISCONNECTED))
-    return Principal(cls=OWNER_AGENT, channel="uds", client_id=str(row.get("client_id") or ""))
+    return Principal(cls=OWNER_AGENT, channel="uds", client_id=str(row.get("client_id") or ""),
+                     app_grant=row.get("app_grant"))
 
 
 def _refuse_label_over_tcp(request: "Optional[Request]") -> None:
@@ -246,6 +247,65 @@ def resolve_request_principal(
             return None  # legacy mode: single-key world, no principal enforcement
         return Principal(cls=THIRD_PARTY, channel="local_http")
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authorization token")
+
+
+#: The pusher key's shape (``local_pushers.PUSHER_KEY_PREFIX``). Neither ``require_api_key`` nor
+#: ``resolve_request_principal`` knows it: the two generic resolvers answer 401 to a ``tpw_``
+#: bearer exactly as to any unknown token, so the key's whole surface is the doors that depend
+#: on ``resolve_local_pusher``.
+_PUSHER_KEY_PREFIX = "tpw_"
+LOOPBACK_REQUIRED = {"error": "loopback_required",
+                     "message": "A local pusher writes from this computer only."}
+PUSHER_KEY_REFUSED = {"error": "pusher_key_refused",
+                      "message": "This app's key is not one this Topos issued, or the app was disconnected."}
+
+
+def resolve_local_pusher(
+    request: Request = None,  # noqa: B008 — populated by FastAPI
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> Principal:
+    """The principal for the local pusher doors (``api/local_pushers.py``): an enrolled app, or the owner.
+
+    An enrolled pusher (``topos/local_pushers.py``) presents its ``tpw_`` key over
+    **loopback TCP** and resolves to ``Principal(owner_app, channel="local_pusher",
+    client_id=<app>, app_grant=<PusherGrant>)``: the owner's attested capture app,
+    which is what the control plane's rule C stamp says of the same extension on
+    an account node, so the rows the two paths write are the same rows. The class
+    is minted here and nowhere else — the generic resolvers 401 the key — and the
+    door that depends on this reads the grant before it writes, so the key opens
+    exactly the sources the owner named on the terminal.
+
+    The owner socket passes as the owner (``owner_app`` on ``uds``): the owner may
+    push any source on their own node. A peer that is not this machine is refused
+    whatever it presents; a ``tpk_`` client token, a ``tpa_`` label, the shared key
+    and the owner key are refused here as they would be on any wrong door.
+    """
+    from .uds import current_transport
+
+    if current_transport() == "uds":
+        label = _agent_label(request)
+        if label:
+            # An agent reads; it does not push rows. Name the refusal rather than demote.
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail={"error": "owner_agent_not_allowed"})
+        return Principal(cls=OWNER_APP, channel="uds")
+
+    _refuse_label_over_tcp(request)
+    if not _peer_is_loopback(request):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=dict(LOOPBACK_REQUIRED))
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authorization")
+    presented = str(credentials.credentials or "")
+    if not presented.startswith(_PUSHER_KEY_PREFIX):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=dict(PUSHER_KEY_REFUSED))
+    from .core.state import get_db_connection
+    from .local_pushers import PUSHER_CHANNEL, verify_pusher_key
+
+    conn = get_db_connection()
+    row = verify_pusher_key(conn, presented) if conn else None
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=dict(PUSHER_KEY_REFUSED))
+    return Principal(cls=OWNER_APP, channel=PUSHER_CHANNEL, client_id=str(row.get("app") or ""),
+                     app_grant=row.get("grant"))
 
 
 async def resolve_request_writer_class(request: Request, *, owner_class: Optional[str] = None) -> str:

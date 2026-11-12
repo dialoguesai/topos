@@ -109,6 +109,7 @@ class Projection:
     sources: list
     revision: str
     allow_clause_id: str
+    revision_contract: str | None = None
 
     def output(self, *, key, grant_id, precision):
         citations, sources, times = [], set(), []
@@ -308,6 +309,10 @@ def _support(resolver,conn,floor,reviews,review_db,refs,policy,lower_us,upper_us
 
 
 def fact_projection(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us):
+    from .expanded_facts import ExpandedFacts
+    if isinstance(getattr(policy.search, 'selective_facts', None), ExpandedFacts):
+        from .expanded_fact_projection import project
+        return project(resolver,conn,floor,reviews,review_db,row,policy,lower_us,upper_us)
     if row.get('object_type')!='fact' or row.get('valid_to') is not None:
         raise PolicyError('fact_not_current')
     payload=_json(row['payload_json'],dict)
@@ -587,7 +592,7 @@ def load_projection_row(conn,table,record_id):
     return dict(rows[0])
 
 
-def current_revision(conn,table,record_id,*,boundary=None):
+def current_revision(conn,table,record_id,*,boundary=None,contract=None):
     """The revision `qualify_projection` stamps on this projection, from its rows as they stand on `conn`.
 
     A fact or a goal is its whole row: that is what its eligibility reads (OD-38 keys its stored verdicts by that
@@ -597,6 +602,11 @@ def current_revision(conn,table,record_id,*,boundary=None):
     vetoes raises `entity_protected`: the scan reads the volatile columns the revision leaves out, so it is run
     again here, on the current rows."""
     row=load_projection_row(conn,table,record_id)
+    if contract == 'expanded-fact/v1' and table == 'signal_objects':
+        from .expanded_fact_projection import fact_revision
+        return fact_revision(conn,row,boundary=boundary)
+    if contract is not None:
+        raise PolicyError('projection_contract_unsupported')
     if table!='entity_edges': return rows_revision([[row]])
     metadata=_json(row['metadata_json'],dict)
     goal=load_projection_row(conn,'user_goals',metadata.get('source_object_id'))
@@ -652,12 +662,34 @@ def candidates(conn, permitted_messages, result_types):
     ids|=journal
     tables={r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if 'fact' in result_types:
+        pending={};discovered=set()
         for row in conn.execute("SELECT object_id,source_refs_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL"):
             try: refs=_json(row[1],list)
             except PolicyError: continue
-            if any(isinstance(ref,dict) and (ref.get('record_id') in ids or (ref.get('table')==JOURNAL
-                   and isinstance(ref.get('id'),str) and ref['id'] in journal)) for ref in refs):
+            direct=False;dependencies=set()
+            for ref in refs:
+                if not isinstance(ref,dict):continue
+                record_id=ref.get('record_id')
+                if ref.get('table')=='signal_objects':
+                    if isinstance(record_id,str):dependencies.add(record_id)
+                elif isinstance(record_id,str) and record_id in ids:
+                    direct=True
+                elif ref.get('table')==JOURNAL and isinstance(ref.get('id'),str) and ref['id'] in journal:
+                    direct=True
+            if direct:
+                discovered.add(row[0])
                 yield 'signal_objects',row[0]
+            elif dependencies:
+                pending[row[0]]=dependencies
+        # Keep only dependency edges, not every source payload in memory.
+        # Discovery is not authorization: qualification checks the entire chain.
+        for _ in range(16):
+            found={fid for fid,children in pending.items() if children & discovered}
+            if not found:break
+            for fid in sorted(found):
+                yield 'signal_objects',fid
+                pending.pop(fid)
+            discovered.update(found)
     goals=set()
     if {'goal','relationship'}&set(result_types) and 'user_goals' in tables:
         for record_id,message_id in conn.execute('SELECT goal_id,record_id FROM user_goals'):

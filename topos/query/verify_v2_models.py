@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import json
 import os
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
+
+from .. import local_serving
 
 DEFAULT_HOSTED_MODEL = "meta-llama/llama-3.3-70b-instruct"
 #: An optional second hosted judge: the owner's Topos Secure replacement for the unrouted gpt-oss-20b (OD-55,
@@ -156,6 +159,28 @@ class LocalChat:
 
     available = True
 
+    def resident(self, timeout: float = 2.0) -> bool:
+        """Whether the Ollama server has this model loaded right now (``/api/ps``). Raises ``ModelUnavailable`` when the
+        server cannot say."""
+        try:
+            with urllib.request.urlopen(self._base + "/api/ps", timeout=timeout) as resp:
+                listed = json.loads(resp.read()).get("models") or []
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError, AttributeError) as exc:
+            raise ModelUnavailable(type(exc).__name__) from None
+        wanted = {self.model, self.model if ":" in self.model else self.model + ":latest"}
+        return any(isinstance(m, dict) and (m.get("name") in wanted or m.get("model") in wanted) for m in listed)
+
+    def warm(self, timeout: float, keep_alive: str = "10m") -> None:
+        """Load this model and keep it loaded a while: Ollama loads a model for a generate call with no prompt and
+        answers once it is ready. Raises ``ModelUnavailable`` like a chat call."""
+        # At the serving context, so the chat calls that follow find the model loaded as they ask for it.
+        started = time.monotonic()
+        try:
+            with local_serving.request({"model": self.model, "keep_alive": keep_alive}, limit=timeout) as body:
+                _post_json(self._base + "/api/generate", body, {}, timeout - (time.monotonic() - started))
+        except local_serving.HoldExpired:  # the node held it until the deadline and sent nothing
+            raise ModelUnavailable("deadline") from None
+
     def __call__(self, system: str, user: str, schema: Dict[str, Any], timeout: float, usage: Usage) -> Dict[str, Any]:
         # Kept questions Wave 2 (OFF2N): on a background path (the owner's inbound truth lane runs as a pipeline job,
         # marked background) the local model host goes to a share's answer job and, under the yield rule, the owner's
@@ -170,7 +195,13 @@ class LocalChat:
         cap = getattr(schema, "max_tokens", None)
         if cap:
             body["options"]["num_predict"] = int(cap)
-        reply = _post_json(self._base + "/api/chat", body, {}, timeout)
+        # Held by the node at most what is left of the deadline, and the time held comes off the request's own.
+        started = time.monotonic()
+        try:
+            with local_serving.request(body, limit=timeout) as body:
+                reply = _post_json(self._base + "/api/chat", body, {}, timeout - (time.monotonic() - started))
+        except local_serving.HoldExpired:  # the node held it until the deadline and sent nothing
+            raise ModelUnavailable("deadline") from None
         usage.add(reply.get("prompt_eval_count"), reply.get("eval_count"))
         try:
             return _parse(reply["message"]["content"])

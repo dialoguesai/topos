@@ -1,5 +1,68 @@
 {
   "$defs": {
+    "ExpandedFacts": {
+      "additionalProperties": false,
+      "properties": {
+        "assertions": {
+          "items": {
+            "enum": [
+              "owner_stated",
+              "inferred"
+            ],
+            "type": "string"
+          },
+          "maxItems": 2,
+          "minItems": 1,
+          "title": "Assertions",
+          "type": "array"
+        },
+        "catalog_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Catalog Digest",
+          "type": "string"
+        },
+        "excluded_fact_ids": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 500,
+          "title": "Excluded Fact Ids",
+          "type": "array"
+        },
+        "ontologies": {
+          "items": {
+            "$ref": "#/$defs/OntologySelection"
+          },
+          "maxItems": 50,
+          "minItems": 1,
+          "title": "Ontologies",
+          "type": "array"
+        },
+        "version": {
+          "const": "selective-facts/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "vocabulary": {
+          "const": "fact-ontology-vocabulary/v2",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "vocabulary",
+        "catalog_digest",
+        "ontologies",
+        "assertions",
+        "excluded_fact_ids"
+      ],
+      "title": "ExpandedFacts",
+      "type": "object"
+    },
     "OntologySelection": {
       "additionalProperties": false,
       "properties": {
@@ -208,13 +271,28 @@
     "selective_facts": {
       "anyOf": [
         {
-          "$ref": "#/$defs/SelectiveFacts"
+          "discriminator": {
+            "mapping": {
+              "selective-facts/v1": "#/$defs/SelectiveFacts",
+              "selective-facts/v2": "#/$defs/ExpandedFacts"
+            },
+            "propertyName": "version"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/SelectiveFacts"
+            },
+            {
+              "$ref": "#/$defs/ExpandedFacts"
+            }
+          ]
         },
         {
           "type": "null"
         }
       ],
-      "default": null
+      "default": null,
+      "title": "Selective Facts"
     },
     "tables": {
       "items": {

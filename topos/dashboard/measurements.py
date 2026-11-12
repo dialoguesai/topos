@@ -3,6 +3,7 @@ from datetime import date, datetime, timedelta, timezone
 import math
 import re
 import sqlite3
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..storage.db.migrations.dashboard_measurements_v1 import INBOUND_TABLES
 
@@ -47,6 +48,36 @@ def _parse_utc(value):
     return parsed.astimezone(timezone.utc)
 
 
+_ZONE_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-]+){0,2}$")
+
+
+def resolve_zone(name):
+    """The zone days are cut in, and the name the response reports for it.
+
+    Days end at the owner's local midnight when the caller names an IANA zone this
+    node can load (DST days are 23 or 25 hours). Anything else keeps UTC days and
+    says so, so a client never labels UTC buckets as local ones.
+    """
+    if isinstance(name, str) and name != "UTC" and len(name) <= 64 and _ZONE_NAME.fullmatch(name):
+        try:
+            return ZoneInfo(name), name
+        except (ZoneInfoNotFoundError, ValueError, OSError):
+            pass
+    return timezone.utc, "UTC"
+
+
+def _day(stamp, zone):
+    return stamp.astimezone(zone).date()
+
+
+def _day_key(text, zone):
+    """Calendar day of a stored UTC instant. UTC days keep the stored date prefix."""
+    if zone is timezone.utc:
+        return text[:10]
+    stamp = _parse_utc(text)
+    return _day(stamp, zone).isoformat() if stamp else None
+
+
 def _request_buckets(first, last):
     buckets, day = [], first
     while day < last:
@@ -55,7 +86,7 @@ def _request_buckets(first, last):
     return {"population": "mcp_tool_calls", "measured_since": None, "buckets": buckets}
 
 
-def mcp_request_activity(earliest, timestamps, start: str, end: str, *, now=None):
+def mcp_request_activity(earliest, timestamps, start: str, end: str, *, now=None, zone=timezone.utc):
     """Recorded MCP tool calls only. Days outside the retained log stay unavailable.
 
     A retained day with no rows is zero tool calls, not proof that TOPOS was unused.
@@ -80,9 +111,10 @@ def mcp_request_activity(earliest, timestamps, start: str, end: str, *, now=None
         return unavailable
     counted = {}
     for stamp in parsed:
-        blocks = counted.setdefault(stamp.date(), [0, 0, 0, 0, 0, 0])
-        blocks[stamp.hour // 4] += 1
-    since_day, as_of_day = since.date(), now.date()
+        local = stamp.astimezone(zone)
+        blocks = counted.setdefault(local.date(), [0, 0, 0, 0, 0, 0])
+        blocks[local.hour // 4] += 1
+    since_day, as_of_day = _day(since, zone), _day(now, zone)
     buckets = []
     day = first
     while day < last:
@@ -132,7 +164,7 @@ def _window(start, end, now):
     return first, last, (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
 
 
-def mcp_caller_activity(earliest, rows, start: str, end: str, *, now=None):
+def mcp_caller_activity(earliest, rows, start: str, end: str, *, now=None, zone=timezone.utc):
     """Who made the recorded MCP tool calls. Same population as the request chart."""
     first, last, now = _window(start, end, now)
     blank = {"count": None, "coverage": "unavailable", "callers": None, "calls": None}
@@ -150,8 +182,8 @@ def mcp_caller_activity(earliest, rows, start: str, end: str, *, now=None):
         return {"population": "mcp_tool_calls", "measured_since": None, "buckets": _dated(first, last, blank)}
     by_day = {}
     for item in parsed:
-        by_day.setdefault(item[0].date(), []).append(item)
-    since_day, as_of_day = since.date(), now.date()
+        by_day.setdefault(_day(item[0], zone), []).append(item)
+    since_day, as_of_day = _day(since, zone), _day(now, zone)
     buckets = []
     day = first
     while day < last:
@@ -172,7 +204,7 @@ def mcp_caller_activity(earliest, rows, start: str, end: str, *, now=None):
     return {"population": "mcp_tool_calls", "measured_since": _iso(since), "buckets": buckets}
 
 
-def routine_run_activity(earliest, rows, start: str, end: str, *, now=None):
+def routine_run_activity(earliest, rows, start: str, end: str, *, now=None, zone=timezone.utc):
     """Routine runs by the time the run row was last updated. Not UMA routine-access counts."""
     first, last, now = _window(start, end, now)
     blank = {"count": None, "coverage": "unavailable", "statuses": None}
@@ -190,8 +222,8 @@ def routine_run_activity(earliest, rows, start: str, end: str, *, now=None):
         return {"population": "routine_runs", "measured_since": None, "buckets": _dated(first, last, blank)}
     by_day = {}
     for stamp, status in parsed:
-        by_day.setdefault(stamp.date(), []).append(status)
-    since_day, as_of_day = since.date(), now.date()
+        by_day.setdefault(_day(stamp, zone), []).append(status)
+    since_day, as_of_day = _day(since, zone), _day(now, zone)
     buckets = []
     day = first
     while day < last:
@@ -218,7 +250,7 @@ def _p50(values):
     return ordered[rank - 1]
 
 
-def serve_activity(earliest, rows, start: str, end: str, *, now=None):
+def serve_activity(earliest, rows, start: str, end: str, *, now=None, zone=timezone.utc):
     """Query serve durations. Days before the first span stay unavailable.
 
     A covered day with no spans of a kind is a measured empty set: count zero and a null percentile.
@@ -245,8 +277,8 @@ def serve_activity(earliest, rows, start: str, end: str, *, now=None):
         return closed
     by_day = {}
     for item in parsed:
-        by_day.setdefault(item[0].date(), []).append(item)
-    since_day, as_of_day = since.date(), now.date()
+        by_day.setdefault(_day(item[0], zone), []).append(item)
+    since_day, as_of_day = _day(since, zone), _day(now, zone)
     buckets = []
     day = first
     while day < last:
@@ -277,12 +309,41 @@ def _columns(conn, table):
     return {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
-def daily_measurements(conn, start: str, end: str, *, now=None):
+def verification_activity(earliest, rows, start, end, *, now=None, zone=timezone.utc):
+    """Answered verification calls, with unknown legacy outcomes separate from abstentions."""
+    from .verification import OUTCOMES
+
+    activity = mcp_request_activity(earliest, [at for at, _ in rows], start, end, now=now, zone=zone)
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    grouped = {}
+    for at, outcome in rows:
+        stamp = _parse_utc(at)
+        if stamp is not None and stamp <= now:
+            counts = grouped.setdefault(_day(stamp, zone).isoformat(), dict.fromkeys((*OUTCOMES, "unavailable"), 0))
+            counts[outcome if outcome in OUTCOMES else "unavailable"] += 1
+    return {"population": "answered_verify_claim_calls", "measured_since": activity["measured_since"],
+            "buckets": [{"date": b["date"], "count": b["count"], "coverage": b["coverage"],
+                         "outcomes": (grouped.get(b["date"], dict.fromkeys((*OUTCOMES, "unavailable"), 0))
+                                      if b["count"] is not None else None)} for b in activity["buckets"]]}
+
+
+def daily_measurements(conn, start: str, end: str, *, now=None, time_zone=None):
+    """Daily buckets from ``start`` to the exclusive ``end``, cut at midnight in ``time_zone``.
+
+    Instants in the response (``as_of``, ``measured_since``, call times) stay UTC.
+    ``time_zone`` in the response names the zone the buckets were actually cut in.
+    """
     first, last = date.fromisoformat(start), date.fromisoformat(end)
     if first.isoformat() != start or last.isoformat() != end or not 0 < (last-first).days <= 366:
         raise ValueError("Expected an exclusive end and a range of 1–366 UTC days")
+    zone, zone_name = resolve_zone(time_zone)
     now = now or datetime.now(timezone.utc)
     as_of = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    # Local days straddle UTC dates. Fetch whole UTC dates that cover every offset
+    # (−12h to +14h); rows outside the requested local days fall out when bucketed.
+    utc = zone is timezone.utc
+    fetch_start = start if utc else (first - timedelta(days=1)).isoformat()
+    fetch_end = end if utc else (last + timedelta(days=1)).isoformat()
     if conn is None:
         return {"available": False}
     try:
@@ -290,33 +351,40 @@ def daily_measurements(conn, start: str, end: str, *, now=None):
         conn.execute("SAVEPOINT dashboard_read")
         coverage = dict(conn.execute("SELECT family, measured_since FROM dashboard_measurement_coverage"))
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        from .coherence import read_claims, coherence_series
+        coherence_rows = read_claims(conn)
         triggers = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger'")}
-        rows = conn.execute("""SELECT substr(recorded_at,1,10), metric, source_id, count(*)
+        # Every zone in use is a whole number of minutes from UTC, so a minute never
+        # straddles a local midnight.
+        rows = conn.execute(f"""SELECT substr(recorded_at,1,{10 if utc else 16}), metric, source_id, count(*)
             FROM dashboard_measurement_items WHERE recorded_at >= ? AND recorded_at < ?
-            AND recorded_at <= ? GROUP BY 1,2,3""", (start, end, as_of)).fetchall()
+            AND recorded_at <= ? GROUP BY 1,2,3""", (fetch_start, fetch_end, as_of)).fetchall()
         earliest, request_rows, call_rows = None, [], []
+        verification_rows = []
         routine_earliest, routine_rows = None, []
         serve_earliest, serve_rows = None, []
         if "mcp_request_log" in tables and "requested_at" in _columns(conn, "mcp_request_log"):
             mcp_columns = _columns(conn, "mcp_request_log")
-            selected = ["requested_at"] + [name for name in ("tool_name", "source", "access_context") if name in mcp_columns]
+            selected = ["requested_at"] + [name for name in ("tool_name", "source", "access_context", "verification_outcome") if name in mcp_columns]
             earliest = conn.execute("SELECT MIN(requested_at) FROM mcp_request_log").fetchone()[0]
             for record in conn.execute(
                 f"SELECT {', '.join(selected)} FROM mcp_request_log WHERE requested_at >= ? AND requested_at < ?",
-                (start, end)):
+                (fetch_start, fetch_end)):
                 values = dict(zip(selected, record))
                 request_rows.append(values["requested_at"])
+                if values.get("tool_name") == "verify_claim":
+                    verification_rows.append((values["requested_at"], values.get("verification_outcome")))
                 call_rows.append((values["requested_at"], values.get("tool_name"), values.get("source"), values.get("access_context")))
         if "routine_runs" in tables and {"updated_at", "status"} <= _columns(conn, "routine_runs"):
             routine_earliest = conn.execute("SELECT MIN(updated_at) FROM routine_runs").fetchone()[0]
             routine_rows = conn.execute(
                 "SELECT updated_at, status FROM routine_runs WHERE updated_at >= ? AND updated_at < ?",
-                (start, end)).fetchall()
+                (fetch_start, fetch_end)).fetchall()
         if "serve_spans" in tables and {"recorded_at", "kind", "duration_ms", "ttfb_ms"} <= _columns(conn, "serve_spans"):
             serve_earliest = conn.execute("SELECT MIN(recorded_at) FROM serve_spans").fetchone()[0]
             serve_rows = conn.execute(
                 "SELECT recorded_at, kind, duration_ms, ttfb_ms FROM serve_spans WHERE recorded_at >= ? AND recorded_at < ?",
-                (start, end)).fetchall()
+                (fetch_start, fetch_end)).fetchall()
     except sqlite3.OperationalError:
         return {"available": False}
     finally:
@@ -324,26 +392,38 @@ def daily_measurements(conn, start: str, end: str, *, now=None):
             conn.execute("RELEASE dashboard_read")
         except sqlite3.OperationalError:
             pass
+    counted, unplaced = {}, set()
+    for stamp, metric, source_id, n in rows:
+        key = _day_key(stamp + ("" if utc else "Z"), zone)
+        if key is None:
+            unplaced.add(metric)
+            continue
+        per_source = counted.setdefault((key, metric), {})
+        per_source[source_id] = per_source.get(source_id, 0) + n
+    as_of_key = _day_key(as_of, zone)
     metrics = {}
     for metric, families in (("inbound_records", list(INBOUND_TABLES)), ("new_facts", ["signal_objects"])):
         present = [t for t in families if t in tables]
-        ready = bool(present) and all(t in coverage and f"dashboard_measure_{t}" in triggers and f"dashboard_measure_{t}_update" in triggers for t in present)
+        ready = bool(present) and metric not in unplaced and all(t in coverage and f"dashboard_measure_{t}" in triggers and f"dashboard_measure_{t}_update" in triggers for t in present)
         since = max(coverage[t] for t in present) if ready else None
+        since_key = _day_key(since, zone) if since else None
         buckets = []
         day = first
         while day < last:
             key = day.isoformat()
-            measured = bool(since and key >= since[:10] and key <= as_of[:10])
-            sources = [{"source_id": r[2], "count": r[3]} for r in rows if r[0] == key and r[1] == metric] if measured else []
+            measured = bool(since_key and key >= since_key and key <= as_of_key)
+            sources = [{"source_id": source_id, "count": n} for source_id, n in sorted(counted.get((key, metric), {}).items())] if measured else []
             buckets.append({"date": key, "count": sum(s["count"] for s in sources) if measured else None,
-                            "coverage": ("partial" if key == since[:10] or key == as_of[:10] else "complete") if measured else "unavailable",
+                            "coverage": ("partial" if key == since_key or key == as_of_key else "complete") if measured else "unavailable",
                             "sources": sources})
             day += timedelta(days=1)
-        metrics[metric] = {"measured_since": since, "buckets": buckets}
-    requests = mcp_request_activity(earliest, request_rows, start, end, now=now)
-    callers = mcp_caller_activity(earliest, call_rows, start, end, now=now)
-    routines = routine_run_activity(routine_earliest, routine_rows, start, end, now=now)
-    serve = serve_activity(serve_earliest, serve_rows, start, end, now=now)
+        metrics[metric] = {"measured_since": since if since_key else None, "buckets": buckets}
+    requests = mcp_request_activity(earliest, request_rows, start, end, now=now, zone=zone)
+    callers = mcp_caller_activity(earliest, call_rows, start, end, now=now, zone=zone)
+    verification = verification_activity(earliest, verification_rows, start, end, now=now, zone=zone)
+    routines = routine_run_activity(routine_earliest, routine_rows, start, end, now=now, zone=zone)
+    serve = serve_activity(serve_earliest, serve_rows, start, end, now=now, zone=zone)
     return {"available": True, "schema_version": 1, "scope": "owner_node", "period_start": start,
-            "period_end": end, "as_of": as_of, "metrics": metrics, "requests": requests,
-            "callers": callers, "routine_runs": routines, "serve": serve, "inbound_bytes": None}
+            "period_end": end, "time_zone": zone_name, "as_of": as_of, "metrics": metrics, "requests": requests,
+            "callers": callers, "verify_claim": verification, "routine_runs": routines, "serve": serve, "inbound_bytes": None,
+            "self_coherence": coherence_series(coherence_rows, start, end, now=now, zone=zone)}

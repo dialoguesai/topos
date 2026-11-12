@@ -1,17 +1,17 @@
-"""``reflection_facts``: the one read an app makes for moments (GRANT_DECISIONS G2, DISCLOSURE_RULES DR-61).
+"""``pack_facts``: an app's read of the facts in the packs its grant names (DISCLOSURE_RULES DR-61, DR-66).
 
-The owner ruled on 24 Oct 2026 that the node is only queryable by the Moments app through a grant, and that Moments
-finds the conversations worth having and composes everything about them. This module is the node's whole part of that:
-the ACTIVE facts of the REFLECTION PACKS the owner switched on (``pack_registry.enabled``), each with its structured
-value, the owner's own words and where it came from. No candidate, no ranking, no prompt, no write.
+The owner ruled on 24 Oct 2026 that the node is queried by an app through a grant, and that the app composes everything.
+This module is the node's whole part of that: the ACTIVE facts of the packs the owner switched on
+(``pack_registry.enabled``), each with its structured value, the owner's own words and where it came from. No candidate,
+no ranking, no prompt, no write.
 
-Who may read it (``core/handlers/query.py``): the owner's app, and an owner agent on the socket whose type list names
-this type (``mcp_clients.APP_AGENT_TYPES``: Moments, G1). Every other class is refused before the payload is read.
+Who may read it (``core/handlers/query.py``): the owner's app, and an owner agent on the socket whose grant names packs
+(``mcp_clients.AppGrant``), for those packs. Every other class is refused before the payload is read.
 
 An owner agent gets the shape below with every filter applied. The owner's app gets the same shape with no Off-limits
 and no special-class filter, as on every owner read (owner questions read with full visibility):
 
-* only active facts of the reflection packs, and only of packs the owner enabled;
+* only active facts of the packs asked for, and only of packs the owner enabled;
 * special-class facts held back: a fact whose pack or predicate is ``special`` by the pack definition, whose stamp
   says so, or whose predicate the current pack no longer declares (``narrative.self``'s ``self.attribution_pattern``
   today). No switch opens special-class kinds to an agent yet (``query/packet_resolution``);
@@ -36,19 +36,17 @@ from datetime import date, datetime, timezone
 from functools import lru_cache
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-VERSION = "reflection_facts/v1"
+VERSION = "pack_facts/v1"
 
-#: The packs Moments reads. The two ``moments.*`` packs are the program's; the rest were bundled already.
-REFLECTION_PACKS: Tuple[str, ...] = ("moments.joy", "moments.tension", "narrative.self", "life.events",
-                                     "aspirations.goals", "obligations.commitments", "relationships.social")
 DEFAULT_LIMIT = 500
+MAX_PACKS = 100
 MAX_LIMIT = 1000
 MAX_FACT_IDS = 100
 MAX_SOURCES = 8
 EXCERPT_CHARS = 400
 QUOTE_CHARS = 200
 #: The one refusal code for a payload this read does not take; never the input.
-INVALID = "invalid_reflection_facts_request"
+INVALID = "invalid_pack_facts_request"
 _PAYLOAD_KEYS = frozenset({"packs", "fact_ids", "since", "limit", "include_excerpts"})
 #: How a value names the owner. Shown as "you", never counted as a person.
 _SELF_WORDS = frozenset({"you", "me", "self", "owner", "myself"})
@@ -67,7 +65,7 @@ _LEAK = re.compile(r"(?:\b(?:id|key):\S+|\bent_[0-9a-f]{6,}\b|\b[0-9a-f]{8}-[0-9
                    r"|[^@\s]+@[^@\s]+\.[a-z]{2,})", re.I)
 
 
-class ReflectionFactsRequestError(ValueError):
+class PackFactsRequestError(ValueError):
     """A payload this read refuses; ``str(exc)`` is always :data:`INVALID`."""
 
 
@@ -92,16 +90,19 @@ def _day(value: Any) -> str:
 
 
 def enabled_packs(conn: sqlite3.Connection) -> List[str]:
-    """The reflection packs the owner switched on, in catalog order. No registry table means none on."""
+    """The packs the owner switched on. No registry table means none on."""
     if not _present(conn, "pack_registry"):
         return []
-    on = {str(r[0]) for r in conn.execute("SELECT pack_id FROM pack_registry WHERE enabled=1").fetchall()}
-    return [p for p in REFLECTION_PACKS if p in on]
+    return sorted(str(r[0]) for r in conn.execute("SELECT pack_id FROM pack_registry WHERE enabled=1").fetchall())
 
 
-def pack_status(conn: sqlite3.Connection) -> Dict[str, List[str]]:
+def pack_status(conn: sqlite3.Connection, granted: Optional[Tuple[str, ...]] = None) -> Dict[str, List[str]]:
+    """Which packs this reader can use now, and which its grant names that are switched off. ``granted`` None: the owner's
+    own read, every pack that is on."""
     on = enabled_packs(conn)
-    return {"packs_enabled": on, "packs_missing": [p for p in REFLECTION_PACKS if p not in on]}
+    if granted is None:
+        return {"packs_enabled": on, "packs_missing": []}
+    return {"packs_enabled": [p for p in granted if p in on], "packs_missing": [p for p in granted if p not in on]}
 
 
 # --- people --------------------------------------------------------------------------------------------------------------
@@ -232,35 +233,36 @@ def _special(definition: Any, predicate: str, payload: Dict[str, Any]) -> bool:
 
 
 # --- the request ---------------------------------------------------------------------------------------------------------
-def parse_request(payload: Any) -> Dict[str, Any]:
+def parse_request(payload: Any, granted: Optional[Tuple[str, ...]] = None) -> Dict[str, Any]:
     """``{"packs"?: [pack ids], "fact_ids"?: [ids], "since"?: "YYYY-MM-DD", "limit"?: 1..1000,
-    "include_excerpts"?: bool}`` -> the request, or :class:`ReflectionFactsRequestError`."""
+    "include_excerpts"?: bool}`` -> the request, or :class:`PackFactsRequestError`. A pack outside ``granted`` is refused
+    (None: the owner's own read, any pack)."""
     if payload is None:
         payload = {}
     if not isinstance(payload, dict) or not set(payload) <= _PAYLOAD_KEYS:
-        raise ReflectionFactsRequestError(INVALID)
+        raise PackFactsRequestError(INVALID)
     packs = payload.get("packs")
-    if packs is not None and (not isinstance(packs, list) or not packs or len(packs) > len(REFLECTION_PACKS)
-                              or not all(isinstance(p, str) and p in REFLECTION_PACKS for p in packs)):
-        raise ReflectionFactsRequestError(INVALID)
+    if packs is not None and (not isinstance(packs, list) or not packs or len(packs) > MAX_PACKS
+                              or not all(isinstance(p, str) and (granted is None or p in granted) for p in packs)):
+        raise PackFactsRequestError(INVALID)
     fact_ids = payload.get("fact_ids")
     if fact_ids is not None and (not isinstance(fact_ids, list) or not fact_ids or len(fact_ids) > MAX_FACT_IDS
                                  or not all(isinstance(f, str) and 0 < len(f) <= 64 for f in fact_ids)):
-        raise ReflectionFactsRequestError(INVALID)
+        raise PackFactsRequestError(INVALID)
     since = payload.get("since")
     if since is not None:
         if not isinstance(since, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", since):
-            raise ReflectionFactsRequestError(INVALID)
+            raise PackFactsRequestError(INVALID)
         try:
             date.fromisoformat(since)
         except ValueError:
-            raise ReflectionFactsRequestError(INVALID) from None
+            raise PackFactsRequestError(INVALID) from None
     limit = payload.get("limit", DEFAULT_LIMIT)
     if type(limit) is not int or not 1 <= limit <= MAX_LIMIT:
-        raise ReflectionFactsRequestError(INVALID)
+        raise PackFactsRequestError(INVALID)
     include = payload.get("include_excerpts", False)
     if type(include) is not bool:
-        raise ReflectionFactsRequestError(INVALID)
+        raise PackFactsRequestError(INVALID)
     return {"packs": list(packs) if packs else None, "fact_ids": list(dict.fromkeys(fact_ids)) if fact_ids else None,
             "since": since, "limit": limit, "include_excerpts": include}
 
@@ -384,13 +386,13 @@ def _withheld(guard: Any, payload: Dict[str, Any], ids: List[str], raws: List[st
 
 # --- the read ------------------------------------------------------------------------------------------------------------
 def read(conn: sqlite3.Connection, request: Dict[str, Any], *, agent: bool, guard: Any = None,
-         now: Optional[datetime] = None) -> Dict[str, Any]:
+         granted: Optional[Tuple[str, ...]] = None, now: Optional[datetime] = None) -> Dict[str, Any]:
     """The facts for one parsed request. ``agent`` applies the special-class hold-back and Off-limits through
     ``guard`` (required for an agent); the owner's app reads unfiltered. Raises when the pack definitions cannot be
     loaded or the protected-record lineage cannot be read (the handler answers a fixed code)."""
     if agent and guard is None:
         raise ValueError("an agent read needs its Off-limits guard")
-    status = pack_status(conn)
+    status = pack_status(conn, granted)
     wanted = request.get("packs")
     packs = [p for p in status["packs_enabled"] if wanted is None or p in wanted]
     result: Dict[str, Any] = {"version": VERSION, **status, "facts": [], "truncated": False,

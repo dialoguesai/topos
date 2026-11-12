@@ -328,10 +328,9 @@ async def get_job_progress(job_id: str):
     poll route is how a transient miss turns into an unreadable failure at the
     edge.
     """
-    conn = get_db_connection()
-    if conn is None:
+    if get_db_connection() is None:
         return {"status": "error", "error": "Database connection not available"}
-    job = await asyncio.to_thread(get_job, conn, str(job_id))
+    job = await asyncio.to_thread(lambda: get_job(get_db_connection(), str(job_id)))
     if not job:
         return {"status": "error", "error": f"Job {job_id} not found"}
     return {"status": "ok", **_progress_dict(job)}

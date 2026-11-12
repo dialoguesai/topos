@@ -47,11 +47,16 @@ class PackPrefilter:
         self.hits = 0
         self.misses = 0
 
-    def passes(self, text: str) -> bool:
-        low = (text or "").lower()
+    def matches(self, low: str, tokens: Set[str]) -> bool:
+        """The rule itself, for a caller that already lowered and tokenised the text (a count over
+        many packs tokenises each record once). Counts nothing."""
         # phrase exemplars are the strongest signal; one DISTINCTIVE unigram is enough
         # (recall over precision: a miss is silent sparsity, an extra hit is one LLM call)
-        if any(e in low for e in self.exemplars) or (_tokens(low) & self.lexicon):
+        return any(e in low for e in self.exemplars) or bool(tokens & self.lexicon)
+
+    def passes(self, text: str) -> bool:
+        low = (text or "").lower()
+        if self.matches(low, _tokens(low)):
             self.hits += 1
             return True
         self.misses += 1

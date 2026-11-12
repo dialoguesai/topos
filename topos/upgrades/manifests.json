@@ -1304,6 +1304,194 @@
       ]
     },
     {
+      "version": "1.5.29",
+      "summary": "The truth lane's lean v3: owner-only truth tables by name, one card per claim with the reading kept and polarity read, and plans that wait for their moment; nothing to run on upgrade (columns are added at runtime).",
+      "steps": [],
+      "notes": []
+    },
+    {
+      "version": "1.5.30",
+      "summary": "Hotfix: the storage snapshot behind get_device_info walks dbstat once at a time, behind the caller, cached 15 minutes; nothing to run on upgrade.",
+      "steps": [],
+      "notes": []
+    },
+    {
+      "version": "1.5.31",
+      "summary": "A rating-candidates door for the calibration ratings card (60 ms instead of the whole person graph), the relationship reads off the event loop, person-graph skip flags, and NER/embedding models loaded from the local cache on a loader thread; nothing to run on upgrade.",
+      "steps": [],
+      "notes": []
+    },
+    {
+      "version": "1.5.32",
+      "summary": "The truth lane checks back as far as the owner sets (window_days, for backfill); every answered verify_claim, from either door, writes one request-log row with its outcome for the Home card; and a claim is read on the day it was said and dated only by its words (both switches on).",
+      "steps": [],
+      "notes": []
+    },
+    {
+      "version": "1.5.33",
+      "summary": "A verify_claim answer no longer waits for its usage row: both doors write the row behind the answer, one at a time, so a held write gate cannot push a 30 s check past its deadline.",
+      "steps": [],
+      "notes": []
+    },
+    {
+      "version": "1.5.34",
+      "summary": "verify_claim: fun mode is optional and a request naming no mode has none (DR-64); Off-limits now applies to the facts it reads. No derived data changes.",
+      "steps": [],
+      "notes": []
+    },
+    {
+      "version": "1.5.35",
+      "summary": "Keep the node responsive during standard claim verification by moving its blocking database/inference work off the app event loop.",
+      "steps": [],
+      "notes": [
+        "[O] Code-only worker isolation. No schema change, reprocessing, or change to local/remote inference routing."
+      ]
+    },
+    {
+      "version": "1.5.36",
+      "summary": "Resilience foundations: explicit compute availability, bounded Engine HTTP admission, verification timing, opt-in telemetry and outbox retry preservation.",
+      "steps": [],
+      "notes": [
+        "Code and protocol changes only. No schema migration, reprocessing, model change or automatic telemetry export.",
+        "Engine HTTP limits do not govern every GPU caller. Experimental provider gateway excluded."
+      ]
+    },
+    {
+      "version": "1.5.37",
+      "summary": "Bound verification and permissioned-answer request lifetimes, retain transport resource ownership, and classify shared-answer failures.",
+      "steps": [],
+      "notes": [
+        "Code-only changes. No schema migration, reprocessing, model change or new automatic telemetry export.",
+        "Database/compute separation is preserved; remote server-side deadline enforcement requires an updated compute host.",
+        "Socket cancellation is not proof of provider/GPU drain. Global provider admission and UI work are excluded."
+      ]
+    },
+    {
+      "version": "1.5.38",
+      "summary": "Raise the normal local routine allowance to 100 and add explicit development-only unlimited daily runs with observable policy.",
+      "steps": [],
+      "notes": [
+        "Code and additive status-contract changes only. No migration, reprocessing, dependency or model change.",
+        "Development unlimited mode defaults off; it changes the daily allowance only, preserving other admission and delivery safeguards.",
+        "Database/compute separation is unchanged; no capacity or mixed-workload speedup is established by this release."
+      ]
+    },
+    {
+      "version": "1.5.39",
+      "summary": "Any app can hold an owner grant with its reads stored on the enrolment, pack_facts replaces reflection_facts, message_context is added, the node's app-specific doors are removed, and verify_claim logs its audit line on every exit.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change. agent_app_grants is created on first use.",
+        "An app enrolled before this release has no grant and reads nothing until it runs `topos-node agents add` again.",
+        "reflection_candidates and reflection_labels stay on disk, untouched and no longer written; a queued reflection_sweep job is never claimed.",
+        "None of the 1.5.38 stress-test fixes (single model profile, two Ollama slots, background yielding, batched judge) are in this release."
+      ]
+    },
+    {
+      "version": "1.5.40",
+      "summary": "The node schedules its own local model requests: one context per model, at most one request per model at a time, the owner's live work first, and an idle model unloaded when a request waits behind it.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "A routine's model calls can wait longer while the owner's live chat or an answer is queued on the same model; what a routine computes is unchanged.",
+        "TOPOS_LOCAL_MODEL_CONTEXT, TOPOS_LOCAL_MODEL_SLOTS and TOPOS_LOCAL_MODEL_RELEASE_AFTER_S tune it; 0 turns each off."
+      ]
+    },
+    {
+      "version": "1.5.41",
+      "summary": "Topos Facts v0.1 is available as an opt-in Facts extraction option; local models start at the smallest of three contexts that fits the request and move up only; and a model whose runner keeps growing is unloaded once its current request ends, so it reloads at its load size.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change by default.",
+        "Picking topos_facts in Settings downloads two pinned encoders (about 1.7 GB) on first use; if they cannot load, the batch defers and nothing is marked done. Nothing already processed is redone.",
+        "A grown model's new requests wait while its current request finishes, at most 120 s, before it is unloaded and reloaded.",
+        "TOPOS_LOCAL_MODEL_CONTEXT_STEPS and TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB tune the model changes; 0 turns each off."
+      ]
+    },
+    {
+      "version": "1.5.42",
+      "summary": "Writes no longer stall for minutes behind the topic-cluster cleanup; the people graph rebuilds at most every 2 hours and scores only new or changed goals; the owner's requests run on their own workers and index rebuilds yield to them; share-index builds are about a third faster; a restart no longer runs the interest refresh at once; Essentials days can end at the owner's local midnight; commitments in direct messages know who they were made to; and one unknown word no longer empties a summary answer.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "The first graph rebuild after the upgrade fills the goal-pair cache and takes as long as before (about 13 minutes on the owner's node); later rebuilds score only new or changed goals. The two cache tables (graph_goal_pair_items, graph_goal_pairs) hold hashes, never goal text.",
+        "An automatic graph rebuild waits until 2 hours after the last one ended, so an import inside that window derives against the last rebuild's graph. TOPOS_GRAPH_REFRESH_MIN_INTERVAL_S sets the interval (7200; 0 turns it off). The owner's own rebuild is never held.",
+        "TOPOS_OWNER_REQUEST_EXECUTOR=off and TOPOS_OWNER_REQUEST_PACING=off turn off the owner request workers and the rebuild yields; TOPOS_OWNER_REQUEST_WORKERS sets the workers (4)."
+      ]
+    },
+    {
+      "version": "1.5.43",
+      "summary": "A write that fails under the write gate now rolls back its transaction, so one failed query write can no longer hold SQLite's write lock and stop every other write on the node.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "A rolled-back write logs a [WRITE_GATE] warning with its call site and SQLite's message, which names the failed constraint and no row values."
+      ]
+    },
+    {
+      "version": "1.5.44",
+      "summary": "Work the node moves off its event loop now runs on that worker thread's own database connection, so a background query write can no longer share the loop's connection and fail or hold the write lock.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "Covers the query pipeline's offloaded reads and writes, 24 other off-loop routes, handlers and enrichment jobs, and the connection check every thread ran on the main thread's handle."
+      ]
+    },
+    {
+      "version": "1.5.45",
+      "summary": "A node with no account runs local-only and moves its rows to the account when one is connected later; a share index whose browsing interest drifted is narrowed to its other members instead of dropped; the owner's own mark on a claim they typed answers the next check of it; and the Topos Facts encoders stay resident between derivation batches without holding SQLite's write lock across model calls.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "Local-only mode starts when no TOPOS_KEY is set outside a cloud runtime; the first connection_info that reaches such a node moves every owner column, dataset_id prefix and raw-file folder to the account in one transaction and records the report under engine_config.rescope_report (owner socket: GET /api/local/owner/rescope-report).",
+        "DR-70 (TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS, on by default): drifted interest members join the withheld set and the index publishes without them; the switch off, an error in the decision, or members that cannot be told still drop the whole index.",
+        "The Topos Facts encoders are pinned outside the model cache's LRU budget for a run and released after TOPOS_FACTS_IDLE_SEC unused (default 300 s) by a timer, so an idle node holds no model; the per-pack pass commits before each model call."
+      ]
+    },
+    {
+      "version": "1.5.46",
+      "summary": "The browser extension can write into a node with no account with its own loopback key; topos-node import reaches the node's ingestion routes again; graph naming no longer holds SQLite's write lock across model calls; a local model request held past its caller's deadline is not sent; the owner socket keeps idle connections past a pooled client's expiry; and the local model watchdog unloads only models this node uses.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "Local pushers: `topos-node pushers add <app> --sources ... --origin chrome-extension://<id>` asks the owner once on a terminal and prints the app's key once; POST /sources/{source_id}/ingest/batch takes that key over loopback only, writes as the owner's capture app, refuses a source the owner did not name (403 source_not_allowed) and answers a repeated write_id with deduplicated: true.",
+        "The owner socket keeps an idle keep-alive connection 75 s (uds.KEEP_ALIVE_SECONDS); the TCP port keeps uvicorn's 5 s.",
+        "local_serving: a request the node held with under 0.5 s of its caller's limit left raises HoldExpired and is not sent (shell status not_sent); the growth recycle and the idle release act only on models this node has sent a request to since the host loaded them (shell status models_in_use)."
+      ]
+    },
+    {
+      "version": "1.5.47",
+      "summary": "topos-node packs list, backfill, status and stop read fact packs' history from a terminal: one yes on the terminal starts one run the node works through itself. A backfill can stop at a date, uses the facts extractor the owner picked, and no longer holds SQLite's write lock across model calls.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "`topos-node packs backfill (--pack ID ... | --all-enabled) [--since YYYY-MM-DD] [--limit N] [--until-done] [--detach]` prints the plan and asks [y/N] once on a terminal; without a terminal it exits 2 and sends nothing. POST /v1/signal/derivation/backfill/runs starts the run with a single-use owner confirmation, on the owner socket only (403 owner_confirmation_required otherwise, over TCP included); GET .../backfill/plan and GET .../backfill/runs/current are reads; POST .../backfill/runs/current/stop needs no confirmation.",
+        "One run at a time, in the node process only: a restart ends it and the same command resumes from derivation_progress. While a run works, the app's single-batch backfill answers 409 backfill_already_running.",
+        "A backfill (the app's button included) now takes the ingest job's route: Topos Facts reads the packs it knows when the owner picked it, the local extraction model reads the rest; a pick that cannot load defers the batch (503 topos_facts_unavailable) with nothing marked done."
+      ]
+    },
+    {
+      "version": "1.5.48",
+      "summary": "The end of a fact-pack backfill batch no longer stalls the node's other writers: the batch's run stamp is a gated, committed write before the embedding step, where it used to hold SQLite's write lock through that step and then wait for the write gate.",
+      "steps": [],
+      "notes": [
+        "No migration, reprocessing, dependency or model change.",
+        "On 1.5.47 a backfill batch's tail stamped pack_registry outside the write gate, left the stamp uncommitted, embedded what the batch wrote, and only then asked for the gate. A gated writer that started in that window waited out SQLite's busy retries (about 156 s) and failed, the next one did the same, and the backfill could not commit until it got the gate: every other writer on the node waited 312 to 343 s at 5 of 9 batch ends on one live node.",
+        "The batch also commits its counters before handing an accepted assertion to the fact writer, which takes the gate when it queues a conflict.",
+        "A stop still runs the stamp and the embedding step; an embedding failure is still reported in the batch's counts and never raised."
+      ]
+    },
+    {
+      "version": "1.5.49",
+      "summary": "Explicit grants for all bundled fact categories, optional owner-enabled automatic fact-pack catch-up, and provisional owner-only literal-claim coherence measurements. No setting or grant is widened automatically.",
+      "steps": [],
+      "notes": [
+        "[P] [O] All 30 bundled categories are available through explicitly selected v2 grants. Existing v1 consent is unchanged; no data reprocessing or automatic grant migration. Permission indexes rebuild on the changed implementation revision.",
+        "[O] Optional automatic catch-up keeps enabled packs current over recent records. Off by default; requires explicit owner activation. No automatic reprocessing, model-policy change, or job-output invalidation.",
+        "[O] The additive owner dashboard coherence metric reads retained claims and reports provisional literal agreement and coverage. No schema migration, model call, label write or verification behavior change. Missing comparisons remain null."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

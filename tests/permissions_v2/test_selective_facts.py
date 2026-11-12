@@ -121,7 +121,8 @@ def test_supported_pack_project_requires_exact_version_and_native_source(legacy,
 
 
 def test_catalog_has_no_counts_or_default_selected_ontology():
-    data=catalog();assert len(data['ontologies'])==28
+    from topos.permissions_v2.selective_facts import legacy_catalog
+    data=legacy_catalog();assert len(data['ontologies'])==28
     assert [o['ontology_id'] for o in data['ontologies'] if o['available']]==['work.career']
     assert 'selected' not in json.dumps(data) and 'count' not in json.dumps(data)
 
@@ -265,9 +266,9 @@ def test_registry_names_only_what_is_on_and_binds_only_admitted_ontologies(legac
     switch_ontologies(conn,['work.career','health.mental','obligations.commitments'])
     switch_ontologies(conn,['beliefs.civic'],on=False)
     assert enabled_ontologies(conn)=={'work.career','health.mental','obligations.commitments'}
-    assert enabled_revision(conn)==['work.career']         # an ontology outside this release never moves an index
+    assert enabled_revision(conn)==['health.mental','obligations.commitments','work.career']  # all admitted switches refresh indexes
     switch_ontologies(conn,['work.career'],on=False)
-    assert 'work.career' not in enabled_ontologies(conn) and enabled_revision(conn)==[]
+    assert 'work.career' not in enabled_ontologies(conn) and enabled_revision(conn)==['health.mental','obligations.commitments']
 
 
 @pytest.mark.parametrize('registry',['off','never_listed','missing'])

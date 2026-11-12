@@ -92,6 +92,15 @@ class Settings(BaseSettings):
     sync_cursor_retry_delay_seconds: float = Field(0.5)
 
     rate_limit_per_minute: int = Field(60)
+    routine_max_runs_per_owner_24h: int = Field(
+        100, ge=1,
+        validation_alias="TOPOS_ROUTINE_MAX_RUNS_PER_OWNER_24H",
+    )
+    # Explicit operator opt-in, never selected by a routine/request payload.
+    # Disables only the rolling run quota, not active-run or compute safeguards.
+    routine_development_unlimited_runs: bool = Field(
+        False, validation_alias="TOPOS_ROUTINE_DEVELOPMENT_UNLIMITED_RUNS",
+    )
     topos_control_plane_url: Optional[str] = Field(DEFAULT_TOPOS_CONTROL_PLANE_URL)
     control_plane_verify_ssl: bool = Field(True)
     hosted_pool_lease_enabled: bool = Field(False)
@@ -186,6 +195,11 @@ class Settings(BaseSettings):
     sanitization_prewarm_on_startup: bool = Field(True)
     platform_privacy_via_engine: bool = Field(True)
     topos_engine_service_url: Optional[str] = Field(None)
+    # Per-process HTTP worker bounds, not a shared-provider concurrency limit.
+    topos_engine_http_active: int = Field(1, ge=1, le=32)
+    topos_engine_http_waiting: int = Field(4, ge=0, le=128)
+    topos_engine_http_queue_timeout_sec: float = Field(30.0, gt=0, le=300)
+    topos_engine_http_shutdown_grace_sec: float = Field(5.0, ge=0, le=30)
 
     topos_database_path: Optional[str] = Field(None)
     # Packet resolution (PLAN_DERIVATION_LAYER.md): env default only; the per-database
@@ -401,9 +415,27 @@ class Settings(BaseSettings):
             return self
         if self.hosted_pool_lease_enabled and self.topos_control_plane_url:
             return self
-        raise ValueError(
-            "TOPOS_KEY is required unless HOSTED_POOL_LEASE_ENABLED=true and TOPOS_CONTROL_PLANE_URL is configured."
-        )
+        if is_cloud_runtime:
+            raise ValueError(
+                "TOPOS_KEY is required unless HOSTED_POOL_LEASE_ENABLED=true and TOPOS_CONTROL_PLANE_URL is configured."
+            )
+        # Local-only mode (local_identity.py): no key, no control-plane link. The
+        # node serves this computer with a locally minted identity until an
+        # account is connected; see `local_only`.
+        return self
+
+    @property
+    def local_only(self) -> bool:
+        """True when this node runs with no account: no key and no hosted lease.
+
+        Every control-plane client, presence loop and stamp pin is skipped; the
+        owner socket, local ingestion and local queries run as usual.
+        """
+        if self.topos_key:
+            return False
+        if self.hosted_pool_lease_enabled and self.topos_control_plane_url:
+            return False
+        return True
 
 
 settings = Settings()
