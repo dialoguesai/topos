@@ -142,7 +142,8 @@ def _consent_question(client: str, display: str, grant: Optional[AppGrant] = Non
     if grant is not None:
         records = grant.plain_feedback()
         return (f"Connect {display} to your Topos? As you, it can read: {grant.plain()}. "
-                + (f"It can also record: {records}. It cannot change a fact. " if records else "")
+                + (f"It can also record: {records}. Other apps that can read those facts see what it records. "
+                   "It cannot change a fact. " if records else "")
                 + "Every read is recorded under its name"
                 + (", and so is each reaction or rank it records." if records else "."))
     return (f"Connect {display} to your Topos? It will read what you allow in Topos, as you, "
@@ -384,8 +385,12 @@ def agents_list(as_json: bool) -> None:
             ]
         finally:
             conn.close()
+    # An app's line says what the owner gave it: its reads, and what it may record when it has the feedback grant
+    # (DR-72), so the owner can see which apps may record without reading JSON. A coding tool has neither.
     lines = [
         f"{'x ' if r['revoked'] else '  '}{r['client']:<12} enrolled {r['enrolled_at'] or '?'}"
+        + (f"  reads {','.join(r['reads'])}" if r.get("reads") else "")
+        + (f"  records {','.join(r['feedback'])}" if r.get("feedback") else "")
         + ("  (disconnected)" if r["revoked"] else "")
         for r in rows
     ]

@@ -16,8 +16,10 @@ The machine-readable twin of each release is
   read, so anything you marked stayed inside that app.
   - *You give it, separately from reading.* `topos-node agents add <name> --reads facts:<pack>,... --feedback
     facts:<pack>,...`. The question you say yes to lists what the app can read and then what it can record.
-    `--reads` alone never gives it, a pack under `--feedback` must also be under `--reads`, and connecting the app
-    again without `--feedback` takes it away. No app has it until you run this. `agents list --json` shows it.
+    It also says that other apps that can read those facts see what is recorded. `--reads` alone never gives it, a
+    pack under `--feedback` must also be under `--reads`, and connecting the app again without `--feedback` takes it
+    away. No app has it until you run this. `topos-node agents list` now shows, for each app, what it reads and
+    what it may record (`--json` too).
   - *What the app sends.* `fact_feedback` on the dispatch door: `{"fact_id", "reaction"?, "rank"?}`. A field it
     leaves out stays as it was. `"reaction": null` takes the reaction back; `"rank": 0` takes the rank back. Sending
     the same value twice changes nothing, so a retry cannot undo itself.
@@ -32,6 +34,9 @@ The machine-readable twin of each release is
     for the same pack can change them.
   - *When a fact is replaced.* If a pack run replaces a fact with a newer one, the reaction and rank stay with the
     old fact and are no longer shown; the new fact starts with none.
+  - *When a fact is erased.* If you remove a record or a whole source and a fact goes with it, the reaction and
+    rank on that fact are deleted in the same step, with the time and the app's name. Nothing is kept under the
+    id of a fact the node no longer has.
   - *On upgrade.* No step and no migration: the table is created the first time an app records something. Apps you
     already connected keep their reads and cannot record until you connect them again with `--feedback`.
 

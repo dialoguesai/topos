@@ -33,6 +33,13 @@ When a pack re-run supersedes a fact, the old fact is closed and the new one has
 with the old id: it is not carried to the new fact and not deleted. The old fact is no longer returned by
 ``pack_facts``, so its feedback is no longer shown and can no longer be changed; the new fact starts with none.
 
+When a fact is erased (a source scrub or the owner's "remove this record" deletes the fact row itself, not merely
+closes it), its feedback row goes with it: the same orphan sweep that ends both flows
+(``features/lifecycle/derived_scrub.sweep_orphans``) calls :func:`forget_erased`, so no reaction, rank, time or app
+name is kept under the id of a fact the node no longer has. A closed or superseded fact still has its row in
+``signal_objects``, so the paragraph above is unchanged by this. A write that lost a race with an erasure is refused
+inside the gate (the fact row is looked for again there), so it cannot leave a row behind the sweep.
+
 Writes are committed under the write gate, off the event loop. Logs carry the app's name, the fact's id and which of
 the two values changed; never a value of the fact.
 """
@@ -134,6 +141,25 @@ def for_facts(conn: sqlite3.Connection, fact_ids: Iterable[str]) -> Dict[str, Tu
     return out
 
 
+def forget_erased(conn: sqlite3.Connection) -> int:
+    """Delete the feedback of facts that no longer exist; -> how many rows went. For the erasure flows' orphan sweep
+    (``derived_scrub.sweep_orphans``): the caller holds the write gate and commits.
+
+    "No longer exists" is no ``fact`` row in ``signal_objects`` at all. A closed or superseded fact still has one, so
+    its feedback stays (see the module docstring). A database without the table has nothing to forget and gets no
+    table."""
+    if not _present(conn):
+        return 0
+    cursor = conn.execute(
+        f"DELETE FROM {TABLE} WHERE fact_id NOT IN (SELECT object_id FROM signal_objects WHERE object_type='fact')")
+    return int(cursor.rowcount or 0)
+
+
+def _fact_row_exists(conn: sqlite3.Connection, fact_id: str) -> bool:
+    return conn.execute("SELECT 1 FROM signal_objects WHERE object_id=? AND object_type='fact'",
+                        (fact_id,)).fetchone() is not None
+
+
 def _readable(conn: sqlite3.Connection, fact_id: str, *, guard: Any, packs: Tuple[str, ...]) -> bool:
     """Whether ``pack_facts`` returns this fact to this app now, asked of the read itself so the two can never drift."""
     from . import pack_facts
@@ -160,6 +186,10 @@ def record(conn: sqlite3.Connection, request: Dict[str, Any], *, app: str, guard
         raise FactNotAvailable(NOT_AVAILABLE)
     at = (now or datetime.now(timezone.utc)).isoformat()
     with with_db_write():
+        # The readability check ran before the gate. An erasure (derived_scrub) that deleted the fact and swept its
+        # feedback in between must not be followed by a row written under the erased id: same refusal, nothing written.
+        if not _fact_row_exists(conn, fact_id):
+            raise FactNotAvailable(NOT_AVAILABLE)
         row = conn.execute(f"SELECT reaction, rank, updated_at FROM {TABLE} WHERE fact_id=?",
                            (fact_id,)).fetchone() if _present(conn) else None
         was_reaction, was_rank, was_at = row if row else (None, None, None)

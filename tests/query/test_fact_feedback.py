@@ -426,6 +426,75 @@ def test_a_superseded_fact_keeps_its_row_and_drops_out_of_reach(world):
     assert stored(world.conn, world.ids.peak) == ("love", 2, "atlas")
 
 
+def fact_exists(conn, fact_id):
+    return conn.execute("SELECT 1 FROM signal_objects WHERE object_id=?", (fact_id,)).fetchone() is not None
+
+
+def test_removing_a_record_erases_the_fact_and_its_row_with_it(world):
+    """The owner's "remove this record" deletes a fact whose only evidence was that record. Its reaction, rank, time
+    and app name go in the same flow; a fact that stays keeps its own."""
+    from topos.features.lifecycle.derived_scrub import purge_derived_for_records
+
+    put(world.ids.peak, reaction="love", rank=2)
+    put(world.ids.walk, reaction="like", rank=-1)
+    report = purge_derived_for_records(world.conn, ["j-dinner"])
+    assert not fact_exists(world.conn, world.ids.peak)
+    assert report["orphans"]["fact_feedback"] == 1
+    assert stored(world.conn, world.ids.peak) is None
+    assert stored(world.conn, world.ids.walk) == ("like", -1, "atlas")
+    assert world.conn.execute("SELECT COUNT(*) FROM fact_feedback").fetchone()[0] == 1
+
+
+def test_a_source_scrub_erases_the_fact_and_its_row_with_it(world):
+    from topos.features.lifecycle.derived_scrub import purge_derived_for_source
+
+    put(world.ids.peak, reaction="sad")
+    put(world.ids.walk, rank=3)
+    report = purge_derived_for_source(world.conn, "a-source-that-is-gone", scrubbed_record_ids={"j-dinner"})
+    assert not fact_exists(world.conn, world.ids.peak)
+    assert report["orphans"]["fact_feedback"] == 1
+    assert stored(world.conn, world.ids.peak) is None
+    assert stored(world.conn, world.ids.walk) == (None, 3, "atlas")
+
+
+def test_the_sweep_keeps_the_row_of_a_fact_that_was_only_closed(world):
+    """Erased means the fact row is gone. A superseded or closed fact still has one, so the sweep leaves its row
+    (the supersede rule above), however often it runs."""
+    from topos.features.lifecycle.derived_scrub import sweep_orphans
+
+    put(world.ids.peak, reaction="love", rank=2)
+    put(world.ids.walk, reaction="down")
+    world.conn.execute("UPDATE signal_objects SET valid_to=? WHERE object_id=?", (day(1), world.ids.peak))
+    world.conn.commit()
+    assert sweep_orphans(world.conn)["fact_feedback"] == 0
+    assert stored(world.conn, world.ids.peak) == ("love", 2, "atlas")
+    assert stored(world.conn, world.ids.walk) == ("down", None, "atlas")
+
+
+def test_the_sweep_creates_no_table_where_nothing_was_recorded(world):
+    from topos.features.lifecycle.derived_scrub import sweep_orphans
+
+    assert sweep_orphans(world.conn)["fact_feedback"] == 0
+    assert not table_exists(world.conn)
+
+
+def test_a_write_that_lost_a_race_with_an_erasure_is_refused_and_leaves_no_row(world, monkeypatch):
+    """The readability check runs before the gate. A fact erased between the two must not get a row the sweep has
+    already passed: the fact row is looked for again inside the gate, and the answer is the one refusal."""
+    real = fact_feedback._readable
+
+    def readable_then_erased(conn, fact_id, **kwargs):
+        answer = real(conn, fact_id, **kwargs)
+        world.conn.execute("DELETE FROM signal_objects WHERE object_id=?", (fact_id,))
+        world.conn.commit()
+        return answer
+
+    put(world.ids.walk, rank=1)                                    # the table exists, as on a node in use
+    monkeypatch.setattr(fact_feedback, "_readable", readable_then_erased)
+    assert put(world.ids.peak, reaction="love") == NOT_AVAILABLE
+    assert stored(world.conn, world.ids.peak) is None
+
+
 def test_the_write_is_committed_under_the_write_gate(world, monkeypatch):
     held = []
     events = []
@@ -733,6 +802,7 @@ def test_the_owner_approves_reads_and_feedback_in_one_question(cli):
     assert result.exit_code == 0, result.output
     assert "it can read: facts from moments.joy, life.events" in result.output
     assert "It can also record: your reaction and rank on facts from moments.joy." in result.output
+    assert "Other apps that can read those facts see what it records." in result.output
     assert "It cannot change a fact." in result.output
     assert "so is each reaction or rank it records" in result.output
     assert grant_of(cli) == AppGrant(packs=("moments.joy", "life.events"), feedback=("moments.joy",))
@@ -742,6 +812,7 @@ def test_without_the_option_the_question_says_nothing_of_recording_and_no_feedba
     result = cli.run("add", "atlas", "--reads", "facts:moments.joy")
     assert result.exit_code == 0, result.output
     assert "record:" not in result.output and "Every read is recorded under its name." in result.output
+    assert "Other apps" not in result.output
     assert grant_of(cli).feedback == ()
 
 
@@ -781,3 +852,13 @@ def test_the_list_shows_what_an_app_may_record(cli):
     rows = {row["client"]: row for row in json.loads(cli.run("list", "--json").output)}
     assert rows["atlas"]["feedback"] == ["facts:moments.joy"] and rows["atlas"]["reads"] == ["facts:moments.joy"]
     assert "feedback" not in rows["reader"]
+
+
+def test_the_plain_list_says_which_apps_may_record(cli):
+    cli.run("add", "atlas", "--reads", "facts:moments.joy,facts:life.events", "--feedback", "facts:moments.joy")
+    cli.run("add", "reader", "--reads", "facts:moments.joy")
+    cli.run("add", "codex")
+    lines = {line.split()[0]: line for line in cli.run("list").output.splitlines() if line.strip()}
+    assert "reads facts:moments.joy,facts:life.events  records facts:moments.joy" in lines["atlas"]
+    assert "reads facts:moments.joy" in lines["reader"] and "records" not in lines["reader"]
+    assert "reads" not in lines["codex"] and "records" not in lines["codex"]
