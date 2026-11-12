@@ -36,7 +36,7 @@ def plain(clock: str, text: str) -> str:
 
 SHED = ("control_plane_inbound_shed window_s=60 aged={aged} gone={gone} oldest_s={oldest} aged_search=1 "
         "aged_search_batch=0 aged_answer_submit=0 aged_answer_fetch=0 gone_search=0 gone_search_batch=0 "
-        "gone_answer_submit=0 gone_answer_fetch=0")
+        "gone_answer_submit=0 gone_answer_fetch=0 gone_read=0")   # the line as the client writes it today
 LOG = (
     # Before the window: none of this is counted.
     plain("09:59:00", "Dropping inbound request due to saturation pending=128")

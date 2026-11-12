@@ -95,6 +95,20 @@ The machine-readable twin of each release is
   written from a reaction are not removed, and a message the owner typed that consists of nothing but
   `Loved “…”` is treated as a reaction.
 - **`verify_claim` leaves its audit line on the exits that still had none.** `[O]` Since 1.5.39 a check that ended on its deadline, a cancel, an overloaded model or an error has written one content-free `truth verify_claim audit:` line. A request refused before any work (an unknown mode, no `caller_app_id`, a bad `deadline_s`) still wrote nothing. It now writes the same line with `outcome: error`, `phase: dispatch` and a `reason` naming the refusal, never the mode or deadline the caller sent. The line for an overloaded model says which kind it was (`compute_busy`, `compute_unavailable` or `compute_rate_limited`) and carries `retry_after_seconds` when the model host gave one. `outcome` is always one of a fixed list; a stop reason outside it is logged as `error`. No caller-visible change.
+- **A read whose control-plane connection closed while it waited is dropped, not run for nobody.** `[O]` When a
+  handler slot comes free, a queued read whose socket closed while it waited is no longer run: the control plane
+  failed it the moment the socket closed, and a reply can only go to the socket its request came on. The four
+  share doors already had this rule; it now covers a closed list of 12 reads (`INBOUND_GONE_READ_TYPES`: the
+  database explorer's tables, rows and file list, the source list, overview and install status, disk status, the
+  owner's sharing status, catalog and counts, `signal_data_health`, `truth_weekly_stats`). Writes and protocol
+  commands are still applied however late they are reached, and a read on a live connection is still answered
+  however long it waited. Measured on a 1.5.28 node on 26-27 Oct, a laptop asleep with the lid shut: macOS woke
+  it for about 45 s every 15 min, 59 of 67 connection drops came 1-28 s after a wake, and 307 of the 360 replies
+  sent to a dead socket were these reads, some 28 min after their socket died, holding slots while new requests
+  were refused busy. The list was re-checked against today's handlers: the four message types added since
+  (`truth_own_claim_label`, which writes, and the reads `pack_facts`, `message_context`,
+  `messenger_rating_candidates`) are not in it. The `control_plane_inbound_shed` log line gains a trailing
+  `gone_read=` count. No migration, no new setting.
 
 ## [1.5.49] — 2026-11-10
 
