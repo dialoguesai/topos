@@ -65,7 +65,7 @@ agreement**, not truthfulness, hypocrisy, independent corroboration or a confide
 estimate. All scores remain provisional; merely collecting more of the same narrow
 sample does not validate broader interpretations.
 
-For each displayed day, consider the preceding 30 local calendar days (inclusive),
+For each displayed day, consider the preceding `coherence_window_days` local calendar days (inclusive; default 30, integer range 30–365),
 using the later of the retained check timestamp and source timestamp. Compare the
 owner's surviving, undismissed claims whose check completed (`supported` or
 `no_evidence`). Exclude plans, owner-separated groups, and claims currently labelled
@@ -113,3 +113,17 @@ weekly snapshots; never join scores from different methods into one unlabeled tr
 The first release tests repetitions, dates/timezones, numeric/order preservation,
 explicit negation, missing periods, failures, corrections, duplicate imports,
 erasure, future checks, expiration, contract parsing and the home-screen connection.
+
+The optional `coherence_window_days` request field changes the lookback for each
+point, independently of the displayed `period_start` / exclusive `period_end`.
+The response's `window_days` is authoritative; older nodes may ignore the request,
+so clients must not label a 30-day result as a longer window. Home stores the
+selected window with its appearance preferences and keeps different windows in
+separate query caches. The weekly collector continues to request the default
+30-day window, independently of the browser preference.
+
+Source timestamp parsing shares Calibrate's `truth_checks.instant` rule. Stored
+naive source timestamps are node-local wall-clock times; explicit offsets are
+honored. A bare date, missing value or malformed timestamp remains unmeasured.
+This fixes the exclusion of legacy journal rows without changing grouping,
+label eligibility, comparison weighting or the provisional interpretation.
