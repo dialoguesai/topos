@@ -9,10 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.53] — 2026-11-12
+
 ### Added
 - [P] Owner-installed fact packs appear automatically in the person-sharing grant editor. Explicit selective-facts/v3 consent carries an owner-local schema and exact installation revision; existing v1/v2 grants keep their original scope. Removed, changed, reinstalled or disabled packs stop sharing immediately, and all source and owner protections remain in force.
 - [D] New custom-pack facts record the producing definition digest. A fresh extraction replaces an older unstamped or differently stamped fact using only its fresh evidence. Existing facts are not relabelled or automatically reprocessed; an owner may run a pack backfill. No invalidation of existing bundled or app outputs.
 
+## [1.5.52] — 2026-11-12
+
+### Fixed
+- **Home self-coherence includes legacy journal timestamps.** `[O]` Uses the same
+  node-local timestamp interpretation as Calibrate, instead of dropping sources
+  without an explicit offset. Missing or invalid timestamps still do not vote.
+
+### Added
+- **Configurable self-coherence rolling window.** `[O]` Owner dashboard requests
+  accept `coherence_window_days` from 30 through 365, defaulting to 30. The response
+  reports the actual window; comparison rules and owner-only access are unchanged.
 
 ## [1.5.51] — 2026-11-12
 

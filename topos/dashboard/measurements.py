@@ -327,7 +327,7 @@ def verification_activity(earliest, rows, start, end, *, now=None, zone=timezone
                                       if b["count"] is not None else None)} for b in activity["buckets"]]}
 
 
-def daily_measurements(conn, start: str, end: str, *, now=None, time_zone=None):
+def daily_measurements(conn, start: str, end: str, *, now=None, time_zone=None, coherence_window_days=30):
     """Daily buckets from ``start`` to the exclusive ``end``, cut at midnight in ``time_zone``.
 
     Instants in the response (``as_of``, ``measured_since``, call times) stay UTC.
@@ -336,6 +336,8 @@ def daily_measurements(conn, start: str, end: str, *, now=None, time_zone=None):
     first, last = date.fromisoformat(start), date.fromisoformat(end)
     if first.isoformat() != start or last.isoformat() != end or not 0 < (last-first).days <= 366:
         raise ValueError("Expected an exclusive end and a range of 1–366 UTC days")
+    from .coherence import validate_window_days
+    coherence_window_days = validate_window_days(coherence_window_days)
     zone, zone_name = resolve_zone(time_zone)
     now = now or datetime.now(timezone.utc)
     as_of = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
@@ -426,4 +428,4 @@ def daily_measurements(conn, start: str, end: str, *, now=None, time_zone=None):
     return {"available": True, "schema_version": 1, "scope": "owner_node", "period_start": start,
             "period_end": end, "time_zone": zone_name, "as_of": as_of, "metrics": metrics, "requests": requests,
             "callers": callers, "verify_claim": verification, "routine_runs": routines, "serve": serve, "inbound_bytes": None,
-            "self_coherence": coherence_series(coherence_rows, start, end, now=now, zone=zone)}
+            "self_coherence": coherence_series(coherence_rows, start, end, now=now, zone=zone, window_days=coherence_window_days)}

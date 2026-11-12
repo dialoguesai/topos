@@ -100,16 +100,50 @@ def test_dashboard_exposes_aggregate_in_same_read_snapshot_without_writing():
     with sqlite3.connect(":memory:") as db:
         db.executescript("""CREATE TABLE journal_entries(entry_id TEXT PRIMARY KEY, entry_at TEXT);
           CREATE TABLE truth_checks(check_id,record_table,record_id,speaker_kind,category,claim_text,verdict,created_at);
-          INSERT INTO journal_entries VALUES ('1','2026-11-09T11:00:00Z'),('2','2026-11-09T12:00:00Z');
+          INSERT INTO journal_entries VALUES ('1','2026-11-09 11:00:00'),('2','2026-11-09 12:00:00');
           INSERT INTO truth_checks VALUES ('1','journal_entries','1','owner','did','synthetic statement','no_evidence','2026-11-10T10:00:00Z'),
           ('2','journal_entries','2','owner','did','synthetic statement','no_evidence','2026-11-10T10:00:00Z');""")
         install_measurements(db)
         db.commit()
         before = db.total_changes
-        result = daily_measurements(db, "2026-11-09", "2026-11-12", now=NOW)
+        result = daily_measurements(db, "2026-11-09", "2026-11-12", now=NOW, coherence_window_days=90)
+        assert result["self_coherence"]["window_days"] == 90
         assert result["self_coherence"]["buckets"][-1]["score"] == 1
         assert "synthetic statement" not in str(result)
         assert db.total_changes == before
         assert not db.in_transaction
         db.execute("DELETE FROM journal_entries WHERE entry_id='2'")
         assert daily_measurements(db, "2026-11-09", "2026-11-12", now=NOW)["self_coherence"]["buckets"][-1]["score"] is None
+
+
+def test_selected_window_recovers_older_pairs_without_changing_group_rules():
+    rows = [{**claim(str(i)), "created_at": "2026-10-01T10:00:00Z",
+             "checked_at": "2026-10-01T10:00:00Z", "source_at": f"2026-10-01T{10+i}:00:00Z"} for i in (1, 2)]
+    assert latest(rows)["score"] is None
+    result = coherence_series(rows, "2026-11-11", "2026-11-12", now=NOW, window_days=90)
+    assert result["window_days"] == 90
+    assert result["buckets"][0]["score"] == 1
+    rows[1]["source_at"] = "2026-10-02T12:00:00Z"
+    assert coherence_series(rows, "2026-11-11", "2026-11-12", now=NOW, window_days=90)["buckets"][0]["score"] is None
+
+
+def test_invalid_window_rejected_even_when_storage_unavailable():
+    import pytest
+    from topos.dashboard.measurements import daily_measurements
+    for value in (None, True, 0, 29, 366, 60.5, "90"):
+        with pytest.raises(ValueError):
+            coherence_series([], "2026-11-11", "2026-11-12", window_days=value)
+        with pytest.raises(ValueError):
+            daily_measurements(None, "2026-11-11", "2026-11-12", coherence_window_days=value)
+
+
+def test_canonical_naive_journal_timestamp_uses_the_same_clock_as_calibrate():
+    # SQLite stores legacy instants without offsets. They are not missing dates.
+    from topos.query.truth_checks import instant
+    from topos.dashboard.coherence import _stamp
+    stamp = "2026-11-09 11:00:00"
+    assert _stamp(stamp) == instant(stamp)
+    for invalid in (None, "", "2026-11-09", "not a time"):
+        assert _stamp(invalid) is None
+    rows = [{**claim(str(i)), "source_at": f"2026-11-09 {10+i}:00:00"} for i in (1, 2)]
+    assert latest(rows)["score"] == 1

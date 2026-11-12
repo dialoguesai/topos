@@ -1533,3 +1533,5 @@ and real-model comparison limitations remain unchanged.
 | query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
 
 - Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+- Release tooling check (1.5.53): the legacy `run_release_eval.py` wrapper failed because it imports `tests.evals.privacy.negotiation`, intentionally removed with retired sharing doors in N8 (`0f969868`). Its underlying current privacy battery passed: 382 passed, 2 expected failures. The failed legacy scorecard is retained in this task's validation artifacts and is not represented as passing. The current procedure of record, `RELEASING.md`, gates publication on selected CI (including the privacy battery), package/upgrade checks, and exact-tree Rig D; those requirements remain in force. No retired production path or test harness was restored to make the obsolete wrapper green.

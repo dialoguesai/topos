@@ -1519,6 +1519,25 @@
       ]
     },
     {
+      "version": "1.5.52",
+      "summary": "Restore owner coherence for legacy journal timestamps and add configurable rolling windows.",
+      "steps": [],
+      "notes": [
+        "Owner-only read calculation; no schema migration, reprocessing, model call or label change.",
+        "Rolling windows accept 30\u2013365 days and default to 30. Deploy with matching control-plane forwarding and web settings."
+      ]
+    },
+    {
+      "version": "1.5.53",
+      "summary": "Support owner-installed custom fact packs in explicit person-sharing grants.",
+      "steps": [],
+      "notes": [
+        "No schema migration or automatic model backfill. Existing v1/v2 grants retain their scope; app grants keep their existing semantics.",
+        "New custom facts carry producing-definition provenance. Older unstamped facts require a fresh extraction or owner-requested pack backfill before person sharing.",
+        "Deploy the compatible selective-facts/v3 control plane and web editor before this node release."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
