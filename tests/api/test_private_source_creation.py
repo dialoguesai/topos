@@ -20,7 +20,7 @@ def body():
         "source_id": "personal_rows", "display_name": "Personal rows", "source_type": "file",
         "schema_id": "personal.rows.v1", "parser_id": "personal.rows.v1", "delivery": "owner_upload",
         "enrichment_trigger": "manual", "posture": "mixed", "pipeline_include_data_table": True,
-        "tables": [{"table_id": "personal_rows_data", "display_name": "Rows", "columns": [
+        "tables": [{"table_id": "private_personal_rows_data", "display_name": "Rows", "columns": [
             {"name": "record_id", "type": "text", "primary_key": True}, {"name": "content", "type": "text"}]}],
         "file_ingest_shape": {"format": "json", "parser_extract_map": {"record_id": "id", "content": "content"}},
     }, "sample": {"file_name": "rows.json", "content": '[{"id":"r1","content":"Synthetic row"}]'}}
@@ -78,7 +78,7 @@ async def test_prepare_no_writes_then_approved_install_import_and_rehydrate(node
     assert receipt["status"] == "ingested", receipt
     assert receipt["registered"] is False
     assert receipt["sample_import"]["records_processed"] == 1
-    row = node.execute('SELECT content FROM personal_rows_data').fetchone()
+    row = node.execute('SELECT content FROM private_personal_rows_data').fetchone()
     assert row[0] == "Synthetic row"
     status = json.loads((await owner_sources.private_source_status("personal_rows", principal=AGENT)).body)
     assert status["installed"] and status["installs"][0]["source_definition_json"]["source_id"] == "personal_rows"

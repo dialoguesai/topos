@@ -32,8 +32,8 @@ For definition fields and runnable examples, see the plugin's
 [source definition guide](https://github.com/dialoguesai/topos-plugin/blob/main/skills/topos-add-source/references/source-definition.md).
 Custom extract maps support chat lanes or raw tables. Other lanes can reuse compatible
 bundled parsers. Raw tables are not automatically searchable or available as facts.
-Private raw table names must start with the source id (dots/hyphens replaced by underscores)
-plus `_`, and cannot reuse unrelated existing tables. Bundled sources and incompatible
+Private raw table names must start with `private_`, the source id (dots/hyphens replaced
+by underscores), then `_`, and cannot reuse unrelated existing tables. Bundled sources and incompatible
 existing definitions cannot be replaced by this create workflow.
 
 ## Receipts and verification

@@ -94,6 +94,7 @@ async def test_missing_or_duplicate_ids_fail(rows):
 
 def test_raw_tables_cannot_target_a_system_table():
     payload = definition()
-    payload["tables"] = [{"table_id": "engine_config", "columns": []}]
+    payload["source_id"] = "ai"
+    payload["tables"] = [{"table_id": "ai_chat_messages", "columns": []}]
     with pytest.raises(ValueError, match="table names"):
         local_create.validated_definition(payload)

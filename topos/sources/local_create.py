@@ -105,6 +105,13 @@ def validated_definition(payload: dict) -> tuple[dict, Any]:
         raise ValueError("Unknown definition fields: " + ", ".join(sorted(unknown)))
     if len(json.dumps(payload).encode()) > MAX_BYTES:
         raise ValueError("Definition exceeds 2 MiB")
+    if not isinstance(payload.get("display_name"), str) or not payload["display_name"].strip():
+        raise ValueError("display_name must be a non-empty string")
+    if payload.get("file_ingest_shape") is not None and not isinstance(payload["file_ingest_shape"], dict):
+        raise ValueError("file_ingest_shape must be an object")
+    if payload.get("tables") is not None and (not isinstance(payload["tables"], list)
+            or any(not isinstance(t, dict) for t in payload["tables"])):
+        raise ValueError("tables must be a list of table objects")
     sid = payload.get("source_id")
     if not isinstance(sid, str) or not ID_RE.fullmatch(sid):
         raise ValueError("source_id must be a lowercase identifier of at most 80 characters")
@@ -128,7 +135,7 @@ def validated_definition(payload: dict) -> tuple[dict, Any]:
         raise ValueError("Custom JSON parsers currently map chat lanes or raw tables. For another lane, use a compatible bundled parser or add an adapter.")
     # A raw data table must belong to this source; never let a new definition write into system tables.
     table_ids = set()
-    prefix = re.sub(r"[.-]", "_", sid) + "_"
+    prefix = "private_" + re.sub(r"[.-]", "_", sid) + "_"
     for table in definition.tables or []:
         table_id = table.get("table_id", "")
         if not isinstance(table_id, str) or not re.fullmatch(r"[a-z][a-z0-9_]*", table_id) or not table_id.startswith(prefix):
