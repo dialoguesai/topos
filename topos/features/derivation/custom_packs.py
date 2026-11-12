@@ -561,17 +561,12 @@ def install_pack(source: Path) -> Dict[str, Any]:
     return install_content(read_candidate(Path(source))[1])
 
 
-def install_content(content: bytes) -> Dict[str, Any]:
-    """Check these bytes and put them in the node's directory as a pack, switched off. Returns its id, version
-    and title, the version it replaced (None for a new pack) and whether it was already there unchanged.
-
-    It takes bytes, not a path, so `packs add` installs what it showed the owner: the file is read once, before
-    the question, and a file that changed while the prompt was open is not read again. The bytes are checked
-    again here, so nothing unchecked can be written by a caller that skipped the check.
-
-    All or nothing: the bytes that were checked are written beside the destination and moved over it in one
-    step, so a refusal leaves the directory as it was. Raises :class:`CustomPackError`."""
-    pack = check_content(content)
+def install_plan(pack: Pack) -> Dict[str, Any]:
+    """What adding this checked pack would do on this node, writing nothing: `{"would", "replaces"}`, where
+    `would` is `new`, `replace` or `unchanged` and `replaces` is the version already there (None for a new pack).
+    Raises :class:`CustomPackError` for a pack this node would refuse: the rules that depend on what the node
+    already holds, which checking the file alone cannot see. `install_content` decides by this, so what
+    `packs add --check --json` says would happen is what happens."""
     directory = custom_pack_dir()
     from .registry import bundled_pack_dir, definition_sha
 
@@ -585,7 +580,6 @@ def install_content(content: bytes) -> Dict[str, Any]:
         if taken:
             _refuse(f"The predicate {taken[0]} is already declared by {other.pack}.")
     destination = directory / f"{pack.pack}.yaml"
-    replaced: Optional[str] = None
     if _is_plain_file(destination):
         try:
             old = _load_checked(destination)
@@ -593,12 +587,31 @@ def install_content(content: bytes) -> Dict[str, Any]:
             old = None                              # an unreadable file there is simply replaced
         if old is not None:
             if definition_sha(old, stamped=False) == definition_sha(pack, stamped=False):
-                return {"pack_id": pack.pack, "version": pack.version, "title": pack.title,
-                        "replaced": old.version, "unchanged": True, "path": str(destination)}
+                return {"would": "unchanged", "replaces": old.version}
             if old.version == pack.version:
                 _refuse(f"{pack.pack} {pack.version} is already added and this file differs from it. "
                         "Give the changed pack a new `version`.")
-            replaced = old.version
+            return {"would": "replace", "replaces": old.version}
+    return {"would": "new", "replaces": None}
+
+
+def install_content(content: bytes) -> Dict[str, Any]:
+    """Check these bytes and put them in the node's directory as a pack, switched off. Returns its id, version
+    and title, the version it replaced (None for a new pack) and whether it was already there unchanged.
+
+    It takes bytes, not a path, so `packs add` installs what it showed the owner: the file is read once, before
+    the question, and a file that changed while the prompt was open is not read again. The bytes are checked
+    again here, so nothing unchecked can be written by a caller that skipped the check.
+
+    All or nothing: the bytes that were checked are written beside the destination and moved over it in one
+    step, so a refusal leaves the directory as it was. Raises :class:`CustomPackError`."""
+    pack = check_content(content)
+    plan = install_plan(pack)
+    directory = custom_pack_dir()
+    destination = directory / f"{pack.pack}.yaml"
+    if plan["would"] == "unchanged":
+        return {"pack_id": pack.pack, "version": pack.version, "title": pack.title,
+                "replaced": plan["replaces"], "unchanged": True, "path": str(destination)}
     try:
         directory.mkdir(parents=True, exist_ok=True)
         _renew_stamp(pack.pack)
@@ -606,7 +619,22 @@ def install_content(content: bytes) -> Dict[str, Any]:
     except OSError:
         _refuse("The pack could not be written to this node's pack directory.")
     return {"pack_id": pack.pack, "version": pack.version, "title": pack.title,
-            "replaced": replaced, "unchanged": False, "path": str(destination)}
+            "replaced": plan["replaces"], "unchanged": False, "path": str(destination)}
+
+
+def routing_reach(pack: Pack) -> Dict[str, List[str]]:
+    """Which records this pack reads, as the engine decides it: `{"words", "phrases"}`.
+
+    A record is sent to the model for a pack when it contains one of the phrases, or ONE of the words
+    (`prefilter.PackPrefilter`: recall over precision). The words are that prefilter's own lexicon, taken from the
+    object it builds and not worked out again here: the routing descriptors and exemplars, the allowed values of
+    the pack's fields, and the texts of its own gold examples, less a short list of words that would match
+    anything. So an everyday word in a gold text or an exemplar ("every", "today") sends most records to the
+    model. Nothing here reads a record."""
+    from .prefilter import PackPrefilter
+
+    prefilter = PackPrefilter(pack)
+    return {"words": sorted(prefilter.lexicon), "phrases": list(prefilter.exemplars)}
 
 
 def remove_pack(pack_id: str) -> bool:

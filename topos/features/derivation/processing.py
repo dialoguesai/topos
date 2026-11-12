@@ -15,14 +15,28 @@ import uuid
 log = logging.getLogger(__name__)
 
 
-def measured_generate(conn, adapter, model, prompt, *, pack_id, phase, mode, n=900):
+#: What every derivation call asks of the local model besides its prompt and reply length. No `keep_alive`: how
+#: long the host keeps the model afterwards is the host's own default, never something a derivation call sets.
+GENERATE_OPTIONS = {'think': False, 'temperature': 0.0, 'num_ctx': 8192, 'timeout': 180}
+#: The reply length an extraction call asks for.
+EXTRACTION_TOKENS = 900
+
+
+def generate(adapter, model, prompt, *, n=EXTRACTION_TOKENS):
+    """One derivation call to the local model, as the adapter answers it, with nothing recorded.
+
+    `measured_generate` is this plus the measurement row; `pack_trial` (a pack file's own examples, which must
+    write nothing) calls it bare. One function so the two cannot ask the model for different things."""
+    return adapter._generate(model, prompt, num_predict=n, **GENERATE_OPTIONS)
+
+
+def measured_generate(conn, adapter, model, prompt, *, pack_id, phase, mode, n=EXTRACTION_TOKENS):
     started_at = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
     start = time.perf_counter()
     out = None
     failed = True
     try:
-        out = adapter._generate(model, prompt, num_predict=n, think=False,
-                                temperature=0.0, num_ctx=8192, timeout=180)
+        out = generate(adapter, model, prompt, n=n)
         failed = bool(isinstance(out, dict) and (out.get('error') or out.get('status') == 'deferred'))
         return str(out.get('text') or '') if isinstance(out, dict) else str(out or '')
     finally:

@@ -1,4 +1,4 @@
-"""`topos-node packs list|add|remove|backfill|status|stop|auto|retract-reactions` — fact packs, from a terminal.
+"""`topos-node packs list|add|try|on|off|remove|backfill|status|stop|auto|retract-reactions` — fact packs, from a terminal.
 
 A fact pack reads new records as they arrive only for the sources whose lane runs it; everything
 else, and the history from before a pack was switched on, is read when the owner asks (a backfill).
@@ -57,8 +57,28 @@ and a small stamp beside it in the node's own pack directory and writes nothing 
 with the node stopped. Its one other read is the node's database, read-only, to count the apps whose
 grant already names the pack's id (`_apps_granted`): a grant names an id, so it covers whatever
 definition is added under that id, and the prompt says so before the person answers. The pack
-starts switched off; switching it on is the app's Fact packs page, as for every pack. No route,
-relay message or tool adds a pack: an app cannot.
+starts switched off. No route, relay message or tool adds a pack: an app cannot.
+
+A pack drafted by a coding agent goes from file to reading with one yes from its owner:
+
+    topos-node packs add --check --json my-pack.yaml      what the file declares, for a program to read
+    topos-node packs try --json my-pack.yaml              runs the file's OWN examples on the local model
+    topos-node packs add my-pack.yaml --on --backfill 30d --open-terminal --json
+    topos-node packs on custom.gardening                  the switch by itself; `off` is its twin
+
+`--check` and `try` need no person. `try` sends the file's text to the running node
+(`features/derivation/pack_trial`), which runs only the examples under the file's `eval` through the
+prompt and parser of a real run, on the node's own model admission, and writes nothing; it reads no
+record of the owner's. `add --on [--backfill WINDOW]` names every effect before its one `[y/N]`: the
+pack is added, it is switched on now, and that much history is read. After the yes it installs the
+bytes it showed, switches the pack on through the owner socket's switch (`surfaces.switch_pack`: the
+node switches on only a pack whose definition is still the one that was shown) and starts the run
+through the door `packs backfill` uses; each of the two requests carries its own one-change
+confirmation, minted here after the yes. Each stage is reported, and a stage that fails leaves the
+ones before it done and says so. Without a terminal these exit `EXIT_NEEDS_HUMAN`; `--open-terminal`
+opens the window where the same question is waiting (`cli/terminal_window`), bound to the bytes that
+were checked. `on` and `off` ask the same way. A pack that writes about other people is never
+switched on from here: its consent stays in the app.
 
 What is printed is a projection: pack ids, counts, state words, model names, times. Never a response body.
 """
@@ -75,11 +95,16 @@ import click
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_NEEDS_HUMAN = 2
+#: `packs try` ran and at least one example failed, or could not be run.
+EXIT_EXAMPLES_FAILED = 3
 EXIT_NODE_DOWN = 4
+#: `packs try`: this node has no local model picked for facts, or the model did not answer.
+EXIT_NO_MODEL = 5
 #: The run was stopped before its packs were done (Ctrl-C here, `packs stop`, or the node going down).
 EXIT_STOPPED = 130
 
 PACKS_PATH = "/v1/signal/derivation/packs"
+TRY_PATH = PACKS_PATH + "/try"
 PLAN_PATH = "/v1/signal/derivation/backfill/plan"
 RUNS_PATH = "/v1/signal/derivation/backfill/runs"
 CURRENT_PATH = RUNS_PATH + "/current"
@@ -89,6 +114,9 @@ REACTION_FACTS_PATH = "/v1/signal/derivation/reaction-facts"
 RETRACT_PATH = REACTION_FACTS_PATH + "/retract"
 
 DEFAULT_LIMIT = 200
+#: How long `packs try` waits for the node: up to 20 examples, one model call each, behind whatever the node is
+#: already running on that model (the node ends a trial itself after `pack_trial.TIME_LIMIT_S`).
+TRY_TIMEOUT_S = 1800.0
 MAX_LIMIT = 1000
 #: Seconds between reads of a run being followed.
 POLL_S = 2.0
@@ -346,7 +374,7 @@ def _times(counts: Dict[str, Any]) -> str:
 # ----------------------------------------------------------------------------- the group
 @click.group("packs")
 def packs_group() -> None:
-    """List fact packs, add your own, and backfill their history."""
+    """List fact packs, add and try your own, switch them on or off, and backfill their history."""
 
 
 @packs_group.command("list")
@@ -424,55 +452,746 @@ _WHO_READS = (
     "them can draw on this pack's facts, as it can on the facts of the packs Topos ships.")
 #: Said in place of whatever a check raised, when it raised instead of refusing.
 _NOT_A_PACK = "The file is not a pack Topos can read."
+_NODE_DOWN = "Topos isn't running — say \"start Topos\"."
+_OLDER_NODE = ("This Topos is older than this command. Update it (`uv tool upgrade topos-node`), restart it, "
+               "then try again.")
+
+#: What a person reads for a refusal of the try, the switch or the run's start, written here from the node's
+#: code (never the node's own text).
+_REFUSALS = {
+    "unknown_pack": "This Topos has no such pack. `topos-node packs list` shows them.",
+    "consent_in_app": "That pack writes facts about other people, so switching it on asks for your consent in the "
+                      "app (Data → Fact packs).",
+    "pack_changed": "The pack changed after it was approved, so it was not switched on. Run the command again to "
+                    "see what it is now.",
+    "definition_required": _OLDER_NODE,
+    "owner_confirmation_required": "Topos did not take the approval. Run the command again in your own terminal.",
+    "backfill_already_running": "Another backfill started first. `topos-node packs status --follow` watches it.",
+    "pack_not_enabled": "The pack is not switched on, so its history was not read.",
+    "no_local_model": "This Topos has no local model picked for facts, so there is nothing to try the pack on.",
+    "trial_already_running": "Another pack is being tried on this Topos. Wait for it, then run this again.",
+    "too_many_examples": "The file holds more examples than one try runs. Try it with fewer.",
+    "pack_invalid": _NOT_A_PACK,
+    "http_404": _OLDER_NODE,
+    "http_405": _OLDER_NODE,
+}
+
+
+NO_ANSWER = "no_answer"
+
+
+class _Stop(Exception):
+    """A step that did not happen: a fixed word, the sentence a person reads, the exit code."""
+
+    def __init__(self, code: str, say: str, exit_code: int = EXIT_FAILED) -> None:
+        self.code, self.say, self.exit_code = code, say, exit_code
+        super().__init__(say)
+
+
+def _node(sock, method: str, path: str, *, confirm: bool = False, **kwargs) -> Dict[str, Any]:
+    """One request for `try`, `on`, `off` and the staged `add`. With `confirm` it carries a fresh one-change
+    confirmation: call it so only after the person said yes on this terminal. A node that is down or refuses
+    raises :class:`_Stop` with a sentence written here; the node's body goes no further than its code."""
+    import httpx
+
+    from topos.mcp_server import NodeDown, NodeRefused
+
+    headers = None
+    if confirm:
+        from topos.uds import write_owner_confirmation
+
+        try:
+            headers = {"X-Topos-Owner-Confirm": write_owner_confirmation()}
+        except OSError:
+            raise _Stop("confirmation_not_written", "This terminal could not record your yes for Topos, so "
+                        "nothing was sent. Check that your home folder is writable and run the command again."
+                        ) from None
+    try:
+        return sock.request_sync(method, path, headers=headers, **kwargs)
+    except NodeDown:
+        raise _Stop("node_down", _NODE_DOWN, EXIT_NODE_DOWN) from None
+    except NodeRefused as exc:
+        code = str(exc.code or f"http_{exc.status}")
+        raise _Stop(code, _REFUSALS.get(code, f"Topos refused this ({code}).")) from None
+    except httpx.HTTPError:
+        # The request went out and no answer came back (a timeout, a dropped connection). For a change, the node
+        # may have made it: say so rather than guess either way.
+        raise _Stop(NO_ANSWER, "Topos did not answer, so whether this happened is not known.") from None
+
+
+def _json_out(doc: Dict[str, Any]) -> None:
+    click.echo(json.dumps(doc, indent=2, sort_keys=True))
+
+
+def _can_prompt() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _sha256(content: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(content).hexdigest()
+
+
+def _shown(text: Any, limit: int = 160) -> str:
+    """Text from a pack file or a model, as a terminal may print it: one line, nothing that moves the cursor."""
+    line = "".join(ch if ch.isprintable() else " " for ch in str(text or ""))
+    line = " ".join(line.split())
+    return line if len(line) <= limit else line[: limit - 1] + "…"
+
+
+def _shown_value(value: Any, limit: int = 200) -> str:
+    try:
+        text = json.dumps(value, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        text = "?"
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _routing_line(reach: Dict[str, List[str]]) -> str:
+    words, phrases = len(reach["words"]), len(reach["phrases"])
+    return (f"  reads a record when it holds one of {words:,} word{'s' if words != 1 else ''}"
+            + (f" or {phrases:,} phrase{'s' if phrases != 1 else ''}" if phrases else "")
+            + " (`topos-node packs add --check --json FILE` lists them)")
+
+
+class _Window(click.ParamType):
+    """How far back `--backfill` reads: `30d` (any number of days), `all`, or a day as `YYYY-MM-DD`."""
+
+    name = "window"
+
+    def convert(self, value, param, ctx):
+        import datetime as _dt
+
+        if isinstance(value, dict):
+            return value
+        text = str(value or "").strip().lower()
+        if text == "all":
+            return {"text": "all", "since": None, "words": "all of it, as far back as a backfill reaches"}
+        days = re.match(r"^([1-9][0-9]{0,3})d$", text)
+        if days:
+            n = int(days.group(1))
+            since = (_dt.datetime.now(_dt.timezone.utc).date() - _dt.timedelta(days=n)).isoformat()
+            return {"text": text, "since": since,
+                    "words": f"the last {n} day{'s' if n != 1 else ''} (records dated {since} or later)"}
+        if _SINCE_RE.match(text):
+            try:
+                _dt.date.fromisoformat(text)
+            except ValueError:
+                self.fail(f"{value!r} is not a day", param, ctx)
+            return {"text": text, "since": text, "words": f"records dated {text} or later"}
+        self.fail(f"{value!r} is not a window: use 30d, 90d (a number of days), all, or YYYY-MM-DD", param, ctx)
+
+
+WINDOW = _Window()
+
+
+def _trial_model(timeout_s: float = 10.0) -> Dict[str, Any]:
+    """Whether `packs try` could run now: is the node up, and does it find a local extraction model. Asked of the
+    running node, which looks without loading or calling a model. `unknown` when it cannot be told."""
+    import httpx
+
+    from topos.mcp_server import NodeDown, NodeRefused
+
+    try:
+        body = _socket(timeout_s).request_sync("GET", TRY_PATH)
+    except NodeDown:
+        return {"node_running": False, "available": "unknown", "model": None}
+    except (NodeRefused, httpx.HTTPError):
+        return {"node_running": True, "available": "unknown", "model": None}
+    available = body.get("available")
+    return {"node_running": True, "available": available if available in ("yes", "no") else "unknown",
+            "model": _model(body.get("model"))}
+
+
+def _check_doc(pack, content: bytes) -> Dict[str, Any]:
+    """`packs add --check --json`: what the file declares and what adding it would do, for a program to read."""
+    from topos.features.derivation import custom_packs, pack_trial
+
+    try:
+        install = {**custom_packs.install_plan(pack), "reason": None}
+    except custom_packs.CustomPackError as exc:
+        install = {"would": "refused", "replaces": None, "reason": str(exc)}
+    examples = pack_trial.examples_of(pack)
+    gold = [e for e in examples if e["kind"] == pack_trial.GOLD]
+    return {
+        "ok": True, "added": False, "pack_id": pack.pack, "version": pack.version, "title": pack.title,
+        "sensitivity": pack.sensitivity_class, "role_policy": pack.role_policy,
+        "reads": custom_packs.ROLE_POLICY_WORDS[pack.role_policy],
+        "predicates": [{"name": name, "type": str(pack.predicates[name].value_type)}
+                       for name in sorted(pack.predicates)],
+        "describe": custom_packs.describe(pack),
+        "install": install,
+        "apps_with_grant": _apps_granted(pack.pack),
+        "examples": {"gold": len(gold), "negative_controls": len(examples) - len(gold),
+                     "gold_with_expected_fact": sum(1 for e in gold if e["expect"]),
+                     "try_limit": pack_trial.MAX_EXAMPLES},
+        "routing": custom_packs.routing_reach(pack),
+        "local_model": _trial_model(),
+        "sha256": _sha256(content),
+    }
+
+
+def _hand_to_person(*, argv: List[str], slug: str, title: str, open_terminal: bool, as_json: bool,
+                    doc: Dict[str, Any], typed: str) -> None:
+    """End with the waiting code: this step is a person's. With `--open-terminal` (macOS) the window where the
+    command is already asking is opened; opening it grants nothing. Otherwise the person is handed the command."""
+    import shlex
+
+    command = shlex.join(["topos-node", *argv])
+    opened = False
+    if open_terminal:
+        from topos.cli.terminal_window import open_terminal_window
+
+        opened = open_terminal_window(slug=slug, title=title, argv=argv,
+                                      # Exit 0 also ends a "no", so this line must not say "Done": the lines
+                                      # above it say what happened.
+                                      done="Finished; the lines above say what happened. Return to your coding "
+                                           "assistant.",
+                                      not_done="Not done. Return to your coding assistant.")
+    say = ("Opened the question in a Terminal window. Answer it there, then return here." if opened else typed)
+    if as_json:
+        _json_out({**doc, "ok": True, "status": "approval_pending" if opened else "needs_human",
+                   "command": command, "human": {"say": say}})
+    else:
+        click.echo(say if opened else f"{say}\n\n  {command}\n", err=not opened)
+    sys.exit(EXIT_NEEDS_HUMAN)
+
+
+def _backfill_words(sock, pack_id: str, window: Dict[str, Any], reach: Dict[str, List[str]]) -> List[str]:
+    """What reading history will cost, as far as it can be said before the pack is added: the window, the model
+    that reads and the one that checks, and this node's measured seconds per call. How many records wait cannot
+    be counted yet (the node counts for a pack that is added and on), and the lines say so. Loads no model."""
+    listing = _node(sock, "GET", PACKS_PATH)
+    plan_params: Dict[str, Any] = {"pack_id": [pack_id]}
+    if window["since"]:
+        plan_params["since"] = window["since"]
+    plan = _node(sock, "GET", PLAN_PATH, params=plan_params)
+    extraction = plan.get("extraction") if isinstance(plan.get("extraction"), dict) else {}
+    llm_model = _model(extraction.get("llm_model")) or "the local extraction model"
+    classifier = _model(extraction.get("classifier_model")) if extraction.get("provider") == "topos_facts" else None
+    rows = [row for row in plan.get("packs") or [] if isinstance(row, dict) and row.get("pack_id") == pack_id]
+    route = (_word(rows[0].get("extract_route")) if rows else None) or "llm"
+    if classifier and route == "classifier":
+        reader = classifier
+    elif classifier and route == "unknown":
+        reader = f"{classifier} if it knows this pack, else the local model {llm_model}"
+    else:
+        reader = f"the local model {llm_model}"
+    verifier = _model(plan.get("verify_model"))
+    per_call = _call_seconds(listing, "extraction")
+    words = len(reach["words"])
+    reach_size = _int(plan.get("history_window"))
+    lines = [f"     It reads {window['words']}"
+             + (f", within the newest {reach_size:,} journal entries and the newest {reach_size:,} messages."
+                if reach_size else "."),
+             f"     Each record that holds one of the pack's {words:,} word{'s' if words != 1 else ''} is one call "
+             f"to {reader}"
+             + (f" (about {per_call:.1f} s each, by this node's 30-day average)" if per_call else "") + "; "
+             + (f"every fact found is then checked by {verifier}, one call each." if verifier
+                else "verification is off on this node."),
+             "     How many records that is cannot be counted before the pack is added: the run says it when it "
+             "starts. `topos-node packs stop` stops it; what it read is kept."]
+    return lines
+
+
+def _started_run(sock, pack_id: str, window: Dict[str, Any]) -> Dict[str, Any]:
+    """Start the history run the person approved, through the door `packs backfill` uses; its receipt."""
+    waiting: Optional[int] = None
+    params: Dict[str, Any] = {"pack_id": [pack_id]}
+    if window["since"]:
+        params["since"] = window["since"]
+    try:
+        plan = _node(sock, "GET", PLAN_PATH, params=params)
+        rows = [row for row in plan.get("packs") or [] if isinstance(row, dict) and row.get("pack_id") == pack_id]
+        if rows and isinstance(rows[0].get("waiting"), int) and not isinstance(rows[0].get("waiting"), bool):
+            waiting = rows[0]["waiting"]
+    except _Stop:
+        waiting = None                    # the count is a courtesy; the run itself is what was approved
+    started = _node(sock, "POST", RUNS_PATH, confirm=True,
+                    json_body={"pack_ids": [pack_id], "limit": DEFAULT_LIMIT, "until_done": True,
+                               "since": window["since"]})
+    run = _run(started)
+    if run is None or not run["run_id"]:
+        raise _Stop("no_run", "Topos did not report a run. Check `topos-node packs status`.")
+    return {"stage": "backfill_started", "ok": True, "run_id": run["run_id"], "since": window["since"],
+            "waiting": waiting}
 
 
 @packs_group.command("add")
 @click.argument("file", type=click.Path(exists=True, dir_okay=False))
 @click.option("--check", is_flag=True, help="Only say whether the file is a pack Topos can add; add nothing.")
-def packs_add(file: str, check: bool) -> None:
-    """Add a fact pack of your own from a YAML file: shows what it would read and write, asks you once."""
+@click.option("--on", "switch_on", is_flag=True,
+              help="Also switch the pack on, in the same question (default: it starts switched off).")
+@click.option("--backfill", "window", type=WINDOW, default=None, metavar="WINDOW",
+              help="With --on: also read history for it, in the same question: 30d, 90d (a number of days), "
+                   "all, or a day as YYYY-MM-DD.")
+@click.option("--open-terminal", is_flag=True,
+              help="Without a terminal: open the question in a Terminal window on macOS; no command typing needed.")
+@click.option("--expected-sha256", "expected", default="", hidden=True)
+@_JSON_OPTION
+def packs_add(file: str, check: bool, switch_on: bool, window: Optional[Dict[str, Any]], open_terminal: bool,
+              expected: str, as_json: bool) -> None:
+    """Add a fact pack of your own from a YAML file: shows what it would read and write, asks you once.
+
+    With --on (and --backfill) the one question also covers switching the pack on (and reading history for it).
+    Every effect is named before the question, and there is no option that answers it for you.
+    """
     from pathlib import Path
 
     from topos.features.derivation import custom_packs
 
+    if window is not None and not switch_on:
+        raise click.UsageError("--backfill reads history for a pack that is on: pass --on with it.")
+    if check and (switch_on or open_terminal):
+        raise click.UsageError("--check adds nothing, so it takes no --on, --backfill or --open-terminal.")
+
+    def refuse(sentence: str) -> None:
+        if as_json:
+            _json_out({"ok": False, "error": sentence})
+            sys.exit(EXIT_FAILED)
+        _fail(f"Not added. {sentence}")
+
     try:
         pack, content = custom_packs.read_candidate(Path(file))
     except custom_packs.CustomPackError as exc:
-        _fail(f"Not added. {exc}")
+        refuse(str(exc))
     except Exception:  # noqa: BLE001 -- the last line: a file from outside never ends this command in a traceback
-        _fail(f"Not added. {_NOT_A_PACK}")
+        refuse(_NOT_A_PACK)
+    digest = _sha256(content)
+    if expected and expected != digest:
+        # The window was opened for other bytes: what the agent checked is not what would be shown here.
+        refuse("The file changed after it was checked. Check it again, then add it.")
+    if check and as_json:
+        _json_out(_check_doc(pack, content))
+        return
+    reach = custom_packs.routing_reach(pack)
+    # With --json, everything a person reads before the question goes to stderr: stdout stays one document.
     for line in custom_packs.describe(pack):
-        click.echo(line)
-    click.echo(_WHO_READS)
+        click.echo(line, err=as_json)
+    click.echo(_routing_line(reach), err=as_json)
+    click.echo(_WHO_READS, err=as_json)
     grants = _existing_grants_line(pack.pack)
     if grants:
-        click.echo(grants)
+        click.echo(grants, err=as_json)
     if check:
         click.echo("This file is a pack Topos can add. Nothing was added.")
         return
-    if not (sys.stdin.isatty() and sys.stdout.isatty()):
-        _fail("Adding a pack changes what Topos may write about you, so it asks you first: "
-              "run this command in your own terminal.", EXIT_NEEDS_HUMAN)
+    staged = switch_on or open_terminal or as_json
+    base = {"pack_id": pack.pack, "version": pack.version, "sha256": digest}
+    if not _can_prompt():
+        if not staged:
+            _fail("Adding a pack changes what Topos may write about you, so it asks you first: "
+                  "run this command in your own terminal.", EXIT_NEEDS_HUMAN)
+        # Look before handing over a question that could only fail.
+        try:
+            custom_packs.install_plan(pack)
+            if switch_on:
+                _node(_socket(30.0), "GET", PACKS_PATH)
+        except custom_packs.CustomPackError as exc:
+            refuse(str(exc))
+        except _Stop as stop:
+            if as_json:
+                _json_out({**base, "ok": False, "status": "failed", "code": stop.code, "error": stop.say,
+                           "receipts": [], "state": {"added": False, "enabled": False, "backfill_run": None}})
+                sys.exit(stop.exit_code)
+            _fail(stop.say, stop.exit_code)
+        argv = ["packs", "add", str(Path(file).resolve()), "--expected-sha256", digest]
+        argv += ["--on"] if switch_on else []
+        argv += ["--backfill", window["text"]] if window is not None else []
+        _hand_to_person(
+            argv=argv, slug="pack-add", title="Add a fact pack to the Topos on this computer",
+            open_terminal=open_terminal, as_json=as_json,
+            doc={**base, "added": False},
+            typed="Adding a pack changes what Topos may write about you, so it asks you first: "
+                  "run this command in your own terminal.")
+
+    sock = _socket() if switch_on else None
+    cost: List[str] = []
+    try:
+        if staged:
+            custom_packs.install_plan(pack)         # what this node would refuse is said before the question
+        if switch_on:
+            _node(sock, "GET", PACKS_PATH)          # is Topos running: asked before the person is
+        if window is not None:
+            active = _run(_node(sock, "GET", CURRENT_PATH))
+            if active is not None and active["state"] in _ACTIVE and active["origin"] != "auto":
+                raise _Stop("backfill_already_running",
+                            "A backfill run is working now, so --backfill cannot start another. Wait for it "
+                            "(`topos-node packs status --follow`), or leave --backfill out.")
+            cost = _backfill_words(sock, pack.pack, window, reach)
+    except custom_packs.CustomPackError as exc:
+        refuse(str(exc))
+    except _Stop as stop:
+        if as_json:
+            _json_out({**base, "ok": False, "status": "failed", "code": stop.code, "error": stop.say,
+                       "receipts": [], "state": {"added": False, "enabled": False, "backfill_run": None}})
+            sys.exit(stop.exit_code)
+        _fail(f"Not added. {stop.say}", stop.exit_code)
     click.echo("If a pack with this id is already added, this file replaces it and the pack is switched off "
-               "until you switch it on again.")
-    if not click.confirm("Add it?", default=False, err=True):
-        click.echo("Nothing added.")
+               "until you switch it on again.", err=as_json)
+    if switch_on:
+        click.echo("One yes here does all of this, in this order:", err=as_json)
+        click.echo("  1. The pack is added: this file is copied into this Topos.", err=as_json)
+        click.echo("  2. It is switched on now. From then on Topos reads your new records for it and writes the "
+                   "facts it finds.", err=as_json)
+        if window is not None:
+            click.echo("  3. History is read for it, in one run that starts now and goes on after this command "
+                       "ends.", err=as_json)
+            for line in cost:
+                click.echo(line, err=as_json)
+        else:
+            click.echo(f"  No history is read. `topos-node packs backfill --pack {pack.pack}` reads it later.",
+                       err=as_json)
+    question = ("Add it?" if not switch_on else "Add it and switch it on?" if window is None
+                else "Add it, switch it on and read that history?")
+    receipts: List[Dict[str, Any]] = []
+    state = {"added": False, "enabled": False, "backfill_run": None}
+    if not click.confirm(question, default=False, err=True):
+        if as_json:
+            _json_out({**base, "ok": True, "status": "cancelled", "receipts": receipts, "state": state})
+        else:
+            click.echo("Nothing added.")
         sys.exit(EXIT_OK)
+
+    def failed(stage: str, code: str, sentence: str, exit_code: int, after: str) -> None:
+        receipts.append({"stage": stage, "ok": False, "code": code, "error": sentence})
+        if as_json:
+            _json_out({**base, "ok": False, "status": "failed", "failed_stage": stage, "code": code,
+                       "error": sentence, "receipts": receipts, "state": state})
+            sys.exit(exit_code)
+        _fail(f"{'Not added. ' if stage == 'added' else ''}{sentence}{after}", exit_code)
+
     try:
         # The bytes that were read and shown above, not the file again: a file that changed while the question
         # was open is not what the owner said yes to.
         added = custom_packs.install_content(content)
     except custom_packs.CustomPackError as exc:
-        _fail(f"Not added. {exc}")
+        failed("added", "not_added", str(exc), EXIT_FAILED, "") if staged else _fail(f"Not added. {exc}")
     except Exception:  # noqa: BLE001
-        _fail(f"Not added. {_NOT_A_PACK}")
+        failed("added", "not_added", _NOT_A_PACK, EXIT_FAILED, "") if staged else _fail(f"Not added. {_NOT_A_PACK}")
+    receipts.append({"stage": "added", "ok": True, "replaced": added["replaced"], "unchanged": added["unchanged"]})
+    state["added"] = True
     if added["unchanged"]:
-        click.echo(f"{added['pack_id']} {added['version']} is already added, unchanged.")
+        click.echo(f"{added['pack_id']} {added['version']} is already added, unchanged.", err=as_json)
+    else:
+        click.echo(f"Added {added['pack_id']} {added['version']}"
+                   + (f" (it replaces {added['replaced']})." if added["replaced"] else "."), err=as_json)
+    if not switch_on:
+        if as_json:
+            _json_out({**base, "ok": True, "status": "done", "receipts": receipts, "state": state})
+            return
+        if not added["unchanged"]:
+            click.echo(f"It is switched off. `topos-node packs on {added['pack_id']}` switches it on (or the app: "
+                       f"Data → Fact packs); `topos-node packs backfill --pack {added['pack_id']}` then reads "
+                       "your history.")
         return
-    click.echo(f"Added {added['pack_id']} {added['version']}"
-               + (f" (it replaces {added['replaced']})." if added["replaced"] else "."))
-    click.echo("It is switched off. Switch it on in the app (Data → Fact packs); "
-               f"`topos-node packs backfill --pack {added['pack_id']}` then reads your history.")
+
+    from topos.features.derivation.registry import definition_sha
+
+    try:
+        # The digest of what was shown: the node switches on only a pack that still has it.
+        _node(sock, "PUT", _switch_path(pack.pack), confirm=True,
+              json_body={"enabled": True, "definition": definition_sha(pack, stamped=False)})
+    except _Stop as stop:
+        if stop.code == NO_ANSWER or added["unchanged"]:
+            # No answer: the switch may have happened. Unchanged: the pack was already added, and its switch is
+            # whatever it was before this command, which this command did not read.
+            state["enabled"] = None
+            after = (" The pack is added; whether it is switched on is not known. `topos-node packs list` says, "
+                     f"and `topos-node packs on {pack.pack}` switches it on.")
+        else:
+            after = f" The pack is added and switched off. `topos-node packs on {pack.pack}` switches it on."
+        failed("switched_on", stop.code, stop.say, stop.exit_code, after)
+    receipts.append({"stage": "switched_on", "ok": True})
+    state["enabled"] = True
+    click.echo("It is switched on.", err=as_json)
+    if window is not None:
+        try:
+            receipt = _started_run(sock, pack.pack, window)
+        except _Stop as stop:
+            since = f" --since {window['since']}" if window["since"] else ""
+            if stop.code == NO_ANSWER:
+                state["backfill_run"] = None
+                after = (" The pack is added and switched on; whether reading its history started is not known. "
+                         "`topos-node packs status` says. Do not start another run before checking.")
+            else:
+                after = (" The pack is added and switched on, and no history was read. "
+                         f"`topos-node packs backfill --pack {pack.pack}{since} --until-done` reads it.")
+            failed("backfill_started", stop.code, stop.say, stop.exit_code, after)
+        receipts.append(receipt)
+        state["backfill_run"] = receipt["run_id"]
+        waiting = receipt["waiting"]
+        click.echo(f"Reading history ({receipt['run_id']})"
+                   + (f": {waiting:,} record{'s' if waiting != 1 else ''} waiting" if waiting is not None else "")
+                   + ". `topos-node packs status --follow` watches it; `topos-node packs stop` stops it.",
+                   err=as_json)
+    if as_json:
+        _json_out({**base, "ok": True, "status": "done", "receipts": receipts, "state": state})
+
+
+# ----------------------------------------------------------------------------- trying a draft's own examples
+def _trial_report(body: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The node's trial report, reduced to the fields this command prints. The texts and expected facts are the
+    file's own; what came back is the model's reading of them. No record of the owner's is in it."""
+    if not isinstance(body, dict) or not isinstance(body.get("examples"), list):
+        return None
+    rows = []
+    for row in body["examples"]:
+        if not isinstance(row, dict) or row.get("kind") not in ("gold", "negative_control"):
+            continue
+        rows.append({
+            "kind": row["kind"], "index": _int(row.get("index")), "text": str(row.get("text") or ""),
+            "role": _word(row.get("role")) or "authored", "routed": row.get("routed") is True,
+            "expected": row.get("expected") if isinstance(row.get("expected"), list) else [],
+            "returned": row.get("returned") if isinstance(row.get("returned"), list) else [],
+            "rejected": _int(row.get("rejected")), "seconds": _seconds(row.get("seconds")),
+            "outcome": row.get("outcome") if row.get("outcome") in ("pass", "fail", "unjudged", "error", "skipped")
+            else "error",
+            "reason": _word(row.get("reason")), "missing": _int(row.get("missing")), "extra": _int(row.get("extra"))})
+
+    def count(outcome: str, kind: Optional[str] = None) -> int:
+        return sum(1 for row in rows if row["outcome"] == outcome and (kind is None or row["kind"] == kind))
+
+    def part(kind: str) -> Dict[str, int]:
+        return {"examples": sum(1 for row in rows if row["kind"] == kind), "passed": count("pass", kind),
+                "failed": count("fail", kind)}
+
+    totals = {"examples": len(rows), "passed": count("pass"), "failed": count("fail"),
+              "unjudged": count("unjudged"), "errors": count("error"), "skipped": count("skipped"),
+              "gold": part("gold"), "negative_controls": part("negative_control")}
+    version = str(body.get("version") or "")
+    return {"pack_id": str(body.get("pack_id") or "") if _PACK_ID_RE.match(str(body.get("pack_id") or "")) else None,
+            "version": version if re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$", version) else None,
+            "model": _model(body.get("model")), "template": _model(body.get("template")),
+            "fact_check": "not_run", "stopped": _word(body.get("stopped")),
+            "seconds": _seconds(body.get("seconds")), "examples": rows, "totals": totals}
+
+
+@packs_group.command("try")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False))
+@_JSON_OPTION
+def packs_try(file: str, as_json: bool) -> None:
+    """Run a pack file's own examples on the local model and say which pass. Adds and writes nothing.
+
+    Only the texts under the file's `eval.gold` and `eval.negative_controls` are read: none of your records.
+    A gold example passes when every fact it expects comes back; a negative control passes when nothing does.
+    It needs Topos running, and takes the model's time: about one call per example.
+    """
+    from pathlib import Path
+
+    from topos.features.derivation import custom_packs, pack_trial
+
+    def refuse(sentence: str, code: Optional[str] = None, exit_code: int = EXIT_FAILED) -> None:
+        if as_json:
+            _json_out({"ok": False, "error": sentence, **({"code": code} if code else {})})
+        else:
+            click.echo(f"Not tried. {sentence}", err=True)
+        sys.exit(exit_code)
+
+    try:
+        pack, content = custom_packs.read_candidate(Path(file))
+    except custom_packs.CustomPackError as exc:
+        refuse(str(exc))
+    except Exception:  # noqa: BLE001 -- a file from outside never ends this command in a traceback
+        refuse(_NOT_A_PACK)
+    examples = pack_trial.examples_of(pack)
+    if len(examples) > pack_trial.MAX_EXAMPLES:
+        refuse(f"The file holds {len(examples)} examples and one try runs at most {pack_trial.MAX_EXAMPLES}. "
+               "Try it with fewer.", "too_many_examples")
+    try:
+        body = _node(_socket(TRY_TIMEOUT_S), "POST", TRY_PATH, json_body={"content": content.decode("utf-8")})
+    except _Stop as stop:
+        if stop.code == "owner_confirmation_required":
+            # A try needs no approval. A node that asks for one does not know the route: its socket refuses every
+            # changing request it has no entry for.
+            refuse(_OLDER_NODE, "older_node")
+        refuse(stop.say, stop.code, EXIT_NO_MODEL if stop.code in ("no_local_model", NO_ANSWER) else stop.exit_code)
+    report = _trial_report(body)
+    if report is None:
+        refuse("Topos did not report the try. Check `topos-node status`.", "no_report")
+    totals = report["totals"]
+    if report["stopped"] == "model_unavailable" or (totals["errors"] and not totals["passed"] + totals["failed"]):
+        status, code = "model_unavailable", EXIT_NO_MODEL
+    elif totals["failed"]:
+        status, code = "failed", EXIT_EXAMPLES_FAILED
+    elif totals["errors"] or totals["skipped"] or totals["unjudged"]:
+        # A gold example with no expected fact was run but not judged: it passed nothing, so neither did the try.
+        status, code = "incomplete", EXIT_EXAMPLES_FAILED
+    else:
+        status, code = "passed", EXIT_OK
+    if as_json:
+        _json_out({"ok": True, "status": status, **report})
+        sys.exit(code)
+    click.echo(f"{report['pack_id'] or pack.pack} {report['version'] or pack.version}, tried on "
+               f"{report['model'] or 'the local model'}: the file's own examples, none of your records. "
+               "Nothing was added or written.")
+    for row in report["examples"]:
+        label = "gold" if row["kind"] == "gold" else "negative control"
+        verdict = {"pass": "pass", "fail": "FAIL", "unjudged": "not judged", "error": "no answer",
+                   "skipped": "not run"}[row["outcome"]]
+        click.echo(f"  {label} {row['index']}: {verdict}" + (f" ({row['reason']})" if row["reason"] else "")
+                   + f"  \"{_shown(row['text'])}\"")
+        for wanted in row["expected"]:
+            if isinstance(wanted, dict):
+                click.echo(f"      expected {_shown(wanted.get('predicate'), 80)} "
+                           f"{_shown_value(wanted.get('value')) if 'value' in wanted else ''}".rstrip())
+        for got in row["returned"]:
+            if isinstance(got, dict):
+                click.echo(f"      returned {_shown(got.get('predicate'), 80)} {_shown_value(got.get('value'))}")
+        if row["outcome"] in ("pass", "fail") and not row["returned"]:
+            click.echo("      returned nothing")
+    click.echo(f"{totals['examples']} example{'s' if totals['examples'] != 1 else ''}: {totals['passed']} passed, "
+               f"{totals['failed']} failed"
+               + (f", {totals['unjudged']} not judged (a gold example with no expected fact)"
+                  if totals["unjudged"] else "")
+               + (f", {totals['errors']} with no answer from the model" if totals["errors"] else "")
+               + (f", {totals['skipped']} not run" if totals["skipped"] else "") + ".")
+    if status == "model_unavailable":
+        click.echo("The local model did not answer. Check `topos-node status`, then try again.", err=True)
+    click.echo("A pass here is about these examples only. The check Topos makes on each fact it finds was not "
+               "run, and nothing here says how the pack reads your own records.")
+    sys.exit(code)
+
+
+# ----------------------------------------------------------------------------- the switch, from a terminal
+def _switch_path(pack_id: str) -> str:
+    return f"{PACKS_PATH}/{pack_id}/switch"
+
+
+def _listed(sock, pack_id: str) -> Optional[Dict[str, Any]]:
+    for row in _packs(_node(sock, "GET", PACKS_PATH)):
+        if row["pack_id"] == pack_id:
+            return row
+    return None
+
+
+def _switch_stop(stop: _Stop, pack_id: str, as_json: bool) -> None:
+    if as_json:
+        _json_out({"ok": False, "pack_id": pack_id, "code": stop.code, "error": stop.say})
+        sys.exit(stop.exit_code)
+    _fail(stop.say, stop.exit_code)
+
+
+@packs_group.command("on")
+@click.argument("pack_id", type=PACK, metavar="ID")
+@click.option("--open-terminal", is_flag=True,
+              help="Without a terminal: open the question in a Terminal window on macOS; no command typing needed.")
+@_JSON_OPTION
+def packs_on(pack_id: str, open_terminal: bool, as_json: bool) -> None:
+    """Switch a fact pack on: shows what it reads and writes, asks you once.
+
+    A pack that writes about other people is not switched on here: its consent is asked in the app.
+    """
+    from topos.features.derivation import custom_packs
+    from topos.features.derivation.packs import load_packs
+    from topos.features.derivation.registry import bundled_pack_dir, definition_sha
+
+    try:
+        pack = load_packs(bundled_pack_dir(), only=[pack_id]).get(pack_id)
+    except Exception:  # noqa: BLE001 -- a catalog that cannot be read names no pack
+        pack = None
+    try:
+        if pack is None:
+            raise _Stop("unknown_pack", f"No such pack: {pack_id}. `topos-node packs list` shows them.")
+        if str(getattr(pack, "net_subject", "deny")) == "allow":
+            raise _Stop("consent_in_app", f"{pack_id} writes facts about other people, so switching it on asks "
+                                          "for your consent in the app (Data → Fact packs). Not switched on.")
+        sock = _socket()
+        row = _listed(sock, pack_id)
+        if row is None:
+            raise _Stop("unknown_pack", f"No such pack: {pack_id}. `topos-node packs list` shows them.")
+    except _Stop as stop:
+        _switch_stop(stop, pack_id, as_json)
+    if row["enabled"]:
+        if as_json:
+            _json_out({"ok": True, "status": "already_on", "pack_id": pack_id, "enabled": True, "changed": False})
+        else:
+            click.echo(f"{pack_id} is already on.")
+        sys.exit(EXIT_OK)
+    if not _can_prompt():
+        _hand_to_person(
+            argv=["packs", "on", pack_id], slug="pack-on", title=f"Switch the fact pack {pack_id} on",
+            open_terminal=open_terminal, as_json=as_json, doc={"pack_id": pack_id, "enabled": False},
+            typed="Switching a pack on changes what Topos reads and writes about you, so it asks you first: "
+                  "run this command in your own terminal.")
+    for line in custom_packs.describe(pack):
+        click.echo(line, err=as_json)
+    click.echo(_routing_line(custom_packs.routing_reach(pack)), err=as_json)
+    count = _apps_granted(pack_id)
+    if count:
+        click.echo(f"  {count} connected app{'s hold' if count != 1 else ' holds'} a grant that names this pack "
+                   "and can read its facts once it is on.", err=as_json)
+    click.echo("  A coding agent you connected and your routines need no grant: an answer Topos gives them can "
+               "draw on this pack's facts.", err=as_json)
+    click.echo("Switching it on: from now on Topos reads your new records for this pack and writes the facts it "
+               f"finds. It reads no history by itself: `topos-node packs backfill --pack {pack_id}` does.",
+               err=as_json)
+    if not click.confirm("Switch it on?", default=False, err=True):
+        if as_json:
+            _json_out({"ok": True, "status": "cancelled", "pack_id": pack_id, "enabled": False, "changed": False})
+        else:
+            click.echo("Nothing changed.")
+        sys.exit(EXIT_OK)
+    body: Dict[str, Any] = {"enabled": True}
+    shown = definition_sha(pack, stamped=False)
+    if shown is not None:
+        body["definition"] = shown        # a pack you added: the node switches on only what was shown above
+    try:
+        _node(sock, "PUT", _switch_path(pack_id), confirm=True, json_body=body)
+    except _Stop as stop:
+        _switch_stop(stop, pack_id, as_json)
+    if as_json:
+        _json_out({"ok": True, "status": "switched_on", "pack_id": pack_id, "enabled": True, "changed": True})
+    else:
+        click.echo(f"{pack_id} is switched on. `topos-node packs backfill --pack {pack_id}` reads your history "
+                   "for it.")
+
+
+@packs_group.command("off")
+@click.argument("pack_id", type=PACK, metavar="ID")
+@click.option("--open-terminal", is_flag=True,
+              help="Without a terminal: open the question in a Terminal window on macOS; no command typing needed.")
+@_JSON_OPTION
+def packs_off(pack_id: str, open_terminal: bool, as_json: bool) -> None:
+    """Switch a fact pack off: it stops reading. The facts it wrote are kept; asks you once."""
+    try:
+        sock = _socket()
+        row = _listed(sock, pack_id)
+        if row is None:
+            raise _Stop("unknown_pack", f"No such pack: {pack_id}. `topos-node packs list` shows them.")
+    except _Stop as stop:
+        _switch_stop(stop, pack_id, as_json)
+    if not row["enabled"]:
+        if as_json:
+            _json_out({"ok": True, "status": "already_off", "pack_id": pack_id, "enabled": False, "changed": False})
+        else:
+            click.echo(f"{pack_id} is already off.")
+        sys.exit(EXIT_OK)
+    if not _can_prompt():
+        _hand_to_person(
+            argv=["packs", "off", pack_id], slug="pack-off", title=f"Switch the fact pack {pack_id} off",
+            open_terminal=open_terminal, as_json=as_json, doc={"pack_id": pack_id, "enabled": True},
+            typed="A pack's switch is yours to change, so it asks you first: run this command in your own "
+                  "terminal.")
+    click.echo(f"Switching {pack_id} off: Topos stops reading records for it. The {row['fact_count']:,} "
+               f"fact{'s' if row['fact_count'] != 1 else ''} it holds "
+               f"{'are' if row['fact_count'] != 1 else 'is'} kept, and no app reads them while the pack is off. "
+               f"`topos-node packs on {pack_id}` switches it on again.", err=as_json)
+    if not click.confirm("Switch it off?", default=False, err=True):
+        if as_json:
+            _json_out({"ok": True, "status": "cancelled", "pack_id": pack_id, "enabled": True, "changed": False})
+        else:
+            click.echo("Nothing changed.")
+        sys.exit(EXIT_OK)
+    try:
+        _node(sock, "PUT", _switch_path(pack_id), confirm=True, json_body={"enabled": False})
+    except _Stop as stop:
+        _switch_stop(stop, pack_id, as_json)
+    if as_json:
+        _json_out({"ok": True, "status": "switched_off", "pack_id": pack_id, "enabled": False, "changed": True})
+    else:
+        click.echo(f"{pack_id} is switched off.")
 
 
 @packs_group.command("remove")
@@ -514,7 +1233,8 @@ def packs_backfill(pack_ids: tuple, all_enabled: bool, limit: int, until_done: b
     if all_enabled:
         chosen = sorted(pid for pid, p in known.items() if p["enabled"])
         if not chosen:
-            click.echo("No fact packs are switched on. Switch them on in the app (Data → Fact packs).")
+            click.echo("No fact packs are switched on. `topos-node packs on ID` switches one on "
+                       "(or the app: Data → Fact packs).")
             sys.exit(EXIT_OK)
     else:
         chosen = list(dict.fromkeys(pack_ids))
@@ -523,7 +1243,8 @@ def packs_backfill(pack_ids: tuple, all_enabled: bool, limit: int, until_done: b
         if unknown:
             _fail(f"No such pack: {', '.join(unknown)}. `topos-node packs list` shows them.")
         if off:
-            _fail(f"Not switched on: {', '.join(off)}. Switch a pack on in the app (Data → Fact packs) first.")
+            _fail(f"Not switched on: {', '.join(off)}. `topos-node packs on ID` switches a pack on "
+                  "(or the app: Data → Fact packs).")
 
     active = _run(_request(sock, "GET", CURRENT_PATH, what="the backfill status"))
     yields = active is not None and active["state"] in _ACTIVE and active["origin"] == "auto"

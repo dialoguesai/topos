@@ -332,6 +332,15 @@ CENSUS: Tuple[RouteRule, ...] = (
     _d("POST", "/v1/signal/derivation/offers/resolve", "signal: derivation pack offers"),
     _d("PUT", "/v1/signal/derivation/packs/{pack_id}", "signal: derivation pack configuration"),
     _d("POST", "/v1/signal/derivation/packs/{pack_id}/backfill", "signal: derivation"),
+    # A pack from a terminal (features/derivation/pack_trial.py, surfaces.switch_pack). The switch is the owner's
+    # in both directions: on starts reading and writing facts, off also takes the pack's facts away from the apps
+    # that read them. It needs the app or the owner's yes on a terminal, and the route checks the confirmed peer
+    # itself as well (it is refused over TCP). The trial runs a pack FILE's own invented examples through the
+    # local model: it reads no record of the owner's and writes nothing, so it is open, like the other model
+    # calls here; the route serves it on the socket only and caps it.
+    _d("PUT", "/v1/signal/derivation/packs/{pack_id}/switch", "signal: the owner's switch for one fact pack, on or off"),
+    _o("POST", "/v1/signal/derivation/packs/try",
+       "a model call over a pack file's own invented examples; reads no owner record, writes nothing"),
     # One confirmed backfill RUN (features/derivation/backfill_runs.py): starting it puts hours of local-model
     # work on the node and writes facts, so it needs the app or the owner's yes on a terminal, and the route
     # checks the confirmed peer itself as well. Stopping one starts nothing and unmarks nothing.
