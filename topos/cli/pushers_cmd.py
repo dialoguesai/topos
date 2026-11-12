@@ -54,7 +54,9 @@ def _source_registry():
     try:
         result = NodeSocket().request_sync("GET", "/sources")
     except NodeDown:
-        raise click.ClickException('Topos isn\'t running — say "start Topos".') from None
+        # Before Topos starts (an installer enrolling a pusher), only bundled sources can be named, as before.
+        from topos.sources.registry import REGISTRY
+        return REGISTRY
     except NodeRefused as exc:
         raise click.ClickException(f"Topos refused the source list ({exc.code or exc.status}).") from None
     return {row["source_id"]: definition_from_payload(row) for row in result.get("sources", [])}
