@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 from pydantic import Field, StringConstraints, field_validator, model_serializer, model_validator
 
 from .contract import Hash, Identifier, Number, StrictModel
-from .selective_facts import SelectiveFacts
+from .selective_facts import FactSelection
 from .search_contract import (SearchPolicy, SearchDeclaration, SearchOutputForm, SearchRelease,
     SearchRule, SearchMemberDecision, SearchSetDecision, OpaqueRecordId)
 
@@ -80,7 +80,7 @@ class KnowledgeDeclaration(SearchDeclaration):
     time_semantics: Literal["underlying_evidence_time/v1"]
     answers: AnswerMode | None = None
     writer_disclosure: WriterDisclosure | None = None
-    selective_facts: SelectiveFacts | None = None
+    selective_facts: FactSelection | None = None
     # The owner's consent to name the AI chat a released message came from. Absent is off; on is the literal true,
     # so a policy signed before this field keeps its bytes and off has one encoding.
     release_conversation_title: Literal[True] | None = None

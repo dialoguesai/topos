@@ -746,7 +746,7 @@ def test_objects_are_stored_as_browsing_interests(db):
     db.commit()
     counts = fam.persist(db, build(db))
     db.commit()
-    assert counts == {"inserted": 1, "closed": 0, "unchanged": 0}
+    assert counts == {"inserted": 1, "closed": 0, "unchanged": 0, "digest_only": 0}
     (key, payload, refs, valid_to), = _stored(db)
     assert key == "interest:tc_hobby:2026-08" and valid_to is None
     assert {k: payload[k] for k in ("label", "month", "strength", "cluster_id", "visit_count", "day_count")} == {
@@ -762,17 +762,41 @@ def test_persist_is_idempotent_and_closes_what_changed_or_left(db):
     month_of_visits(db, 0, 5, [3, 9, 17])
     month_of_visits(db, 100, 5, [1, 5, 19], month=9)
     db.commit()
-    assert fam.persist(db, build(db)) == {"inserted": 2, "closed": 0, "unchanged": 0}
-    assert fam.persist(db, build(db)) == {"inserted": 0, "closed": 0, "unchanged": 2}
+    assert fam.persist(db, build(db)) == {"inserted": 2, "closed": 0, "unchanged": 0, "digest_only": 0}
+    assert fam.persist(db, build(db)) == {"inserted": 0, "closed": 0, "unchanged": 2, "digest_only": 0}
     visit(db, 300, at(9, 20, hour=1))
     db.execute("DELETE FROM topic_cluster_members WHERE record_id='browser:v0'")
     db.commit()
-    assert fam.persist(db, build(db)) == {"inserted": 1, "closed": 2, "unchanged": 0}
+    # September gained a visit inside its band (a renewal, digest_only); August lost one and no longer qualifies.
+    assert fam.persist(db, build(db)) == {"inserted": 1, "closed": 2, "unchanged": 0, "digest_only": 1}
     active = [s for s in _stored(db) if s[3] is None]
     assert [(k, p["visit_count"]) for k, p, _r, _v in active] == [("interest:tc_hobby:2026-09", 6)]
     before = db.execute("SELECT COUNT(*) FROM signal_objects WHERE object_type != 'browsing_interest'").fetchone()
-    assert fam.persist(db, fam.Build(built_at_us=NOW_US)) == {"inserted": 0, "closed": 1, "unchanged": 0}
+    assert fam.persist(db, fam.Build(built_at_us=NOW_US)) == {"inserted": 0, "closed": 1, "unchanged": 0,
+                                                                "digest_only": 0}
     assert db.execute("SELECT COUNT(*) FROM signal_objects WHERE object_type != 'browsing_interest'").fetchone() == before
+
+
+def test_persist_counts_the_renewals_that_kept_label_month_and_band(db):
+    """`digest_only`: a renewal whose label, month and strength band are the closed row's. Only the counted visits
+    behind its content revision moved, so a recipient would receive the same record; the refresh's receipt uses the
+    count to tell the open month's hourly churn (5 Nov 2026: 55 of 59 renewals) from a real change. A band crossing,
+    a relabel and an interest that is gone are not renewals of that kind."""
+    month_of_visits(db, 0, 16, [3, 9, 17])                     # August: 16 visits, medium
+    db.commit()
+    assert fam.persist(db, build(db)) == {"inserted": 1, "closed": 0, "unchanged": 0, "digest_only": 0}
+    visit(db, 300, at(8, 20))                                   # one more, inside the band
+    db.commit()
+    assert fam.persist(db, build(db)) == {"inserted": 1, "closed": 1, "unchanged": 0, "digest_only": 1}
+    assert fam.persist(db, build(db)) == {"inserted": 0, "closed": 0, "unchanged": 1, "digest_only": 0}
+    month_of_visits(db, 400, 33, [4, 10, 18])                   # 50 visits: the band moves to high
+    db.commit()
+    assert fam.persist(db, build(db)) == {"inserted": 1, "closed": 1, "unchanged": 0, "digest_only": 0}
+    cluster(db, "tc_hobby", "sourdough / bread")                # a relabel: the same visits under another label
+    db.commit()
+    assert fam.persist(db, build(db)) == {"inserted": 1, "closed": 1, "unchanged": 0, "digest_only": 0}
+    assert fam.persist(db, fam.Build(built_at_us=NOW_US)) == {"inserted": 0, "closed": 1, "unchanged": 0,
+                                                                "digest_only": 0}
 
 
 def test_persist_does_not_move_the_protection_clock(db):
@@ -793,7 +817,7 @@ def test_an_unavailable_build_stores_nothing(tmp_path):
     import sqlite3
     conn = sqlite3.connect(str(tmp_path / "x.db"))
     assert fam.persist(conn, fam.build(conn, owner_id=OWNER, now_us=NOW_US)) == {"inserted": 0, "closed": 0,
-                                                                                 "unchanged": 0}
+                                                                                 "unchanged": 0, "digest_only": 0}
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ from ..engine.engine import Engine
 from ..engine.admission import AdmissionRejected, EngineAdmission
 from ..engine.tasks import ProcessingResult, ProcessingTask
 from ..engine.overload import unavailable_from_detail
+from ..engine.request_budget import RequestBudget, RequestStopped, budget_scope, await_budgeted, TIMEOUT_HEADER, MAX_SECONDS
 
 logger = logging.getLogger(__name__)
 
@@ -48,14 +49,25 @@ def get_admission(request: Request) -> EngineAdmission:
     return admission
 
 
-async def _execute_connected(request: Request, admission: EngineAdmission, task: ProcessingTask) -> ProcessingResult:
+async def _execute_connected(request: Request, admission: EngineAdmission, task: ProcessingTask, budget=None) -> ProcessingResult:
     async def disconnected():
         # FastAPI has already consumed the JSON body. Listen for disconnect
         # without polling or treating the end of the request body as cancellation.
         while (await request.receive())["type"] != "http.disconnect":
             pass
 
-    work = asyncio.create_task(admission.execute(lambda: Engine().run(task)))
+    def run():
+        if budget is not None:
+            budget.check()
+        return Engine().run(task)
+
+    async def execute():
+        if budget is None:
+            return await admission.execute(run)
+        with budget_scope(budget):
+            return await await_budgeted(admission.execute(run), budget)
+
+    work = asyncio.create_task(execute())
     gone = asyncio.create_task(disconnected())
     try:
         done, _ = await asyncio.wait((work, gone), return_when=asyncio.FIRST_COMPLETED)
@@ -63,6 +75,8 @@ async def _execute_connected(request: Request, admission: EngineAdmission, task:
             return await work
         # execute() cancels a queued job, or detaches the caller while retaining
         # the active worker slot. The worker is never assumed to have stopped.
+        if budget is not None:
+            budget.cancel()
         raise HTTPException(status_code=499, detail="Caller disconnected")
     finally:
         for future in (work, gone):
@@ -82,8 +96,17 @@ async def engine_run(body: Dict[str, Any], request: Request,
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid ProcessingTask: {exc}",
         ) from exc
+    budget = None
+    value = request.headers.get(TIMEOUT_HEADER)
+    if value is not None:
+        if not value.isascii() or not value.isdecimal() or len(value) > 6 or not 1 <= int(value) <= MAX_SECONDS * 1000:
+            raise HTTPException(status_code=422, detail="Invalid compute request budget")
+        budget = RequestBudget(int(value) / 1000)
     try:
-        result = await _execute_connected(request, admission, task)
+        result = await _execute_connected(request, admission, task, budget)
+    except RequestStopped as exc:
+        result = ProcessingResult(task_id=task.id, status="deferred", error=str(exc),
+                                  output={"availability": exc.detail()})
     except AdmissionRejected as exc:
         from ..observability.metrics import measure
         measure("counter", "topos.compute.rejections", 1, unit="{request}",

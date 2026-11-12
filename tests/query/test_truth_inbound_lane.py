@@ -629,8 +629,15 @@ def test_the_local_chat_reads_loaded_models_and_loads_with_an_empty_generate(mon
     assert models.LocalChat("qwen3.5:9b-mlx", base).resident() is True
     assert models.LocalChat("llama3.2", base).resident() is True  # an untagged name means :latest
     assert models.LocalChat("smtek/Qwen3.8-27B:IQ2_M", base).resident() is False
+    # The warm loads the model at its serving context (the first step, for a load with no prompt), so the chat calls
+    # after it find it loaded as they ask.
+    from topos import local_serving
+    monkeypatch.setattr(local_serving, "CONTEXT", 32768)
+    monkeypatch.setattr(local_serving, "STEPS", (8192, 16384))
+    monkeypatch.setattr(local_serving, "_contexts", {})
     models.LocalChat("qwen3.5:9b-mlx", base).warm(120.0)
-    assert seen[-1] == (base + "/api/generate", {"model": "qwen3.5:9b-mlx", "keep_alive": "10m"})
+    assert seen[-1] == (base + "/api/generate", {"model": "qwen3.5:9b-mlx", "keep_alive": "10m",
+                                                 "options": {"num_ctx": 8192}})
 
     def down(request, timeout):
         raise models.urllib.error.URLError("refused")
@@ -641,6 +648,27 @@ def test_the_local_chat_reads_loaded_models_and_loads_with_an_empty_generate(mon
     with pytest.raises(models.ModelUnavailable):
         models.LocalChat("qwen3.5:9b-mlx", base).warm(1.0)
 
+
+
+def test_a_local_chat_out_of_time_in_the_nodes_hold_is_unavailable_and_sends_nothing(monkeypatch):
+    """The node does not send a local request once its hold has used up the caller's time (local_serving's
+    HoldExpired). The verify pipeline handles only ModelUnavailable, so that is what a chat or a warm raises then."""
+    from topos import local_serving
+    from topos.query import verify_v2_models as models
+
+    sent = []
+    monkeypatch.setattr(models.urllib.request, "urlopen", lambda request, timeout: sent.append(request))
+    monkeypatch.setattr(local_serving, "POLL_SECONDS", 0.01)
+    monkeypatch.setattr(local_serving, "SLOTS", 1)
+    monkeypatch.setattr(local_serving, "_held", {})
+    monkeypatch.setattr(local_serving, "_in_flight", {1: ("qwen3.5:9b-mlx", 8192, local_serving.time.monotonic(),
+                                                          local_serving.LIVE)})
+    chat = models.LocalChat("qwen3.5:9b-mlx", "http://127.0.0.1:11434")
+    with pytest.raises(models.ModelUnavailable, match="deadline"):
+        chat("system", "user", {"type": "object"}, 0.6, models.Usage())
+    with pytest.raises(models.ModelUnavailable, match="deadline"):
+        chat.warm(0.6)
+    assert sent == []
 
 def test_a_deadline_is_stored_as_unable(node, monkeypatch):
     add_journal(node.conn, "j1", "I finished building the garden shed this morning.")

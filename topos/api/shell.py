@@ -20,6 +20,7 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 
+from .. import local_serving
 from ..core import state
 from ..core.logging import get_log_file_path
 from ..runtime_update import (
@@ -48,7 +49,10 @@ def _control_plane_state(status: Optional[dict]) -> str:
     that is the one a human must fix by pairing again rather than by waiting.
     """
     if not status:
-        return "unknown"
+        from ..config.settings import settings
+
+        # No client at all because no account is connected: a state, not an unknown.
+        return "local_only" if settings.local_only else "unknown"
     if status.get("connected") or status.get("state") == "connected":
         return "connected"
     if status.get("last_failure_category") == "auth":
@@ -74,16 +78,21 @@ def _identity_fields() -> dict:
     the user id itself and never a key."""
     topos_id = None
     user_id_present = False
+    mode = None
     conn = _db_connection()
     if conn is not None:
         try:
             from ..core.state import get_engine_config_value, get_user_id
+            from ..local_identity import identity_mode
 
             topos_id = (get_engine_config_value(conn, "topos_id") or "").strip() or None
             user_id_present = bool(get_user_id(conn))
+            found = identity_mode(conn)
+            mode = found if found in ("local", "account") else None
         except Exception:  # noqa: BLE001
             pass
-    return {"topos_id": topos_id, "user_id_present": user_id_present}
+    # `identity_mode`: `local` while the ids were minted on this computer (no account yet), `account` once paired.
+    return {"topos_id": topos_id, "user_id_present": user_id_present, "identity_mode": mode}
 
 
 def _client_is_local(request: Request) -> bool:
@@ -100,6 +109,7 @@ async def shell_status() -> dict:
     from ..features.entities.rebuild_subprocess import graph_rebuild_running
     from ..owner_key import owner_key_persisted
     from ..sanitization.prewarm import prewarm_status
+    from ..routines.store import run_quota_policy
 
     info = get_update_info()
     log_file = get_log_file_path()
@@ -128,6 +138,9 @@ async def shell_status() -> dict:
         # automatic refreshes, manual requests, and upgrade rebuilds. A dirty
         # or debouncing graph is not yet rebuilding.
         "graph_rebuild": {"running": graph_rebuild_running()},
+        "routine_run_policy": run_quota_policy(),
+        # How the node serves its local models: one context, and the watchdog's unloads (topos/local_serving.py).
+        "local_serving": local_serving.status(),
         # Additive, for `topos-node status` / `doctor` over the owner socket and the
         # plugin's SessionStart hook (CONTRACTS §4): the control-plane link as a word,
         # who supervises this process, whether the owner key is on disk (DIGEST J6),

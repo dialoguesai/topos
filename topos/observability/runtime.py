@@ -52,19 +52,18 @@ def current() -> Telemetry:
 
 
 def configure() -> bool:
-    """No connection on ordinary consumer installs; endpoint or opt-in required."""
+    """Owner-controlled diagnostics: explicit Topos opt-in AND export destination.
+
+    Generic OTEL variables may be inherited from a hosting environment. They are
+    configuration, never consent. No vendor endpoint or implicit localhost export.
+    """
     global _runtime, _configured
     with _lock:
         if _configured:
             return True
         if os.getenv("OTEL_SDK_DISABLED", "").lower() == "true":
             return False
-        if os.getenv("TOPOS_OTEL_ENABLED", "").lower() != "true" and not any(
-            os.getenv(name) for name in (
-                "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
-                "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
-            )
-        ):
+        if os.getenv("TOPOS_OTEL_ENABLED", "").strip().lower() != "true":
             return False
         providers = []
         try:
@@ -91,6 +90,11 @@ def configure() -> bool:
                                      os.getenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf"))
                 if choice == "otlp" and protocol != "http/protobuf":
                     raise ValueError("Only http/protobuf is supported")
+                if choice == "otlp" and not (
+                    os.getenv(f"OTEL_EXPORTER_OTLP_{signal}_ENDPOINT", "").strip()
+                    or os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip()
+                ):
+                    raise ValueError("An owner-selected endpoint is required for each exported signal")
                 choices[signal] = choice
             tp = TracerProvider(resource=resource, shutdown_on_exit=False)
             providers.append(tp)

@@ -138,6 +138,42 @@ def _log_query_failure(
     )
 
 
+#: Keys copied from a verify_claim's in-progress audit onto its failure line. All content-free by construction
+#: (verify.py builds them from mode, counts and timings); nothing else the worker might add is copied.
+_VERIFY_FAILURE_AUDIT_KEYS = ("mode", "retrieval_touched", "judge", "evidence_counts", "category", "task_id", "phase")
+
+
+def _log_verify_failure_audit(progress: Dict[str, Any], failure: str, caller_app_id: str,
+                              dispatched: float, worker_times: Dict[str, float]) -> None:
+    """The same `truth verify_claim audit:` line a success writes, for a request that ended without a result.
+
+    Before 1.5.39 the line was written only on success, so every 120 s deadline in the 1-2 Nov 2026 stress runs left no
+    record of how far the request got. The worker may still be writing `progress` (the handler stops waiting at the
+    deadline; the worker stops at its next budget check), so read single keys and copy nested dicts defensively.
+    """
+    now = time.perf_counter()
+    audit: Dict[str, Any] = {"outcome": failure, "caller_app_id": caller_app_id}
+    for key in _VERIFY_FAILURE_AUDIT_KEYS:
+        value = progress.get(key)
+        if value is not None:
+            audit[key] = value
+    try:
+        timings = dict(progress.get("timings_ms") or {})
+    except RuntimeError:  # resized by the worker while copying
+        timings = {}
+    phase_started = progress.get("phase_started")
+    if isinstance(phase_started, float):
+        # How long the request had been in its last phase when it ended: for phase=model_call this is the wait for
+        # the model (queue, load and generation together; streaming is needed to split them).
+        timings["phase_elapsed"] = round((now - phase_started) * 1000, 3)
+    if "ready" in worker_times:
+        timings["worker_ready"] = round((worker_times["ready"] - dispatched) * 1000, 3)
+    timings["dispatch_to_result"] = round((now - dispatched) * 1000, 3)
+    audit["timings_ms"] = timings
+    audit.setdefault("phase", "dispatch")
+    logger.info("truth verify_claim audit: %s", audit)
+
+
 def _truth_door_refusal(req_id: Any, msg_type: str) -> Optional[Dict[str, Any]]:
     """Who may use the truth door — topos/query/truth_door.py, decided from the
     channel-verified principal on every entry point (local HTTP, relay, any
@@ -172,29 +208,62 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
         from ...query.verify import verify_claim
         from ...query.verify_modes import DEFAULT_MODE
         from .common import run_db_read
+        from ...engine.request_budget import RequestBudget, RequestStopped, budget_scope, await_budgeted, DEFAULT_VERIFY_SECONDS
+
+        try:
+            budget = RequestBudget(payload.get("deadline_s", DEFAULT_VERIFY_SECONDS))
+        except ValueError:
+            return {"id": req_id, "status": "error", "error": "invalid_deadline_s"}
 
         dispatched = time.perf_counter()
         worker_times = {}
+        # Filled by verify_claim as it goes, so a request that never returns still leaves
+        # a content-free audit line saying how far it got.
+        progress: Dict[str, Any] = {}
 
         def run(conn):
             # Retrieval and the synchronous model judge must not hold the app
             # event loop. Build the guard on the worker's own connection too.
             worker_times["ready"] = time.perf_counter()
             try:
+                budget.check()
                 return verify_claim(
                     conn,
                     statement=statement,
                     mode=str(payload.get("mode") or DEFAULT_MODE),
                     caller_app_id=caller_app_id,
                     guard=guard_from_message(conn, message),
+                    audit_sink=progress,
                 )
             finally:
                 worker_times["finished"] = time.perf_counter()
+                logger.info("truth verification worker terminal: stopped=%s elapsed_ms=%.3f",
+                            budget.cancelled.is_set(), (worker_times["finished"] - dispatched) * 1000)
 
-        result = await run_db_read(run)
+        failure = "cancelled"
+        try:
+            with budget_scope(budget):
+                result = await await_budgeted(run_db_read(run), budget)
+            failure = None
+        except RequestStopped as exc:
+            failure = exc.reason
+            raise
+        except ComputeUnavailable as exc:
+            failure = exc.code
+            raise
+        except Exception:
+            failure = "error"
+            raise
+        finally:
+            if failure is not None:
+                _log_verify_failure_audit(progress, failure, caller_app_id, dispatched, worker_times)
         received = time.perf_counter()
         audit = result.pop("_audit", None)
         if audit:
+            # Progress markers are for the failure line; a finished request reports its timings instead.
+            audit.pop("phase", None)
+            audit.pop("phase_started", None)
+            audit["outcome"] = "ok"
             timings = audit.setdefault("timings_ms", {})
             # Worker readiness includes executor scheduling AND connection
             # acquisition. It is not a measurement of GPU queue time.
@@ -515,97 +584,48 @@ async def handle_truth_claim_label(message: Dict[str, Any]) -> Optional[Dict[str
         return _truth_error(req_id, "truth_lane_unavailable")
 
 
-# --- the reflection doors (product-iterations/reflection/REFLECTION_PROGRAM.md §2a) ------------------------------------
-# Owner class only at the truth door (a reflection type is not in its read set, so the relay, an enrolled client and a
-# third party are refused before the payload is read). ``reflection_invitations`` and ``reflection_conversation`` are
-# reads and write nothing (OWNER_DOOR_OPEN_TYPES); ``reflection_label`` is the one write: dangerous by subtraction.
-# Errors are fixed codes, never the input.
-
-
-@handles("reflection_invitations")
-async def handle_reflection_invitations(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``{"starter"?: discover|wonderful|relationship|difficult|myself|connect, "limit": 1..6, "exclude": [ids]}`` ->
-    balanced cards from the candidates the sweep built out of the enabled packs' facts, plus which reflection packs
-    are on and which are missing. No starter: the home list across every section."""
+@handles("truth_own_claim_label")
+async def handle_truth_own_claim_label(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The owner's own word on a claim they typed into the home claim box (owner's decision of 5 Nov 2026).
+    ``{"statement", "label": "true"|"partly"|"false", "note"?}`` -> ``{"ok": true, "label", "note", "labelled_at"}``
+    writes one owner-only ``verified_claim`` object keyed by the normalised statement (a second mark replaces the
+    first); ``{"statement", "label": null}`` removes it; ``{"statement"}`` alone reads it -> ``{"label", "note",
+    "labelled_at"}`` (``label`` null when none). The next ``verify_claim`` of that statement answers from the mark.
+    Owner class only at the truth door; fixed codes, never the input."""
     req_id = message.get("id")
     if not req_id:
         return None
-    refused = _truth_door_refusal(req_id, "reflection_invitations")
-    if refused:
-        return refused
-    payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
-    if payload is None or not set(payload) <= {"starter", "limit", "exclude"}:
-        return _truth_error(req_id, "invalid_reflection_request")
-    from ...query.reflection import ReflectionRequestError, invitations
-    from .common import run_db_read
-
-    try:
-        result = await run_db_read(invitations, payload.get("starter"), payload.get("limit", 5), payload.get("exclude"))
-        return {"id": req_id, "status": "ok", "payload": result}
-    except ReflectionRequestError as exc:
-        return _truth_error(req_id, str(exc))
-    except Exception as exc:  # noqa: BLE001
-        _log_query_failure("reflection_invitations", req_id, exc)
-        return _truth_error(req_id, "reflection_unavailable")
-
-
-@handles("reflection_conversation")
-async def handle_reflection_conversation(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``{"candidate_id"}`` -> the prepared conversation: character, system prompt, opening, three questions, the
-    evidence with the owner's own words (a row the owner did not write is its date and source only)."""
-    req_id = message.get("id")
-    if not req_id:
-        return None
-    refused = _truth_door_refusal(req_id, "reflection_conversation")
+    refused = _truth_door_refusal(req_id, "truth_own_claim_label")
     if refused:
         return refused
     payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
     if payload is None:
-        return _truth_error(req_id, "invalid_reflection_request")
-    from ...query.reflection import ReflectionRequestError, conversation
-    from .common import run_db_read
+        return _truth_error(req_id, "invalid_truth_label")
+    from ...query.truth_checks import TruthRequestError, clear_own_claim_label, label_own_claim, own_claim_label
+    from .common import run_db_read, run_db_write
 
     try:
-        return {"id": req_id, "status": "ok", "payload": await run_db_read(conversation, payload.get("candidate_id"))}
-    except ReflectionRequestError as exc:
-        return _truth_error(req_id, str(exc))
-    except Exception as exc:  # noqa: BLE001
-        _log_query_failure("reflection_conversation", req_id, exc)
-        return _truth_error(req_id, "reflection_unavailable")
-
-
-@handles("reflection_label")
-async def handle_reflection_label(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``{"candidate_id", "label": worth_it|opened|not_now|not_true|too_personal, "note"?}`` -> ``{"ok", "label_id"}``.
-    A second submit replaces the label and its owner-only ``reflection_label`` object; ``opened`` only counts."""
-    req_id = message.get("id")
-    if not req_id:
-        return None
-    refused = _truth_door_refusal(req_id, "reflection_label")
-    if refused:
-        return refused
-    payload = message.get("payload") if isinstance(message.get("payload"), dict) else None
-    if payload is None:
-        return _truth_error(req_id, "invalid_reflection_label")
-    from ...query.reflection import ReflectionRequestError, label
-    from .common import run_db_write
-
-    try:
-        result = await run_db_write(label, payload.get("candidate_id"), payload.get("label"), payload.get("note"))
+        if "label" not in payload:
+            result = await run_db_read(own_claim_label, payload.get("statement"))
+        elif payload.get("label") is None:
+            result = await run_db_write(clear_own_claim_label, payload.get("statement"))
+        else:
+            result = await run_db_write(label_own_claim, payload.get("statement"), payload.get("label"),
+                                        payload.get("note"))
         return {"id": req_id, "status": "ok", "payload": result}
-    except ReflectionRequestError as exc:
+    except TruthRequestError as exc:
         return _truth_error(req_id, str(exc))
     except Exception as exc:  # noqa: BLE001
-        _log_query_failure("reflection_label", req_id, exc)
-        return _truth_error(req_id, "reflection_unavailable")
+        _log_query_failure("truth_own_claim_label", req_id, exc)
+        return _truth_error(req_id, "truth_lane_unavailable")
 
 
-# --- the owner-agent reflection read (GRANT_DECISIONS G2, DISCLOSURE_RULES DR-61) ---------------------------------
-# The one read the Moments app makes: the enabled reflection packs' facts, filtered for an agent
-# (``query/reflection_facts.py``). The owner's app, and an owner agent on the socket; the dispatcher has already held
-# an agent to its own type list (``owner_agent_allowed_types``: Moments sends this and nothing else), so a coding
-# agent never reaches it. Every other class is refused before the payload is read. A read: writes nothing.
-def _reflection_facts_reader(principal: Any) -> Optional[str]:
+# --- an app's reads (DISCLOSURE_RULES DR-61, DR-65, DR-66) --------------------------------------------------------
+# ``pack_facts`` (``query/pack_facts.py``): the facts of the packs a grant names, filtered for an agent.
+# ``message_context`` (``query/message_context.py``): the turns around a message. The owner's app, and an owner agent on
+# the socket; the dispatcher has already held an agent to what its grant opens (``owner_agent_allowed_types``), so a
+# coding agent never reaches them. Every other class is refused before the payload is read. Reads: they write nothing.
+def _app_reader(principal: Any) -> Optional[str]:
     """"owner" or "agent" for a class this read serves, None for every other."""
     from ...principal import OWNER_AGENT, OWNER_APP
 
@@ -617,26 +637,65 @@ def _reflection_facts_reader(principal: Any) -> Optional[str]:
     return None
 
 
-@handles("reflection_facts")
-async def handle_reflection_facts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """``{"packs"?, "fact_ids"?, "since"?, "limit"?, "include_excerpts"?}`` -> the active facts of the reflection packs
-    the owner switched on: value (people as display names), the owner's quote, date, sources; plus which reflection
-    packs are on and which are missing. Fixed error codes, never the input."""
+@handles("pack_facts", "reflection_facts")  # the old name, for one release
+async def handle_pack_facts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"packs"?, "fact_ids"?, "since"?, "limit"?, "include_excerpts"?}`` -> the active facts of the granted packs the
+    owner switched on: value (people as display names), the owner's quote, date, sources; plus which granted packs are
+    on and which are missing. Fixed error codes, never the input."""
     req_id = message.get("id")
     if not req_id:
         return None
     from ...principal import current_principal
 
     principal = current_principal()
-    reader = _reflection_facts_reader(principal)
+    reader = _app_reader(principal)
     if reader is None:
         return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
-    from ...query.reflection_facts import ReflectionFactsRequestError, parse_request, read
+    from ...mcp_clients import app_grant_of
+    from ...query.pack_facts import PackFactsRequestError, parse_request, read
+    from .common import run_db_read
+
+    granted = app_grant_of(principal).packs if reader == "agent" else None
+    try:
+        request = parse_request(message.get("payload"), granted)
+    except PackFactsRequestError as exc:
+        return _truth_error(req_id, str(exc))
+
+    def run(conn: Any) -> Dict[str, Any]:
+        guard = None
+        if reader == "agent":
+            from ...features.lifecycle.blackhole_guard import guard_from_message
+
+            guard = guard_from_message(conn, message)
+        return read(conn, request, agent=reader == "agent", guard=guard, granted=granted)
+
+    try:
+        result = await run_db_read(run)
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("pack_facts", req_id, exc)
+        return _truth_error(req_id, "pack_facts_unavailable")
+    await _record_query_request(message, {}, tool="pack_facts")
+    return {"id": req_id, "status": "ok", "payload": result}
+
+
+@handles("message_context")
+async def handle_message_context(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"record_id", "before"?, "after"?}`` -> the message a search returned and its neighbours in the conversation, in
+    time order. An id it can't find or may not show answers with no turns. Fixed error codes, never the input."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    from ...principal import current_principal
+
+    reader = _app_reader(current_principal())
+    if reader is None:
+        return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
+    from ...query.message_context import MessageContextRequestError, parse_request, read
     from .common import run_db_read
 
     try:
         request = parse_request(message.get("payload"))
-    except ReflectionFactsRequestError as exc:
+    except MessageContextRequestError as exc:
         return _truth_error(req_id, str(exc))
 
     def run(conn: Any) -> Dict[str, Any]:
@@ -650,9 +709,9 @@ async def handle_reflection_facts(message: Dict[str, Any]) -> Optional[Dict[str,
     try:
         result = await run_db_read(run)
     except Exception as exc:  # noqa: BLE001
-        _log_query_failure("reflection_facts", req_id, exc)
-        return _truth_error(req_id, "reflection_facts_unavailable")
-    await _record_query_request(message, {}, tool="reflection_facts")
+        _log_query_failure("message_context", req_id, exc)
+        return _truth_error(req_id, "message_context_unavailable")
+    await _record_query_request(message, {}, tool="message_context")
     return {"id": req_id, "status": "ok", "payload": result}
 
 

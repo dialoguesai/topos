@@ -132,3 +132,45 @@ class TestEffectiveConfigForApi:
         data = facts_effective_config(_SETTINGS, conn)
         assert data["provider"] == "ollama"
         assert data["device_override_provider"] == ""
+
+
+class TestToposFactsChoice:
+    """Topos Facts is a Facts-extraction choice, not an LLM: the per-pack pass runs it, and
+    every LLM reader of this config keeps the local default chain."""
+
+    def test_put_accepts_it_and_defaults_the_version(self):
+        assert facts_normalize_put_config({"provider": "topos_facts"}) == ("topos_facts", "v0.1")
+        assert facts_normalize_put_config({"provider": "topos_facts", "model": "v0.1"}) == ("topos_facts", "v0.1")
+
+    def test_put_rejects_an_unknown_version(self):
+        with pytest.raises(ValueError):
+            facts_normalize_put_config({"provider": "topos_facts", "model": "v9"})
+
+    def test_llm_readers_get_the_local_default_chain(self):
+        conn = _conn()
+        _set(conn, ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER, "topos_facts")
+        _set(conn, ENGINE_CONFIG_KEY_FACTS_LLM_MODEL, "v0.1")
+        # never "v0.1" as an Ollama model name, never a hosted provider
+        assert resolve_facts_llm_request(_SETTINGS, conn) == ("ollama", "extraction:latest")
+
+    def test_classifier_version_only_when_picked(self):
+        from topos.config.facts_llm import facts_classifier_version
+
+        conn = _conn()
+        assert facts_classifier_version(conn) == ""
+        _set(conn, ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER, "redpill")
+        assert facts_classifier_version(conn) == ""
+        _set(conn, ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER, "topos_facts")
+        _set(conn, ENGINE_CONFIG_KEY_FACTS_LLM_MODEL, "v0.1")
+        assert facts_classifier_version(conn) == "v0.1"
+
+    def test_api_reports_the_pick_and_the_llm_still_serving(self, monkeypatch):
+        from topos.engine.backends import ollama
+
+        monkeypatch.setattr(ollama.OllamaAdapter, "list_models", lambda self: [])
+        conn = _conn()
+        _set(conn, ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER, "topos_facts")
+        _set(conn, ENGINE_CONFIG_KEY_FACTS_LLM_MODEL, "v0.1")
+        out = facts_effective_config(_SETTINGS, conn)
+        assert (out["provider"], out["model"], out["source"]) == ("topos_facts", "v0.1", "device_override")
+        assert out["llm_model"] == "extraction:latest"

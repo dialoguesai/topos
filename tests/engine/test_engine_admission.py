@@ -184,6 +184,55 @@ def body(task_id):
 
 
 @pytest.mark.asyncio
+async def test_request_deadline_removes_queued_remote_work_before_dispatch(monkeypatch):
+    from topos.engine.request_budget import TIMEOUT_HEADER
+    release, calls = threading.Event(), []
+    try:
+        async with endpoint(monkeypatch, release, calls) as (app, client):
+            active = asyncio.create_task(client.post('/v1/engine/run', json=body('active')))
+            await until(lambda: calls == ['active'])
+            expired = await client.post('/v1/engine/run', json=body('expired'), headers={TIMEOUT_HEADER:'50'})
+            assert expired.status_code == 503
+            assert expired.json()['result']['output']['availability']['reason'] == 'deadline_exceeded'
+            assert app.state.engine_http_admission.snapshot()['waiting'] == 0
+            assert app.state.engine_http_admission.snapshot()['active'] == 1
+            release.set()
+            assert (await active).status_code == 200
+            assert (await client.post('/v1/engine/run', json=body('new'), headers={TIMEOUT_HEADER:'500'})).status_code == 200
+            assert calls == ['active', 'new']
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+async def test_request_deadline_does_not_report_noncooperative_worker_as_drained(monkeypatch):
+    from topos.engine.request_budget import TIMEOUT_HEADER
+    release, calls = threading.Event(), []
+    try:
+        async with endpoint(monkeypatch, release, calls) as (app, client):
+            response = await client.post('/v1/engine/run', json=body('slow'), headers={TIMEOUT_HEADER:'50'})
+            assert response.status_code == 503
+            snapshot = app.state.engine_http_admission.snapshot()
+            assert snapshot['active'] == snapshot['detached_active'] == 1
+            assert snapshot['backend_drain_known'] is False
+            release.set()
+            await until(lambda: app.state.engine_http_admission.snapshot()['active'] == 0)
+    finally:
+        release.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('value', ['nan', '-1', 'true', '120001', '0000001'])
+async def test_invalid_remote_budget_never_dispatches(monkeypatch, value):
+    from topos.engine.request_budget import TIMEOUT_HEADER
+    release, calls = threading.Event(), []
+    async with endpoint(monkeypatch, release, calls) as (_, client):
+        response = await client.post('/v1/engine/run', json=body('invalid'), headers={TIMEOUT_HEADER:value})
+        assert response.status_code == 422
+        assert not calls
+
+
+@pytest.mark.asyncio
 async def test_http_overflow_control_responsiveness_and_recovery(monkeypatch):
     release, calls = threading.Event(), []
     try:

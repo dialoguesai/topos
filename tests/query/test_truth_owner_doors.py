@@ -228,7 +228,8 @@ def test_every_open_claim_is_returned_and_the_app_chooses_how_many_to_show(node)
 
 
 # --- the four doors ---------------------------------------------------------------------------------------------------
-DOORS = ("truth_inbound_settings", "truth_weekly_stats", "truth_claim_cards", "truth_claim_label")
+DOORS = ("truth_inbound_settings", "truth_weekly_stats", "truth_claim_cards", "truth_claim_label",
+         "truth_own_claim_label")
 
 
 class Untouchable(dict):
@@ -315,7 +316,7 @@ def test_on_the_owner_socket_the_reads_are_open_and_the_changes_need_the_app():
     import topos.core.handlers as hub
 
     assert {"truth_weekly_stats", "truth_claim_cards"} <= hub.owner_door_open_types()
-    assert {"truth_inbound_settings", "truth_claim_label"} <= hub.DANGEROUS_TYPES
+    assert {"truth_inbound_settings", "truth_claim_label", "truth_own_claim_label"} <= hub.DANGEROUS_TYPES
 
 
 def test_the_protocol_snapshot_names_the_four_doors():
@@ -788,13 +789,16 @@ def _reading(text, names, polarity, kind="did_or_made", category="did"):
 
 def _said(conn, record_id, said, *, claim, names, polarity, hours_ago, verdict="no_evidence", shown=None):
     """One owner message and its check, with what the reader made of it: the lane's row for increment B."""
-    add_message(conn, record_id, said, from_self=True, at=ago(hours=hours_ago))
+    # The message and its check describe one instant, even if fixture setup
+    # crosses a clock-second boundary between the two database writes.
+    said_time = ago(hours=hours_ago)
+    add_message(conn, record_id, said, from_self=True, at=said_time)
     conn.commit()
     result = {"verdict": verdict, "reason": None, "category": "did", "claim": {"text": claim}, "evidence": [],
               "timings_ms": {"total": 900.0}, "reading": _reading(claim, names, polarity),
               **({"stages": {"retrieve": {"owner_labels": shown}}} if shown is not None else {})}
     record = {"table": "conversation_messages", "record_id": record_id, "source": "imessage", "owner": True}
-    return store.record_check(conn, lane.check_row(record, result, model="local:test", said_at=store.with_offset(ago(hours=hours_ago))))
+    return store.record_check(conn, lane.check_row(record, result, model="local:test", said_at=store.with_offset(said_time)))
 
 
 PINWHEEL_KEY = "did|did_or_made|none|day every pinwheel"  # claim_key of "The owner uses Pinwheel every day." named Pinwheel ("uses" is a stop word)
