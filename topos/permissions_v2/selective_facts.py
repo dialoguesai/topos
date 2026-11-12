@@ -141,7 +141,7 @@ def catalog():
     from .expanded_facts import catalog as expanded_catalog
     from .custom_fact_runtime import installed_manifests
     from .custom_facts import catalog as custom_catalog
-    custom = installed_manifests()
+    custom = installed_manifests(catalog_limit=True)
     return custom_catalog(custom) if custom else expanded_catalog()
 
 

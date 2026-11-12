@@ -183,3 +183,21 @@ def test_real_writer_fact_reaches_signed_recipient_output(legacy,tmp_path,monkey
     output,error=node.search_request('owner',k=10)
     assert error is None and len(output['records'])==1
     assert 'tomatoes' in output['records'][0]['content']
+
+
+def test_catalog_size_limit_does_not_revoke_existing_custom_consent(legacy,tmp_path,monkeypatch):
+    import sys
+    raw=yaml.safe_load(pack_yaml())
+    for field in range(4):
+        raw['predicates'][0]['value_schema'][f'kind{field}']={
+            'enum':[f'{index:03d}-'+'v'*186 for index in range(90)]}
+    monkeypatch.setattr(sys.modules[__name__],'pack_yaml',lambda:yaml.safe_dump(raw))
+    node,fid=custom_node(legacy,tmp_path,monkeypatch);node.rebuild()
+    result,error=node.search_request('owner',k=10)
+    assert error is None and len(result['records'])==1
+    from topos.features.derivation.custom_packs import install_pack
+    unrelated=deepcopy(raw);unrelated['pack']='custom.aaa';unrelated['predicates'][0]['name']='custom.aaa'
+    source=tmp_path/'unrelated.yaml';source.write_text(yaml.safe_dump(unrelated));install_pack(source)
+    assert 'custom.aaa' in sf.catalog()['custom_packs']
+    result,error=node.search_request('owner',k=10)
+    assert error is None and len(result['records'])==1

@@ -26,14 +26,17 @@ def manifest(pack):
     return spec
 
 
-def installed_manifests():
+def installed_manifests(*, catalog_limit=False):
     from ..features.derivation.custom_packs import load_custom_packs
     from .custom_facts import validate_custom
     result = {}
     for oid, pack in sorted(load_custom_packs().items()):
         try:
             candidate = {**result, oid: manifest(pack)}
-            validate_custom(candidate)
+            # The wire catalog has a combined size bound. An existing grant
+            # checks its own selected definitions, so another installation
+            # filling the picker cannot revoke or hide its runtime schema.
+            validate_custom(candidate if catalog_limit else {oid: candidate[oid]})
         except (ValueError, TypeError, KeyError):
             # An unsupported/oversized portable schema cannot break other grants.
             logging.getLogger(__name__).warning('Custom pack %s is outside the sharing catalog limits', oid)
