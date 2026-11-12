@@ -17,7 +17,19 @@ ERROR_FRAME = b'{"error":"Compute is temporarily unavailable.","error_type":"com
 
 
 class Rejected(ComputeUnavailable):
+    """The node's overload outcome (topos/engine/overload.py), with this gateway's reason.
+
+    ``queue_full``, ``queue_expired`` and ``stopping`` mean what they mean for the
+    Engine HTTP worker budget (topos/engine/admission.py ``AdmissionRejected``) and
+    carry the same code; tests/engine/test_provider_gateway_opt_in.py pins that.
+    """
+
+    REASONS = frozenset({"queue_full", "queue_expired", "stopping", "unresolved_execution",
+                         "cancelled", "provider_unavailable"})
+
     def __init__(self, reason: str):
+        if reason not in self.REASONS:
+            raise ValueError("Unknown provider admission rejection reason")
         super().__init__("compute_busy" if reason in {"queue_full", "queue_expired"} else "compute_unavailable")
         self.reason = reason
 
@@ -105,8 +117,10 @@ class ProviderAuthority:
                 "active": len(self.running), "waiting": len(self.waiting), "uncertain": self.uncertain,
                 "detached_active": sum(job.detached for job in self.running),
                 "active_limit": self.active_limit, "waiting_limit": self.waiting_limit,
+                "queue_timeout_seconds": self.queue_seconds,
                 "stopping": self.stopping, "storage_failed": self.storage_failed,
-                "global_gpu_bound": False, "hardware_drain_known": False,
+                # backend_drain_known is the Engine HTTP budget's name for the same fact.
+                "global_gpu_bound": False, "hardware_drain_known": False, "backend_drain_known": False,
                 "timings": dict(self.timings),
                 "totals": dict(self.counts)}
 
@@ -114,7 +128,7 @@ class ProviderAuthority:
         self.counts["offered"] += 1
         if self.stopping or self.storage_failed or self.uncertain:
             self.counts["rejected_unavailable"] += 1
-            raise Rejected("unresolved_execution")
+            raise Rejected("stopping" if self.stopping else "unresolved_execution")
         self._expire()
         if len(self.running) >= self.active_limit and len(self.waiting) >= self.waiting_limit:
             self.counts["rejected_full"] += 1
@@ -169,9 +183,10 @@ class ProviderAuthority:
     def _pump(self):
         self._expire()
         if self.stopping or self.storage_failed or self.uncertain:
+            reason = "stopping" if self.stopping else "unresolved_execution"
             while self.waiting:
                 self.counts["aborted_queued"] += 1
-                self._reject(self.waiting.popleft(), "unresolved_execution")
+                self._reject(self.waiting.popleft(), reason)
             return
         while self.waiting and len(self.running) < self.active_limit:
             self._start(self.waiting.popleft())

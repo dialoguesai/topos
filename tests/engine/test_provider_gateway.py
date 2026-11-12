@@ -19,6 +19,8 @@ from topos.compute.provider import ProviderAuthority, Rejected
 pytestmark = pytest.mark.public
 TOKEN = "fixture-gateway-token-000000000000000"
 BODY = b'{"model":"fixture","prompt":"Synthetic input","stream":false}'
+# The HTTP door refuses a chat request with no messages (the provider's "load this model" shape).
+CHAT = b'{"model":"fixture","messages":[{"role":"user","content":"Synthetic input"}],"stream":false}'
 DONE = b'{"response":"Synthetic result","done":true}\n'
 
 
@@ -251,14 +253,14 @@ async def test_http_auth_json_stream_overflow_and_control_responsiveness(tmp_pat
             assert (await client.get("/admission")).status_code == 401
             assert (await client.post("/api/generate", content=BODY)).status_code == 401
             headers = {"Authorization": f"Bearer {TOKEN}"}
-            response = await client.post("/api/chat", content=BODY, headers=headers)
+            response = await client.post("/api/chat", content=CHAT, headers=headers)
             assert response.status_code == 200 and response.json()["done"] is True
             assert uuid.UUID(response.headers["X-Topos-Operation-Id"])
-            blocked = asyncio.create_task(client.post("/api/generate", json={"model":"fixture", "stream":True}, headers=headers))
+            blocked = asyncio.create_task(client.post("/api/generate", json={"model":"fixture", "prompt":"Synthetic input", "stream":True}, headers=headers))
             await until(lambda: len(calls) == 2)
             async with asyncio.timeout(0.5):
                 assert (await client.get("/admission", headers=headers)).status_code == 200
-                rejected = await client.post("/api/chat", content=BODY, headers=headers)
+                rejected = await client.post("/api/chat", content=CHAT, headers=headers)
             assert rejected.status_code == 503
             assert rejected.json()["detail"]["code"] == "compute_busy"
             release.set()
@@ -283,7 +285,7 @@ async def test_real_asgi_disconnect_retains_active_or_removes_queued(tmp_path, q
             existing = gate.submit("/api/chat", BODY, True)
             await existing.headers
         inbound = asyncio.Queue()
-        await inbound.put({"type":"http.request", "body":b'{"model":"fixture","stream":true}', "more_body":False})
+        await inbound.put({"type":"http.request", "body":b'{"model":"fixture","prompt":"Synthetic input","stream":true}', "more_body":False})
         sent = []
         async def send(message): sent.append(message)
         scope = {"type":"http", "asgi":{"version":"3.0", "spec_version":"2.3"}, "http_version":"1.1",
@@ -380,7 +382,7 @@ async def test_http_rejects_bad_input_management_and_redirects(tmp_path):
             assert (await client.post("/api/chat", content=b'x'*1048577)).status_code == 413
             assert (await client.post("/api/pull", content=BODY)).status_code == 404
             assert not calls
-            response = await client.post("/api/chat", content=BODY)
+            response = await client.post("/api/chat", content=CHAT)
             assert response.status_code == 503
             assert len(calls) == 1
             assert app.state.provider_authority.uncertain == 1

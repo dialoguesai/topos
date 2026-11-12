@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import hmac
 import json
+import math
 import os
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -47,6 +48,33 @@ def local_provider_url(value: str) -> str:
     return f"http://{host}:{port}"
 
 
+def residency_only(kind: str, data: dict) -> bool:
+    """A request that loads, warms, unloads or pins a model instead of generating.
+
+    The provider reads a generate request with no prompt, or a chat request with
+    no messages, as "load this model" (with ``keep_alive`` 0: "unload it"), and a
+    negative ``keep_alive`` as "never unload it". Those are model management, which
+    this gateway does not proxy: it forwards generation, and how long a model then
+    stays loaded is the provider's own default or the caller's finite value.
+    A blank prompt is refused too: it generates nothing a caller reads and is the
+    shape a warm-up takes.
+    """
+    keep_alive = data.get("keep_alive")
+    if keep_alive is not None:
+        if isinstance(keep_alive, bool) or not isinstance(keep_alive, (int, float, str)):
+            return True
+        if isinstance(keep_alive, str):
+            if keep_alive.strip().startswith("-"):
+                return True
+        elif keep_alive < 0 or (isinstance(keep_alive, float) and not math.isfinite(keep_alive)):
+            return True
+    if kind == "generate":
+        prompt = data.get("prompt")
+        return not isinstance(prompt, str) or not prompt.strip()
+    messages = data.get("messages")
+    return not isinstance(messages, list) or not messages
+
+
 def create_app(*, upstream: str, state_dir: Path, token: str, active=1, waiting=4,
                queue_seconds=30.0, execution_seconds=300.0, transport=None,
                shutdown_grace=5.0) -> FastAPI:
@@ -79,8 +107,11 @@ def create_app(*, upstream: str, state_dir: Path, token: str, active=1, waiting=
         return hmac.compare_digest(received, ("Bearer " + token).encode())
 
     def error(reason):
+        # The node's overload contract (topos/engine/overload.py): same status, same
+        # content-free ``detail`` a node client reads with ``unavailable_from_detail``.
         return JSONResponse({"error": str(reason), "error_type": reason.code,
-                             "detail": reason.detail(), "admission_reason": reason.reason}, status_code=503)
+                             "detail": reason.detail(), "admission_reason": reason.reason},
+                            status_code=reason.status_code, headers=reason.headers())
 
     @app.get("/admission")
     async def diagnostic(request: Request):
@@ -107,6 +138,10 @@ def create_app(*, upstream: str, state_dir: Path, token: str, active=1, waiting=
                 return Response(status_code=400)
         except (ValueError, TimeoutError):
             return Response(status_code=400)
+        if residency_only(kind, data):
+            # Refused before admission: nothing is queued, journaled or sent.
+            return JSONResponse({"error": "This gateway forwards generation only; it does not load, unload or pin a model.",
+                                 "error_type": "model_residency_not_proxied"}, status_code=400)
         authority = app.state.provider_authority
         try:
             job = authority.submit(f"/api/{kind}", bytes(body), data.get("stream", True))
