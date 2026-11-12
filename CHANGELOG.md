@@ -9,6 +9,41 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.54] — 2026-11-12
+
+### Added
+- **A private source from your own JSON, JSONL or CSV file, with no account or developer key.** `[O]` `sources infer` drafts a definition from a sample, `sources add --check` validates it, `sources add --open-terminal` asks the owner once in a Terminal window, and `sources inspect` shows what was installed. See `docs/private-sources.md`.
+- **A fact pack goes from a drafted file to reading your records with one yes: `topos-node packs add FILE --on --backfill 30d`.** `[E:derivation]` `[O]`
+  Until now a pack you added could only be switched on in the app, which needs a Dialogues account, and reading
+  its history was a second command with a second question. Now one question names every effect (the pack is
+  added, it is switched on now, that much history is read) and asks `[y/N]` once on your terminal. After the yes
+  the command reports each step (`added`, `switched_on`, `backfill_started`). A step that fails leaves the steps
+  before it done and says where things stand: a pack that cannot be switched on is added and switched off, and
+  no history is read. Without `--on` the command does what it did before. See `docs/custom-fact-packs.md`.
+  - *A coding agent can prepare it; these commands give it no way to approve it.* `packs add --check --json FILE` says what the file
+    declares and what adding it would do, for a program to read. `packs try FILE` runs the file's own examples.
+    Neither needs you. `packs add ... --open-terminal` opens a Terminal window (macOS) where the question is
+    waiting; the agent's command ends at once with exit code 2 and writes nothing. The window is tied to the
+    file as it was checked, so a file that changes before you answer is refused. There is no option that
+    answers for you.
+  - *`topos-node packs try FILE` tests a draft on your local model and writes nothing.* It runs only the texts
+    under the file's `eval.gold` and `eval.negative_controls` (invented text in the file, none of your records)
+    through the prompt and parser a real run uses, and says for each what was expected, what came back, and
+    pass or fail. A gold example passes when every fact it expects comes back; a negative control passes when
+    nothing does. It runs inside your Topos and waits its turn for the model, at most 20 examples per call,
+    and never loads a model ahead of time or keeps one loaded. It does not run the check Topos makes on each
+    fact before storing it, and a pass says nothing about how the pack reads your own records.
+  - *`topos-node packs on ID` and `packs off ID` switch a pack from a terminal.* Each shows what it will do and
+    asks once; a coding agent's own request to the switch is refused. `on` records exactly what the app's
+    switch records, and for a pack you added it switches on only the definition you were shown: a file that
+    changed after your yes stays off. A pack that writes about other people is not switched on here; its
+    consent stays in the app.
+  - *`--check --json` lists the words that send a record to the pack.* A record goes to the model for a pack
+    when it holds one of the pack's routing phrases or one of its routing words, and the words include every
+    word of the pack's own gold examples. An everyday word there ("every", "today") sends most of your records
+    to the model. The list is the engine's own, so a drafter can see it and reword. It counts none of your
+    records.
+
 ## [1.5.53] — 2026-11-12
 
 ### Added

@@ -332,6 +332,15 @@ CENSUS: Tuple[RouteRule, ...] = (
     _d("POST", "/v1/signal/derivation/offers/resolve", "signal: derivation pack offers"),
     _d("PUT", "/v1/signal/derivation/packs/{pack_id}", "signal: derivation pack configuration"),
     _d("POST", "/v1/signal/derivation/packs/{pack_id}/backfill", "signal: derivation"),
+    # A pack from a terminal (features/derivation/pack_trial.py, surfaces.switch_pack). The switch is the owner's
+    # in both directions: on starts reading and writing facts, off also takes the pack's facts away from the apps
+    # that read them. It needs the app or the owner's yes on a terminal, and the route checks the confirmed peer
+    # itself as well (it is refused over TCP). The trial runs a pack FILE's own invented examples through the
+    # local model: it reads no record of the owner's and writes nothing, so it is open, like the other model
+    # calls here; the route serves it on the socket only and caps it.
+    _d("PUT", "/v1/signal/derivation/packs/{pack_id}/switch", "signal: the owner's switch for one fact pack, on or off"),
+    _o("POST", "/v1/signal/derivation/packs/try",
+       "a model call over a pack file's own invented examples; reads no owner record, writes nothing"),
     # One confirmed backfill RUN (features/derivation/backfill_runs.py): starting it puts hours of local-model
     # work on the node and writes facts, so it needs the app or the owner's yes on a terminal, and the route
     # checks the confirmed peer itself as well. Stopping one starts nothing and unmarks nothing.
@@ -375,6 +384,8 @@ CENSUS: Tuple[RouteRule, ...] = (
     _d("POST", "/v1/source-test-ingestion", "ingests a sample payload"),
     _d("POST", "/v1/sources/retention", "retention floors (CONTRACTS §1.6)"),
     _d("POST", "/v1/sources/retention/compact", "retention: compacts rows"),
+    _o("POST", "/api/local/owner/sources/prepare", "validate supplied private definition/sample; no writes"),
+    _d("POST", "/api/local/owner/sources/install-private", "install private definition and optional sample"),
     # owner_sources.py — lane L5's socket doors (CONTRACTS §2.8): open at the socket layer; the door itself serves
     # only the three bundled transcript sources (404/409 for any other id), so there is nothing dangerous to gate here
     _o("POST", "/api/local/owner/sources/{source_id}/preview", "L5 owner door: counts-only preview of a transcript source"),
@@ -391,6 +402,8 @@ CENSUS: Tuple[RouteRule, ...] = (
 #: The HTTP routes an ``owner_agent`` may call on the socket (CONTRACTS §1.2): a positive list, every other route is
 #: 403 ``{"error": "owner_agent_not_allowed"}`` at the socket layer, before the route and before any auth of its own.
 OWNER_AGENT_ROUTES: Tuple[Tuple[str, str], ...] = (
+    ("GET", "/api/local/owner/private-sources/{source_id}"),
+    ("POST", "/api/local/owner/sources/prepare"),
     ("POST", "/api/local/agent/dispatch"),
     ("GET", "/sources"),
     ("GET", "/sources/{source_id}/settings"),

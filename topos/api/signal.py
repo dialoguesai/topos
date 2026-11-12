@@ -1466,6 +1466,95 @@ async def post_reaction_facts_retract(
         return _backfill_refusal(409, refused.code, str(refused))
 
 
+# --- a pack from a terminal: try a draft's own examples, switch a pack on or off -------------------------
+# (features/derivation/pack_trial.py, surfaces.switch_pack). Neither is served over TCP: the trial is a model
+# call the node's own admission must hold, and the switch is the owner's yes, which only the socket can carry.
+
+
+def _on_owner_socket() -> bool:
+    from ..uds import current_socket_peer, current_transport
+
+    return current_transport() == "uds" and current_socket_peer() is not None
+
+
+@router.get("/derivation/packs/try")
+async def get_pack_trial_model(_api_key: str = Depends(require_api_key)):
+    """Whether a trial could find its model: `{model, available: yes|no|unknown, max_examples}`. The model picked
+    for facts and the model host's own list of what is on disk; no model is loaded or called, no host started."""
+    import asyncio as _asyncio
+
+    from ..features.derivation import pack_trial as trial
+
+    status = await _asyncio.to_thread(lambda: trial.model_status(_entities_conn()))
+    return {**status, "max_examples": trial.MAX_EXAMPLES}
+
+
+@router.post("/derivation/packs/try")
+async def post_pack_trial(
+    body: Dict[str, Any] = Body(...),
+    _api_key: str = Depends(require_api_key),
+):
+    """Run a pack file's own examples on the local model: `{content: "<the file's text>"}`.
+
+    The examples are invented text in the file; no record of the owner's is read and nothing is written, so this
+    needs no confirmation (`owner_door_routes`: open). It is the owner socket's only: 403 `owner_socket_only` over
+    TCP. 400 `pack_trial_invalid` for a body that is not that, 400 `pack_invalid` for a file that is not a pack
+    Topos can add, 400 `too_many_examples`, 409 `no_local_model`, 409 `trial_already_running`. Answers the report
+    `pack_trial.run_trial` builds: per example the text, what was expected, what came back and pass or fail."""
+    import asyncio as _asyncio
+
+    from fastapi.responses import JSONResponse
+
+    from ..features.derivation import pack_trial as trial
+
+    if not _on_owner_socket():
+        return _backfill_refusal(403, "owner_socket_only", "A pack is tried through the Topos on this computer.")
+    content = body.get("content") if isinstance(body, dict) else None
+    if not isinstance(body, dict) or set(body) != {"content"} or not isinstance(content, str):
+        return _backfill_refusal(400, "pack_trial_invalid", "body is {content}")
+    try:
+        # A worker thread: a model call on the event loop's thread is not held by the node's admission.
+        report = await _asyncio.to_thread(
+            lambda: trial.run_trial(content.encode("utf-8", "surrogatepass"), _entities_conn()))
+    except trial.TrialRefused as refused:
+        status = 409 if refused.code in ("no_local_model", "trial_already_running") else 400
+        return _backfill_refusal(status, refused.code, str(refused))
+    return JSONResponse(report, headers={"Cache-Control": "no-store"})
+
+
+@router.put("/derivation/packs/{pack_id}/switch")
+async def put_pack_switch(
+    pack_id: str,
+    body: Dict[str, Any] = Body(...),
+    _api_key: str = Depends(require_api_key),
+):
+    """Switch one pack on or off from a terminal: `{enabled: bool, definition?: "<digest>"}`.
+
+    403 `owner_confirmation_required` unless the caller is the app or presents the owner's confirmation on the
+    socket, for off as for on: the switch is the owner's, and off also takes the pack's facts away from the apps
+    that read them. 400 `pack_switch_invalid` for a body that is not that. 404 `unknown_pack`. 409 `consent_in_app`
+    for a pack that writes about other people (its consent stays in the app), 400 `definition_required` and 409
+    `pack_changed` for a pack the owner added whose definition is not the one that was shown before the yes.
+    Answers `{pack_id, enabled, changed}`."""
+    import asyncio as _asyncio
+
+    from ..features.derivation import surfaces
+    from ..uds import OWNER_CONFIRMATION_MESSAGE
+
+    if not _confirmed_owner_socket():
+        return _backfill_refusal(403, "owner_confirmation_required", OWNER_CONFIRMATION_MESSAGE)
+    definition = body.get("definition") if isinstance(body, dict) else None
+    if not isinstance(body, dict) or set(body) - {"enabled", "definition"} or not isinstance(body.get("enabled"), bool) \
+            or not (definition is None or (isinstance(definition, str) and 0 < len(definition) <= 128)):
+        return _backfill_refusal(400, "pack_switch_invalid", "body is {enabled, definition}")
+    try:
+        return await _asyncio.to_thread(lambda: surfaces.switch_pack(
+            _entities_conn(), pack_id, body["enabled"], definition=definition))
+    except surfaces.PackSwitchRefused as refused:
+        status = {"unknown_pack": 404, "definition_required": 400}.get(refused.code, 409)
+        return _backfill_refusal(status, refused.code, str(refused))
+
+
 @router.get("/derivation/backfill/runs/current")
 async def get_backfill_run(_api_key: str = Depends(require_api_key)):
     """The active run, else the last one this node process finished, else `{"run": null}`.

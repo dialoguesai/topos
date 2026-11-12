@@ -624,3 +624,11 @@ def sources_reclassify_touches(source_id: str, apply: bool, as_json: bool) -> No
     payload, human = project(result)
     click.echo(json.dumps(payload, indent=2, sort_keys=True) if as_json else human)
     sys.exit(EXIT_OK)
+
+
+# Private, unregistered definitions share the existing source command namespace.
+from topos.cli.source_create_cmd import add_command, infer_command, inspect_command
+
+sources_group.add_command(infer_command)
+sources_group.add_command(add_command)
+sources_group.add_command(inspect_command)

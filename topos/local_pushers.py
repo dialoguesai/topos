@@ -150,17 +150,19 @@ def parse_origins(words: Iterable[str]) -> Tuple[str, ...]:
     return tuple(dict.fromkeys(origins))
 
 
-def parse_sources(words: Iterable[str]) -> Tuple[str, ...]:
+def parse_sources(words: Iterable[str], *, registry=None) -> Tuple[str, ...]:
     """The push sources an enrolment names: each must be in the registry and take client pushes."""
     from .sources.definitions import accepts_app_ingest
     from .sources.registry import REGISTRY
+
+    registry = REGISTRY if registry is None else registry
 
     sources: List[str] = []
     for raw in words:
         source_id = str(raw or "").strip()
         if not source_id:
             continue
-        definition = REGISTRY.get(source_id)
+        definition = registry.get(source_id)
         if definition is None:
             raise PusherRefused(f"this Topos has no source named {source_id!r}")
         if not accepts_app_ingest(definition):

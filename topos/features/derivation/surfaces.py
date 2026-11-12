@@ -220,6 +220,72 @@ def set_pack_enabled(conn: sqlite3.Connection, pack_id: str, enabled: bool, *,
     return bool(cur.rowcount)
 
 
+class PackSwitchRefused(ValueError):
+    """Why the terminal's switch did not flip a pack. `code` is a fixed word; the message is one plain sentence."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(message)
+
+
+def switch_pack(conn: sqlite3.Connection, pack_id: str, enabled: bool, *,
+                definition: Optional[str] = None) -> Dict[str, Any]:
+    """The terminal's switch (`topos-node packs on|off ID`): flip one pack, as the Fact packs page does.
+
+    The page reads the pack list, which seeds the registry (`list_packs`), and then flips the row
+    (`set_pack_enabled`). This does those two steps in that order and nothing else to the row, so what it records
+    is what the page's switch records: for a pack the owner added, the digest of the definition and its install
+    stamp that the seeding wrote, with `enabled` set over it.
+
+    Three things the page's switch does not need and a terminal does:
+
+    * `definition` is the digest (`registry.definition_sha(pack, stamped=False)`) of the definition the owner was
+      shown before the yes. A pack the owner added is switched on only when the pack on disk now has that digest:
+      the yes was to a definition, and a file that changed after it is refused (`pack_changed`). A pack that ships
+      with the engine has no digest and changes only with a release.
+    * A pack that writes about other people (`consent_terms`) is never switched on here. Its consent is stated and
+      recorded where it is today, in the app; this refuses (`consent_in_app`) and passes no consent of its own.
+    * After the flip it asks what every reader asks (`runs_as_switched_on`). A file that changed between the
+      seeding and the flip leaves a row no reader would honour; the row is switched off again and the change
+      refused, so "on" is never reported for a pack that reads nothing.
+
+    Raises :class:`PackSwitchRefused` (`unknown_pack`, `consent_in_app`, `definition_required`, `pack_changed`)."""
+    from .packs import load_packs
+    from .registry import bundled_pack_dir, definition_sha, runs_as_switched_on, seed_pack_registry
+
+    pack_dir = bundled_pack_dir()
+    seed_pack_registry(conn, pack_dir)
+    row = conn.execute("SELECT enabled FROM pack_registry WHERE pack_id=?", (pack_id,)).fetchone()
+    if row is None:
+        raise PackSwitchRefused("unknown_pack", f"This Topos has no pack named {pack_id}.")
+    if not enabled:
+        set_pack_enabled(conn, pack_id, False)
+        return {"pack_id": pack_id, "enabled": False, "changed": bool(row[0])}
+    pack = load_packs(pack_dir, only=[pack_id]).get(pack_id)
+    if pack is None:
+        raise PackSwitchRefused("unknown_pack", f"The pack {pack_id} is no longer on this Topos.")
+    if consent_terms(conn, pack_id) is not None:
+        raise PackSwitchRefused("consent_in_app", f"{pack_id} writes facts about other people, so switching it on "
+                                                  "asks for your consent in the app.")
+    shown = definition_sha(pack, stamped=False)
+    if shown is not None:
+        if not isinstance(definition, str) or not definition:
+            raise PackSwitchRefused("definition_required", "Say which definition of the pack was approved.")
+        if definition != shown:
+            raise PackSwitchRefused("pack_changed", f"{pack_id} changed after it was approved. It stays switched "
+                                                    "off.")
+    try:
+        set_pack_enabled(conn, pack_id, True)
+    except ConsentRequired as need:      # held above; kept so a consent can never be skipped by a race
+        raise PackSwitchRefused("consent_in_app", f"{pack_id} asks for your consent in the app.") from need
+    current = load_packs(pack_dir, only=[pack_id]).get(pack_id)
+    if current is None or not runs_as_switched_on(conn, current):
+        set_pack_enabled(conn, pack_id, False)
+        raise PackSwitchRefused("pack_changed", f"{pack_id} changed while it was being switched on. It stays "
+                                                "switched off.")
+    return {"pack_id": pack_id, "enabled": True, "changed": not bool(row[0]), "version": current.version}
+
+
 def list_conflicts(conn: sqlite3.Connection, limit: int = 100) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
     cols = {r[1] for r in conn.execute("PRAGMA table_info(fact_conflicts)")}
