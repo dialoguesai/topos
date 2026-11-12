@@ -141,18 +141,35 @@ def _log_query_failure(
 #: Keys copied from a verify_claim's in-progress audit onto its failure line. All content-free by construction
 #: (verify.py builds them from mode, counts and timings); nothing else the worker might add is copied.
 _VERIFY_FAILURE_AUDIT_KEYS = ("mode", "retrieval_touched", "judge", "evidence_counts", "category", "task_id", "phase")
+#: Every `outcome` a failure line may carry: the request budget's two stop reasons, the three overload codes of
+#: engine/overload.py, and `error`. A stop reason is whatever its raiser passed, so a word not listed here is
+#: logged as `error`, never copied.
+_VERIFY_FAILURE_OUTCOMES = frozenset({"deadline_exceeded", "cancelled", "compute_busy", "compute_unavailable",
+                                      "compute_rate_limited", "error"})
+#: The fixed refusals a request can end on before any work is done. The line names the code; the mode or deadline
+#: the caller sent is never copied.
+_VERIFY_REFUSAL_REASONS = frozenset({"unknown_mode", "caller_app_id_required", "invalid_deadline_s"})
 
 
 def _log_verify_failure_audit(progress: Dict[str, Any], failure: str, caller_app_id: str,
-                              dispatched: float, worker_times: Dict[str, float]) -> None:
+                              dispatched: float, worker_times: Dict[str, float], *,
+                              reason: Any = None, retry_after: Optional[int] = None) -> None:
     """The same `truth verify_claim audit:` line a success writes, for a request that ended without a result.
 
     Before 1.5.39 the line was written only on success, so every 120 s deadline in the 1-2 Nov 2026 stress runs left no
     record of how far the request got. The worker may still be writing `progress` (the handler stops waiting at the
     deadline; the worker stops at its next budget check), so read single keys and copy nested dicts defensively.
+
+    `reason` is the refusal code of a request that never started (kept only when it is one of ours); `retry_after`
+    is the bounded seconds an overloaded model host asked for, under the name the caller's envelope uses.
     """
     now = time.perf_counter()
-    audit: Dict[str, Any] = {"outcome": failure, "caller_app_id": caller_app_id}
+    known = isinstance(failure, str) and failure in _VERIFY_FAILURE_OUTCOMES
+    audit: Dict[str, Any] = {"outcome": failure if known else "error", "caller_app_id": caller_app_id}
+    if isinstance(reason, str) and reason in _VERIFY_REFUSAL_REASONS:
+        audit["reason"] = reason
+    if retry_after is not None:
+        audit["retry_after_seconds"] = retry_after
     for key in _VERIFY_FAILURE_AUDIT_KEYS:
         value = progress.get(key)
         if value is not None:
@@ -210,12 +227,13 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
         from .common import run_db_read
         from ...engine.request_budget import RequestBudget, RequestStopped, budget_scope, await_budgeted, DEFAULT_VERIFY_SECONDS
 
+        dispatched = time.perf_counter()
         try:
             budget = RequestBudget(payload.get("deadline_s", DEFAULT_VERIFY_SECONDS))
         except ValueError:
+            _log_verify_failure_audit({}, "error", caller_app_id, dispatched, {}, reason="invalid_deadline_s")
             return {"id": req_id, "status": "error", "error": "invalid_deadline_s"}
 
-        dispatched = time.perf_counter()
         worker_times = {}
         # Filled by verify_claim as it goes, so a request that never returns still leaves
         # a content-free audit line saying how far it got.
@@ -240,7 +258,7 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
                 logger.info("truth verification worker terminal: stopped=%s elapsed_ms=%.3f",
                             budget.cancelled.is_set(), (worker_times["finished"] - dispatched) * 1000)
 
-        failure = "cancelled"
+        failure, retry_after = "cancelled", None
         try:
             with budget_scope(budget):
                 result = await await_budgeted(run_db_read(run), budget)
@@ -249,16 +267,23 @@ async def handle_verify_claim(message: Dict[str, Any]) -> Optional[Dict[str, Any
             failure = exc.reason
             raise
         except ComputeUnavailable as exc:
-            failure = exc.code
+            # compute_busy, compute_unavailable or compute_rate_limited: the code the caller's envelope carries.
+            failure, retry_after = exc.code, exc.retry_after
             raise
         except Exception:
             failure = "error"
             raise
         finally:
             if failure is not None:
-                _log_verify_failure_audit(progress, failure, caller_app_id, dispatched, worker_times)
+                _log_verify_failure_audit(progress, failure, caller_app_id, dispatched, worker_times,
+                                          retry_after=retry_after)
         received = time.perf_counter()
         audit = result.pop("_audit", None)
+        if not audit and "error" in result:
+            # verify_claim refused the request before it built an audit (unknown mode, no caller_app_id): an exit
+            # like any other, so it gets its line too.
+            _log_verify_failure_audit(progress, "error", caller_app_id, dispatched, worker_times,
+                                      reason=result["error"])
         if audit:
             # Progress markers are for the failure line; a finished request reports its timings instead.
             audit.pop("phase", None)
