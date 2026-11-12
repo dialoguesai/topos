@@ -342,16 +342,17 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     committed write before the indexer. Holding SQLite's write lock while waiting for the
     gate stalls every gated writer for as long as the wait lasts."""
     from ...enrichment.jobs.canonical.derivation_job import (
-        _bump_yield, _iter_history, _ledger_write, _note_deferral, _verify_mode,
-        retire_role_skipped_progress)
+        _bump_yield, _context_for, _context_refs, _iter_history, _ledger_write, _note_deferral,
+        _owners_own, _verify_mode, retire_role_skipped_progress)
     from ...config.facts_llm import facts_classifier_version
     from . import topos_facts as _tf
     from ..provenance.posture import make_posture_resolver
+    from .commitments import UNNAMED_RECIPIENT
     from .packs import load_packs
     from .prefilter import PackPrefilter
     from . import template as _T
     from .registry import bundled_pack_dir
-    from .template import addressing_for, build_prompt, parse_output
+    from .template import THANKS_CUE_PACKS, addressing_for, build_prompt, context_packs, parse_output
     from .verify import (apply_verdict, build_verify_prompt, label_note_for, lens_note_for,
                          parse_verdict, verifier_model)
     from .writer import DerivationWriter
@@ -398,8 +399,9 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
             raise BackfillDeferred("topos_facts_unavailable", reason) from exc
     extract_model = _tf.MODEL_ID if by_classifier else model
 
-    def extract(rec):
-        """The pack's raw output for one record: Topos Facts or the LLM."""
+    def extract(rec, context=None):
+        """The pack's raw output for one record: Topos Facts or the LLM. `context` is the
+        record's conversation (DR-62); only the LLM reads it."""
         if by_classifier:
             settle()
             # load() again, not a kept handle: a cache hit that keeps the encoders' idle clock
@@ -412,7 +414,8 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                                       speaker_entity_id=str(rec.get("speaker_entity_id") or ""),
                                       recipient=str(rec.get("recipient") or ""),
                                       recipient_entity_id=str(rec.get("recipient_entity_id") or ""),
-                                      recipient_key=str(rec.get("recipient_key") or "")))
+                                      recipient_key=str(rec.get("recipient_key") or ""),
+                                      context=context, record_table=str(rec.get("table") or "")))
         _bump_yield(conn, pack_id, llm_calls=1, prefilter_hits=1)
         return raw
 
@@ -435,23 +438,33 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
 
     source = records if records is not None else _iter_history(
         conn, limit=BACKFILL_HISTORY_WINDOW, posture_for=posture_for, since=since)
+    # DR-62 is the LLM's reading. Topos Facts is given the one record and copies every value
+    # out of it, so a pack it reads has no conversation here, for the parser and the verifier
+    # too, and no short message.
+    reads_context = pack_id in context_packs() and not by_classifier
+    ctx_cache: Dict[str, Any] = {"record_only": frozenset({pack_id} if by_classifier else ())}
     for rec in source:
         if stats["processed"] >= limit:
             break
         if should_stop is not None and should_stop():
             stats["stopped"] = True
             break
+        if rec.get("short") and not reads_context:
+            continue                     # an owner's short message is only a context pack's to read (DR-62)
         key = f"{pack_id}@{pack.version}:{rec['table']}:{rec['record_id']}"
         if key in done:
             continue
-        if rec["role"] not in pack.allowed_roles() or (use_prefilter and not pf.passes(rec["text"])):
+        if (rec["role"] not in pack.allowed_roles() or (use_prefilter and not pf.passes(rec["text"]))
+                or (rec.get("short") and not _context_for(conn, pack, rec, ctx_cache))):
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
             continue
         stats["processed"] += 1
+        # The owner's backfill reads a record as ingest does: the conversation for a context pack.
+        context = _context_for(conn, pack, rec, ctx_cache) or None
         rec = addressing_for(pack, rec)
         began = time.perf_counter()
         try:
-            raw = extract(rec)
+            raw = extract(rec, context)
         except Exception:  # noqa: BLE001
             # Left unmarked, so a later batch asks again; counted, so a run can tell a model
             # that is down from a history that is done.
@@ -462,11 +475,16 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
         stats["extract_s"] += time.perf_counter() - began
         valid, _rej = parse_output(
             raw, pack, record_text=rec["text"],
-            grounded_exempt=(rec.get("recipient"), rec.get("speaker")),
+            # The thank-word cue gives the joy pack the recipient, and the stand-in for an unnamed one
+            # must not be exempt: exempted, "the person you are texting" would be stored as a person
+            # (ingest: `_recipient_parse_args`). Every other pack keeps the pair it had.
+            grounded_exempt=tuple(x for x in (rec.get("recipient"), rec.get("speaker"))
+                                  if not (pack_id in THANKS_CUE_PACKS and x == UNNAMED_RECIPIENT)),
             runner_labels=[l for l in (
                 f"id:{rec['recipient_entity_id']}" if rec.get("recipient_entity_id") else "",
                 f"key:{rec['recipient_key']}" if rec.get("recipient_key") else "",
-                f"id:{rec['speaker_entity_id']}" if rec.get("speaker_entity_id") else "") if l])
+                f"id:{rec['speaker_entity_id']}" if rec.get("speaker_entity_id") else "") if l],
+            context=context, counts=stats)
         stats["assertions"] += len(valid)
         _bump_yield(conn, pack_id, assertions=len(valid))
         for a in valid:
@@ -476,16 +494,17 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                     verdict = parse_verdict(llm(vmodel, build_verify_prompt(
                         rec["text"], rec["role"], rec["date"],
                         a["predicate"], a["value"], a.get("about", "owner"),
-                        lens_note=lens_note_for(pack), label_note=label_note_for(rec)), n=250, phase="verification"))
+                        lens_note=lens_note_for(pack), label_note=label_note_for(rec),
+                        context=context), n=250, phase="verification"))
                 except Exception:  # noqa: BLE001
                     verdict = None
                 stats["verify_s"] += time.perf_counter() - began
-                a = apply_verdict(a, verdict)
+                a = _owners_own(apply_verdict(a, verdict), context)
             else:
                 a = dict(a); a["verifier_status"] = "skipped"
             if a.get("verifier_status") == "rejected":
                 _ledger_write(conn, stage="backfill", pack=pack, rec=rec, a=a,
-                              model=extract_model, vmodel=vmodel)
+                              model=extract_model, vmodel=vmodel, context=context)
                 continue
             stats["accepted"] += 1
             _bump_yield(conn, pack_id, accepted=1)
@@ -500,14 +519,14 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                 source_refs=[{"table": rec["table"], "record_id": rec["record_id"]}],
                 confidence=a["confidence"], occurrence=a["occurrence"],
                 quote=a.get("quote", ""), about=a.get("about", "owner"),
-                event_date=rec["date"] or None)
+                event_date=rec["date"] or None, context_refs=_context_refs(context))
             stored = out.get("outcome") in ("written", "corroborated", "retelling_merged",
                                             "field_update", "corrected", "superseded")
             if stored:
                 stats["written"] += 1
                 _bump_yield(conn, pack_id, written=1)
             _ledger_write(conn, stage="backfill", pack=pack, rec=rec, a=a,
-                          model=extract_model, vmodel=vmodel,
+                          model=extract_model, vmodel=vmodel, context=context,
                           written_id=out.get("object_id") if stored else None)
         conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
         conn.commit()

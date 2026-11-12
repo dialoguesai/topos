@@ -7,13 +7,18 @@ Non-conforming assertions are dropped and counted, never repaired silently.
 from __future__ import annotations
 
 import json
+import os
 import re
+import unicodedata
+from datetime import date as _date
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .packs import Pack, load_scales
 
-TEMPLATE_VERSION = "shadow-10"
+#: shadow-11 (DR-62): the tension and joy packs' conversation context and the joy pack's thank-word cue. Every other
+#: prompt, and these two packs' prompt on a record with neither, is byte for byte shadow-10's.
+TEMPLATE_VERSION = "shadow-11"
 _PACK_DIR = Path(__file__).resolve().parents[4] if False else None  # set by set_pack_dir()
 
 
@@ -263,12 +268,246 @@ def _predicate_menu(pack: Pack) -> str:
     return "\n".join(lines)
 
 
+# --- DR-62 (owner, 26 Oct 2026): the tension and joy packs read an owner's message with the turns before it -------
+# The other person's words help the extractor tell what the owner's own words refer to ("Wow. Okay." after their
+# news); they are never evidence. The verifier reads the same turns, and the parser keeps only assertions that quote
+# the owner's message, are about the owner and repeat none of the other person's words (`copies_other_turn`).
+
+#: The packs DR-62 rules on. `TOPOS_DERIVATION_CONTEXT_PACKS` narrows this set and cannot widen it: context for
+#: another pack is another ruling.
+CONTEXT_PACKS = ("moments.tension", "moments.joy")
+#: The ruled number. `TOPOS_DERIVATION_CONTEXT_TURNS` can lower it and cannot raise it: more turns is another ruling.
+CONTEXT_TURNS = 3
+#: How a context line names the owner, and the other person when no contact name agrees.
+CONTEXT_OWNER = "OWNER"
+CONTEXT_UNNAMED = "Contact"
+CONTEXT_LINE_CHARS = 1000
+
+CONTEXT_BLOCK = (
+    "Conversation context: the turns just before this record, oldest first. It is for understanding the record "
+    "ONLY. Lines not marked OWNER are other people's words: never extract a fact from them, and never record what they "
+    "felt, did or said about the owner as the owner's account. Use the context only to tell who and what the owner's "
+    "words in the record refer to.\n---\n{lines}\n---\n\n")
+RULE_CONTEXT = ("- Every assertion rests on the OWNER's own words in the Record and quotes them. The context may supply "
+                "who or what those words refer to (the person the owner is answering, what \"it\" means); it is never "
+                "itself a source of facts.")
+#: The ruling: a description may name the situation and never quotes the other person. The parser enforces it
+#: (`copies_other_turn`); this line asks for it, so fewer findings are lost to the parser.
+RULE_NO_COPY = ("- Never copy another person's words from the context into any field. Say who or what the OWNER is "
+                "answering in a few words of your own: an assertion that repeats a run of their words is discarded.")
+#: `TOPOS_DERIVATION_CONTEXT_SITUATION=false` ("people only", the ruling's other answer): the person answered may be
+#: named, the situation may not. A prompt rule only; no deterministic check backs it.
+RULE_NO_SITUATION = ("- Describe the moment only with what the OWNER's own words in the Record say: never name an "
+                     "event, a plan or news that only a context line states.")
+
+
+def _off(name: str, default: str) -> bool:
+    return os.environ.get(name, default).strip().lower() in ("0", "false", "off", "no")
+
+
+def context_turns() -> int:
+    """`TOPOS_DERIVATION_CONTEXT_TURNS`: how many earlier turns a context pack reads, 0 to the ruled 3 (0 = one
+    record at a time). A larger number reads 3."""
+    raw = os.environ.get("TOPOS_DERIVATION_CONTEXT_TURNS", "").strip()
+    try:
+        turns = int(raw) if raw else CONTEXT_TURNS
+    except ValueError:
+        turns = CONTEXT_TURNS
+    return max(0, min(turns, CONTEXT_TURNS))
+
+
+def fact_check_off() -> bool:
+    """Whether the owner switched the fact check off (`TOPOS_DERIVATION_VERIFY=off`): the one value for which the
+    runners skip the verifier (`derivation_job._verify_mode`)."""
+    return os.environ.get("TOPOS_DERIVATION_VERIFY", "required").strip().lower() == "off"
+
+
+def context_packs() -> frozenset:
+    """`TOPOS_DERIVATION_CONTEXT_PACKS`, within the ruled set; empty when the turns are 0, and while the fact check
+    is off. DR-62 rules on a reading the verifier checks against the same turns. With no verifier there is only
+    the parser between another person's turn and a stored fact, and that reading has no ruling: the packs then read
+    one record at a time, as before, and no short message."""
+    if context_turns() <= 0 or fact_check_off():
+        return frozenset()
+    raw = os.environ.get("TOPOS_DERIVATION_CONTEXT_PACKS")
+    named = CONTEXT_PACKS if raw is None else [p.strip() for p in raw.split(",")]
+    return frozenset(p for p in named if p in CONTEXT_PACKS)
+
+
+def context_situation() -> bool:
+    """`TOPOS_DERIVATION_CONTEXT_SITUATION`: whether a moment may name the situation the context supplied."""
+    return not _off("TOPOS_DERIVATION_CONTEXT_SITUATION", "true")
+
+
+def _one_line(value: Any, limit: int) -> str:
+    # One line per turn: a newline inside someone's message must not start a line that reads as another speaker's.
+    return " ".join(str(value or "").split())[:limit]
+
+
+def render_context(context: Sequence[Mapping[str, Any]]) -> str:
+    """The context block for the extractor and the verifier: `[speaker, time] text`, oldest first."""
+    lines = "\n".join(f"[{_one_line(t.get('speaker'), 60)}, {_one_line(t.get('at'), 16)}] "
+                      f"{_one_line(t.get('text'), CONTEXT_LINE_CHARS)}" for t in context)
+    return CONTEXT_BLOCK.format(lines=lines.strip())
+
+
+def context_speaker_names(context: Optional[Sequence[Mapping[str, Any]]]) -> List[str]:
+    """The other people's names the context labels its lines with: what person grounding may use from it. Never its
+    free text, the owner's label or the stand-in for a contact with no agreed name."""
+    out = []
+    for t in context or ():
+        name = _one_line(t.get("speaker"), 60)
+        if not t.get("owner") and name and name not in (CONTEXT_OWNER, CONTEXT_UNNAMED) and name not in out:
+            out.append(name)
+    return out
+
+
+def _quote_norm(text: Any) -> str:
+    folded = unicodedata.normalize("NFKC", str(text or "")).casefold()
+    for curly, plain in (("‘", "'"), ("’", "'"), ("“", '"'), ("”", '"')):
+        folded = folded.replace(curly, plain)
+    return " ".join(folded.split())
+
+
+_QUOTE_EDGES = " \"'.,!?;:-…"
+
+
+def quote_in_record(quote: Any, record_text: Any) -> bool:
+    """The quote guard: is the assertion's quote the owner's own words, i.e. in the record?
+
+    Case, curly quotes, spacing and the punctuation at its ends aside, and an ellipsis read as a cut. A quote taken
+    from another person's line, or from an earlier owner turn in the context, is not in the record and fails."""
+    text = _quote_norm(clean_record_text(str(record_text or "")))
+    pieces = [p.strip(_QUOTE_EDGES) for p in re.split(r"\.\.\.|…", _quote_norm(quote))]
+    pieces = [p for p in pieces if p]
+    return bool(pieces) and all(p in text for p in pieces)
+
+
+# --- the other person's words never reach a fact's value ------------------------------------------------------------
+# The quote guard covers `quote`. This covers every other string the extractor returns (a description, a `what`, a
+# name): read with context, none may repeat a run of words from a turn the owner did not write. Counted in words, so
+# case, punctuation and spacing do not hide a copy, and a near-copy (a word changed, a clause dropped) still shares
+# a run. What a value may do is name the situation in other words: that is the ruling.
+
+#: The run, in words. Four keeps "the Rotterdam offer" (the situation, named) and drops "got the Rotterdam offer"
+#: (their sentence). A built default: the ruling says "never quotes", not how long a quotation is.
+CONTEXT_COPY_RUN_WORDS = 4
+#: A turn shorter than the run is matched whole, from this many words ("Dad died"). One word is vocabulary.
+CONTEXT_COPY_SHORT_TURN_WORDS = 2
+# A script written without spaces has no words to count, so each of its characters is one (Thai, kana, Han).
+_UNSPACED = "\u0e00-\u0e7f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff"
+_WORD = re.compile(f"[{_UNSPACED}]|[^\\W_{_UNSPACED}]+")
+
+
+def _words(text: Any) -> List[str]:
+    return _WORD.findall(_quote_norm(text).replace("'", ""))
+
+
+def _runs(words: Sequence[str], n: int) -> set:
+    return {tuple(words[i:i + n]) for i in range(len(words) - n + 1)}
+
+
+def _strings(value: Any):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, Mapping):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _strings(item)
+
+
+def other_turn_runs(record_text: Any, context: Optional[Sequence[Mapping[str, Any]]]) -> set:
+    """The word runs that are another person's and not also the owner's: every CONTEXT_COPY_RUN_WORDS consecutive
+    words of each turn the owner did not write, as the prompt showed it, and a shorter turn whole; less any run the
+    owner's own record has too (said by both, they are the owner's words as well)."""
+    theirs: set = set()
+    for turn in context or ():
+        if turn.get("owner"):
+            continue
+        words = _words(_one_line(turn.get("text"), CONTEXT_LINE_CHARS))
+        if len(words) >= CONTEXT_COPY_RUN_WORDS:
+            theirs |= _runs(words, CONTEXT_COPY_RUN_WORDS)
+        elif len(words) >= CONTEXT_COPY_SHORT_TURN_WORDS:
+            theirs.add(tuple(words))
+    if theirs:
+        own = _words(clean_record_text(str(record_text or "")))
+        for n in {len(run) for run in theirs}:
+            theirs -= _runs(own, n)
+    return theirs
+
+
+def copies_other_turn(value: Any, record_text: Any, context: Optional[Sequence[Mapping[str, Any]]],
+                      runs: Optional[set] = None) -> bool:
+    """Whether a string anywhere in an assertion's value repeats one of `other_turn_runs`."""
+    theirs = other_turn_runs(record_text, context) if runs is None else runs
+    if not theirs:
+        return False
+    sizes = {len(run) for run in theirs}
+    return any(not theirs.isdisjoint(_runs(_words(text), n)) for text in _strings(value) for n in sizes)
+
+
+# --- the joy pack's thank-word cue ---------------------------------------------------------------------------------
+# The pack defines a thank-you the owner writes as gratitude, yet the extractor tends to pass over a plain one. When
+# the owner's message has a thank-word, one hard rule says so and, in a direct message, binds the gratitude to the
+# recipient's runner label. Every other message gets the prompt unchanged. The label goes with the cue and nowhere
+# else: offered on every joy call, with the context in view, it invites thanks to the recipient that nobody wrote.
+# Like the context, the cue is for a reading the fact check verifies: it binds a person to a fact from the record's
+# addressing, not from the words. With the fact check off there is no cue and no label, and the joy pack's prompt
+# and parse are what they were before DR-62, whatever the message says.
+
+#: Packs whose prompt carries the cue.
+THANKS_CUE_PACKS = frozenset({"moments.joy"})
+#: Not "ty": it is a name as often as a thank-you.
+_THANK_WORD = re.compile(r"\b(thank|thanks|thx|appreciate|appreciated|grateful)\b", re.I)
+TX_RULE = ("- The OWNER's message above thanks someone (it says \"{word}\"). A thank-you the owner writes is "
+           "moment.gratitude with acknowledged true, even when the deed is small; `what` is what the thanks is for. "
+           "Extract it, unless it declines something (\"no thanks\") or is sarcastic.")
+#: Keeps a peak the same message states: told only about the thanks, the extractor answers gratitude instead of both.
+TX2_RULE = TX_RULE + (" If the same message also says a moment itself felt good (a great time, so happy), that is a "
+                      "separate moment.peak: extract both.")
+TR_ADD = (" Unless the words name someone else, the thanks is to {name}, the person this message was sent to: put "
+          "exactly \"{label}\" in `person` (never their name).")
+
+
+def thank_word(text: Any) -> str:
+    """The first thank-word in the text, lower-cased, or ""."""
+    found = _THANK_WORD.search(clean_record_text(str(text or "")))
+    return found.group(0).lower() if found else ""
+
+
+#: Where a thank-you is one the owner sent to a person. A journal entry and the owner's turn in an AI chat are
+#: `authored` too, but "grateful" in a journal thanked nobody, and "thanks" to an assistant is not a moment.
+THANKS_CUE_TABLES = frozenset({"conversation_messages"})
+
+
+def thanks_cue_applies(pack: Any, record_text: Any, actor_role: str, record_table: str = "") -> str:
+    """The thank-word the cue quotes, for a cue pack reading a message the owner sent (`record_table` in
+    THANKS_CUE_TABLES); else "". A caller that does not say what the record is gets no cue, and nobody gets one
+    while the fact check is off (`fact_check_off`)."""
+    if (fact_check_off() or str(getattr(pack, "pack", "") or "") not in THANKS_CUE_PACKS
+            or actor_role != "authored" or str(record_table or "") not in THANKS_CUE_TABLES):
+        return ""
+    return thank_word(record_text)
+
+
 def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str,
                  known_people=None, speaker: str = "", speaker_entity_id: str = "",
-                 recipient: str = "", recipient_entity_id: str = "", recipient_key: str = "") -> str:
+                 recipient: str = "", recipient_entity_id: str = "", recipient_key: str = "",
+                 context: Optional[Sequence[Mapping[str, Any]]] = None, record_table: str = "") -> str:
+    """`context` is the turns before the record (DR-62; the job passes them only to `context_packs()` for a
+    two-party message): the block before the record and two hard rules. `record_table` is the table the record is
+    stored in; the thank-word cue reads it (`thanks_cue_applies`). With no context and no thank-word cue the
+    prompt is byte for byte the one-record prompt, and so is every prompt while the fact check is off."""
     record_text = clean_record_text(record_text)
     g = pack.guidance
     abst = "\n".join(f"- {a}" for a in (g.get("abstention") or []))
+    thanks = thanks_cue_applies(pack, record_text, actor_role, record_table)
+    if str(getattr(pack, "pack", "") or "") in THANKS_CUE_PACKS and not thanks and not fact_check_off():
+        # The recipient rides with the cue and only with it (see TR_ADD). With the fact check off nothing here
+        # touches the arguments: the prompt is the one this function built before the cue existed.
+        recipient = recipient_entity_id = recipient_key = ""
     # The record's own sender identity, for packs that read other people's words. It comes
     # from the record (contacts + the entity spine), never from the text, and it is what
     # lets a self-statement route to the speaker's node: "I'm hiring" is about the sender.
@@ -280,11 +519,21 @@ def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str
     # person being texted and their name is nowhere in the text; the recipient comes from
     # the record, so a counterparty-shaped field with nobody named in the words binds to
     # them by id.
+    label = ""
     if recipient and (recipient_entity_id or recipient_key) and actor_role == "authored":
         label = f"id:{recipient_entity_id}" if recipient_entity_id else f"key:{recipient_key}"
-        abst += (f"\n- This is a direct message the owner sent to {recipient}. A promise, debt or plan "
-                 f"with no other person named in the words is with THEM: put exactly \"{label}\" in the "
-                 f"counterparty/person field (never their name — the label is how the archive knows them).")
+        if not thanks:
+            abst += (f"\n- This is a direct message the owner sent to {recipient}. A promise, debt or plan "
+                     f"with no other person named in the words is with THEM: put exactly \"{label}\" in the "
+                     f"counterparty/person field (never their name — the label is how the archive knows them).")
+    cue = ""
+    if thanks:
+        cue = "\n" + TX2_RULE.format(word=thanks) + (TR_ADD.format(name=recipient, label=label) if label else "")
+    context_block = rule_context = ""
+    if context:
+        context_block = render_context(context)
+        rule_context = (RULE_CONTEXT + "\n" + ("" if context_situation() else RULE_NO_SITUATION + "\n")
+                        + RULE_NO_COPY + "\n")
     known_block = ""
     if known_people:
         names = ", ".join(known_people)
@@ -300,7 +549,7 @@ def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str
     return f"""You extract personal facts about the OWNER of a private journal/message archive.
 Lens: {pack.title}. {str(g.get('definitions') or '').strip()}
 
-Record (role={actor_role}, date={record_date}{", speaker=" + speaker if speaker and actor_role == "observed" else ""}{", sent to " + recipient if recipient and actor_role == "authored" else ""}):
+{context_block}Record (role={actor_role}, date={record_date}{", speaker=" + speaker if speaker and actor_role == "observed" else ""}{", sent to " + recipient if recipient and actor_role == "authored" else ""}):
 ---
 {record_text[:4000]}
 ---
@@ -321,7 +570,7 @@ Example (a record often holds a fact even when most of it is about something els
             "quote": "dentist moved my cleaning to Friday"}}]}}
 
 Hard rules:
-{abst}
+{rule_context}{abst}
 - Extract only what this record actually states about the OWNER. No guesses, no world knowledge.
 - Every assertion MUST carry "about": "owner" if the fact is about the record's author-owner,
   "other:<name>" if the record states it about someone else (their appointment, their partner,
@@ -338,7 +587,7 @@ Hard rules:
 - Empty is a good answer for records with no facts for this lens — but when a stated fact IS present, extract it.
 - occurrence_date: ISO date the event happened, ONLY for dated events, resolved against the record date.
 - quote: the exact phrase (<=15 words) the fact comes from.
-- confidence: 0.0-1.0, how clearly the record states it.
+- confidence: 0.0-1.0, how clearly the record states it.{cue}
 
 Respond with ONLY this JSON, nothing else:
 {{"assertions": [{{"predicate": "...", "value": "... or object", "about": "owner", "occurrence_date": null, "confidence": 0.0, "quote": "..."}}]}}"""
@@ -361,9 +610,12 @@ _RECIPIENT_KEYS = ("recipient", "recipient_entity_id", "recipient_key")
 
 def addressing_for(pack: Any, rec: Dict[str, Any]) -> Dict[str, Any]:
     """The record as this pack reads it: an owner DM's recipient stays only for a pack in
-    RECIPIENT_LABEL_PACKS. Every runner reads the record through this before building the
-    prompt, the parser's labels and the verifier's addressing, so the three agree."""
+    RECIPIENT_LABEL_PACKS, and for a THANKS_CUE_PACKS pack on a message the cue fires on. Every
+    runner reads the record through this before building the prompt, the parser's labels and
+    the verifier's addressing, so the three agree."""
     if str(getattr(pack, "pack", "") or "") in RECIPIENT_LABEL_PACKS:
+        return rec
+    if thanks_cue_applies(pack, rec.get("text"), str(rec.get("role") or ""), str(rec.get("table") or "")):
         return rec
     return {k: v for k, v in rec.items() if k not in _RECIPIENT_KEYS}
 
@@ -397,9 +649,39 @@ def normalise_runner_label(value: Any, runner_labels: Any) -> Any:
     return value
 
 
+_ISO_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+
+
+def _iso_date(value: Any) -> bool:
+    """Whether `value` is exactly a calendar date written YYYY-MM-DD.
+
+    An assertion read with context (DR-62) keeps `occurrence_date` only then: it becomes the
+    fact's `valid_from` and part of its key, and it is outside the copy guard, so any other
+    text there ("Dad died.", cut to ten characters) could carry the other person's words."""
+    text = str(value or "").strip()
+    if not _ISO_DATE_RE.match(text):
+        return False
+    try:
+        _date.fromisoformat(text)
+    except ValueError:
+        return False
+    return True
+
+
 def parse_output(raw: str, pack: Pack, record_text: str = None,
-                 grounded_exempt: Any = (), runner_labels: Any = ()) -> Tuple[List[Dict[str, Any]], int]:
-    """Return (valid_assertions, schema_reject_count)."""
+                 grounded_exempt: Any = (), runner_labels: Any = (),
+                 context: Optional[Sequence[Mapping[str, Any]]] = None,
+                 counts: Optional[Dict[str, int]] = None) -> Tuple[List[Dict[str, Any]], int]:
+    """Return (valid_assertions, schema_reject_count).
+
+    `context` is what `build_prompt` showed before the record (DR-62). A person value may then
+    be grounded by the context's speaker names, never by its text, and every assertion must be
+    the owner's own: its quote in the record (`quote_in_record`), `about` the owner, and no
+    string in its value repeating the other person's words (`copies_other_turn`). Without the
+    quote guard another person's line could come back as the owner's quote, which an app prints
+    as "you wrote"; without the other, as the moment's description. There is no switch for
+    either. `counts["context_copied"]` is how many assertions the second one dropped: a number,
+    the text is never kept or logged."""
     m = _JSON_RE.search(raw or "")
     if not m:
         return [], 1 if (raw or "").strip() else 0
@@ -408,6 +690,10 @@ def parse_output(raw: str, pack: Pack, record_text: str = None,
     except json.JSONDecodeError:
         return [], 1
     person_names = person_fields_for(pack)
+    grounding = record_text
+    if context and record_text is not None:
+        grounding = "\n".join([record_text, *context_speaker_names(context)])
+    their_runs = other_turn_runs(record_text, context) if context else set()
     valid, rejects = [], 0
     for a in data.get("assertions") or []:
         if not isinstance(a, dict):
@@ -465,7 +751,7 @@ def parse_output(raw: str, pack: Pack, record_text: str = None,
                         if not person_field_ok(item):
                             person_bad = True
                             continue
-                        if record_text is not None and not person_grounded(item, record_text):
+                        if grounding is not None and not person_grounded(item, grounding):
                             person_bad = True
                             continue
                         cleaned.append(item)
@@ -502,7 +788,7 @@ def parse_output(raw: str, pack: Pack, record_text: str = None,
                     pass  # the recipient/speaker the prompt named, spelled as it was given
                 elif pv is not None and not person_field_ok(pv):
                     person_bad = True
-                elif pv is not None and record_text is not None and not person_grounded(pv, record_text):
+                elif pv is not None and grounding is not None and not person_grounded(pv, grounding):
                     person_bad = True
             # org laundering is the same failure in a different slot (measured:
             # a spine name bound as the fired-from org) — grounding-only, no
@@ -522,6 +808,14 @@ def parse_output(raw: str, pack: Pack, record_text: str = None,
         about = str(a.get("about") or "").strip()
         if not _ABOUT_RE.match(about):
             about = "unclear" if _needs_about(pred.name) else "owner"
+        if context and (about != "owner" or not quote_in_record(a.get("quote"), record_text)):
+            rejects += 1               # read with other people's words: the owner's own words, about the owner, only
+            continue
+        if their_runs and copies_other_turn(val, record_text, context, their_runs):
+            rejects += 1               # the other person's words in a value: never a fact
+            if counts is not None:
+                counts["context_copied"] = counts.get("context_copied", 0) + 1
+            continue
         if (record_text is not None and pred.name == "rel.relationship"
                 and isinstance(val, dict) and isinstance(val.get("role"), str)):
             rc = relationship_role_check(val.get("role"), str(val.get("person") or ""), record_text)
@@ -536,8 +830,11 @@ def parse_output(raw: str, pack: Pack, record_text: str = None,
             conf = min(1.0, max(0.0, float(a.get("confidence") or 0.5)))
         except (TypeError, ValueError):
             conf = 0.5
+        occurrence = str(a.get("occurrence_date"))[:10] if a.get("occurrence_date") else None
+        if context and occurrence is not None and not _iso_date(occurrence):
+            occurrence = None          # read with other people's words: a date, or no date at all
         entry = {"predicate": pred.name, "value": val, "confidence": conf, "about": about,
-                      "occurrence": (str(a.get("occurrence_date"))[:10] if a.get("occurrence_date") else None),
+                      "occurrence": occurrence,
                       "quote": str(a.get("quote") or "")[:200]}
         if a.get("new_person"):
             entry["new_person"] = True
