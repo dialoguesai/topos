@@ -28,6 +28,7 @@ from .job_store import (
     DEFAULT_LEASE_SECONDS,
     claim_matching_queued_jobs,
     claim_next_job,
+    close_retired_jobs,
     complete_job,
     enqueue_job,
     fail_job,
@@ -457,6 +458,16 @@ EXECUTORS: Dict[str, ExecutorFn] = {
     "topic_consolidation": _execute_topic_consolidation,
     SIGNAL_DERIVE_RETRY_KIND: _execute_signal_derive_retry,
     LOCAL_SYNC_KIND: _execute_local_sync,
+}
+
+#: Kinds this node no longer runs, with the reason written on any leftover row. An installed node can still hold a
+#: queued (or leased) row of one from before the upgrade; with no executor it would sit 'queued' for good (the
+#: claims only take kinds in EXECUTORS), so startup closes it as 'done' with this reason instead
+#: (``recover_pipeline_jobs``). Never re-add a kind here to EXECUTORS.
+RETIRED_KINDS: Dict[str, str] = {
+    # The 1.5.23 reflection sweep (owner decision G6), removed in 1.5.39: an app reads ``pack_facts`` and finds,
+    # composes and labels conversations itself, so the node no longer builds reflection candidates.
+    "reflection_sweep": "retired in 1.5.39: apps read pack_facts and compose themselves (G6)",
 }
 
 
@@ -1231,6 +1242,10 @@ def recover_pipeline_jobs(conn) -> int:
     scrubbed = withhold_persisted_secrets(conn)
     if scrubbed:
         logger.info("withheld credentials from %d stored pipeline job payload(s)", scrubbed)
+    # Before recovery too: a leftover row of a retired kind is closed, not requeued to wait for good.
+    closed = close_retired_jobs(conn, RETIRED_KINDS)
+    if closed:
+        logger.info("closed %d pipeline job(s) of a retired kind", closed)
     return recover_stale_jobs(conn)
 
 
