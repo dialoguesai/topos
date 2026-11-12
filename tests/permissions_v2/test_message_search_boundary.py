@@ -20,6 +20,7 @@ import pytest
 from tests.permissions_v2 import message_search_corpus as mc
 from tests.permissions_v2.message_search_harness import Node, embed_corpus, twin
 from tests.permissions_v2.test_message_search_refusals import signed, search_with
+from topos.permissions_v2 import switches
 from topos.permissions_v2.canonical import PolicyError
 
 # These cases were written on the p2c-v1 profile, which a node no longer serves (N8): they run with its
@@ -73,6 +74,34 @@ def test_qb_work_framed_drag(pair):
                  "which coworkers know about my {}", "work notes mentioning {} and the roadmap"]
     for query in prompts(2, templates, list(mc.PRIVATE_WORDS)):
         check(pair, query, k=25)
+
+
+@pytest.mark.parametrize("names", [("SEARCH_PLURAL_FOLD",), ("SEARCH_PLURAL_FOLD", "SEARCH_REQUEST_WORDS")],
+                         ids=["plural-forms", "both"])
+def test_qb_qc_with_the_word_lane_readings_on(pair, monkeypatch, names):
+    """Families B and C again with the word lane's optional readings on (carried forward from topos#102): the
+    private units, and the released ones outside a request's window, must not move an answer with them either.
+
+    The questions ask in the plural for words the corpus holds in the singular, so the plural forms are at work, and
+    the last lines say so: a run in which the switch changed no answer would guard nothing. The corpus holds none of
+    the request words, so that reading is run here beside the plural forms and never alone, where it could change no
+    answer; its own cases are in test_search_word_lane_options.py."""
+    words = list(mc.PRIVATE_WORDS) + list(mc.WORK_WORDS)
+    templates = ["can you tell me about my {}s", "please show the {}s and the roadmaps", "which reviews mention {}s",
+                 "status update including anything about {}s"]
+    rng = random.Random(12)
+    requests = [(query, {"k": 25}) for query in prompts(12, templates, words)]
+    for _ in range(N):
+        query = " ".join(word + "s" for word in rng.sample(words, 2))
+        after = mc.NOW - rng.randint(1, 80) * 86_400
+        requests.append((query, {"k": rng.randint(1, 25), "window": {"after": after, "before": mc.NOW}}))
+    sample = range(0, len(requests), 4)
+    before = [pair[0].search_request(requests[number][0], **requests[number][1])[0] for number in sample]
+    for name in names:
+        monkeypatch.setenv(switches.PREFIX + name, "true")
+    after = [check(pair, query, **kwargs) for query, kwargs in requests]
+    changed = sum(1 for number, was in zip(sample, before) if was != after[number])
+    assert changed >= len(before) // 4, changed
 
 
 def test_qc_counting_and_differencing(pair):

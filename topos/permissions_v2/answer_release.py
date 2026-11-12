@@ -974,8 +974,10 @@ class AnswerService:
             # before, byte for byte).
             **({"items_withheld_protected": job.items_withheld_protected}
                if switches.on(switches.ANSWER_PROTECTED_ITEM_FILTER) else {}),
-            # ANSWER_SHARED_CONTEXT: the items' text shared one budget in this job's prompt, only while the switch is
-            # on (off: the receipt of before, byte for byte). A fixed word, never a length or a text.
+            # ANSWER_SHARED_CONTEXT: the switch was on when this receipt was written, so a prompt this job built
+            # shared one budget between its items' text. Written on every receipt while it is on, like the count
+            # above, also for a job that built no prompt (question_protected, nothing_matched, deferred); off, the
+            # receipt of before, byte for byte. A fixed word, never a length or a text.
             **({"context_budget": "shared"} if shared_context_on() else {}),
             "model": {"tag": MODEL, "digest": MODEL_REVISION}, "template_version": job.template or answer_template(),
             "outcome": ("deferred" if deferred

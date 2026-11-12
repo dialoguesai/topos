@@ -354,7 +354,10 @@ def shown_items(records: list, precision: str) -> list[ShownItem]:
     items, and a text that still does not fit ends at a sentence end (`_clip_sentences`). What one record shows
     then depends on the others beside it, so `build_prompt` and Fix A (`withhold_protected_items`) both read this,
     over the same list. Nothing but these records' own text is read, and each text shown is the start of the
-    record's own (its body, or its first citation's): more of a released record, never another record."""
+    record's own (its body, or its first citation's): more or less of a released record, never another record.
+    Less happens too: no text gets less room than the fixed cut, but the sentence that does not fit is left out
+    whole and the room it leaves is not dealt again, so eight long records of 43-character sentences show 386
+    characters each where the fixed cut showed 420 (`test_answer_shared_context.py` pins it)."""
     if not shared_context_on():
         return [shown_item(record, precision) for record in records]
     bodies = [" ".join(record.content.split()) for record in records]
@@ -953,7 +956,8 @@ def build_prompt(question: str, records: list, *, precision: str, owner_words: f
                  time_widened: bool = False, owner_names: frozenset[str] | None = None,
                  records_cap: int | None = None,
                  node_names: frozenset[str] | None = None) -> Prompt:
-    """Quote only the share's released records, clipped to the fixed prompt budget.
+    """Quote only the share's released records, clipped to the prompt budget (`shown_items`): the fixed cut for each
+    record, or with ANSWER_SHARED_CONTEXT on each record's share of the same total, ending at a sentence end.
 
     `labels` (round 5): more words that name the share's parts (its policy's result kinds), beside the prompt's own
     kinds and the closed source families. A capitalised label in the question is not a person's name (`_name_terms`).

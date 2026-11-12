@@ -216,18 +216,93 @@ def test_both_forms_in_one_item_or_one_question_are_one_word_counted_once():
     assert lexical(index, "project projects") != lexical(index, "project")
 
 
-def test_a_member_outside_the_window_lends_no_form_and_moves_no_score():
-    """The twin-corpus oracle of `within`, with the fold on: a permitted member outside the request's window holds the
-    plural, a rare word and many words, and the ranking and the scores are those of the index without it."""
-    inside = ["I finished a project.", "I read about a kiln.", "A second note about a project and a kiln."]
-    hidden = "Projects projects projects kiln kilns and a long tail of other words to move the average length."
-    with_hidden = index_for(inside + [hidden], times=[1_000_000] * 3 + [9_000_000])
-    without = index_for(inside)
-    for question in ("projects", "kilns", "project kiln", "What projects?"):
-        options = dict(limit=8, **WINDOW, plural_fold=True, drop_request_words=True)
-        assert rank(with_hidden, question, None, **options) == rank(without, question, None, **options)
-        assert (lexical(search_lanes.within(with_hidden, 0, 2_000_000), question, plural_fold=True)
-                == lexical(without, question, plural_fold=True))
+@pytest.mark.parametrize("question,alone,text", [
+    ("potatos potatoes", "potato", "I peeled a potato."),       # two spellings of one plural both reach "potato"
+    ("cach cache", "caches", "I cleared the caches."),          # two words whose plural is spelled the same
+    ("boxe box", "boxes", "I moved the boxes."),
+])
+def test_a_stored_form_two_query_words_reach_is_scored_once(question, alone, text):
+    index = index_for([text, "A completely unrelated item.", "Another unrelated item."])
+    scored = lexical(index, question, plural_fold=True)
+    assert [opaque for opaque, _score in scored] == [index.members[0].opaque_id]
+    assert scored == lexical(index, alone, plural_fold=True)
+
+
+# Two items inside the window and five permitted ones outside it. Inside, "project" and "kiln" are each in one item
+# of two, and the first holds its word twice, so it is first on the words. The five outside each hold the word and
+# its plural: scored over the whole index "project" would be in six items of seven and worth a fraction of "kiln",
+# and the second item would be first, with the plural forms on or off. Same lengths inside, so the average length
+# the outside items move cannot hide it.
+INSIDE = ["Project note project.", "Kiln note today."]
+OUTSIDE = ["Projects projects project and a long tail of other words to move the average length."] * 5
+OUTSIDE_AT = 9_000_000
+
+
+def _windowed():
+    with_outside = index_for(INSIDE + OUTSIDE, times=[1_000_000] * len(INSIDE) + [OUTSIDE_AT] * len(OUTSIDE))
+    return with_outside, index_for(INSIDE)
+
+
+WORD_OPTIONS = [dict(), dict(plural_fold=True), dict(drop_request_words=True),
+                dict(plural_fold=True, drop_request_words=True)]
+
+
+def test_the_data_would_flip_the_order_if_the_outside_members_were_counted():
+    """What makes the next test a guard: the same question scored over all seven members, as a `rank` that applied
+    the window after the word lane would score it, puts the other inside item first."""
+    with_outside, alone = _windowed()
+    first, second = (member.opaque_id for member in alone.members)
+    everywhere = dict(lower_us=0, upper_us=OUTSIDE_AT)
+    for question, options in (("project kiln", dict(plural_fold=True)), ("projects kiln", dict(plural_fold=True)),
+                              ("Can you tell me about the projects and the kiln?",
+                               dict(plural_fold=True, drop_request_words=True)),
+                              ("project kiln", dict()), ("project kiln", dict(drop_request_words=True))):
+        assert rank(alone, question, None, limit=8, **WINDOW, **options)[0] == first, question
+        counted = [opaque for opaque in rank(with_outside, question, None, limit=8, **everywhere, **options)
+                   if opaque in {first, second}]
+        assert counted == [second, first], question
+
+
+@pytest.mark.parametrize("options", WORD_OPTIONS)
+def test_a_member_outside_the_window_lends_no_form_and_moves_no_order(options):
+    """The twin-corpus oracle of `within`, through `rank`, with each mix of the two switches: permitted members
+    outside the request's window hold the plural many times, and the order is that of the index without them."""
+    with_outside, alone = _windowed()
+    first, second = (member.opaque_id for member in alone.members)
+    for question in ("project kiln", "projects kiln", "kilns projects", "What projects?", "kiln",
+                     "Can you tell me about the projects and the kiln?"):
+        ranked = rank(with_outside, question, None, limit=8, **WINDOW, **options)
+        assert ranked == rank(alone, question, None, limit=8, **WINDOW, **options), question
+        assert set(ranked) <= {first, second}
+    # Both words asked: the item that says "project" twice stays first, whatever the members outside hold.
+    assert rank(with_outside, "project kiln", None, limit=8, **WINDOW, **options) == [first, second]
+    if options.get("plural_fold"):
+        assert rank(with_outside, "projects kiln", None, limit=8, **WINDOW, **options) == [first, second]
+    # The spare candidates and the window fill are taken from the same members.
+    for extra in (dict(spare=5), dict(fill=True), dict(spare=5, fill=True)):
+        assert (rank(with_outside, "projects kiln", None, limit=1, **WINDOW, **options, **extra)
+                == rank(alone, "projects kiln", None, limit=1, **WINDOW, **options, **extra))
+
+
+@pytest.mark.parametrize("options", WORD_OPTIONS)
+def test_the_word_lane_of_a_rank_is_handed_only_the_members_inside_the_window(options, monkeypatch):
+    """`rank` narrows to the window before the word lane reads a bag, so the scores themselves are those of the
+    window's members alone: the lane called by `rank` is recorded here, not called beside it."""
+    with_outside, alone = _windowed()
+    seen = []
+    real = search_lanes.lexical
+
+    def recording(index, query, **keywords):
+        scored = real(index, query, **keywords)
+        seen.append(({member.opaque_id for member in index.members}, keywords, scored))
+        return scored
+    monkeypatch.setattr(search_lanes, "lexical", recording)
+    rank(with_outside, "projects kiln", None, limit=8, **WINDOW, **options)
+    assert len(seen) == 1
+    members, keywords, scored = seen[0]
+    assert members == {member.opaque_id for member in alone.members}
+    assert keywords == {"plural_fold": False, "drop_request_words": False, **options}
+    assert scored == real(alone, "projects kiln", **options)
 
 
 def test_the_fold_reads_no_bag_but_the_members_it_is_given():

@@ -1336,13 +1336,21 @@ and real-model comparison limitations remain unchanged.
   The draft's own fold and request filter, patched over today's lane for comparison, give 248/320, 248/320 and
   320/320, the numbers the draft reported. Tests: `tests/permissions_v2/test_search_word_lane_options.py` and
   `tests/permissions_v2/test_answer_shared_context.py`, with the switch table and the neighbouring answer and
-  search files (counts in the PR).
+  search files (counts in the PR). The window guard was rewritten after review: the first version stayed green
+  when `rank` scored the word lane over the whole index and filtered to the window afterwards. It now uses data
+  on which the members outside the window would reverse the order of the two inside, records the members `rank`
+  hands the word lane, and the twin-corpus families B and C of `test_message_search_boundary.py` run again with
+  the plural forms on and with both switches on; that mutant fails all three.
 - **Limits:** The corpus was authored for the draft, its held-out groups included, and was read while this was
   built: it is an exposed regression set, not a fresh holdout, and its cases are correlated variants. It has no
   embeddings, so it says nothing about the meaning lane or fusion on a real index. The plural reading conflates a
-  name with the same name plus "s". The request-word reading drops a subject that is itself a request word. The
-  shared context changes what the writer reads: its effect on answers is unmeasured. It also shows more of each
-  item, so while the Off-limits item filter is off, a shown item that names an Off-limits entry in a form the
+  name with the same name plus "s", and it goes by spelling: a word of four or more letters ending in "s" is
+  read as a possible plural ("lens" also matches "len", "series" looks up "serie" and "sery"), and a word of
+  three or more letters also matches itself with "-s" or "-es" ("los" also matches "loses"). The request-word reading drops a subject that is itself a request word. The
+  shared context changes what the writer reads: its effect on answers is unmeasured. An item among many long
+  ones can show somewhat less text than the fixed cut did (the sentence that does not fit is left out whole and
+  its room is not handed on: 386 characters against 420 for eight long items of 43-character sentences). Among
+  short ones it shows more of each item, so while the Off-limits item filter is off, a shown item that names an Off-limits entry in a form the
   release's veto passes can refuse a whole answer more often (the body check still refuses; nothing is released).
 - **Paired offline gate:** NOT RUN, before or after. The gate's catalog covers the home-chat and query paths, which
   this change does not touch, and the release machine could run only targeted tests on the night this was built.

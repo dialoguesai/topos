@@ -82,7 +82,12 @@ def _variants(term: str) -> tuple[str, ...]:
     own plural (`_plurals`) is `term`, so the relation is the same in both directions: "caches" finds "cache", "cache"
     finds "caches". Only ASCII letters, three or more of them; anything else (a number, "café", any other script)
     matches itself alone, as before. A word that is the plural of nothing in use ("status" of "statu") gains a form
-    no bag holds, which costs one failed lookup."""
+    no bag holds, which costs one failed lookup.
+
+    It reads spelling, not meaning, so it also joins words that are no plural of each other. Any word of four or
+    more letters ending in "s" is read as a possible plural: "lens" also matches "len", "series" looks up "serie"
+    and "sery". Any word of three or more letters gains its "-s" or "-es" form: "los" also matches "loses", "add"
+    matches "adds". All of it stays among the members the lane was given."""
     if len(term) < 3 or not term.isascii() or not term.isalpha() or term in _NOT_PLURAL:
         return (term,)
     singulars = []
@@ -111,7 +116,10 @@ def lexical(index: LoadedIndex, query: str, *, plural_fold: bool = False,
     `plural_fold`: each query word stands for itself and its plural forms (`_variants`). A member's count of the
     word is the sum over those forms and its document frequency counts a member holding any of them, so a word asked
     in the singular and written in the plural is one word, scored once. A query that holds both forms of a word
-    ("project" and "projects") counts it once too. Off, the default: exact words, as before."""
+    ("project" and "projects") counts it once too, and a stored form stands for one query word only: the first, in
+    sorted order, that reaches it. Two query words that are different spellings of one plural ("potatos" and
+    "potatoes") both reach "potato", and an item that says "potato" is scored for it once, as it is for either
+    alone. Off, the default: exact words, as before."""
     words = set(tokenize(query))
     terms = sorted(words - REQUEST_WORDS or words) if drop_request_words else sorted(words)
     members = index.members
@@ -123,7 +131,7 @@ def lexical(index: LoadedIndex, query: str, *, plural_fold: bool = False,
         groups, taken = [], set()
         for term in terms:
             if term not in taken:       # sorted, so a singular comes before its own plural and stands for both
-                groups.append(_variants(term))
+                groups.append(tuple(form for form in _variants(term) if form not in taken))
                 taken.update(groups[-1])
         counts = [[sum(member.terms.get(form, 0) for form in group) for group in groups] for member in members]
     else:
