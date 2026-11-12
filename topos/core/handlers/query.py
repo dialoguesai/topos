@@ -650,6 +650,7 @@ async def handle_truth_own_claim_label(message: Dict[str, Any]) -> Optional[Dict
 # ``message_context`` (``query/message_context.py``): the turns around a message. The owner's app, and an owner agent on
 # the socket; the dispatcher has already held an agent to what its grant opens (``owner_agent_allowed_types``), so a
 # coding agent never reaches them. Every other class is refused before the payload is read. Reads: they write nothing.
+# The one write an app has is ``fact_feedback`` below, on a grant of its own.
 def _app_reader(principal: Any) -> Optional[str]:
     """"owner" or "agent" for a class this read serves, None for every other."""
     from ...principal import OWNER_AGENT, OWNER_APP
@@ -700,6 +701,56 @@ async def handle_pack_facts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
         _log_query_failure("pack_facts", req_id, exc)
         return _truth_error(req_id, "pack_facts_unavailable")
     await _record_query_request(message, {}, tool="pack_facts")
+    return {"id": req_id, "status": "ok", "payload": result}
+
+
+# ``fact_feedback`` (``query/fact_feedback.py``, DR-72): the one thing an app may write. Not a read, so it is not in the
+# dispatcher's open types: on the real socket it is a dangerous change for every caller but an enrolled app whose grant
+# opens it (``core/handlers/__init__.py``, ``_app_granted_write``).
+@handles("fact_feedback")
+async def handle_fact_feedback(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """``{"fact_id", "reaction"?: love|like|sad|down|null, "rank"?: -3..3|null}`` -> the owner's reaction and rank on
+    one pack fact as stored after the write. An absent field is left as it was; null (or rank 0) takes it back.
+
+    Only an enrolled app on the socket whose grant gives feedback (``--feedback``), and only for a fact ``pack_facts``
+    would return to it now: any other fact, and an id that does not exist, get the one 404 ``fact_not_available``.
+    Every other class, and an app with reads only, is refused before the payload is read. Fixed codes, never the
+    input."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    from ...mcp_clients import app_agent_of, app_grant_of
+    from ...principal import current_principal
+
+    principal = current_principal()
+    app = app_agent_of(principal) if _app_reader(principal) == "agent" else None
+    grant = app_grant_of(principal)
+    if not app or not grant.feedback:
+        return {"id": req_id, "status": "error", "code": 403, "error": "feedback_grant_required"}
+    from ...query.fact_feedback import (
+        NOT_AVAILABLE, FactFeedbackRequestError, FactNotAvailable, parse_request, record,
+    )
+    from .common import run_db_write
+
+    try:
+        request = parse_request(message.get("payload"))
+    except FactFeedbackRequestError as exc:
+        return _truth_error(req_id, str(exc))
+
+    def run(conn: Any) -> Dict[str, Any]:
+        from ...features.lifecycle.blackhole_guard import guard_from_message
+
+        return record(conn, request, app=app, guard=guard_from_message(conn, message), granted=grant.packs,
+                      feedback=grant.feedback)
+
+    try:
+        result = await run_db_write(run)
+    except FactNotAvailable:
+        return {"id": req_id, "status": "error", "code": 404, "error": NOT_AVAILABLE}
+    except Exception as exc:  # noqa: BLE001
+        _log_query_failure("fact_feedback", req_id, exc)
+        return _truth_error(req_id, "fact_feedback_unavailable")
+    await _record_query_request(message, {}, tool="fact_feedback")
     return {"id": req_id, "status": "ok", "payload": result}
 
 

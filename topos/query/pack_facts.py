@@ -26,6 +26,10 @@ and no special-class filter, as on every owner read (owner questions read with f
   ``*_entity_id(s)`` keys are dropped, and any id- or handle-shaped token left in text becomes "someone";
 * the fact's quote, and a source record's text, only when the owner wrote it. A record someone else wrote gives its
   source and date only. Record ids never leave.
+
+Each fact also carries ``reaction`` and ``rank``: what the owner put on it through an app holding the feedback grant
+(``query/fact_feedback.py``, DR-72), or None. They are the owner's, so every reader of the fact gets them; the read
+never orders or filters by them.
 """
 from __future__ import annotations
 
@@ -453,8 +457,22 @@ def read(conn: sqlite3.Connection, request: Dict[str, Any], *, agent: bool, guar
             "at": valid_from, "day": _day(valid_from),
             "sources": [_source(ref, record, valid_from, request.get("include_excerpts", False))
                         for ref, record in sources[:MAX_SOURCES]],
+            "reaction": None, "rank": None,
         })
+    _attach_feedback(conn, result["facts"])
     return result
+
+
+def _attach_feedback(conn: sqlite3.Connection, facts: List[Dict[str, Any]]) -> None:
+    """The owner's reaction and rank on each returned fact (``query/fact_feedback.py``, DR-72): ``reaction`` is one of
+    love, like, sad, down or None, ``rank`` a whole number from -3 to 3 without 0, or None. Looked up only for the
+    facts this reader is being given, after every filter, and never which app recorded them. The node orders nothing by
+    them."""
+    from .fact_feedback import for_facts
+
+    feedback = for_facts(conn, [fact["id"] for fact in facts])
+    for fact in facts:
+        fact["reaction"], fact["rank"] = feedback.get(fact["id"], (None, None))
 
 
 def _source(ref: Dict[str, Any], record: Optional[Dict[str, Any]], at: Any, include_excerpt: bool) -> Dict[str, Any]:

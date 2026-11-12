@@ -911,6 +911,13 @@ def sweep_orphans(conn: sqlite3.Connection) -> Dict[str, int]:
         from ..signal.derived_index import prune_orphaned_derived_embeddings
 
         out["derived_object_index"] = prune_orphaned_derived_embeddings(conn)
+        # The owner's reaction and rank on a fact (query/fact_feedback.py, DR-72) are keyed by the fact's id and by
+        # nothing else, so no sweep above can reach them. Both erasure flows end here after deleting fact rows; a
+        # row left behind would keep how the owner felt, when, and which app recorded it, under an id the node no
+        # longer has. Only a fact whose row is GONE counts: a closed or superseded fact keeps its feedback.
+        from ...query.fact_feedback import forget_erased
+
+        out["fact_feedback"] = forget_erased(conn)
         commit_connection(conn)
     return out
 
