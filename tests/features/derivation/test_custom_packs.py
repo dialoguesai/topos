@@ -1022,19 +1022,20 @@ def test_an_added_pack_never_reads_with_the_conversation_turns(home, tmp_path, m
 
 
 @pytest.mark.parametrize("stale", [None, "0" * 64])
-def test_new_extraction_replaces_old_definition_provenance_without_inheriting_sources(home,tmp_path,node_db,stale):
+@pytest.mark.parametrize("temporal", ["interval", "episodic"])
+def test_new_extraction_replaces_old_definition_provenance_without_inheriting_sources(home,tmp_path,node_db,stale,temporal):
     from topos.features.derivation.writer import DerivationWriter
-    add(tmp_path)
+    add(tmp_path,predicates=[{**definition()["predicates"][0],"temporal":temporal}])
     pack=load_custom_packs()[PACK]
     writer=DerivationWriter(node_db,"synthetic-model")
     args=dict(pack=pack,predicate="custom.plant",subject_entity_id="self-owner",value={"name":"tomatoes"},
               actor_role="authored",event_date="2026-11-01")
-    old=writer.assert_pack_fact(**args,source_refs=[{"table":"conversation_messages","record_id":"old-source"}])
+    old=writer.assert_pack_fact(**args,occurrence="2026-11-01",source_refs=[{"table":"conversation_messages","record_id":"old-source"}])
     payload=json.loads(node_db.execute("SELECT payload_json FROM signal_objects WHERE object_id=?",(old["object_id"],)).fetchone()[0])
     payload["extractor"]["definition_digest"]=stale
     node_db.execute("UPDATE signal_objects SET payload_json=? WHERE object_id=?",(json.dumps(payload),old["object_id"]));node_db.commit()
     refs=[{"table":"conversation_messages","record_id":"fresh-source"}]
-    new=writer.assert_pack_fact(**args,source_refs=refs)
+    new=writer.assert_pack_fact(**args,occurrence="2026-11-02",source_refs=refs)
     assert new["outcome"]=="corrected" and new["object_id"]!=old["object_id"]
     payload,stored_refs=node_db.execute("SELECT payload_json,source_refs_json FROM signal_objects WHERE object_id=?",(new["object_id"],)).fetchone()
     assert json.loads(payload)["extractor"]["definition_digest"]==definition_sha(pack,stamped=False)

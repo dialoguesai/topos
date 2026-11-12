@@ -1509,3 +1509,27 @@ and real-model comparison limitations remain unchanged.
 | query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
 
 - Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+### Regression gate — RQ-CUSTOM-SHARE — after
+
+- Recorded (UTC): 2026-11-12T17:23:51.270975+00:00
+- Note: Final provenance handling also re-extracts stale event retellings without inheriting old evidence
+- Report: [machine-readable results](response-quality-runs/20261112T172351270975Z-RQ-CUSTOM-SHARE-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | 86 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.

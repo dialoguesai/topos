@@ -451,12 +451,20 @@ class DerivationWriter:
             # would mint a phantom second event — corroborate the original instead.
             retold = self._episodic_retelling(key.rsplit(":", 1)[0] + ":", pred, occurrence)
             if retold is not None:
-                self._corroborate({"object_id": retold["object_id"],
-                                   "payload": json.loads(retold["payload_json"] or "{}"),
-                                   "source_refs": (json.loads(retold["payload_json"] or "{}").get("source_refs") or [])},
-                                  confidence, source_refs, context_refs)
-                self.stats["retelling_merged"] = self.stats.get("retelling_merged", 0) + 1
-                return {"outcome": "retelling_merged", "object_id": retold["object_id"]}
+                from .registry import definition_sha
+                retold_payload = json.loads(retold["payload_json"] or "{}")
+                if (not pack.first_party and (retold_payload.get("extractor") or {}).get("definition_digest")
+                        != definition_sha(pack, stamped=False)):
+                    # Re-extract the existing event below rather than corroborating its
+                    # stale definition or creating a second active event for a new date.
+                    key = retold["object_key"]
+                    incumbent = self.store._active_fact_by_key(key)
+                else:
+                    self._corroborate({"object_id": retold["object_id"], "payload": retold_payload,
+                                       "source_refs": retold_payload.get("source_refs") or []},
+                                      confidence, source_refs, context_refs)
+                    self.stats["retelling_merged"] = self.stats.get("retelling_merged", 0) + 1
+                    return {"outcome": "retelling_merged", "object_id": retold["object_id"]}
         now = _now_iso()
         # THE FACT'S TIME IS ITS EVIDENCE TIME (owner rule, 2026-08-26): a stated
         # fact anchors to its stated occurrence, else its source record's date;
