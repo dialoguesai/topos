@@ -341,6 +341,11 @@ CENSUS: Tuple[RouteRule, ...] = (
     # The standing switch (features/derivation/auto_catchup.py): on, the node starts catch-up runs by itself
     # from then on; off is the owner's setting to change as well. The route checks the confirmed peer itself.
     _d("PUT", "/v1/signal/derivation/backfill/auto", "signal: the owner's switch for automatic catch-up runs"),
+    # Ending the facts a pack wrote from a reaction the owner sent (features/derivation/reaction_retract.py):
+    # it changes what the node holds to be true, so it needs the app or the owner's yes on a terminal, and the
+    # route checks the confirmed peer itself as well. Counting them is a GET.
+    _d("POST", "/v1/signal/derivation/reaction-facts/retract",
+       "signal: ends the standing facts written from the owner's own reactions"),
     _d("PUT", "/v1/signal/entities/communities/{community_id}/name", "signal: entity curation"),
     _d("POST", "/v1/signal/entities/graph/rebuild", "signal: rebuilds the entity graph"),
     _d("DELETE", "/v1/signal/entities/{entity_id}/blackhole", "signal_unblackhole_entity (Off-limits)"),

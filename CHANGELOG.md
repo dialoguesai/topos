@@ -166,6 +166,77 @@ The machine-readable twin of each release is
     byte what it was, and so is every prompt while the fact check is off. Template `shadow-11`.
     `no-invalidation`: nothing already written is wrong, and messages already read are not read again; your
     short messages, never read before, are new to these two packs.
+- **`topos-node packs retract-reactions`: end the facts a pack stored from a reaction you sent in Messages.**
+  `[E:derivation]` `[O]` Fact packs no longer read a reaction the owner sent (the fix below), but a fact stored
+  from one before that fix stays where it is. This command counts those facts and, when you say so, ends them.
+  - *What it counts.* A standing pack fact whose every source record is a reaction the owner sent, by the same
+    test the packs and the commitments lane apply (the marker Messages puts on the stored row, or the English
+    text form). A fact with any other source (a journal entry, a message you typed, a contact's message, a
+    record that is no longer stored) is left alone. The packs also skip a message whose stored metadata
+    cannot be read; that alone does not end a fact here: a message counts as a reaction only when its
+    metadata can be read and carries the marker, or its words are the text form. A fact read from a message
+    of that kind is left, counted apart and said.
+  - *What it leaves although the fact names only reactions.* A fact you made yourself in the app (confirmed,
+    corrected, revised, added from an assertion held for review, or given another author): counted apart and
+    said. A fact you marked in an app with a reaction or a rank of your own: counted apart and said. A fact
+    about when you are active, which cites records for their time and not their words: counted apart and
+    said. And a fact whose list of records is not the whole story, or cannot be shown to be. The list falls
+    short in four ways: an event told again in a later record keeps only the later record in its list; a
+    record can change a detail of a fact without joining its list; a fact read a second time within seven
+    days by the same model stores nothing at all, so a fact first read from a reaction and then from a
+    message you typed still names only the reaction; and a reading that disagrees with the fact at lower
+    confidence (a message you typed that tells the same event with one more detail) is held for review and
+    stores nothing. Topos keeps its own log of every reading that reached the fact writer, stored or not. A
+    fact is ended only when that log accounts for it: the log holds the fact's first store and each later
+    merge, every one from a reaction you sent; it holds no reading from any other record of the same value
+    or, for a kind of fact that holds many values or is an event, of the same one; and no reading held for
+    review names the fact, whatever became of it. When the log shows another record, is missing a store, or
+    is not there, the fact is left, counted apart and said. So is a fact stored before a retention floor was
+    applied (`POST /v1/sources/retention`: keep a source's data only from a date onward), or while one is
+    being applied: the floor deletes the log's rows for the messages it removes, so the log is then known to
+    be short. Removing a source or a single record leaves the log as it is.
+  - *By itself it only counts.* `topos-node packs retract-reactions` prints pack ids and counts, needs no
+    terminal and writes nothing (`--json` for the same as data). It never prints a fact or a message.
+  - *`--apply` ends them, after asking you.* It shows the count, asks `[y/N]` once on a terminal, and sends one
+    confirmed change that carries the count you were shown; if the count has changed since, nothing is ended.
+    The facts are judged once more when the change holds the write gate, so a message you typed that is read,
+    or a mark you make in an app, while the change waits its turn keeps its fact (reported as changed).
+    Without a terminal it exits 2 and asks no one. No flag or environment variable answers for you. The route is
+    `POST /v1/signal/derivation/reaction-facts/retract`: `dangerous` in the owner socket's census, and it checks
+    the confirmed peer itself. `GET /v1/signal/derivation/reaction-facts` is the count, an open read.
+  - *What ending means.* The fact is closed as of now, the way a superseded fact is: its row and its value stay
+    in the history. No row is deleted, no message is touched and no tombstone is written, so the same value
+    read later from a message you typed can be stored again. The reaction itself is not read again, so a later
+    backfill does not bring an ended fact back. The write goes through the write gate, in one commit.
+  - *Nothing runs by itself.* An upgrade ends no fact; only this command does, on your yes.
+  - *What ending does not put back.* If a fact stored from a reaction took the place of an earlier fact (a
+    reaction's value replaced what you had typed), the earlier fact stays closed. If a reaction changed a
+    detail of a fact you also wrote yourself, that fact is left as it is, with the changed detail. The command
+    says both before it asks. Finding and restoring these is not built.
+  - Limits: facts that did not come from a pack are not looked at. Assertions held for review and the training
+    ledger's rows from a reaction stay. A fact you marked in an app is kept whatever the mark says, a thumbs
+    down included (the owner has not ruled otherwise); the marks are read from the table by its name, since
+    the change that records them is not part of this one. A fact stored from a reaction that Topos's log has
+    no store for is left and counted, so a node whose log was cleared ends nothing with this command. Once a
+    reaction has changed a detail of a fact, any reading of the same kind of fact from another record that
+    was not stored keeps it, which is wider than a repeat of that fact. For sharing, an ended fact is a
+    closed fact the node has no rule for,
+    and such a fact withholds the message it names: the reaction it was read from is not released to a share
+    from then on (the owner has not ruled otherwise; a test now pins it). The English text form is wider than
+    a reaction: a message you typed that starts with a reaction word and a curly quote and ends with a curly
+    quote (`Loved “one title” and now reading “another”`) reads as a reaction too, even when Messages marked
+    the row as ordinary. The packs skip such a message, and a fact read only from it is counted here and ended
+    on your yes; you are shown counts, not the facts, so you cannot pick it out first. The writer still
+    replaces an event's list of records when the event is told again (not fixed here; this command reads
+    Topos's log to get around it). An edit you make to a fact in the app that leaves it exactly as it was
+    leaves no mark on it, so it cannot be seen and does not keep the fact. Facts that Topos builds from other
+    facts (a summary of your work history or of how visible your work is, `work.venture_history` and
+    `work.professional_visibility`) are not looked at, and stay standing when a fact they were built from is
+    ended. A retention floor that was lifted afterwards takes its record with it, so the log it shortened is
+    then read as whole. The facts are judged again once the change holds the write gate, but the fact lanes
+    write their log without the gate: a reading committed in the moment between that judgement and the
+    change is not seen. Not run on a real node: the tests use an invented database, a stubbed model and the
+    real owner socket gate.
 
 ### Changed
 - **Signal Desktop can be read on a plain macOS install.** `[O]` The reader imported `pysqlcipher3`, a
