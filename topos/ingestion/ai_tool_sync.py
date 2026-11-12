@@ -152,11 +152,15 @@ def resolve_owner_scope(conn: Any) -> Optional[Dict[str, str]]:
         topos_id = str(get_engine_config_value(conn, "topos_id") or "").strip()
     if not topos_id or topos_id == "*":
         return None
+    from ..local_identity import IDENTITY_MODE_ACCOUNT, IDENTITY_MODE_LOCAL, is_local_owner_id
+
     return {
         "user_id": user_id,
         "topos_id": topos_id,
         "dataset_id": f"{user_id}:topos:{topos_id}",
         "identity_source": identity_source,
+        # `local`: minted on this computer, no account yet (local_identity.py); `account` otherwise.
+        "identity_mode": IDENTITY_MODE_LOCAL if is_local_owner_id(user_id) else IDENTITY_MODE_ACCOUNT,
     }
 
 

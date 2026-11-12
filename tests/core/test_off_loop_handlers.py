@@ -53,6 +53,24 @@ PAYLOADS = {
     # HT lane: the owner's home-chat timing rows. The first write creates the table, so the slow connection is reached.
     "record_home_chat_turn_timings": {"user_id": "an-invented-account", "records": []},
     "get_home_chat_turn_timings_summary": {"user_id": "an-invented-account", "days": 7},
+    # The relationship reads (28 Oct 2026): the person graph took 10 s on the owner's node and ran on the loop, and
+    # the node's log has a 22.6 s stall with every other owner frame queued behind it. Every type the handler serves
+    # is marked, the writes included: their write gate belongs on a worker thread, not the loop's.
+    "messenger_relationships": {"dataset_id": "an-invented-dataset"},
+    "messenger_relationship_signals": {"dataset_id": "an-invented-dataset"},
+    "messenger_directed_edges": {"dataset_id": "an-invented-dataset"},
+    "messenger_bench": {},
+    "messenger_luck_surface": {"dataset_id": "an-invented-dataset"},
+    "messenger_person_graph": {"dataset_id": "an-invented-dataset"},
+    "messenger_naming_queue": {"dataset_id": "an-invented-dataset"},
+    "messenger_person_provenance": {"dataset_id": "an-invented-dataset", "node_id": "ent:an-invented-person"},
+    "messenger_person_curate": {"dataset_id": "an-invented-dataset", "subject_ids": ["ent:an-invented-person"],
+                                "action": "tag", "value": "an-invented-tag"},
+    "messenger_person_undo": {"overlay_ids": ["an-invented-overlay"]},
+    "messenger_curation_history": {"dataset_id": "an-invented-dataset"},
+    "messenger_person_rate": {"subject_entity_id": "an-invented-person", "domain": "extraversion", "level": "high"},
+    # The ratings card's own door, off the loop from its first day.
+    "messenger_rating_candidates": {"dataset_id": "an-invented-dataset", "limit": 5},
 }
 
 

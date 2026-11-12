@@ -264,23 +264,24 @@ def test_switching_an_admitted_ontology_moves_the_digest_and_one_outside_the_rel
     _switch(path, ["work.career"])
     on = _digest(path)
     assert on != unread
-    _switch(path, ["health.mental", "obligations.commitments"])
+    _switch(path, ["future.health", "future.commitments"])
     assert _digest(path) == on                                # outside the release: shares nothing either way
     _switch(path, ["work.career"], on=False)
     off = _digest(path)
     assert off != on and off == unread                        # off and unreadable are the same answer: none on
-    _switch(path, ["health.mental"], on=False)
+    _switch(path, ["future.health"], on=False)
     assert _digest(path) == off
     _switch(path, ["work.career"])
     assert _digest(path) == on
 
 
 def test_with_every_admitted_ontology_on_the_digest_is_the_one_kept_before_the_switches_were_read(tmp_path):
-    """So an upgrade on such a node (the default: the admitted ontology is on by default) queues no build."""
+    """So an upgrade on such a node (every supported ontology is enabled) queues no build."""
     import hashlib
     from topos.permissions_v2.refresh_loop import FACTS_VERSION
     path = canonical(tmp_path)
-    _switch(path, ["work.career"])
+    from topos.permissions_v2.expanded_facts import SEMANTICS
+    _switch(path, sorted(SEMANTICS))
     with sqlite3.connect(path) as conn:
         row = conn.execute("SELECT COUNT(*), MAX(rowid), MAX(valid_from), MAX(valid_to) FROM signal_objects "
                            "WHERE object_type='fact'").fetchone()
@@ -302,7 +303,7 @@ def test_a_switch_queues_one_build_of_the_fact_grants_and_drops_no_index(tmp_pat
     clock.now = 1030
     receipt = loop.run_pending()
     assert receipt.cause_classes == ["facts_changed"] and service.rebuilds == ["g-journal"]
-    _switch(service.resolver.path, ["health.mental"])         # one outside the release: nothing is queued
+    _switch(service.resolver.path, ["future.health"])         # one outside the release: nothing is queued
     loop.observe(service)
     assert loop._pending == {}
     _switch(service.resolver.path, ["work.career"])           # back on: the build that brings its facts back

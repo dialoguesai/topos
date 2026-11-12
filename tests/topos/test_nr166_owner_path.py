@@ -127,4 +127,10 @@ def test_what_this_branch_sheds_and_what_it_moves_off_the_loop():
         # Calibrate SQLite reads/writes use the same off-loop handler dispatch.
         "calibration_catalog", "calibration_answer", "calibration_preview",
         # Kept questions Wave 2 (OFF2N): the owner's away settings and readiness, both from memory.
+        # #221 (1.5.31): handle_relationship_reads is off_loop, so every messenger_* read, the overlay writes
+        # included, runs off the event loop (the ratings card's 8 s person-graph read had been ON it).
+        "messenger_bench", "messenger_curation_history", "messenger_directed_edges", "messenger_luck_surface",
+        "messenger_naming_queue", "messenger_person_curate", "messenger_person_graph", "messenger_person_provenance",
+        "messenger_person_rate", "messenger_person_undo", "messenger_rating_candidates", "messenger_relationship_signals",
+        "messenger_relationships",
         "put_away_config", "get_sharing_readiness"}

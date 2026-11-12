@@ -19,6 +19,7 @@ and text only.
 """
 from __future__ import annotations
 
+from topos import local_serving
 import math
 import random
 import time
@@ -297,6 +298,8 @@ def test_each_pair_of_switches_writes_its_template_budget_and_writer(dense, on_q
 
 @pytest.mark.asyncio
 async def test_the_writer_is_asked_with_v10_and_2048_tokens(monkeypatch):
+    # The caller's own context; the serving layer (topos/local_serving.py) raises it on the wire, tested there.
+    monkeypatch.setattr(local_serving, "CONTEXT", 0)
     from topos.permissions_v2 import shadow_labeler_local as sl
     _switches(monkeypatch, True, True)
     posted = []

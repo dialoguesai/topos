@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import asyncio
 import uuid
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response
@@ -49,6 +50,7 @@ async def local_list_database_tables(principal=Depends(resolve_request_principal
 
 @router.post("/verify_claim")
 async def local_verify_claim(
+    request: Request,
     body: dict = Body(default_factory=dict),
     principal=Depends(_truth_door("verify_claim")),  # noqa: B008
 ) -> dict:
@@ -56,19 +58,46 @@ async def local_verify_claim(
     or an enrolled client the owner lists in TOPOS_TRUTH_CLIENT_ALLOWLIST; any
     bearer on TCP otherwise gets 403 owner_mode_required — the owner key there
     is a third party too. Mirrors the CP door: `app_id` is mandatory and `mode`
-    is pinned to fun, so this route cannot reach a mode the registry doesn't
-    ship. Body: {"statement": "...", "app_id": "truth-mirror"}."""
+    is optional, with no fun mode unless the caller names it (DR-64). Body:
+    {"statement": "...", "app_id": "truth-mirror", "mode": "fun"}."""
     statement = str(body.get("statement") or "").strip()
     app_id = str(body.get("app_id") or "").strip()
     if not statement or not app_id:
         return {"status": "error", "error": "statement and app_id required"}
-    msg = {
-        "id": str(uuid.uuid4()),
-        "type": "verify_claim",
-        "payload": {"statement": statement, "mode": "fun", "caller_app_id": app_id},
-    }
-    out = await handle_control_plane_request(msg, principal=principal)
+    payload = {"statement": statement, "caller_app_id": app_id}
+    if body.get("mode"):
+        payload["mode"] = str(body["mode"])
+    if "deadline_s" in body:
+        payload["deadline_s"] = body["deadline_s"]
+    msg = {"id": str(uuid.uuid4()), "type": "verify_claim", "payload": payload}
+
+    async def disconnected():
+        while (await request.receive())["type"] != "http.disconnect":
+            pass
+
+    work = asyncio.create_task(handle_control_plane_request(msg, principal=principal))
+    gone = asyncio.create_task(disconnected())
+    try:
+        done, _ = await asyncio.wait((work, gone), return_when=asyncio.FIRST_COMPLETED)
+        if work not in done:
+            raise HTTPException(status_code=499, detail="Caller disconnected")
+        out = await work
+    finally:
+        for future in (work, gone):
+            if not future.done():
+                future.cancel()
+        await asyncio.gather(work, gone, return_exceptions=True)
     if out.get("status") == "error":
+        from ..engine.overload import unavailable_from_detail
+
+        unavailable = unavailable_from_detail(out.get("error_code"), {
+            "code": out.get("error_type"), "retry_after_seconds": out.get("retry_after_seconds"),
+        })
+        if unavailable is not None:
+            detail = unavailable.detail()
+            if out.get("termination_reason") in {"cancelled", "deadline_exceeded"}:
+                detail["reason"] = out["termination_reason"]
+            raise HTTPException(status_code=unavailable.status_code, detail=detail, headers=unavailable.headers())
         return {"status": "error", "error": out.get("error", "unknown")}
     return out.get("payload", {})
 
@@ -112,35 +141,6 @@ async def _owner_truth_door(request: Request, response: Response, principal, msg
     return out.get("payload", {})
 
 
-@router.post("/reflection_invitations")
-async def local_reflection_invitations(
-    request: Request,
-    response: Response,
-    principal=Depends(_truth_door("reflection_invitations")),  # noqa: B008
-) -> dict:
-    """The reflection doors (REFLECTION_PROGRAM.md §2a): owner class only; the body is read after the door admitted
-    the caller; an empty body is ``{}``."""
-    return await _owner_truth_door(request, response, principal, "reflection_invitations")
-
-
-@router.post("/reflection_conversation")
-async def local_reflection_conversation(
-    request: Request,
-    response: Response,
-    principal=Depends(_truth_door("reflection_conversation")),  # noqa: B008
-) -> dict:
-    return await _owner_truth_door(request, response, principal, "reflection_conversation")
-
-
-@router.post("/reflection_label")
-async def local_reflection_label(
-    request: Request,
-    response: Response,
-    principal=Depends(_truth_door("reflection_label")),  # noqa: B008
-) -> dict:
-    return await _owner_truth_door(request, response, principal, "reflection_label")
-
-
 @router.post("/truth_inbound_settings")
 async def local_truth_inbound_settings(
     request: Request,
@@ -180,6 +180,17 @@ async def local_truth_claim_label(
 ) -> dict:
     """The owner's label of one claim. Body: {"check_id": "...", "label": "true"|"partly"|"false", "note": "..."}."""
     return await _owner_truth_door(request, response, principal, "truth_claim_label")
+
+
+@router.post("/truth_own_claim_label")
+async def local_truth_own_claim_label(
+    request: Request,
+    response: Response,
+    principal=Depends(_truth_door("truth_own_claim_label")),  # noqa: B008
+) -> dict:
+    """The owner's own mark on a claim they typed. Body: {"statement": "...", "label": "true"|"partly"|"false",
+    "note": "..."}; {"statement", "label": null} removes it; {"statement"} reads it."""
+    return await _owner_truth_door(request, response, principal, "truth_own_claim_label")
 
 
 @router.post("/truth_prompts")

@@ -12,6 +12,7 @@ set off; its "off" sets ANSWER_DENSE off, 1.5.9's setting. Invented names and te
 """
 from __future__ import annotations
 
+from topos import local_serving
 import json
 import re
 import time
@@ -123,6 +124,8 @@ def test_on_the_prompt_is_v9_with_a_doubled_budget(dense):
 
 @pytest.mark.asyncio
 async def test_the_writer_is_asked_with_v9_and_2048_tokens(dense, monkeypatch):
+    # The caller's own context; the serving layer (topos/local_serving.py) raises it on the wire, tested there.
+    monkeypatch.setattr(local_serving, "CONTEXT", 0)
     from topos.permissions_v2 import shadow_labeler_local as sl
     posted = []
 

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
 import os
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..model_cache import ModelSlot, get_model_cache
 
@@ -180,6 +183,137 @@ def _stitch_wordpiece_entities(
     return [best[k] for k in sorted(best)]
 
 
+# --------------------------------------------------------------------------- model loads
+#
+# Two rules for the NER and embedding loads, both measured on the owner's node (28 Oct 2026,
+# raw import batches): a load went to the Hub although every file was on disk (no
+# ``HF_HUB_OFFLINE`` in the node's environment, so ``pipeline(model=...)`` made its
+# unauthenticated etag requests, each with a 10 s timeout), and it ran on whichever thread
+# first asked, holding the cache's loading mark for the length of the load while every
+# other caller of the slot waited on it.
+#
+# 1. From the local cache when the cache holds the model, with ``local_files_only``: the
+#    NER pipeline through ``sanitization.hub_pipeline.load_pipeline`` (tokenizer and model
+#    built offline first, the Hub only after the cache miss transformers raises for), the
+#    embedding model from its cached snapshot path. Zero requests on a warm cache; a cold
+#    cache still downloads.
+# 2. Never on an event loop's thread. Loads run on ONE loader thread of their own
+#    (``warm`` / ``warm_async``), not the loop's default pool, so a 20 s load holds no
+#    pool worker and a coroutine awaits the load's future while the loop keeps running.
+#    ``ModelCache.acquire`` already makes a second caller of a loading slot wait for the
+#    first, so a batch that runs while the loader thread loads waits for THAT load rather
+#    than starting its own.
+
+_LOADER_THREAD_NAME = "hf-model-loader"
+_loader_lock = threading.Lock()
+_loader: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+#: Subtypes whose model this module can bring up ahead of a batch, and the slot each loads.
+WARMABLE_SUBTYPES: Dict[str, ModelSlot] = {
+    "entity_extraction": ModelSlot.NER,
+    "entity_extraction_batch": ModelSlot.NER,
+    "embedding": ModelSlot.EMBEDDING,
+}
+
+
+def _loader_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _loader
+    with _loader_lock:
+        if _loader is None:
+            _loader = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix=_LOADER_THREAD_NAME)
+        return _loader
+
+
+def on_loader_thread() -> bool:
+    return threading.current_thread().name.startswith(_LOADER_THREAD_NAME)
+
+
+def _on_an_event_loop_thread() -> bool:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def cached_model_path(model: str) -> Optional[str]:
+    """The local snapshot directory of ``model``, or None when the cache does not hold it.
+
+    Asks the hub library with ``local_files_only=True``: no request is made either way. A
+    cache miss raises there and answers None; so does a node without the hub library.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+    except ImportError:
+        return None
+    try:
+        return str(snapshot_download(repo_id=model, local_files_only=True))
+    except Exception:  # noqa: BLE001 — LocalEntryNotFoundError, or any other reason to ask the Hub
+        return None
+
+
+def ner_loader(model: str, device: str) -> Callable[[], Any]:
+    """The NER pipeline's loader: offline first, the Hub only on the cache miss."""
+
+    def _load():
+        from ...sanitization.hub_pipeline import load_pipeline
+
+        # "first": WORD-level aggregation — every subword takes the tag of
+        # its word's first piece, so entities align to whole words and
+        # "##fragment" outputs become structurally impossible. ("simple"
+        # only merged adjacent same-tag TOKENS: any mid-word tag flip split
+        # the word — 5.2% of live raw hits were ## junk, and the kept
+        # halves were silently truncated surfaces like "Jon" for "Jonny".)
+        return load_pipeline("ner", model, model_class="AutoModelForTokenClassification",
+                             aggregation_strategy="first", device=device)
+
+    return _load
+
+
+def embedding_loader(model: str, device: str, profile: Dict[str, Any]) -> Callable[[], Any]:
+    """The embedding model's loader: from its cached snapshot when there is one."""
+
+    def _load():
+        from sentence_transformers import SentenceTransformer
+
+        kwargs: Dict[str, Any] = {"device": device}
+        if profile.get("trust_remote_code"):
+            kwargs["trust_remote_code"] = True
+        local = cached_model_path(model)
+        if local is not None:
+            logger.info("%s: loaded from the local cache, no Hub requests", model)
+            return SentenceTransformer(local, local_files_only=True, **kwargs)
+        logger.info("%s: not in the local cache, loading from the Hub", model)
+        return SentenceTransformer(model, **kwargs)
+
+    return _load
+
+
+def _note_load_site(slot: ModelSlot, model_id: str) -> None:
+    """Say so when a load is about to run on an event loop's thread. The async callers
+    (``warm_async``) never get here; a synchronous caller on a loop is the bug this names."""
+    if _on_an_event_loop_thread() and slot not in get_model_cache().resident_slots():
+        logger.warning("model load for %s (%s) requested on an event loop thread; "
+                       "callers on a loop should await warm_async first", slot.value, model_id)
+
+
+def warm(subtype: str, model_name: Optional[str] = None) -> "concurrent.futures.Future[Any]":
+    """Bring up the model ``subtype`` needs on the loader thread. Returns at once; the
+    future resolves to the handle (a cache hit resolves immediately)."""
+    slot = WARMABLE_SUBTYPES.get(str(subtype or "").strip().lower())
+    if slot is None:
+        raise ValueError(f"no warmable model for subtype {subtype!r}")
+    adapter = HuggingFaceAdapter()
+    getter = adapter._get_ner_pipeline if slot is ModelSlot.NER else adapter._get_embedding_model
+    return _loader_executor().submit(getter, model_name or "")
+
+
+async def warm_async(subtype: str, model_name: Optional[str] = None) -> Any:
+    """``warm``, awaited: the loop keeps running while the loader thread loads."""
+    return await asyncio.wrap_future(warm(subtype, model_name))
+
+
 class HuggingFaceAdapter:
     """BackendAdapter for HuggingFace: text-classification pipeline and go_emotions model."""
 
@@ -320,23 +454,12 @@ class HuggingFaceAdapter:
     def _get_ner_pipeline(self, model_name: str):
         model = model_name or DEFAULT_NER_MODEL
 
-        def _load():
-            from transformers import pipeline
-
-            # "first": WORD-level aggregation — every subword takes the tag of
-            # its word's first piece, so entities align to whole words and
-            # "##fragment" outputs become structurally impossible. ("simple"
-            # only merged adjacent same-tag TOKENS: any mid-word tag flip split
-            # the word — 5.2% of live raw hits were ## junk, and the kept
-            # halves were silently truncated surfaces like "Jon" for "Jonny".)
-            return pipeline(
-                "ner", model=model, aggregation_strategy="first", device=device,
-            )
-
         from ..torch_runtime import device_for
 
         device = device_for("ner")
-        handle, _ = get_model_cache().acquire(ModelSlot.NER, f"{model}@{device}", _load)
+        _note_load_site(ModelSlot.NER, model)
+        handle, _ = get_model_cache().acquire(ModelSlot.NER, f"{model}@{device}",
+                                              ner_loader(model, device))
         return handle
 
     def _get_embedding_model(self, model_name: str):
@@ -349,18 +472,11 @@ class HuggingFaceAdapter:
         # on any Mac ("No device provided, using mps") and CUDA nowhere else it might
         # have been available. Now the host decides and the owner can override.
         device = device_for("embeddings")
-
-        def _load():
-            from sentence_transformers import SentenceTransformer
-
-            kwargs: Dict[str, Any] = {"device": device}
-            if profile.get("trust_remote_code"):
-                kwargs["trust_remote_code"] = True
-            return SentenceTransformer(model, **kwargs)
-
+        _note_load_site(ModelSlot.EMBEDDING, model)
         # Device is part of the cache identity: switching it must reload, not serve a
         # handle still pinned to the old one.
-        handle, _ = get_model_cache().acquire(ModelSlot.EMBEDDING, f"{model}@{device}", _load)
+        handle, _ = get_model_cache().acquire(ModelSlot.EMBEDDING, f"{model}@{device}",
+                                              embedding_loader(model, device, profile))
         return handle
 
     def _get_rerank_model(self, model_name: str):

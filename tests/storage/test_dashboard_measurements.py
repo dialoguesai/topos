@@ -364,3 +364,88 @@ def test_fact_receipt_erasure_and_coverage_roll_back_together_across_chunks(db):
     db.rollback()
     assert db.execute("SELECT count(*) FROM dashboard_measurement_items").fetchone()[0] == before
     assert count(db, "new_facts") == 130
+
+
+def test_verification_outcomes_upgrade_legacy_log_and_reconcile_counts(db):
+    from topos.core.state import record_mcp_request
+    db.executescript("""CREATE TABLE mcp_request_log(id INTEGER PRIMARY KEY, tool_name TEXT, requested_at TEXT);
+        INSERT INTO mcp_request_log VALUES(1, 'verify_claim', '2026-10-26T12:00:00Z');""")
+    for outcome in ("true", "false", "unanswerable", "invalid"):
+        record_mcp_request(db, "verify_claim", source="dev-transcripts", verification_outcome=outcome)
+    record_mcp_request(db, "query_scope", verification_outcome="true")
+    db.execute("UPDATE mcp_request_log SET requested_at='2026-10-27T12:00:00Z' WHERE id > 1")
+    db.commit()
+    result = daily_measurements(db, "2026-10-25", "2026-10-30", now=datetime(2026, 10, 29, tzinfo=timezone.utc))
+    metric = result["verify_claim"]
+    assert metric["population"] == "answered_verify_claim_calls"
+    assert metric["buckets"][0]["count"] is None
+    assert metric["buckets"][1]["outcomes"] == {"true": 0, "false": 0, "unanswerable": 0, "unavailable": 1}
+    assert metric["buckets"][2]["count"] == 4
+    assert metric["buckets"][2]["outcomes"] == {"true": 1, "false": 1, "unanswerable": 1, "unavailable": 1}
+    assert metric["buckets"][3]["count"] == 0
+    assert db.execute("SELECT verification_outcome FROM mcp_request_log WHERE tool_name='query_scope'").fetchone()[0] is None
+
+
+def test_legacy_outcome_read_does_not_migrate_database(db):
+    db.executescript("""CREATE TABLE mcp_request_log(tool_name TEXT, requested_at TEXT);
+        INSERT INTO mcp_request_log VALUES('verify_claim', '2026-10-27T12:00:00Z');""")
+    result = daily_measurements(db, "2026-10-27", "2026-10-28", now=datetime(2026, 10, 29, tzinfo=timezone.utc))
+    assert result["verify_claim"]["buckets"][0]["outcomes"]["unavailable"] == 1
+    assert "verification_outcome" not in {r[1] for r in db.execute("PRAGMA table_info(mcp_request_log)")}
+
+
+def _arrivals(db, stamps):
+    db.execute("UPDATE dashboard_measurement_coverage SET measured_since='2026-10-20T00:00:00.000Z'")
+    for i, stamp in enumerate(stamps):
+        db.execute("INSERT INTO documents VALUES(?, 'test_source', 'x')", (f"tz{i}",))
+        db.execute("UPDATE dashboard_measurement_items SET recorded_at=? WHERE item_key=?", (stamp, f"tz{i}"))
+    db.commit()
+
+
+def _inbound(result):
+    return [(b["date"], b["count"], b["coverage"]) for b in result["metrics"]["inbound_records"]["buckets"]]
+
+
+def test_days_end_at_the_owners_local_midnight(db):
+    # 06:59Z is 23:59 the previous evening in Los Angeles; 03:00Z on the 24th is 20:00 on the 23rd.
+    _arrivals(db, ["2026-10-23T06:59:00.000Z", "2026-10-23T07:00:00.000Z", "2026-10-24T03:00:00.000Z"])
+    db.executescript("""CREATE TABLE mcp_request_log(id INTEGER PRIMARY KEY, tool_name TEXT, requested_at TEXT);
+        INSERT INTO mcp_request_log VALUES(1, 'verify_claim', '2026-10-24T03:00:00+00:00');
+        INSERT INTO mcp_request_log VALUES(2, 'query', '2026-10-19T12:00:00+00:00');""")
+    db.commit()
+    now = datetime(2026, 10, 24, 12, tzinfo=timezone.utc)
+    local = daily_measurements(db, "2026-10-22", "2026-10-25", now=now, time_zone="America/Los_Angeles")
+    assert local["time_zone"] == "America/Los_Angeles"
+    assert local["as_of"] == "2026-10-24T12:00:00.000Z"
+    assert _inbound(local) == [("2026-10-22", 1, "complete"), ("2026-10-23", 2, "complete"), ("2026-10-24", 0, "partial")]
+    assert local["requests"]["buckets"][1]["blocks"] == [0, 0, 0, 0, 0, 1]
+    assert [b["count"] for b in local["verify_claim"]["buckets"]] == [0, 1, 0]
+    assert local["callers"]["buckets"][1]["calls"][0]["at"] == "2026-10-24T03:00:00.000Z"
+    utc = daily_measurements(db, "2026-10-22", "2026-10-25", now=now)
+    assert utc["time_zone"] == "UTC"
+    assert _inbound(utc) == [("2026-10-22", 0, "complete"), ("2026-10-23", 2, "complete"), ("2026-10-24", 1, "partial")]
+    assert sum(b["count"] for b in local["metrics"]["inbound_records"]["buckets"]) == 3
+
+
+def test_local_days_follow_daylight_saving_and_half_hour_zones(db):
+    # Los Angeles falls back on 1 Nov 2026: that day runs 07:00Z–08:00Z+1 (25 hours).
+    # Kolkata is UTC+5:30, and its first requested day starts on the previous UTC date.
+    _arrivals(db, ["2026-11-02T07:30:00.000Z", "2026-10-21T20:00:00.000Z",
+                   "2026-10-23T18:29:00.000Z", "2026-10-23T18:30:00.000Z"])
+    now = datetime(2026, 11, 3, 12, tzinfo=timezone.utc)
+    pacific = daily_measurements(db, "2026-11-01", "2026-11-03", now=now, time_zone="America/Los_Angeles")
+    assert _inbound(pacific) == [("2026-11-01", 1, "complete"), ("2026-11-02", 0, "complete")]
+    kolkata = daily_measurements(db, "2026-10-22", "2026-10-25", now=now, time_zone="Asia/Kolkata")
+    assert _inbound(kolkata) == [("2026-10-22", 1, "complete"), ("2026-10-23", 1, "complete"), ("2026-10-24", 1, "complete")]
+
+
+def test_unknown_zone_keeps_utc_days_and_says_so(db):
+    from topos.dashboard.measurements import resolve_zone
+
+    _arrivals(db, ["2026-10-24T03:00:00.000Z"])
+    now = datetime(2026, 10, 24, 12, tzinfo=timezone.utc)
+    utc = daily_measurements(db, "2026-10-23", "2026-10-25", now=now)
+    for name in (None, "", "UTC", "Mars/Olympus_Mons", "../../etc/passwd", "America/Los_Angeles; DROP", 42, "A" * 65):
+        assert resolve_zone(name)[1] == "UTC"
+        result = daily_measurements(db, "2026-10-23", "2026-10-25", now=now, time_zone=name)
+        assert result == utc

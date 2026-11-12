@@ -180,3 +180,52 @@ def test_thread_safe_acquire():
         t.join()
     assert not errors
     assert ModelSlot.EMBEDDING.value in cache.resident_slots()
+
+
+def test_pinned_slot_sits_outside_the_lru_budget():
+    """The budget is sized for the small enrichment encoders every ingest chunk cycles
+    through; a large model in that rotation was evicted and reloaded every chunk (the
+    Topos Facts encoders, 8 loads in 8 batches on 6 Nov 2026). Pinned, it stays while the
+    others keep their full budget."""
+    cache = ModelCache(max_resident=2)
+    loads = {"n": 0}
+
+    def load_facts():
+        loads["n"] += 1
+        return "facts"
+
+    cache.acquire(ModelSlot.TOPOS_FACTS, "facts@cpu", load_facts, pinned=True)
+    for slot in (ModelSlot.PRIVACY_FILTER, ModelSlot.EMBEDDING, ModelSlot.NER, ModelSlot.EMOTION):
+        cache.acquire(slot, slot.value, lambda s=slot: s.value)
+    cache.trim_to_budget()
+    assert ModelSlot.TOPOS_FACTS.value in cache.resident_slots()
+    assert cache.pinned_slots() == [ModelSlot.TOPOS_FACTS.value]
+    # The two most recent small encoders are resident beside it: the budget is theirs alone.
+    assert set(cache.resident_slots()) == {"topos_facts", "ner", "emotion"}
+    _, hit = cache.acquire(ModelSlot.TOPOS_FACTS, "facts@cpu", load_facts, pinned=True)
+    assert hit is True and loads["n"] == 1
+
+
+def test_pinned_slot_is_released_by_its_own_idle_time_or_evict_slot():
+    cache = ModelCache(max_resident=1, idle_ttl_sec=0)
+    cache.acquire(ModelSlot.TOPOS_FACTS, "facts@cpu", lambda: "facts", pinned=True, pin_idle_sec=60)
+    cache.acquire(ModelSlot.NER, "ner", lambda: "ner")
+    cache.trim_to_budget()
+    assert set(cache.resident_slots()) == {"topos_facts", "ner"}   # fresh: the global TTL (off) is not its clock
+    cache._entries[ModelSlot.TOPOS_FACTS].last_used -= 61
+    cache.trim_to_budget()
+    assert cache.resident_slots() == ["ner"]
+    cache.acquire(ModelSlot.TOPOS_FACTS, "facts@cpu", lambda: "facts", pinned=True)
+    cache.evict_slot(ModelSlot.TOPOS_FACTS)
+    assert "topos_facts" not in cache.resident_slots()
+
+
+def test_rss_trim_keeps_the_pinned_slot():
+    cache = ModelCache(max_resident=3, rss_soft_limit_mb=1)
+    cache.acquire(ModelSlot.TOPOS_FACTS, "facts@cpu", lambda: "facts", pinned=True)
+    cache.acquire(ModelSlot.NER, "ner", lambda: "ner")
+    cache.acquire(ModelSlot.EMOTION, "emotion", lambda: "emotion")
+    with patch("topos.engine.model_cache.get_process_rss_mb", return_value=10_000.0):
+        cache.trim_to_budget()
+    assert "topos_facts" in cache.resident_slots()
+    assert len([s for s in cache.resident_slots() if s != "topos_facts"]) == 1

@@ -122,6 +122,13 @@ backoff), because a new interest or a newly assessed label moves no index basis,
 would ever drop the index (WS0, 1 Oct, on Lane C's finding). With the flag off nothing here
 touches the interest family.
 
+The time of the last interval run is kept in the state file (``last_interest_at``), so a restart
+does not make the refresh due at once (4 Nov 2026). Measured on the owner's node: the refresh
+nearly always finds a current-month interest whose visits moved, and the full rebuild of every
+interest grant it then queues (306 s and 249 s after the 4 Nov restart, each publish holding the
+write gate 22-29 s) landed on top of the restart's own graph rebuild. A kept time from the future
+(the clock went back) or one older than the interval leaves the refresh due, as before.
+
 A cluster whose own label is a bad name for a grant (it names a site, echoes a page title, or is
 not a short topic name) and which nothing explicitly excludes is given a second try at a label in
 the same refresh (``interest_relabel``; owner direction, 1 Oct): after the labels owed an
@@ -180,6 +187,7 @@ from typing import Callable, Literal, get_args
 
 from pydantic import model_serializer
 
+from ..core import owner_requests
 from . import switches
 from .canonical import PolicyError
 from .contract import Hash, Identifier, Number, StrictModel
@@ -304,12 +312,18 @@ class InterestRefreshReceipt(StrictModel):
     relabel_pending: Number | None = None   # clusters owed a second label when the refresh began
     relabel_calls: Number | None = None     # model calls made for them
     relabelled: Number | None = None        # second labels every label check accepted
+    # Of `closed`, the objects stored again with the label, month and band the closed row had: only the counted
+    # visits behind the content revision moved (`interest_family.persist`). Such a run still queues the rebuild
+    # (the sealed member binds that revision, and a release refuses a member whose object moved), so this count is
+    # how a reader tells the hourly churn of the open month from a new, changed or gone interest. Absent from every
+    # receipt written before it.
+    digest_only: Number | None = None
 
     @model_serializer(mode="wrap")
     def _without_counts_that_were_not_taken(self, handler):
         data = handler(self)
         if isinstance(data, dict):
-            for key in ("relabel_pending", "relabel_calls", "relabelled"):
+            for key in ("relabel_pending", "relabel_calls", "relabelled", "digest_only"):
                 if data.get(key) is None:
                     data.pop(key, None)
         return data
@@ -478,7 +492,8 @@ def fact_digest(conn) -> str:
     served from it, and what one switched on adds arrives with the build. The state is added only while an admitted
     ontology is off (or the registry cannot be read), so on a node with them all on the digest is the one it kept
     before this rule and an upgrade queues nothing."""
-    from .selective_facts import SEMANTICS, enabled_revision
+    from .selective_facts import enabled_revision
+    from .expanded_facts import SEMANTICS
     row = conn.execute("SELECT COUNT(*), MAX(rowid), MAX(valid_from), MAX(valid_to) FROM signal_objects "
                        "WHERE object_type='fact'").fetchone()
     on = enabled_revision(conn)
@@ -590,6 +605,7 @@ class RefreshLoop:
         self._state: dict | None = None
         self._interest_after_pass: tuple | None = None   # (budget the pass left, was it a full pass)
         self._last_interest_at: float | None = None
+        self._interest_clock_read = False         # the kept `last_interest_at` is read once, at the first run
         self._relabels_waited = False             # the last refresh held its second tries back for a restore
         self._facts: str | None = None            # IF-6: the fact digest when last observed
         self._goal_field_owed: tuple | None = None   # (rule state,) queued grants are being rebuilt under
@@ -603,7 +619,7 @@ class RefreshLoop:
         if self._state is None:
             state = {"version": STATE_VERSION, "names": [], "ingest_high_water": None, "last_full_pass_at": None,
                      "assessment_revisions": None, "proof_digest": None, "continuation": None, "fact_digest": None,
-                     "goal_field": None}
+                     "goal_field": None, "last_interest_at": None}
             try:
                 loaded = json.loads(self._state_path().read_text("utf-8"))
                 if isinstance(loaded, dict) and loaded.get("version") == STATE_VERSION:
@@ -618,6 +634,8 @@ class RefreshLoop:
                         state["fact_digest"] = None
                     if not isinstance(state["goal_field"], str):
                         state["goal_field"] = None
+                    if type(state["last_interest_at"]) is not int or state["last_interest_at"] < 0:
+                        state["last_interest_at"] = None
                     if not self._valid_continuation(state["continuation"]):
                         state["continuation"] = None
             except (OSError, ValueError):
@@ -1029,6 +1047,7 @@ class RefreshLoop:
             entry = due[grant_id]
             answer_gate.hold_background_start(
                 only_if=lambda: self._policy_hash(grant_id, int(self.clock())) is not None)
+            owner_requests.pace()   # between shares: an owner frame in hand goes first (core/owner_requests.py)
             with self._lock:
                 causes |= entry["causes"]
                 entry["running"] = True
@@ -1352,6 +1371,12 @@ class RefreshLoop:
             if self._pass is not None:
                 return None
             after, self._interest_after_pass = self._interest_after_pass, None
+            if not self._interest_clock_read:
+                # Kept across a restart (module docstring): a refresh within the interval is not due again.
+                self._interest_clock_read = True
+                kept = self._load_state().get("last_interest_at")
+                if self._last_interest_at is None and kept is not None and kept <= now:
+                    self._last_interest_at = kept
             interval_due = (self._last_interest_at is None
                             or now >= self._last_interest_at + self.settings.interest_interval)
             if after is not None and (after[1] or interval_due):
@@ -1362,8 +1387,8 @@ class RefreshLoop:
                 return None
         if self._worker_object().running():
             return None  # the owner's own pass; the interval brings this back once it is done
-        self._last_interest_at = now
-        counts = dict(inserted=0, closed=0, unchanged=0, pending=0, assessed=0, unresolved=0, short=False)
+        self._note_interest_run(now)
+        counts = dict(inserted=0, closed=0, unchanged=0, digest_only=0, pending=0, assessed=0, unresolved=0, short=False)
         if self.settings.relabels:
             counts.update(relabel_pending=0, relabel_calls=0, relabelled=0)
         try:
@@ -1384,6 +1409,19 @@ class RefreshLoop:
                                          rebuild_requested=requested, **counts)
         self._record(receipt)
         return receipt
+
+    def _note_interest_run(self, at: int | None) -> None:
+        """The last interest refresh, kept across a restart (module docstring); None makes the next one due at once.
+        A failed write costs only that: the refresh is due at the next start, as it was before."""
+        with self._lock:
+            self._last_interest_at = at
+            state = self._load_state()
+            if state.get("last_interest_at") != at:
+                state["last_interest_at"] = at
+                try:
+                    self._save_state()
+                except OSError as exc:
+                    _log.warning("interest refresh time not kept (%s)", type(exc).__name__)
 
     def _interest_grants(self, now: int) -> list[str]:
         """Active grants that sign interests (``interest_index.admits``) and have an index here, published or
@@ -1438,7 +1476,8 @@ class RefreshLoop:
                 # A restore is owed, and it runs right after this refresh. A grant whose index was dropped is dark
                 # until it does, and the second tries are model calls it would wait for: they stand back for the
                 # next round, which is due at once. Once only: the round after a wait makes them whatever is owed.
-                self._relabels_waited, self._last_interest_at = True, None
+                self._relabels_waited = True
+                self._note_interest_run(None)
                 return state
             state = self._second_labels(service, owed, opt_outs, budget, counts, spent)
             if state != "complete" or not counts["relabelled"]:
@@ -1450,7 +1489,7 @@ class RefreshLoop:
             stored = self._canonical_write(service, lambda conn: fam.persist(conn, built))
             # Both stores add up; `unchanged` stays the first store's (what this refresh found and left as it was).
             counts.update(inserted=counts["inserted"] + stored["inserted"], closed=counts["closed"] + stored["closed"],
-                          pending=counts["pending"] + len(fresh))
+                          digest_only=counts["digest_only"] + stored["digest_only"], pending=counts["pending"] + len(fresh))
             return self._assess_interest_labels(service, fresh, budget, counts, spent)
 
     def _interest_snapshot(self, service, opt_outs) -> tuple:

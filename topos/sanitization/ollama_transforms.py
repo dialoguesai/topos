@@ -20,6 +20,7 @@ import threading
 from contextlib import contextmanager
 from typing import Any, Dict, Final, Iterator, List, Optional, Tuple
 
+from topos import local_serving
 from topos.config.sanitization_ollama import (
     SANITIZATION_OLLAMA_TRANSFORM_IDS,
     SanitizationOllamaEffective,
@@ -215,7 +216,7 @@ def _ollama_chat(
     if options:
         body["options"] = options
     with httpx.Client(timeout=timeout_sec) as client:
-        resp = client.post(url, json=body)
+        resp = local_serving.post(client, url, json=body)
         if (
             auto_pull
             and resp.status_code == 404
@@ -232,7 +233,7 @@ def _ollama_chat(
                 pulled = OllamaAdapter(base_url=host).ensure_model(model)
                 if pulled:
                     logger.info("Sanitization: finished pulling Ollama model %r", model)
-            resp = client.post(url, json=body)
+            resp = local_serving.post(client, url, json=body)
         resp.raise_for_status()
         data = resp.json()
     msg = data.get("message") or {}

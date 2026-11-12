@@ -8,6 +8,10 @@ verifier sees the same turns; the turns protect the fact (exclusion, deletion, s
 never a source; the thank-word cue fires only on a thank-word and binds the recipient's label; with the turns
 at 0 and no thank-word every prompt is byte for byte what it was.
 
+One thing the ruling does not name and these tests settle the narrow way: a pack the owner's Topos Facts
+pick reads is read from the one record, so it has no context for the parser or the verifier either, and no
+short message.
+
 Invented people and lines in a migrated temp database; never the owner's node.
 """
 import hashlib
@@ -499,6 +503,94 @@ def test_the_owners_backfill_reads_a_moments_pack_with_its_conversation(node_db,
     run_pack_backfill(node_db, "relationships.social", use_prefilter=False)
     assert seen["extract"] and not [p for p in seen["extract"] if "Conversation context" in p]
     assert not [p for p in seen["extract"] if f"---\n{THANKS}\n---" in p]
+
+
+def test_a_backfill_since_a_date_walks_no_short_message_from_before_it(node_db):
+    node_db.execute("UPDATE conversation_messages SET event_at=? WHERE message_id='g3'", (_ts(days=40),))
+    node_db.commit()
+    since = (datetime.now(timezone.utc) - timedelta(days=2)).strftime("%Y-%m-%d")
+    walked = {r["record_id"] for r in _iter_history(node_db, since=since)}
+    assert "m2" in walked and "g3" not in walked and "d1" not in walked
+
+
+def test_the_backfill_plan_counts_a_short_message_only_where_a_run_would_read_it(node_db, packs):
+    """The count the owner reads before the yes (and the automatic catch-up's look) is the run's own rule: a
+    short message waits for a context pack when it has a conversation, and is not one of the records walked."""
+    from topos.features.derivation.backfill_runs import waiting_counts
+    from topos.features.derivation.prefilter import PackPrefilter
+    joy, social = packs["moments.joy"], packs["relationships.social"]
+    assert PackPrefilter(joy).passes(THANKS), "the thank-you is the joy pack's kind of record"
+    long_joy = sum(1 for r in _iter_history(node_db) if not r.get("short") and r["role"] in joy.allowed_roles()
+                   and PackPrefilter(joy).passes(r["text"]))
+    long_social = sum(1 for r in _iter_history(node_db) if not r.get("short") and r["role"] in social.allowed_roles()
+                      and PackPrefilter(social).passes(r["text"]))
+    waiting, history = waiting_counts(node_db, packs, ["moments.joy", "relationships.social"], None)
+    assert waiting == {"moments.joy": long_joy + 1, "relationships.social": long_social}, \
+        "m2 has a conversation; the group's short message has none; neither is the other pack's"
+    assert history["conversation_messages"] == sum(1 for r in _iter_history(node_db) if not r.get("short"))
+
+
+# --- a pack Topos Facts reads has the one record ------------------------------------------------------------------
+
+class _Classifier:
+    """Topos Facts, stubbed: it knows the joy pack and reports one peak from whatever text it is given."""
+
+    def __init__(self):
+        self.texts = []
+
+    def knows(self, pack_id):
+        return pack_id == "moments.joy"
+
+    def extract(self, pack_id, text):
+        self.texts.append(text)
+        return [{"predicate": "moment.peak", "value": {"kind": "accomplished", "description": "a proud week"},
+                 "confidence": 0.97, "about": "owner"}]
+
+
+def _pick_topos_facts(conn, monkeypatch):
+    stub = _Classifier()
+    monkeypatch.setattr("topos.features.derivation.topos_facts.load", lambda: stub)
+    conn.execute("CREATE TABLE IF NOT EXISTS engine_config (key TEXT PRIMARY KEY, value TEXT)")
+    conn.execute("INSERT OR REPLACE INTO engine_config (key, value) VALUES ('facts_llm_provider', 'topos_facts')")
+    conn.execute("INSERT OR REPLACE INTO engine_config (key, value) VALUES ('facts_llm_model', 'v0.1')")
+    conn.commit()
+    return stub
+
+
+def test_a_pack_topos_facts_reads_gets_the_record_alone_and_tension_keeps_its_turns(node_db, monkeypatch):
+    stub = _pick_topos_facts(node_db, monkeypatch)
+    _enable(node_db, "moments.joy", "moments.tension")
+    _ingest_only(monkeypatch)
+    seen = _model(monkeypatch)
+    run_derivation_batch(node_db, [_row("m1", node_db), _row("m2", node_db, THANKS)], stats={})
+    assert stub.texts == [PROUD], "the classifier is given the owner's record, and no short message"
+    assert not [p for p in seen["extract"] if LENS["joy"] in p]
+    (verify,) = seen["verify"]
+    assert VERIFY_RECORD_ONLY in verify and NEWS not in verify, "the verifier is shown no more than the reader"
+    ((refs, payload),) = _facts(node_db, "moments.joy")
+    assert [r["record_id"] for r in refs] == ["m1"] and not payload.get("context_refs")
+    (tension,) = _lens(seen["extract"], "tension", PROUD)
+    assert NEWS in tension and T.RULE_CONTEXT in tension, "a pack still on the LLM reads as DR-62 says"
+
+
+def test_the_backfill_and_its_plan_read_a_topos_facts_pack_the_same_way(node_db, monkeypatch, packs):
+    from topos.features.derivation import topos_facts
+    from topos.features.derivation.backfill_runs import waiting_counts
+    from topos.features.derivation.surfaces import run_pack_backfill
+    stub = _pick_topos_facts(node_db, monkeypatch)
+    _enable(node_db, "moments.joy")
+    monkeypatch.setattr("topos.features.signal.derived_index.index_derived_objects", lambda *a, **kw: {})
+    monkeypatch.setattr(topos_facts, "known_packs_offline", lambda: frozenset({"moments.joy"}))
+    with_llm = waiting_counts(node_db, packs, ["moments.tension"], None)[0]["moments.tension"]
+    planned = waiting_counts(node_db, packs, ["moments.joy"], None)[0]["moments.joy"]
+    seen = _model(monkeypatch)
+    stats = run_pack_backfill(node_db, "moments.joy")
+    assert stats["processed"] == planned == len(stub.texts) and THANKS not in stub.texts
+    assert seen["verify"] and not [v for v in seen["verify"] if VERIFY_WITH_CONTEXT in v]
+    assert not [p for _r, p in _facts(node_db, "moments.joy") if p.get("context_refs")]
+    # while the classifier's pack list is not on this computer, the plan counts no short message for any pack
+    monkeypatch.setattr(topos_facts, "known_packs_offline", lambda: None)
+    assert waiting_counts(node_db, packs, ["moments.tension"], None)[0]["moments.tension"] <= with_llm
 
 
 # --- the turns protect the fact ----------------------------------------------------------------------------------

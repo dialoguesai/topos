@@ -27,7 +27,10 @@ import asyncio
 import json as _json
 import logging
 import os
+import re
+import sqlite3
 import threading
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
@@ -147,6 +150,9 @@ def _read_conversation_context(conn, rec, k, cache) -> List[Dict[str, Any]]:
     import datetime as _dt
     from ....features.derivation.template import CONTEXT_OWNER, CONTEXT_UNNAMED, is_diarisation_label
     rid = str(rec.get("record_id") or "")
+    if "columns" not in cache:
+        cache["columns"] = {str(r[1]) for r in conn.execute("PRAGMA table_info(conversation_messages)")}
+    cols = cache["columns"]
     found = conn.execute("SELECT conversation_id, event_at, source_id FROM conversation_messages"
                          " WHERE message_id=?", (rid,)).fetchone()
     if not found or not found[0] or str(found[2] or "").lower() not in _CONTEXT_SOURCES:
@@ -155,8 +161,7 @@ def _read_conversation_context(conn, rec, k, cache) -> List[Dict[str, Any]]:
     when = _aware(at)
     if when is None:
         return []
-    if "columns" not in cache:
-        cache["columns"] = {str(r[1]) for r in conn.execute("PRAGMA table_info(conversation_messages)")}
+    if "guard" not in cache:
         from ....features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
         from ....features.lifecycle.exclusions import excluded_record_ids
         from ....features.lifecycle.off_limits_view import for_own_processing
@@ -169,11 +174,11 @@ def _read_conversation_context(conn, rec, k, cache) -> List[Dict[str, Any]]:
     other = cache["conversations"][conv]
     if other is None:
         return []
-    cols = cache["columns"]
     nsfw = "COALESCE(content_nsfw,0)" if "content_nsfw" in cols else "0"
     system = " AND COALESCE(message_type,'')<>'system'" if "message_type" in cols else ""
     rows = conn.execute(
-        f"SELECT message_id, content, event_at, COALESCE(is_from_self,0), {nsfw} FROM conversation_messages"
+        f"SELECT message_id, content, event_at, COALESCE(is_from_self,0), {nsfw}"
+        f" FROM conversation_messages"
         f" WHERE conversation_id=? AND message_id<>? AND (event_at < ? OR (event_at = ? AND message_id < ?))"
         f" AND content IS NOT NULL AND TRIM(content)<>''{system}"
         f" ORDER BY event_at DESC, message_id DESC LIMIT ?", (conv, rid, at, at, rid, int(k))).fetchall()
@@ -217,10 +222,13 @@ def _other_party(conn, conv: str, guard, is_diarisation_label) -> Optional[str]:
 
 def _context_for(conn, pack, rec: Dict[str, Any], cache: Dict[str, Any]) -> List[Dict[str, Any]]:
     """The turns `pack` reads before `rec`: `_conversation_context` for a pack in
-    `template.context_packs()`, [] for every other pack. Read once per record and kept on it, so
-    the prompt, the parser and the verifier see the same turns."""
+    `template.context_packs()`, [] for every other pack, and for a pack the caller listed in
+    `cache["record_only"]` (one Topos Facts reads: the classifier is given the record alone, so
+    nothing downstream of it is shown more). Read once per record and kept on it, so the prompt,
+    the parser and the verifier see the same turns."""
     from ....features.derivation.template import context_packs, context_turns
-    if str(getattr(pack, "pack", "") or "") not in context_packs():
+    pid = str(getattr(pack, "pack", "") or "")
+    if pid not in context_packs() or pid in cache.get("record_only", ()):
         return []
     if "context" not in rec:
         rec["context"] = _conversation_context(conn, rec, context_turns(), cache=cache)
@@ -331,6 +339,32 @@ def _ledger_write(conn, *, stage, pack, rec, a, model, vmodel, written_id=None):
          a.get("verifier_status"), a.get("verifier_reason"), written_id))
 
 
+def _note_deferral(conn, reason: str) -> None:
+    """Record why the batch could not run where the facts config reads it (one row, counted),
+    so a picked provider that never loads is visible in the app, not only in the node log."""
+    from ....config.facts_llm import ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL, derivation_deferral
+    prior = derivation_deferral(conn) or {}
+    batches = prior.get("batches") if isinstance(prior.get("batches"), int) else 0
+    value = _json.dumps({"reason": reason, "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                         "batches": batches + 1})
+    try:
+        conn.execute("INSERT OR REPLACE INTO engine_config (key, value) VALUES (?, ?)",
+                     (ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL, value))
+        conn.commit()
+    except sqlite3.Error:
+        logger.debug("derivation: could not record the deferral", exc_info=True)
+
+
+def _clear_deferral(conn) -> None:
+    from ....config.facts_llm import ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL
+    try:
+        cur = conn.execute("DELETE FROM engine_config WHERE key = ?", (ENGINE_CONFIG_KEY_DERIVATION_DEFERRAL,))
+        if cur.rowcount:
+            conn.commit()
+    except sqlite3.Error:
+        logger.debug("derivation: could not clear the deferral", exc_info=True)
+
+
 def _bump_yield(conn, pack_id, **cols):
     import datetime as _dt
     day = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
@@ -411,8 +445,23 @@ def run_derivation_batch(
     vmodel = verifier_model()
     adapter = OllamaAdapter()
 
+    def settle():
+        """Commit before a model call so no write transaction spans it.
+
+        This job writes on its own connection, outside the write gate, and used to commit
+        once per record. In WAL the first write takes SQLite's write lock at execute time,
+        so the lock was held across every extraction and verifier call of the record (up
+        to 11 packs, 9-20 s each). The pipeline's claim_next_job then took the gate and
+        blocked on SQLite, and every gated writer queued behind it: measured 5-6 Nov 2026
+        on an isolated node, claim_next_job held 160 s with waited=0, 383-3,017 s per
+        50-record run. The lock is now held for the write bursts only (milliseconds).
+        """
+        if conn.in_transaction:
+            conn.commit()
+
     def llm(m: str, prompt: str, n: int = 900, *, pack_id=None,
             phase="extraction", mode="ingest") -> str:
+        settle()
         if pack_id is not None:
             from ....features.derivation.processing import measured_generate
             return measured_generate(conn, adapter, m, prompt, pack_id=pack_id,
@@ -433,10 +482,48 @@ def run_derivation_batch(
         except Exception as exc:  # noqa: BLE001
             st["deferred"] = f"verifier_unavailable: {exc}"[:120]
             logger.warning("derivation deferred: verifier %s unavailable (%s)", vmodel, exc)
+            _note_deferral(conn, st["deferred"])
             return 0
+
+    # Topos Facts (owner opt-in under Node functions → Facts extraction): the packs it
+    # knows skip the LLM call; ROUTED_TO_LLM and unknown packs keep `model`. A pick that
+    # cannot load defers the batch, like an unavailable verifier: nothing is marked done.
+    from ....config.facts_llm import facts_classifier_version
+    from ....features.derivation import topos_facts as _tf
+    tf_model = None
+    if facts_classifier_version(conn):
+        try:
+            tf_model = _tf.load()
+        except Exception as exc:  # noqa: BLE001
+            st["deferred"] = f"topos_facts_unavailable: {exc}"[:120]
+            logger.warning("derivation deferred: Topos Facts unavailable (%s)", exc)
+            _note_deferral(conn, st["deferred"])
+            return 0
+    else:
+        _tf.release()                    # another provider picked: the encoders go
+    _clear_deferral(conn)
 
     filters = {pid: PackPrefilter(pk) for pid, pk in all_packs.items()}
     writer = DerivationWriter(conn, model=model)
+    writers = {model: writer}
+
+    def pack_raw(pack, rec, mode, context=None):
+        """(raw output, extract model) for one record and pack: Topos Facts or the LLM.
+        `context` is the record's conversation (DR-62) and only the LLM reads it: a pack
+        Topos Facts reads has none (`ctx_cache["record_only"]`)."""
+        if tf_model is not None and _tf.routes_to_classifier(pack.pack, tf_model):
+            settle()
+            return _tf.raw_output(tf_model, pack.pack, rec["text"]), _tf.MODEL_ID
+        raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec),
+                                      context=context),
+                  pack_id=pack.pack, mode=mode)
+        _bump_yield(conn, pack.pack, llm_calls=1)
+        return raw, model
+
+    def writer_for(extract_model):
+        if extract_model not in writers:
+            writers[extract_model] = DerivationWriter(conn, model=extract_model)
+        return writers[extract_model]
     posture_for = make_posture_resolver(conn)
     retired = retire_role_skipped_progress(conn, all_packs, posture_for)
     if retired:
@@ -454,7 +541,10 @@ def run_derivation_batch(
             return True
         return False
 
-    ctx_cache: Dict[str, Any] = {}
+    # Topos Facts copies every value out of the one record it is given, so a pack it reads has
+    # no conversation to show the parser or the verifier either, and no short message to read.
+    ctx_cache: Dict[str, Any] = {"record_only": frozenset(
+        pid for pid in all_packs if _tf.routes_to_classifier(pid, tf_model))}
 
     def judge(pack, rec, a, stage):
         """Verify one assertion; high-harm predicate classes get 3-vote majority
@@ -520,10 +610,7 @@ def run_derivation_batch(
                 continue
             context = _context_for(conn, pack, rec, ctx_cache) or None
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec),
-                                              context=context),
-                          pack_id=pack.pack, mode="ingest")
-                _bump_yield(conn, pid, llm_calls=1)
+                raw, used = pack_raw(pack, rec, "ingest", context)
             except Exception as exc:  # noqa: BLE001
                 st["llm_errors"] = st.get("llm_errors", 0) + 1
                 logger.debug("derivation llm error on %s: %s", key, exc)
@@ -539,10 +626,10 @@ def run_derivation_batch(
                 st[f"v_{a.get('verifier_status')}"] = st.get(f"v_{a.get('verifier_status')}", 0) + 1
                 if a.get("verifier_status") == "rejected":
                     _ledger_write(conn, stage="ingest", pack=pack, rec=rec, a=a,
-                                  model=model, vmodel=vmodel)
+                                  model=used, vmodel=vmodel)
                     continue
                 _bump_yield(conn, pid, accepted=1)
-                out = writer.assert_pack_fact(
+                out = writer_for(used).assert_pack_fact(
                     pack=pack, predicate=a["predicate"], subject_entity_id=owner,
                     value=a["value"], actor_role=rec["role"],
                     source_refs=[{"table": rec["table"], "record_id": rec["record_id"],
@@ -557,13 +644,13 @@ def run_derivation_batch(
                     written += 1
                     _bump_yield(conn, pid, written=1)
                 _ledger_write(conn, stage="ingest", pack=pack, rec=rec, a=a,
-                              model=model, vmodel=vmodel,
+                              model=used, vmodel=vmodel,
                               written_id=out.get("object_id") if stored else None)
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
         conn.commit()
 
-    _drip_catchup(conn, packs=packs, filters=filters, llm=llm, judge=judge,
-                  writer=writer, owner=owner, done=done, st=st, cancel=cancel,
+    _drip_catchup(conn, packs=packs, filters=filters, pack_raw=pack_raw, judge=judge,
+                  writer_for=writer_for, owner=owner, done=done, st=st, cancel=cancel,
                   posture_for=posture_for, ctx_cache=ctx_cache)
 
     _self_gate(conn, all_packs=all_packs, enabled=set(packs), filters=filters,
@@ -574,7 +661,10 @@ def run_derivation_batch(
         mark_pack_run(conn, pid, pack.version)
     conn.commit()
     st["written"] = written
-    st.update({f"w_{k}": v for k, v in writer.stats.items() if v})
+    for w in writers.values():
+        for k, v in w.stats.items():
+            if v:
+                st[f"w_{k}"] = st.get(f"w_{k}", 0) + v
     return written
 
 
@@ -629,39 +719,52 @@ def retire_role_skipped_progress(conn, all_packs, posture_for) -> int:
     return len(stale)
 
 
+_SINCE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 #: history records drip-processed per batch — the dark delta self-heals without
 #: a scheduler; a fresh enablement's history closes over days, or immediately
 #: via the owner's backfill control.
 CATCHUP_PER_BATCH = 25
 
 
-def _iter_history(conn, limit=2000, posture_for=None):
+def _iter_history(conn, limit=2000, posture_for=None, since=None):
+    """The newest `limit` journal entries and the newest `limit` messages, newest first.
+
+    `since` (a `YYYY-MM-DD` date) keeps only records dated on or after it: an owner's backfill
+    back to a date they chose stops there instead of walking the whole window. The stamps are ISO
+    text, so the comparison is the text's own order."""
     import sqlite3 as _sqlite3
     if posture_for is None:
         from ....features.provenance.posture import make_posture_resolver
         posture_for = make_posture_resolver(conn)
+    since = str(since or "").strip()
+    if since and not _SINCE_RE.match(since):
+        raise ValueError("since must be a YYYY-MM-DD date")
+    args = (since,) if since else ()
     def _rows(sql):
         try:
-            return conn.execute(sql).fetchall()
+            return conn.execute(sql, args).fetchall()
         except _sqlite3.OperationalError:
             return []
     out = []
     for tbl, rid, text, at, role in _rows(
             f"SELECT 'journal_entries', entry_id, content, entry_at, 'authored'"
             f" FROM journal_entries WHERE content IS NOT NULL AND LENGTH(content)>15"
+            f"{' AND entry_at >= ?' if since else ''}"
             f" ORDER BY entry_at DESC LIMIT {int(limit)}"):
         out.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
                     "date": str(at or "")[:10], "role": role or "authored", "source_id": ""})
+    msg_since = " AND event_at >= ?" if since else ""
     msg_rows = _rows(
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role,"
             f" CASE WHEN COALESCE(is_from_self,0)=1 THEN NULL ELSE sender_id END,"
             f" is_from_self, sender_id, sender_type, source_id, dataset_id, conversation_id"
-            f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
+            f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15{msg_since}"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")
     if not msg_rows:
         msg_rows = [tuple(r) + (None,) * 7 for r in _rows(
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role"
-            f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
+            f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15{msg_since}"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")]
     # DR-62: the owner's short messages, for the context packs only. A query of their own, so
     # the walk above, and every other pack's history, is exactly what it was.
@@ -672,7 +775,7 @@ def _iter_history(conn, limit=2000, posture_for=None):
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role, NULL,"
             f" is_from_self, sender_id, sender_type, source_id, dataset_id, conversation_id"
             f" FROM conversation_messages WHERE COALESCE(is_from_self,0)=1 AND content IS NOT NULL"
-            f" AND LENGTH(content)<={SHORT_RECORD_CHARS} AND LENGTH(TRIM(content))>0"
+            f" AND LENGTH(content)<={SHORT_RECORD_CHARS} AND LENGTH(TRIM(content))>0{msg_since}"
             f" ORDER BY event_at DESC LIMIT {int(limit)}")
         short_ids = {str(r[1]) for r in short_rows}
         msg_rows = list(msg_rows) + list(short_rows)
@@ -707,16 +810,13 @@ def _iter_history(conn, limit=2000, posture_for=None):
     return out
 
 
-def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, cancel,
+def _drip_catchup(conn, *, packs, filters, pack_raw, judge, writer_for, owner, done, st, cancel,
                   posture_for=None, ctx_cache=None):
     """Process up to CATCHUP_PER_BATCH unprocessed HISTORY (record, pack) pairs
     per batch. Newest-first: recent history answers queries soonest."""
     if not packs:
         return
-    from ....features.derivation.template import build_prompt, context_packs, parse_output
-    from ....features.facts.llm_extract import _resolved_extraction_model
-    from ....config.settings import settings as _settings
-    model = _resolved_extraction_model(_settings, conn)
+    from ....features.derivation.template import context_packs, parse_output
     ctx_packs = context_packs()
     ctx_cache = ctx_cache if ctx_cache is not None else {}
     budget = CATCHUP_PER_BATCH
@@ -737,10 +837,8 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
             context = _context_for(conn, pack, rec, ctx_cache) or None
             budget -= 1
             try:
-                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"], **_recipient_args(pack, rec),
-                                              context=context),
-                          pack_id=pack.pack, mode="catchup")
-                _bump_yield(conn, pid, llm_calls=1, prefilter_hits=1)
+                raw, used = pack_raw(pack, rec, "catchup", context)
+                _bump_yield(conn, pid, prefilter_hits=1)
             except Exception:  # noqa: BLE001
                 st["llm_errors"] = st.get("llm_errors", 0) + 1
                 continue
@@ -751,10 +849,10 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
                 a = judge(pack, rec, a, "catchup")
                 if a.get("verifier_status") == "rejected":
                     _ledger_write(conn, stage="catchup", pack=pack, rec=rec, a=a,
-                                  model=model, vmodel="(job)", )
+                                  model=used, vmodel="(job)", )
                     continue
                 _bump_yield(conn, pid, accepted=1)
-                out = writer.assert_pack_fact(
+                out = writer_for(used).assert_pack_fact(
                     pack=pack, predicate=a["predicate"], subject_entity_id=owner,
                     value=a["value"], actor_role=rec["role"],
                     source_refs=[{"table": rec["table"], "record_id": rec["record_id"]}],
@@ -767,7 +865,7 @@ def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, 
                     _bump_yield(conn, pid, written=1)
                     st["catchup_written"] = st.get("catchup_written", 0) + 1
                 _ledger_write(conn, stage="catchup", pack=pack, rec=rec, a=a,
-                              model=model, vmodel="(job)",
+                              model=used, vmodel="(job)",
                               written_id=out.get("object_id") if stored else None)
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
             done.add(key)
@@ -918,11 +1016,18 @@ class DerivationJob(BaseEnrichmentJob):
         cancel = threading.Event()
         stats: Dict[str, Any] = {}
         try:
-            written = await asyncio.to_thread(
-                run_derivation_batch, conn, canonical_messages,
-                cancel=cancel, stats=stats)
+            def _run_batch():
+                # The worker's own handle; `conn` above belongs to this coroutine's thread.
+                return run_derivation_batch(
+                    get_db_connection(), canonical_messages, cancel=cancel, stats=stats)
+
+            written = await asyncio.to_thread(_run_batch)
         except asyncio.CancelledError:
             cancel.set()
             raise
         logger.info("derivation batch: %s written, stats=%s", written, stats)
+        if stats.get("deferred"):
+            # The pipeline's deferral path (debt row, envelope), as for the goals job: the
+            # records were not marked done, and a retry finds them.
+            return [{"_deferred": True, "error": str(stats["deferred"]), "derivation_written": 0, **stats}]
         return [{"derivation_written": written, **stats}]

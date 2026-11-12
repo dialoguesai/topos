@@ -46,6 +46,7 @@ from pydantic import Field
 
 from .canonical import PolicyError, canonical_bytes, digest, parse_json
 from .contract import Hash, Identifier, Number, StrictModel
+from .. import local_serving
 
 VERSION = "topos-interest-label-review/v1"
 TABLE = "interest_label_assessments"
@@ -176,7 +177,7 @@ async def assess(prepared: dict, *, transport=None) -> InterestClassification:
                      else (open_transport(base_url=assessment_base_url()), True))
     try:
         await client.verify()
-        response = await client.client.post(client.base_url + "/api/chat", timeout=25, json={
+        response = await local_serving.post_async(client.client, client.base_url + "/api/chat", timeout=25, json={
             "model": MODEL, "stream": False, "think": False, "format": "json",
             "options": {"temperature": 0, "num_predict": 256},
             "messages": [{"role": "system", "content": PROMPT + "\n" + classification_rubric()},

@@ -502,6 +502,39 @@ def _main_database_file(conn: sqlite3.Connection) -> str:
     return ""
 
 
+def _rollback_failed_write(
+    conn: sqlite3.Connection, was_in_transaction: bool, exc: BaseException
+) -> None:
+    """Roll back the transaction a failed gated write opened, so it cannot keep the write lock.
+
+    A transaction the connection already had is the caller's batch and is left
+    to the caller. Never raises: the write's own error is the one to report.
+    The warning carries SQLite's own message, which names a constraint or a
+    schema object and never a row's values; on 2026-11-04 the handler logged
+    only "IntegrityError", so which constraint failed could not be recovered.
+    """
+    if was_in_transaction or not getattr(conn, "in_transaction", False):
+        return
+    error = f"{type(exc).__name__}: {exc}" if isinstance(exc, sqlite3.Error) else type(exc).__name__
+    try:
+        conn.rollback()
+    except Exception as rollback_exc:  # noqa: BLE001 — the write's error must propagate
+        logger.warning(
+            "[WRITE_GATE] write at %s raised %s and rolling back its transaction failed (%s); "
+            "the connection may still hold the write lock",
+            _caller_site(),
+            error,
+            type(rollback_exc).__name__,
+        )
+        return
+    logger.warning(
+        "[WRITE_GATE] write at %s raised %s; rolled back the transaction it opened so the "
+        "connection does not keep the write lock",
+        _caller_site(),
+        error,
+    )
+
+
 def retry_stale_snapshot(
     conn: sqlite3.Connection, fn: Callable[[sqlite3.Connection], T]
 ) -> T:
@@ -525,6 +558,14 @@ def retry_stale_snapshot(
     a transaction the connection already had (a caller's batch the rollback
     would discard), or an in-memory database (nothing to reopen). Call it with
     the write gate held.
+
+    Any other failure of ``fn`` rolls back the transaction it opened before the
+    error propagates. SQLite backs out a failed statement but keeps the
+    transaction, and in WAL a transaction that wrote keeps the write lock, so
+    an uncaught IntegrityError used to leave this thread's connection holding
+    it: on 2026-11-04 one query artifact's failed INSERT (its session foreign
+    key, by elimination) left every other writer waiting out busy_timeout under
+    the gate for about 11.5 minutes.
     """
     was_in_transaction = getattr(conn, "in_transaction", False)
     started = time.monotonic()
@@ -536,6 +577,7 @@ def retry_stale_snapshot(
             or not is_busy_error(exc)
             or time.monotonic() - started >= _STALE_SNAPSHOT_MAX_S
         ):
+            _rollback_failed_write(conn, was_in_transaction, exc)
             raise
         conn.rollback()
         path = _main_database_file(conn)
@@ -555,6 +597,10 @@ def retry_stale_snapshot(
         finally:
             unregister_connection(fresh)
             fresh.close()
+    except BaseException as exc:
+        _rollback_failed_write(conn, was_in_transaction, exc)
+        raise
+
 
 def begin_immediate(conn: sqlite3.Connection) -> None:
     """``BEGIN IMMEDIATE`` with busy retry, clearing any leaked implicit transaction.

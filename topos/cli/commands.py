@@ -195,6 +195,25 @@ def _resolve_topos_key(cli_topos_key: str | None, env_path: Path = USER_ENV_PATH
     raise NeedsHumanError(KEY_NOT_CONFIGURED_MESSAGE)
 
 
+LOCAL_ONLY_START_MESSAGE = (
+    "No account is connected: starting Topos in local-only mode. It collects and answers on this "
+    "computer. Connect an account later with `topos-node pair` (then restart Topos)."
+)
+
+
+def _resolve_topos_key_or_local(cli_topos_key: str | None) -> str | None:
+    """The key when there is one; otherwise None and the node starts local-only.
+
+    A missing key used to stop the node (a prompt in a terminal, exit 2 without
+    one). Local-first: the node runs without an account, and `topos-node pair`
+    connects one later. `--set-topos-key` / `--topos-key` keep their own path.
+    """
+    if cli_topos_key or (os.getenv("TOPOS_KEY") or "").strip():
+        return _resolve_topos_key(cli_topos_key)
+    click.echo(LOCAL_ONLY_START_MESSAGE, err=True)
+    return None
+
+
 def _emit_startup_banner(host: str, port: int, package_name: str = DEFAULT_PACKAGE_NAME) -> None:
     runtime_version = _get_runtime_version(package_name=package_name)
     emit_startup_banner(
@@ -488,7 +507,7 @@ def _run_node(
             "Use --port to start a second instance."
         )
 
-    _resolve_topos_key(topos_key)
+    _resolve_topos_key_or_local(topos_key)
 
     if app_mode:
         # Must happen before `topos.app` is imported — configure_logging() runs
@@ -762,6 +781,7 @@ from topos.cli.reprocess_cmd import reprocess_command  # noqa: E402
 from topos.cli.profile_cmd import profile_group  # noqa: E402
 from topos.cli.setup_models_cmd import setup_models_command  # noqa: E402
 from topos.cli.agents_cmd import agents_group  # noqa: E402
+from topos.cli.pushers_cmd import pushers_group  # noqa: E402
 from topos.cli.sources_cmd import sources_group  # noqa: E402
 from topos.cli.status_cmd import doctor_command, status_command  # noqa: E402
 from topos.mcp_server import mcp_command  # noqa: E402
@@ -769,11 +789,14 @@ from topos.cli.pair_cmd import pair_command  # noqa: E402
 from topos.cli.service_cmd import service_group  # noqa: E402
 from topos.cli.setup_cmd import setup_command  # noqa: E402
 from topos.cli.truth_cmd import truth_group  # noqa: E402
+from topos.cli.import_cmd import import_command  # noqa: E402
+from topos.cli.packs_cmd import packs_group  # noqa: E402
 
 main.add_command(reprocess_command)
 main.add_command(profile_group)
 main.add_command(setup_models_command)
 main.add_command(agents_group)
+main.add_command(pushers_group)
 main.add_command(sources_group)
 main.add_command(status_command)
 main.add_command(doctor_command)
@@ -783,6 +806,8 @@ main.add_command(pair_command)
 main.add_command(service_group)
 main.add_command(setup_command)
 main.add_command(truth_group)
+main.add_command(import_command)
+main.add_command(packs_group)
 
 
 if __name__ == "__main__":

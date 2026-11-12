@@ -18,6 +18,10 @@ cases and verification limits. The log covers node, web, and control-plane chang
 Run the full [before/after regression gate](response-quality-regression.md) for each
 such change and retain its reports, including failures.
 
+Optional developer tracing and metrics are documented in
+[Node observability](OBSERVABILITY.md). They are disabled by default and are not
+part of user onboarding or required for the node to function.
+
 ```bash
 pip install -e ".[dev,engine]"
 pytest tests -q

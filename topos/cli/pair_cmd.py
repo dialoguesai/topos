@@ -50,6 +50,13 @@ MANUAL_NEEDS_TTY_MESSAGE = (
     "Open your own terminal (not the assistant's) and run it there."
 )
 CP_BUSY_MESSAGE = "the control plane is busy right now; try `topos-node pair` again in a few minutes"
+CP_NO_ATTACH_MESSAGE = (
+    "this control plane cannot connect a Topos that is already running here yet; "
+    "update it, or start over with a fresh Topos (`topos-node pair --fresh`)"
+)
+#: Pairing modes that end in a key on this computer (CONTRACTS §3): `create` mints a new Topos on the control
+#: plane; `attach` registers the id this node minted for itself while it ran with no account (local_identity.py).
+KEY_MODES = ("create", "attach")
 CP_UNREACHABLE_MESSAGE = "could not reach the control plane; check the network and try `topos-node pair` again"
 
 #: Poll errors tolerated before the poller gives up (each costs one interval).
@@ -226,7 +233,31 @@ def _http_client() -> httpx.Client:
     return httpx.Client(**kwargs)
 
 
-def start_pairing(*, client_name: str, mode: str) -> Dict[str, Any]:
+def _local_topos_id() -> Optional[str]:
+    """The Topos id this node minted for itself (local_identity.py), when the served database is in local
+    mode; None for an account-bound or empty database, or when no database can be read. Read-only, so a
+    running node is never disturbed."""
+    try:
+        from topos.cli.status_cmd import _database_path, _read_only
+        from topos.local_identity import IDENTITY_MODE_LOCAL, identity_mode
+
+        path = _database_path()
+        conn = _read_only(path) if path else None
+        if conn is None:
+            return None
+        try:
+            if identity_mode(conn) != IDENTITY_MODE_LOCAL:
+                return None
+            row = conn.execute("SELECT value FROM engine_config WHERE key = 'topos_id'").fetchone()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — a missing or locked database means "no local identity to bring"
+        return None
+    value = str(row[0]).strip() if row and row[0] is not None else ""
+    return value or None
+
+
+def start_pairing(*, client_name: str, mode: str, topos_id: Optional[str] = None) -> Dict[str, Any]:
     body = {
         "computer_name": _computer_name(),
         "platform": current_platform(),
@@ -237,6 +268,12 @@ def start_pairing(*, client_name: str, mode: str) -> Dict[str, Any]:
         # agent: the poll result carries `agent: {client}` in both modes.
         "mode": mode,
     }
+    if mode == "attach":
+        # The id this node already runs under; the account adopts it, so the rows collected with no account
+        # keep their Topos id and only the owner moves (local_identity.rescope_to_account).
+        if not topos_id:
+            raise NeedsHuman("this Topos has no local id to connect; run `topos-node pair --fresh` instead")
+        body["topos_id"] = topos_id
     try:
         with _http_client() as http:
             response = http.post("/v1/topos/device-pairing/start", json=body)
@@ -251,6 +288,9 @@ def start_pairing(*, client_name: str, mode: str) -> Dict[str, Any]:
         raise NeedsHuman(CP_404_MESSAGE)
     if response.status_code in (429, 503):
         raise NeedsHuman(CP_BUSY_MESSAGE)
+    if response.status_code == 422 and mode == "attach":
+        # An older control plane knows `create` and `add_agent` only.
+        raise NeedsHuman(CP_NO_ATTACH_MESSAGE)
     if response.status_code != 200:
         # Never the body: it is the control plane's text, not ours to print.
         raise NeedsHuman(f"the control plane refused to start pairing (HTTP {response.status_code}); try again later")
@@ -261,7 +301,7 @@ def start_pairing(*, client_name: str, mode: str) -> Dict[str, Any]:
     for field in ("device_code", "user_code", "verification_url", "expires_at"):
         if not data.get(field):
             raise NeedsHuman("the control plane answered with incomplete pairing data; try again later")
-    return {
+    record = {
         "state": "pending",
         "user_code": str(data["user_code"]),
         "verification_url": str(data["verification_url"]),
@@ -273,6 +313,10 @@ def start_pairing(*, client_name: str, mode: str) -> Dict[str, Any]:
         "client": client_name,
         "poller_pid": None,
     }
+    if mode == "attach":
+        # Kept so a restarted pairing (expired code) proposes the same id, and `--wait` can say what was kept.
+        record["topos_id"] = topos_id
+    return record
 
 
 # --- the detached poller --------------------------------------------------------
@@ -334,7 +378,11 @@ def run_poller(*, sleep: Callable[[float], None] = time.sleep, now: Callable[[],
         if restarts >= MAX_RESTARTS:
             return False
         try:
-            fresh = start_pairing(client_name=str(record.get("client") or "cli"), mode=str(record.get("mode") or "create"))
+            fresh = start_pairing(
+                client_name=str(record.get("client") or "cli"),
+                mode=str(record.get("mode") or "create"),
+                topos_id=str(record.get("topos_id") or "") or None,
+            )
         except click.ClickException as exc:
             record["error"] = exc.message
             return False
@@ -416,7 +464,7 @@ def run_poller(*, sleep: Callable[[float], None] = time.sleep, now: Callable[[],
                 return _finish("error", error="the control plane answered with an unknown pairing state")
 
             key = str(data.get("topos_key") or "")
-            if record.get("mode") == "create":
+            if record.get("mode") in KEY_MODES:
                 if not key:
                     return _finish("error", error="approved, but the control plane sent no key")
                 try:
@@ -477,6 +525,8 @@ def _print_code(record: Dict[str, Any]) -> None:
     click.echo("")
     if record.get("mode") == "add_agent":
         click.echo(f"Approving lets {record.get('client')} read from your Topos.")
+    elif record.get("mode") == "attach":
+        click.echo("Approving connects the Topos already running on this computer to your account; its data stays here.")
     else:
         click.echo("Approving creates a Topos on this computer; your data stays here.")
     expires = _parse_iso(record.get("expires_at"))
@@ -503,6 +553,17 @@ def _reusable_pending(record: Optional[Dict[str, Any]]) -> bool:
     if expires is None or _now() >= expires:
         return False
     return _pid_alive(record.get("poller_pid"))
+
+
+def _node_runs_local_only() -> bool:
+    """A node is up and holds a locally minted identity (local_identity.py): it needs a restart to use the key."""
+    try:
+        from topos.cli.status_cmd import collect_status
+
+        snapshot = collect_status()
+    except Exception:  # noqa: BLE001 — a hint only
+        return False
+    return bool(snapshot.get("node", {}).get("running")) and snapshot.get("mode") == "local"
 
 
 def _wait_sleep(seconds: float) -> None:
@@ -547,7 +608,14 @@ def _wait(ctx: click.Context, *, as_json: bool, sleep: Optional[Callable[[float]
                 if agent.get("client"):
                     click.echo(f"{agent['client']} was approved too: `topos-node agents add {agent['client']} --approved`.")
                 if record.get("mode") != "add_agent":
-                    click.echo("Next: `topos-node start --headless` (or `topos-node service install`).")
+                    if _node_runs_local_only():
+                        click.echo(
+                            "Topos is running without an account: restart it so it connects and moves its "
+                            "data to this account (`topos-node service install` restarts the service; "
+                            "otherwise quit Topos and start it again)."
+                        )
+                    else:
+                        click.echo("Next: `topos-node start --headless` (or `topos-node service install`).")
             ctx.exit(0)
         if state == "denied":
             if as_json:
@@ -596,10 +664,16 @@ def _manual(ctx: click.Context) -> None:
 @click.option("--client", "client_name", type=click.Choice(CLIENTS), default="cli", show_default=True,
               help="Which assistant is asking (shown on the approve page).")
 @click.option("--add-agent", is_flag=True, help="Let the named assistant read from an already-paired Topos.")
+@click.option("--fresh", is_flag=True,
+              help="Ask the account for a new Topos even though one already runs here (its id is not kept).")
 @click.option("--poll", "poll", is_flag=True, hidden=True)
 @click.pass_context
-def pair_command(ctx, as_json: bool, wait: bool, manual: bool, client_name: str, add_agent: bool, poll: bool) -> None:
+def pair_command(ctx, as_json: bool, wait: bool, manual: bool, client_name: str, add_agent: bool, fresh: bool,
+                 poll: bool) -> None:
     """Connect this computer to your Topos account without ever showing the key.
+
+    A Topos already running here without an account is connected as it is
+    (its id and data are kept); otherwise a new Topos is created.
 
     Exit codes: 0 paired · 2 a person needs to approve the code (or type the
     key) · 5 denied.
@@ -611,7 +685,8 @@ def pair_command(ctx, as_json: bool, wait: bool, manual: bool, client_name: str,
         _manual(ctx)
         return
 
-    mode = "add_agent" if add_agent else "create"
+    local_topos_id = None if (add_agent or fresh) else _local_topos_id()
+    mode = "add_agent" if add_agent else ("attach" if local_topos_id else "create")
     if add_agent:
         if client_name == "cli":
             raise NeedsHuman("`--add-agent` needs `--client` (claude-code, codex, cursor or gemini).")
@@ -628,7 +703,7 @@ def pair_command(ctx, as_json: bool, wait: bool, manual: bool, client_name: str,
         _emit(record, as_json=as_json, exit_code=2)
         ctx.exit(2)
 
-    record = start_pairing(client_name=client_name, mode=mode)
+    record = start_pairing(client_name=client_name, mode=mode, topos_id=local_topos_id)
     write_pairing(record)
     pid = _spawn_poller()
     record["poller_pid"] = pid
