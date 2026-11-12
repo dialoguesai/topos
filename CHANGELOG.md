@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.54] — 2026-11-12
+
 ### Added
 - **A private source from your own JSON, JSONL or CSV file, with no account or developer key.** `[O]` `sources infer` drafts a definition from a sample, `sources add --check` validates it, `sources add --open-terminal` asks the owner once in a Terminal window, and `sources inspect` shows what was installed. See `docs/private-sources.md`.
 - **A fact pack goes from a drafted file to reading your records with one yes: `topos-node packs add FILE --on --backfill 30d`.** `[E:derivation]` `[O]`
