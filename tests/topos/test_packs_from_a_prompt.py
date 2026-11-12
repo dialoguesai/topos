@@ -825,3 +825,91 @@ def test_a_pack_changed_after_the_yes_is_added_and_stays_off_over_a_real_socket(
     assert doc["state"] == {"added": True, "enabled": False, "backfill_run": None}
     assert _row(real.conn)[0] == 0 and PACK not in enabled_packs(real.conn, bundled_pack_dir())
     assert runs._active is None and runs._last is None and real.script.calls == [], "no history was read"
+
+
+# ----------------------------------------------------------------------------- review round 1
+def test_a_try_whose_gold_example_was_not_judged_is_not_a_pass(cli):
+    # A gold example with no expected fact runs but is never judged. Counting it as a pass let a file with no
+    # expectation at all end in exit 0, "passed": a pack that was never tested.
+    cli.sock.answers[("POST", packs_cmd.TRY_PATH)] = _report("unjudged", "pass")
+    result = cli.run(["try", "--json", cli.write(definition())], tty=False)
+    assert result.exit_code == packs_cmd.EXIT_EXAMPLES_FAILED
+    doc = _doc(result)
+    assert (doc["status"], doc["totals"]["unjudged"], doc["totals"]["passed"]) == ("incomplete", 1, 1)
+
+
+def test_a_try_the_node_never_answered_ends_in_a_sentence_not_a_traceback(cli):
+    import httpx
+
+    cli.sock.answers[("POST", packs_cmd.TRY_PATH)] = httpx.ReadTimeout("slow")
+    result = cli.run(["try", "--json", cli.write(definition())], tty=False)
+    assert result.exit_code == packs_cmd.EXIT_NO_MODEL
+    assert (_doc(result)["ok"], _doc(result)["code"]) == (False, packs_cmd.NO_ANSWER)
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+@pytest.mark.parametrize("error", ["read_timeout", "protocol"])
+def test_a_switch_with_no_answer_after_the_yes_says_the_state_is_not_known(cli, error):
+    # The request went out; the node may have switched the pack on. Saying "added and switched off" would be a
+    # guess, and before this the command ended in a traceback with no receipts at all.
+    import httpx
+
+    exc = httpx.ReadTimeout("slow") if error == "read_timeout" else httpx.RemoteProtocolError("dropped")
+    cli.sock.answers[("PUT", SWITCH)] = exc
+    result = cli.run(["add", cli.write(definition()), "--on", "--backfill", "30d", "--json"])
+    assert result.exit_code == packs_cmd.EXIT_FAILED, result.output
+    doc = _doc(result)
+    assert (doc["status"], doc["failed_stage"], doc["code"]) == ("failed", "switched_on", packs_cmd.NO_ANSWER)
+    assert doc["state"] == {"added": True, "enabled": None, "backfill_run": None}
+    assert ("POST", packs_cmd.RUNS_PATH) not in cli.sock.sent()
+    text = cli.run(["add", cli.write(definition(version="1.1.0")), "--on"])
+    assert "whether it is switched on is not known" in text.stderr
+    assert "switched off" not in text.stderr
+
+
+def test_a_run_start_with_no_answer_says_to_check_before_starting_another(cli):
+    import httpx
+
+    cli.sock.answers[("POST", packs_cmd.RUNS_PATH)] = httpx.ReadTimeout("slow")
+    result = cli.run(["add", cli.write(definition()), "--on", "--backfill", "30d", "--json"])
+    doc = _doc(result)
+    assert (doc["failed_stage"], doc["code"]) == ("backfill_started", packs_cmd.NO_ANSWER)
+    assert doc["state"] == {"added": True, "enabled": True, "backfill_run": None}
+    text = cli.run(["add", cli.write(definition()), "--on", "--backfill", "30d"])
+    assert "whether reading its history started is not known" in text.stderr
+    assert "--until-done` reads it" not in text.stderr
+
+
+def test_a_yes_that_cannot_be_recorded_sends_nothing(cli):
+    def fail(**kw):
+        raise PermissionError("read-only home")
+
+    cli.monkeypatch.setattr(uds, "write_owner_confirmation", fail)
+    result = cli.run(["add", cli.write(definition()), "--on", "--json"])
+    assert result.exit_code == packs_cmd.EXIT_FAILED
+    assert _doc(result)["code"] == "confirmation_not_written"
+    assert cli.sock.sent("PUT") == []
+
+
+def test_without_a_terminal_the_text_hand_off_prints_the_command_to_run(cli):
+    _added(cli)
+    text = cli.run(["on", PACK], tty=False)
+    assert text.exit_code == packs_cmd.EXIT_NEEDS_HUMAN
+    assert f"  topos-node packs on {PACK}\n" in text.stderr
+
+
+def test_the_window_does_not_say_done_after_a_no(cli):
+    _added(cli)
+    cli.run(["on", PACK, "--open-terminal", "--json"], tty=False)
+    assert cli.windows and not cli.windows[0]["done"].startswith("Done")
+
+
+@pytest.mark.parametrize("expected, returned, same", [
+    (5, 5.0, True), (5, "5", True), ("5", 5, True), (5, 6, False), (0, False, False), (False, 0, False),
+    (False, False, True), (0, "", False), (0, None, False), ("Dune", " dune ", True), ("Dune", "Dunes", False),
+    ({"distance_km": 5, "activity": "jogging"}, {"distance_km": 5.0, "activity": "Jogging", "minutes": 30}, True),
+])
+def test_a_try_compares_numbers_as_numbers_and_yes_or_no_as_itself(expected, returned, same):
+    from topos.features.derivation import pack_trial
+
+    assert pack_trial._same(expected, returned) is same

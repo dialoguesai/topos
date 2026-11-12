@@ -477,6 +477,9 @@ _REFUSALS = {
 }
 
 
+NO_ANSWER = "no_answer"
+
+
 class _Stop(Exception):
     """A step that did not happen: a fixed word, the sentence a person reads, the exit code."""
 
@@ -489,13 +492,20 @@ def _node(sock, method: str, path: str, *, confirm: bool = False, **kwargs) -> D
     """One request for `try`, `on`, `off` and the staged `add`. With `confirm` it carries a fresh one-change
     confirmation: call it so only after the person said yes on this terminal. A node that is down or refuses
     raises :class:`_Stop` with a sentence written here; the node's body goes no further than its code."""
+    import httpx
+
     from topos.mcp_server import NodeDown, NodeRefused
 
     headers = None
     if confirm:
         from topos.uds import write_owner_confirmation
 
-        headers = {"X-Topos-Owner-Confirm": write_owner_confirmation()}
+        try:
+            headers = {"X-Topos-Owner-Confirm": write_owner_confirmation()}
+        except OSError:
+            raise _Stop("confirmation_not_written", "This terminal could not record your yes for Topos, so "
+                        "nothing was sent. Check that your home folder is writable and run the command again."
+                        ) from None
     try:
         return sock.request_sync(method, path, headers=headers, **kwargs)
     except NodeDown:
@@ -503,6 +513,10 @@ def _node(sock, method: str, path: str, *, confirm: bool = False, **kwargs) -> D
     except NodeRefused as exc:
         code = str(exc.code or f"http_{exc.status}")
         raise _Stop(code, _REFUSALS.get(code, f"Topos refused this ({code}).")) from None
+    except httpx.HTTPError:
+        # The request went out and no answer came back (a timeout, a dropped connection). For a change, the node
+        # may have made it: say so rather than guess either way.
+        raise _Stop(NO_ANSWER, "Topos did not answer, so whether this happened is not known.") from None
 
 
 def _json_out(doc: Dict[str, Any]) -> None:
@@ -630,14 +644,17 @@ def _hand_to_person(*, argv: List[str], slug: str, title: str, open_terminal: bo
         from topos.cli.terminal_window import open_terminal_window
 
         opened = open_terminal_window(slug=slug, title=title, argv=argv,
-                                      done="Done. Return to your coding assistant.",
+                                      # Exit 0 also ends a "no", so this line must not say "Done": the lines
+                                      # above it say what happened.
+                                      done="Finished; the lines above say what happened. Return to your coding "
+                                           "assistant.",
                                       not_done="Not done. Return to your coding assistant.")
     say = ("Opened the question in a Terminal window. Answer it there, then return here." if opened else typed)
     if as_json:
         _json_out({**doc, "ok": True, "status": "approval_pending" if opened else "needs_human",
                    "command": command, "human": {"say": say}})
     else:
-        click.echo(say, err=not opened)
+        click.echo(say if opened else f"{say}\n\n  {command}\n", err=not opened)
     sys.exit(EXIT_NEEDS_HUMAN)
 
 
@@ -877,8 +894,15 @@ def packs_add(file: str, check: bool, switch_on: bool, window: Optional[Dict[str
         _node(sock, "PUT", _switch_path(pack.pack), confirm=True,
               json_body={"enabled": True, "definition": definition_sha(pack, stamped=False)})
     except _Stop as stop:
-        failed("switched_on", stop.code, stop.say, stop.exit_code,
-               f" The pack is added and switched off. `topos-node packs on {pack.pack}` switches it on.")
+        if stop.code == NO_ANSWER or added["unchanged"]:
+            # No answer: the switch may have happened. Unchanged: the pack was already added, and its switch is
+            # whatever it was before this command, which this command did not read.
+            state["enabled"] = None
+            after = (" The pack is added; whether it is switched on is not known. `topos-node packs list` says, "
+                     f"and `topos-node packs on {pack.pack}` switches it on.")
+        else:
+            after = f" The pack is added and switched off. `topos-node packs on {pack.pack}` switches it on."
+        failed("switched_on", stop.code, stop.say, stop.exit_code, after)
     receipts.append({"stage": "switched_on", "ok": True})
     state["enabled"] = True
     click.echo("It is switched on.", err=as_json)
@@ -887,9 +911,14 @@ def packs_add(file: str, check: bool, switch_on: bool, window: Optional[Dict[str
             receipt = _started_run(sock, pack.pack, window)
         except _Stop as stop:
             since = f" --since {window['since']}" if window["since"] else ""
-            failed("backfill_started", stop.code, stop.say, stop.exit_code,
-                   " The pack is added and switched on, and no history was read. "
-                   f"`topos-node packs backfill --pack {pack.pack}{since} --until-done` reads it.")
+            if stop.code == NO_ANSWER:
+                state["backfill_run"] = None
+                after = (" The pack is added and switched on; whether reading its history started is not known. "
+                         "`topos-node packs status` says. Do not start another run before checking.")
+            else:
+                after = (" The pack is added and switched on, and no history was read. "
+                         f"`topos-node packs backfill --pack {pack.pack}{since} --until-done` reads it.")
+            failed("backfill_started", stop.code, stop.say, stop.exit_code, after)
         receipts.append(receipt)
         state["backfill_run"] = receipt["run_id"]
         waiting = receipt["waiting"]
@@ -977,7 +1006,7 @@ def packs_try(file: str, as_json: bool) -> None:
             # A try needs no approval. A node that asks for one does not know the route: its socket refuses every
             # changing request it has no entry for.
             refuse(_OLDER_NODE, "older_node")
-        refuse(stop.say, stop.code, EXIT_NO_MODEL if stop.code == "no_local_model" else stop.exit_code)
+        refuse(stop.say, stop.code, EXIT_NO_MODEL if stop.code in ("no_local_model", NO_ANSWER) else stop.exit_code)
     report = _trial_report(body)
     if report is None:
         refuse("Topos did not report the try. Check `topos-node status`.", "no_report")
@@ -986,7 +1015,8 @@ def packs_try(file: str, as_json: bool) -> None:
         status, code = "model_unavailable", EXIT_NO_MODEL
     elif totals["failed"]:
         status, code = "failed", EXIT_EXAMPLES_FAILED
-    elif totals["errors"] or totals["skipped"]:
+    elif totals["errors"] or totals["skipped"] or totals["unjudged"]:
+        # A gold example with no expected fact was run but not judged: it passed nothing, so neither did the try.
         status, code = "incomplete", EXIT_EXAMPLES_FAILED
     else:
         status, code = "passed", EXIT_OK

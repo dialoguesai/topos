@@ -17,7 +17,7 @@ The machine-readable twin of each release is
   the command reports each step (`added`, `switched_on`, `backfill_started`). A step that fails leaves the steps
   before it done and says where things stand: a pack that cannot be switched on is added and switched off, and
   no history is read. Without `--on` the command does what it did before. See `docs/custom-fact-packs.md`.
-  - *A coding agent can prepare it, and cannot approve it.* `packs add --check --json FILE` says what the file
+  - *A coding agent can prepare it; these commands give it no way to approve it.* `packs add --check --json FILE` says what the file
     declares and what adding it would do, for a program to read. `packs try FILE` runs the file's own examples.
     Neither needs you. `packs add ... --open-terminal` opens a Terminal window (macOS) where the question is
     waiting; the agent's command ends at once with exit code 2 and writes nothing. The window is tied to the

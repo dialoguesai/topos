@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import math
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -95,11 +96,35 @@ def examples_of(pack: Any) -> List[Dict[str, Any]]:
     return out
 
 
+def _number(value: Any) -> Optional[float]:
+    """A finite number, or a text that is only one; None for anything else (a yes/no is not a number)."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _same(expected: Any, returned: Any) -> bool:
     """One expected value against one that came back, by the writer's equality. A mapping is compared field by
     field, over the fields the example names."""
     from .writer import _canon_value
 
+    if isinstance(expected, bool) or isinstance(returned, bool):
+        # `False` is not `0`, `""` or nothing: a yes/no field must come back as the same yes or no.
+        return isinstance(expected, bool) and isinstance(returned, bool) and expected == returned
+    number = _number(expected)
+    if number is not None:
+        # `5` and `5.0` (or "5") are one distance; the writer's text equality would call them different.
+        other = _number(returned)
+        return other is not None and math.isclose(number, other, rel_tol=1e-9, abs_tol=1e-9)
     if isinstance(expected, dict):
         return isinstance(returned, dict) and all(
             field in returned and _same(value, returned[field]) for field, value in expected.items())

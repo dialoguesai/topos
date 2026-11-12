@@ -29,7 +29,7 @@ You can take the steps apart. `topos-node packs add my-pack.yaml` only adds the 
 
 ## With a coding agent
 
-A coding agent you connected can draft the file and test it by itself. It cannot add a pack, switch one on or read your history: each of those waits for your yes on a terminal, and there is no option that answers for you.
+A coding agent you connected can draft the file and test it by itself. These commands give it no way to add a pack, switch one on or read your history: each of those waits for your yes on a terminal, and there is no option that answers for you.
 
 | The agent runs | What happens | Needs you |
 | --- | --- | --- |
@@ -55,7 +55,7 @@ So an everyday word costs you. One gold example that says "Every morning I water
 
 `try` runs only the texts under the file's `eval.gold` and `eval.negative_controls` through the prompt and the parser a real run uses, on the local model you picked for facts. It needs Topos running. It runs at most 20 examples per call, one call each, and waits its turn behind whatever else your Topos is running on that model. It never loads a model ahead of time or keeps one loaded.
 
-- A gold example passes when every fact it expects comes back: the same predicate, about you, and every field the example names with an equal value (case and spacing do not count). A field the example does not name is not compared. A gold example with no `expect` cannot be judged and is reported as such.
+- A gold example passes when every fact it expects comes back: the same predicate, about you, and every field the example names with an equal value (case and spacing do not count). A field the example does not name is not compared. A gold example with no `expect` cannot be judged and is reported as such, and a try with one is not a pass: it ends `incomplete`, with exit code 3.
 - A negative control passes when nothing comes back.
 
 A pass is about those examples only. It does not show:
@@ -65,7 +65,7 @@ A pass is about those examples only. It does not show:
 - what the pack costs on your history. That depends on the routing words above and on how many of your records hold them;
 - the same answer next time. A model can answer one text two ways.
 
-Exit codes: `try` ends with 0 when every example passed, 3 when one failed or could not be run, 4 when Topos is not running, 5 when no local model is picked for facts or the model did not answer, and 1 when it was refused: the file is not a pack, it holds more than 20 examples, or another try is running.
+Exit codes: `try` ends with 0 when every example passed, 3 when one failed, could not be run or could not be judged, 4 when Topos is not running, 5 when no local model is picked for facts or the model did not answer, and 1 when it was refused: the file is not a pack, it holds more than 20 examples, or another try is running.
 
 ## What a pack you add can and cannot do
 
@@ -80,7 +80,7 @@ Exit codes: `try` ends with 0 when every example passed, 3 when one failed or co
 - **Changing it switches it off.** The switch records the exact definition you switched on, whether you switched it on in the app or with `packs on`. If the file changes (you add a new version, or edit it by hand), or the file is removed or stops validating, the pack is switched off and reads nothing until you switch it on again. Removing a pack and adding the same file again also starts switched off. From the moment it is off, no app reads the facts it wrote earlier; they are kept, and an app reads them again once you switch the pack on.
 - **Its sensitivity is what the file says.** For a shipped pack, Topos decides which facts are special-class (health, beliefs and the like), and those are never given to an app. For a pack you add, that rests on the `sensitivity_class` in the file, which `packs add` shows you before it asks. Topos does not check it against what the pack looks for. If the pack looks for health, beliefs or similar, declare it `special`: a pack that looks for them and declares `personal` is read as a personal pack by an app whose grant names it, by a coding agent and by a routine.
 - **Read a pack file before you add it.** `packs add` shows the pack's id, version, title, what it reads, its sensitivity and the kinds of fact it writes. The wording that tells the model what to look for (`guidance`, `routing`) is in the file itself.
-- **An app cannot add one, and cannot switch one on.** Nothing but the `packs add` command writes to the pack directory, and that command asks a person on a terminal. There is no route, relay message or tool for it. The terminal's switch (`packs on`, `packs off`) takes your yes on a terminal too: a coding agent's own request to it is refused.
+- **An app cannot add one.** Nothing but the `packs add` command writes to the pack directory, and that command asks a person on a terminal. There is no route, relay message or tool for it. The terminal's switch (`packs on`, `packs off`) takes your yes on a terminal too: a coding agent's own request to that switch is refused.
 
 ## Format
 
