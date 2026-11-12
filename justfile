@@ -156,6 +156,13 @@ release-plan *args:
 release-checks *args:
     uv run python scripts/node_release_gate.py "$@"
 
+# Pre-tag load gate (prototype, ADVISORY: no release check requires it). A scratch
+# node from this checkout, a large invented database, 3 minutes of concurrent load
+# (~3.5 min a run); see docs/PRE_TAG_LOAD_GATE.md. Refuses while Rig D or a stress
+# run is up, and on battery.
+load-gate *args:
+    uv run python scripts/node_load_gate.py "$@"
+
 # Core release gate: everything ci.yml checks, runnable locally when CI is
 # unavailable (dep pins, migration checksums, public tests, privacy tests,
 # build and release smoke). CI runs the public lane in seven separate processes

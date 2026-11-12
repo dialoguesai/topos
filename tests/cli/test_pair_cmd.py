@@ -43,6 +43,8 @@ def home(tmp_path: Path, monkeypatch) -> Path:
     monkeypatch.setattr(pair_cmd, "_computer_name", lambda: "Test Mac")
     monkeypatch.setattr(pair_cmd, "_spawn_poller", lambda: 4242)
     monkeypatch.setattr(pair_cmd, "_pid_alive", lambda pid: True)
+    # No node database in the scratch HOME: an account-less, empty computer pairs in `create` mode.
+    monkeypatch.setattr(pair_cmd, "_local_topos_id", lambda: None)
     return tmp_path
 
 
@@ -67,6 +69,7 @@ class _FakeCP:
         self.calls: list[tuple] = []
         self.polls = 0
         self.start_mode: str | None = None
+        self.start_topos_id: str | None = None
         self.transport = httpx.MockTransport(self._handle)
 
     def _handle(self, request: httpx.Request) -> httpx.Response:
@@ -77,6 +80,7 @@ class _FakeCP:
             if self.start_status != 200:
                 return httpx.Response(self.start_status, json={"error": "not_found"})
             self.start_mode = body.get("mode")
+            self.start_topos_id = body.get("topos_id")
             if self.agent is None and body.get("client") not in (None, "cli"):
                 self.agent = {"client": body["client"]}
             self.starts += 1
@@ -99,9 +103,11 @@ class _FakeCP:
                 return httpx.Response(200, json={"status": "pending"})
             if self.mode_result == "denied":
                 return httpx.Response(200, json={"status": "denied"})
+            # An attach adopts the id the node proposed; a create mints one on the control plane.
+            adopted = self.start_topos_id if self.start_mode == "attach" else "tp_0123"
             payload = {"status": "approved", "masked_account": MASKED,
-                       "topos_id": "tp_0123", "agent": self.agent}
-            if self.start_mode == "create":
+                       "topos_id": adopted, "agent": self.agent}
+            if self.start_mode in ("create", "attach"):
                 payload["topos_key"] = self.key
             return httpx.Response(200, json=payload)
         if path.endswith("/device-pairing/ack"):
@@ -455,3 +461,122 @@ def test_wait_in_one_command_survives_the_poller_still_starting(home: Path, monk
     assert f"Paired with {MASKED}." in result.output
     rec = json.loads((home / ".topos" / "pairing.json").read_text())
     assert rec["state"] == "delivered" and rec["poller_pid"] == os.getpid()
+
+
+# --- attach: a node that already runs with a locally minted identity (local_identity.py) ----------------------
+
+LOCAL_TOPOS_ID = "3f2a9c1e-7b4d-4e8a-9c21-5d6e7f8a9b0c"
+
+
+def _local_database(path: Path, *, mode: str, topos_id: str = LOCAL_TOPOS_ID) -> None:
+    """A node database with only the identity rows: `engine_config` as core/state.py creates it."""
+    import sqlite3
+
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE engine_config (key TEXT PRIMARY KEY, value TEXT NOT NULL, "
+                 "updated_at TEXT NOT NULL DEFAULT (datetime('now')))")
+    user_id = "local:" + "a" * 32 if mode == "local" else "9670043c-401a-4323-b092-c4724ca166eb"
+    rows = [("user_id", user_id), ("topos_id", topos_id)]
+    if mode != "none":
+        rows.append(("identity_mode", mode))
+    conn.executemany("INSERT INTO engine_config (key, value) VALUES (?, ?)", rows)
+    conn.commit()
+    conn.close()
+
+
+def test_local_topos_id_reads_only_a_local_mode_database(monkeypatch, tmp_path: Path):
+    """`_local_topos_id` is the one read `pair` makes before choosing attach: the stored Topos id when the
+    database says `identity_mode = local`, None for an account database, an empty database or none at all.
+    (Not the `home` fixture: that one stubs `_local_topos_id`; this test runs the real read.)"""
+    from topos.cli import status_cmd
+
+    db = tmp_path / "node.db"
+    monkeypatch.setattr(status_cmd, "_database_path", lambda: db)
+    assert pair_cmd._local_topos_id() is None, "no database yet"
+    _local_database(db, mode="local")
+    assert pair_cmd._local_topos_id() == LOCAL_TOPOS_ID
+    db.unlink()
+    _local_database(db, mode="account")
+    assert pair_cmd._local_topos_id() is None, "an account database has nothing to bring"
+    monkeypatch.setattr(status_cmd, "_database_path", lambda: None)
+    assert pair_cmd._local_topos_id() is None
+
+
+def test_local_node_pairs_in_attach_mode_with_its_topos_id_and_saves_the_key(home: Path, monkeypatch):
+    """CONTRACTS §3 attach: the start body carries `mode: attach` and the id this node minted for itself; the
+    poller treats the approval exactly as create (key to .env first, then ack) and records the adopted id."""
+    monkeypatch.setattr(pair_cmd, "_local_topos_id", lambda: LOCAL_TOPOS_ID)
+    key = _key()
+    env_path = home / ".topos" / ".env"
+    cp = _FakeCP(key=key, env_path=env_path)
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    result = CliRunner().invoke(main, ["pair", "--client", "claude-code"])
+    assert result.exit_code == 2, result.output
+    assert "connects the Topos already running on this computer" in result.output
+    assert key not in result.output
+    start_body = next(b for p, b in cp.calls if p.endswith("/start"))
+    assert start_body["mode"] == "attach"
+    assert start_body["topos_id"] == LOCAL_TOPOS_ID
+    pending = json.loads((home / ".topos" / "pairing.json").read_text())
+    assert pending["mode"] == "attach" and pending["topos_id"] == LOCAL_TOPOS_ID
+
+    assert pair_cmd.run_poller(sleep=lambda _s: None) == "delivered"
+    rec = json.loads((home / ".topos" / "pairing.json").read_text())
+    assert rec["state"] == "delivered"
+    assert rec["topos_id"] == LOCAL_TOPOS_ID, "the account adopted the node's id"
+    assert rec["agent"] == {"client": "claude-code"}
+    assert f"TOPOS_KEY={key}" in env_path.read_text()
+    assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
+    assert _scan_for(home, key) == [".topos/.env"], "the key lands in .env and nowhere else"
+    # The key was on disk before the ack went out.
+    assert ("ack_env_has_key", True) in cp.calls
+
+
+def test_fresh_asks_for_a_new_topos_even_on_a_local_node(home: Path, monkeypatch):
+    monkeypatch.setattr(pair_cmd, "_local_topos_id", lambda: LOCAL_TOPOS_ID)
+    cp = _FakeCP(key=_key(), env_path=home / ".topos" / ".env")
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    assert CliRunner().invoke(main, ["pair", "--fresh"]).exit_code == 2
+    start_body = next(b for p, b in cp.calls if p.endswith("/start"))
+    assert start_body["mode"] == "create"
+    assert "topos_id" not in start_body
+
+
+def test_add_agent_never_attaches(home: Path, monkeypatch):
+    monkeypatch.setattr(pair_cmd, "_local_topos_id", lambda: LOCAL_TOPOS_ID)
+    env_path = home / ".topos" / ".env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text("TOPOS_KEY=" + _key() + "\n")
+    cp = _FakeCP(key="unused", env_path=env_path)
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    assert CliRunner().invoke(main, ["pair", "--add-agent", "--client", "codex"]).exit_code == 2
+    start_body = next(b for p, b in cp.calls if p.endswith("/start"))
+    assert start_body["mode"] == "add_agent" and "topos_id" not in start_body
+
+
+def test_attach_on_an_old_control_plane_prints_the_exact_message(home: Path, monkeypatch):
+    """A control plane without the attach mode answers 422 to the start body; the message names the way out."""
+    monkeypatch.setattr(pair_cmd, "_local_topos_id", lambda: LOCAL_TOPOS_ID)
+    cp = _FakeCP(key=_key(), env_path=home / ".topos" / ".env", start_status=422)
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    result = CliRunner().invoke(main, ["pair"])
+    assert result.exit_code == 2
+    assert pair_cmd.CP_NO_ATTACH_MESSAGE in result.output
+    assert not (home / ".topos" / "pairing.json").exists()
+
+
+def test_expired_attach_restarts_with_the_same_topos_id(home: Path, monkeypatch):
+    monkeypatch.setattr(pair_cmd, "_local_topos_id", lambda: LOCAL_TOPOS_ID)
+    key = _key()
+    env_path = home / ".topos" / ".env"
+    cp = _FakeCP(key=key, env_path=env_path, approve_after=0,
+                 poll_script=[(200, {"status": "expired"})])
+    monkeypatch.setattr(pair_cmd, "_transport", cp.transport)
+    assert CliRunner().invoke(main, ["pair"]).exit_code == 2
+    assert pair_cmd.run_poller(sleep=lambda _s: None) == "delivered"
+    starts = [b for p, b in cp.calls if p.endswith("/start")]
+    assert len(starts) == 2
+    assert all(b["mode"] == "attach" and b["topos_id"] == LOCAL_TOPOS_ID for b in starts)
+    rec = json.loads((home / ".topos" / "pairing.json").read_text())
+    assert rec["restarts"] == 1 and rec["topos_id"] == LOCAL_TOPOS_ID
+    assert f"TOPOS_KEY={key}" in env_path.read_text()

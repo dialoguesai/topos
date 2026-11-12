@@ -102,6 +102,14 @@ def site(root: Path) -> Path:
     return path
 
 
+@pytest.fixture(autouse=True)
+def _whole_index_drop_as_1_5_44(monkeypatch):
+    """These pins are about the kept verdict, and they read a False verdict as 1.5.44 did: the whole index goes
+    (`sweep() == 1`, the file gone, stage `interest`). DR-70 (owner ruling of 5 Nov 2026, on by default) narrows a
+    drifted interest instead; its pins are in test_interest_door.py. Named off here, assertions unchanged."""
+    monkeypatch.setenv("TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS", "false")
+
+
 class Arm:
     """One node, its index built, and its sweeps with the NR187 switch on or off."""
 
@@ -129,8 +137,8 @@ def computed(monkeypatch):
     seen: dict = {}
     real = SearchIndexService._interests_current
 
-    def counted(self, conn, sealed_members, policy, boundary, opt_outs=frozenset()):
-        verdict = real(self, conn, sealed_members, policy, boundary, opt_outs)
+    def counted(self, conn, sealed_members, policy, boundary, opt_outs=frozenset(), **kwargs):
+        verdict = real(self, conn, sealed_members, policy, boundary, opt_outs, **kwargs)   # DR-70: `found` through
         if policy is None:
             seen.setdefault(id(self), []).append((opt_outs, verdict))
         return verdict

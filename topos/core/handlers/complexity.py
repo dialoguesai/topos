@@ -1,17 +1,17 @@
 """Complexity analytics handlers (focus/structure readings + influence threads).
 
-The snapshot computation is CPU-bound (seconds on a live-size DB); it runs in
-a worker thread via asyncio.to_thread so the node's event loop keeps serving
-other messages. The hub connection is created with check_same_thread=False
-and all commits go through the process-wide write gate
-(topos.features.complexity.store).
+The snapshot computation is CPU-bound (seconds on a live-size DB); it runs on
+a worker thread through ``run_db_read`` so the node's event loop keeps serving
+other messages. The worker resolves its OWN connection there (one Connection,
+one thread — see ``topos.core.state.get_db_connection``); all commits go
+through the process-wide write gate (topos.features.complexity.store).
 """
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Dict, Optional
 
+from .common import run_db_read
 from .registry import handles
 
 
@@ -51,12 +51,10 @@ async def handle_complexity_summary(message: Dict[str, Any]) -> Optional[Dict[st
 
         from ...features.complexity.engine import get_complexity_summary
 
-        conn = hub.get_db_connection()
-        if conn is None:
+        if hub.get_db_connection() is None:
             return {"id": req_id, "status": "error", "error": "Database not available", "code": 503}
-        result = await asyncio.to_thread(
+        result = await run_db_read(
             get_complexity_summary,
-            conn,
             recompute=bool(payload.get("recompute")),
             weeks=_clamped_int(payload, "weeks", 12, 1, 104),
             window_days=_clamped_int(payload, "window_days", 30, 1, 3650),
@@ -78,12 +76,10 @@ async def handle_complexity_timeline(message: Dict[str, Any]) -> Optional[Dict[s
 
         from ...features.complexity.engine import get_shift_timeline
 
-        conn = hub.get_db_connection()
-        if conn is None:
+        if hub.get_db_connection() is None:
             return {"id": req_id, "status": "error", "error": "Database not available", "code": 503}
-        result = await asyncio.to_thread(
+        result = await run_db_read(
             get_shift_timeline,
-            conn,
             recompute=bool(payload.get("recompute")),
             weeks=_clamped_int(payload, "weeks", 12, 1, 104),
         )
@@ -103,12 +99,10 @@ async def handle_complexity_topics_daily(message: Dict[str, Any]) -> Optional[Di
 
         from ...features.complexity.topics_daily import topics_daily
 
-        conn = hub.get_db_connection()
-        if conn is None:
+        if hub.get_db_connection() is None:
             return {"id": req_id, "status": "error", "error": "Database not available", "code": 503}
-        result = await asyncio.to_thread(
+        result = await run_db_read(
             topics_daily,
-            conn,
             days=_clamped_int(payload, "days", 90, 1, 365),
             top=_clamped_int(payload, "top", 10, 1, 24),
         )
@@ -128,12 +122,10 @@ async def handle_complexity_influence(message: Dict[str, Any]) -> Optional[Dict[
 
         from ...features.complexity.engine import get_influence_threads
 
-        conn = hub.get_db_connection()
-        if conn is None:
+        if hub.get_db_connection() is None:
             return {"id": req_id, "status": "error", "error": "Database not available", "code": 503}
-        result = await asyncio.to_thread(
+        result = await run_db_read(
             get_influence_threads,
-            conn,
             recompute=bool(payload.get("recompute")),
             weeks=_clamped_int(payload, "weeks", 12, 1, 104),
             top_k=_clamped_int(payload, "top_k", 5, 1, 50),

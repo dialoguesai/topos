@@ -50,7 +50,12 @@ refuses, without shredding, until it has. Every other failure still deletes the 
 own-row edit `_own_row_edit` admits (DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, on by default since 1.5.16): an
 AI-chat line whose fingerprint is its own row alone, whose own-row dependency already moved as `row_revision`, stays
 withheld instead. The file a narrowed publish replaces is zero-overwritten, whatever that switch says; a reader that
-opened it first refuses as not served now and shreds nothing (`IndexReplaced`).
+opened it first refuses as not served now and shreds nothing (`IndexReplaced`). A browsing interest that is no longer
+the member its build admitted is withheld the same way (DR-70, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS`, on by
+default since the owner's ruling of 5 Nov 2026, read only while INDEX_NARROW_MEMBERS is on): the sweep's `interest`
+step adds the drifted interest members to the withheld set (`_drifted_interests`) and every other member, proven
+current by the same check, keeps serving. An error in that decision, a drift whose members cannot be told, and the
+switch off still drop the whole index.
 """
 from __future__ import annotations
 
@@ -73,6 +78,7 @@ _log = logging.getLogger(__name__)
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from topos.core import owner_requests
 from topos.disclosure.content_policy import is_record_nsfw
 from topos.principal import OWNER_APP, current_principal
 from topos.storage.db.write_gate import with_db_write
@@ -94,6 +100,12 @@ ROOT_NAME = "message-search"
 # after it: a build begun before a grant changed can never overwrite the build that follows the change. Never taken by
 # a caller that holds the write gate (a build takes the gate inside it).
 BUILD_SLOT = threading.Lock()
+#: Pacing (core/owner_requests.py): every this many candidates or members, and before every passage embedding, a
+#: build yields while one of the owner's own frames is being handled. Only on the ungated read snapshot: the freeze
+#: and the publish hold the gate, and `pace` never waits while the thread holds it. A module constant, not an
+#: attribute of the service: the grant census (scripts/permissions_v2/grant_census.py) runs `_members` with a
+#: namespace standing in for the service.
+PACE_EVERY = 32
 _TOKEN = re.compile(r"\w{2,}")
 STOPWORDS = frozenset("""
 a an and are as at be but by for from has have i if in into is it its me my of on or our so that the their them
@@ -588,6 +600,14 @@ def _narrow_members() -> bool:
     instead of its whole index going."""
     from . import switches
     return switches.on(switches.INDEX_NARROW_MEMBERS)
+
+
+def _narrow_interests() -> bool:
+    """DR-70 (widens DR-31; on by default since the owner's ruling of 5 Nov 2026, read only while INDEX_NARROW_MEMBERS
+    is on): whether a browsing interest that is no longer the member its build admitted is withheld on its own
+    (`_members_current`) instead of its whole index going."""
+    from . import switches
+    return switches.on(switches.INDEX_NARROW_INTERESTS)
 
 
 def _narrow_own_row_edits() -> bool:
@@ -1184,10 +1204,12 @@ class SearchIndexService:
         from . import search_timing
         # Attribution only (NR166): the mode a policy states itself; one it leaves to the client is a request's to say.
         search_timing.share_seen(index_path(self.root, grant_id), mode=getattr(policy.search, "answers", None))
-        for _attempt in range(self.REBUILD_ATTEMPTS):
-            result = self._rebuild_once(grant_id, authority, policy, key, now=now)
-            if result is not None:
-                return result
+        from .entity_boundary import build_normalizer
+        with build_normalizer():   # the matcher's normalised strings, kept for this build only (entity_boundary)
+            for _attempt in range(self.REBUILD_ATTEMPTS):
+                result = self._rebuild_once(grant_id, authority, policy, key, now=now)
+                if result is not None:
+                    return result
         # The owner kept changing reviews or protection while the index was being built. BL-157: an index the full
         # current check still proves keeps serving (a failed refresh is not a restriction); any other is purged.
         self._discard_unsafe(grant_id, now=now)
@@ -1352,7 +1374,9 @@ class SearchIndexService:
                                    if isinstance(review, review_types)}.values())
                           if direct else [row[0] for row in conn.execute(
                 "SELECT object_id FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL ORDER BY object_id")])
-            for fact_id in candidates:
+            for number, fact_id in enumerate(candidates):
+                if number % PACE_EVERY == 0:
+                    owner_requests.pace()   # between batches of the walk, on the ungated snapshot (never under the gate)
                 if fact_id in frozen.opt_outs:
                     continue
                 try:
@@ -1416,7 +1440,9 @@ class SearchIndexService:
                 from .knowledge_projections import candidates, qualify_projection
                 from .canonical import digest
                 originals=list(members.values())
-                for table,record_id in candidates(conn,[e['identity'] for e in originals],policy.search.result_types):
+                for number,(table,record_id) in enumerate(candidates(conn,[e['identity'] for e in originals],policy.search.result_types)):
+                    if number % PACE_EVERY == 0:
+                        owner_requests.pace()
                     try:
                         projected=qualify_projection(self.resolver,conn,snapshot_floor,frozen,None,table,record_id,policy,
                             (now-policy.search.window.max_age_seconds)*1000000,now*1000000)
@@ -1436,7 +1462,8 @@ class SearchIndexService:
                         members['projection:'+table+':'+record_id]={"identity":identity,"row":source_rows[_key(identity)],
                             "facts":set(),"message":identity.model_dump(),"entity_dependencies":dependencies,
                             "review_context_revision":context_for(conn,identity,source_rows[_key(identity)],boundary=boundary)[0],
-                            "projection":{"table":table,"record_id":record_id,"revision":projected.revision},
+                            "projection":{"table":table,"record_id":record_id,"revision":projected.revision,
+                                **({"revision_contract":projected.revision_contract} if projected.revision_contract else {})},
                             "classification_contexts":contexts,"rank_text":projected.content,
                             # Each source by its family's rule (a journal entry's stated day, IF-5 §1).
                             "rank_event_us":projected.rank_time_us()}
@@ -1455,8 +1482,9 @@ class SearchIndexService:
         basis = basis_of(authority, clock=clock, boundary_revision=boundary_revision)
         if getattr(getattr(policy, "search", None), "selective_facts", None) is not None:
             from .selective_facts import CATALOG_DIGEST
+            from .expanded_facts import CATALOG_DIGEST as EXPANDED_CATALOG_DIGEST
             from . import switches
-            basis["selective_facts_revision"] = [CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
+            basis["selective_facts_revision"] = [CATALOG_DIGEST, EXPANDED_CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
         if policy.versions.capability in DIRECT_SEARCH_CAPABILITIES:
             basis["message_review_revision"] = frozen.authority_digest
         if automatic:
@@ -1493,7 +1521,7 @@ class SearchIndexService:
                     from .automatic_message_review import context_for
                     for entry in members.values():
                         projection = entry.get('projection')
-                        if projection and current_revision(conn, projection['table'], projection['record_id']) != projection['revision']:
+                        if projection and current_revision(conn, projection['table'], projection['record_id'],contract=projection.get('revision_contract')) != projection['revision']:
                             return None
                         contexts = entry.get('classification_contexts', []) or [
                             {'identity':entry['identity'].model_dump(), 'revision':entry['review_context_revision']}]
@@ -1521,7 +1549,9 @@ class SearchIndexService:
         remaining_embeddings = self.EMBEDDINGS_PER_BUILD
         has_embeddings = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signal_embeddings'").fetchone() is not None
-        for entry in members.values():
+        for number, entry in enumerate(members.values()):
+            if number % PACE_EVERY == 0:
+                owner_requests.pace()
             identity, row = entry["identity"], entry["row"]
             opaque = opaque_record_id(key, grant_id=grant_id, table=identity.table, source_id=identity.source_id,
                                       dataset_id=identity.dataset_id, record_id=identity.record_id)
@@ -1560,6 +1590,7 @@ class SearchIndexService:
                 content = rank_text
                 if isinstance(content, str) and len(content.encode("utf-8")) <= 65536:
                     remaining_embeddings -= 1
+                    owner_requests.pace()   # 8-18 ms of CPU each: the owner's frame goes first
                     try:
                         candidate = self.passage_embedder(content, model)
                         if (isinstance(candidate, (list, tuple)) and 0 < len(candidate) <= 4096
@@ -1634,15 +1665,20 @@ class SearchIndexService:
                 "interest": item["interest"]}
         return out
 
-    def _interests_current(self, conn, sealed_members, policy, boundary, opt_outs=frozenset()) -> bool:
+    def _interests_current(self, conn, sealed_members, policy, boundary, opt_outs=frozenset(),
+                           found: dict | None = None) -> bool:
         """Whether every interest member is still the member its build admitted (`interest_index.indexed_current`).
 
-        With `policy`, the grant's decision is made again as well; without it the index basis pins the policy."""
+        With `policy`, the grant's decision is made again as well; without it the index basis pins the policy. `found`
+        (a dict, DR-70) receives under `current` the record ids the decision found current, so a False verdict's
+        drifted members can be told without deciding again (`_drifted_interests`)."""
         from . import interest_index
         sealed_members = list(sealed_members)
-        found = interest_index.indexed_current(conn, sealed_members, owner_id=self.resolver.binding.owner_id,
-                                               boundary=boundary, opt_outs=opt_outs, policy=policy)
-        return found == frozenset(member["record_id"] for member in sealed_members)
+        current = interest_index.indexed_current(conn, sealed_members, owner_id=self.resolver.binding.owner_id,
+                                                 boundary=boundary, opt_outs=opt_outs, policy=policy)
+        if found is not None:
+            found["current"] = current
+        return current == frozenset(member["record_id"] for member in sealed_members)
 
     def _publish(self, grant_id, basis, state, model, dims, built) -> None:
         final = index_path(self.root, grant_id)
@@ -2058,6 +2094,9 @@ class SearchIndexService:
         every OTHER member checked is current, and the caller must never serve or keep serving the members it holds.
         With the switch off it stays empty and the check is main's. `fingerprint` always drops the whole index, except
         an own-row edit `_own_row_edit` admits (DR-34, `TOPOS_PERMISSIONS_V2_INDEX_NARROW_OWN_ROW_EDITS`, on by default since 1.5.16).
+        DR-70 (`TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS`, on by default, read only with `narrowed` given): a deep
+        check whose interest step finds members that are no longer the ones their build admitted adds exactly those to
+        `narrowed` (`_drifted_interests`) and goes on; what cannot be told drops the whole index.
 
         NR187: `interest_before` (the daemon sweep only, with SWEEP_INTEREST_VERDICT on) is the canonical token the sweep
         read before `conn`'s snapshot was established (None when unreadable). The interest step then reuses this very
@@ -2135,8 +2174,9 @@ class SearchIndexService:
         basis = dict(index["basis"])
         if "selective_facts_revision" in basis:
             from .selective_facts import CATALOG_DIGEST
+            from .expanded_facts import CATALOG_DIGEST as EXPANDED_CATALOG_DIGEST
             from . import switches
-            expected["selective_facts_revision"] = [CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
+            expected["selective_facts_revision"] = [CATALOG_DIGEST, EXPANDED_CATALOG_DIGEST, switches.on(switches.SELECTIVE_FACTS)]
         from .index_review_guard import VERSION as GUARD_VERSION
         guarded = (authority.capability_version == CAPABILITY_KNOWLEDGE_SEARCH
                    and basis.get("review_guard_version") == GUARD_VERSION)
@@ -2203,7 +2243,8 @@ class SearchIndexService:
         sweeps. None when unreadable: None never matches."""
         return self._probe().canonical_token()
 
-    def _interests_current_kept(self, conn, interests, boundary, key, path, opened_state, before) -> bool:
+    def _interests_current_kept(self, conn, interests, boundary, key, path, opened_state, before,
+                                found: dict | None = None) -> bool:
         """NR187: `_interests_current` for the daemon sweep, or its last True verdict for this very index file while
         nothing that verdict reads has changed.
 
@@ -2247,7 +2288,7 @@ class SearchIndexService:
         if opened_state is None or _file_state(path) != opened_state:
             search_timing.fast_path("nr187_interest", "miss", "file_replaced")  # attribution only, as below
             self._forget_interest_verdict(path.name)
-            return self._interests_current(conn, interests, None, boundary)
+            return self._interests_current(conn, interests, None, boundary, found=found)
         try:
             state = (opened_state, hashlib.sha256(key).hexdigest(), self._canonical_token(), boundary.revision,
                      _interest_inputs())
@@ -2278,7 +2319,7 @@ class SearchIndexService:
                                     ":".join(moved + ([] if provable else ["before"])) or "unreadable")
         from . import switches
         with switches.observed() as reads:
-            verdict = self._interests_current(conn, interests, None, boundary)
+            verdict = self._interests_current(conn, interests, None, boundary, found=found)
         if verdict is True and provable and _interest_inputs_held(state[4], reads):
             self._keep_interest_verdict(path.name, state)
         else:
@@ -2389,8 +2430,17 @@ class SearchIndexService:
         other failure fails the index as before: any exception (an `entity_protected` veto, an unreadable row:
         `member_unavailable`), `missing`, `row_unavailable`, `live_rows`, `projection`, `projection_context`, any other
         `context` move, `fingerprint` (except an own-row edit `_own_row_edit` admits: DR-34, switch, said once per check
-        as `fingerprint: own_row_edit`), `lineage`, `interest`, and the provenance pass's refusal. `withheld(stage,
-        word)` reports the first narrow failure of each class once per check.
+        as `fingerprint: own_row_edit`), `lineage`, and the provenance pass's refusal. `withheld(stage, word)` reports
+        the first narrow failure of each class once per check.
+
+        DR-70 (`TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS`, on by default, read only with `narrowed` given): a False
+        interest verdict on a deep check withholds exactly the interest members that are no longer the ones their build
+        admitted (`_drifted_interests`, decided as the verdict was: at each member's own `built_at`), said once as
+        `interest: <word>` (`interest_index.DRIFT_WORDS`; `content` when the word cannot be told), and every other
+        member, already proven current above, keeps serving. The members withheld were never served since the drift: a
+        recipient's read decides every interest again at its own clock (`interest_index.release_object`), so this only
+        removes them from the file. An error in the decision (`member_unavailable`), a False verdict whose drifted
+        members cannot be told, and the switch off drop the whole index, as before the rule.
         """
         checked = {}
         interests = []
@@ -2414,7 +2464,7 @@ class SearchIndexService:
                 member = unseal(key, opaque, sealed)
                 spent("unseal", lap)
                 if member.get("table") == "activity_events":   # an IF-5 interest: decided below, all at once
-                    interests.append(member)
+                    interests.append((opaque, member))         # DR-70: the opaque id names it to `narrowed`
                     continue
                 lap = time.perf_counter()
                 why: dict = {}   # NR188: what moved, for the fixed word
@@ -2462,7 +2512,7 @@ class SearchIndexService:
                         # The boundary: Off-limits is decided again on the projection's current rows (their
                         # volatile columns are outside the revision, not outside the scan).
                         try:
-                            revision=current_revision(conn,projection['table'],projection['record_id'],boundary=boundary)
+                            revision=current_revision(conn,projection['table'],projection['record_id'],boundary=boundary,contract=projection.get('revision_contract'))
                         except PolicyError:
                             return stale('projection')
                         if revision!=projection['revision']:
@@ -2514,13 +2564,55 @@ class SearchIndexService:
         # (`interest_index.release_object`), so a member that changed since the build never releases, and the drift
         # is dropped within one sweep (test_interest_door pins both).
         try:
-            if deep and interests and not (self._interests_current(conn, interests, None, boundary)
-                                           if interest_memo is None else
-                                           self._interests_current_kept(conn, interests, boundary, key, *interest_memo)):
-                return stale("interest")
+            if deep and interests:
+                sealed_interests = [member for _opaque, member in interests]
+                found: dict = {}   # DR-70: the record ids a full decision found current, when one was made here
+                current = (self._interests_current(conn, sealed_interests, None, boundary, found=found)
+                           if interest_memo is None else
+                           self._interests_current_kept(conn, sealed_interests, boundary, key, *interest_memo,
+                                                        found=found))
+                if not current:
+                    word = self._interest_drift_word(conn, sealed_interests, boundary)
+                    # DR-70 (switch on; `narrowed` is given only with NR188's on): the drifted interest members alone
+                    # are withheld, and every other member, proven current above, keeps serving. A drift whose members
+                    # cannot be told drops the whole index, as every drift did before the rule.
+                    drifted = (self._drifted_interests(conn, interests, boundary, found)
+                               if narrowed is not None and _narrow_interests() else None)
+                    if not drifted:
+                        return stale("interest", word)
+                    narrowed.update(drifted)
+                    withheld("interest", word or "content")
         except (PolicyError, sqlite3.Error, KeyError):
             return stale("member_unavailable")
         return True
+
+    def _drifted_interests(self, conn, interests, boundary, found: dict) -> frozenset | None:
+        """DR-70 (`TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS`): the opaque ids of the interest members (`(opaque,
+        sealed)` pairs) that are no longer the members their build admitted, decided as the verdict decided them
+        (`interest_index.indexed_current`: each at its own `built_at`, no policy, on this snapshot). `found` carries the
+        record ids the verdict's full decision found current (`_interests_current`); a verdict not decided in full here
+        (NR187's kept path) is decided again, once. None when no member is drifted, which a False verdict cannot mean:
+        the caller then drops the whole index, as before the rule. An error raises to the caller, which drops it too
+        (`member_unavailable`). Never a label, an id in a log line, or a count."""
+        current = found.get("current")
+        if current is None:
+            from . import interest_index
+            current = interest_index.indexed_current(conn, [member for _opaque, member in interests],
+                                                     owner_id=self.resolver.binding.owner_id, boundary=boundary)
+        drifted = frozenset(opaque for opaque, member in interests if member.get("record_id") not in current)
+        return drifted or None
+
+    def _interest_drift_word(self, conn, interests, boundary) -> str | None:
+        """Attribution only, for the `interest` stale line and its `index_stale` event (`sub`, as NR188's words): what
+        moved about the first drifted interest member, in one of `interest_index.DRIFT_WORDS`, or None when it cannot
+        be said. Decided on the same snapshot the verdict was, after it; the index is stale either way, and a failure
+        here costs only the word. Never a label, an id or a count."""
+        from . import interest_index
+        try:
+            return interest_index.drift_word(conn, list(interests), owner_id=self.resolver.binding.owner_id,
+                                             boundary=boundary)
+        except Exception:  # noqa: BLE001 -- attribution only
+            return None
 
     def _own_key(self, member: dict) -> str:
         """NR188: the key `_entity_dependencies_current` gives the member's own row among its dependencies."""

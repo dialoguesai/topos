@@ -273,6 +273,25 @@ def test_dead_socket_file_is_reclaimable(monkeypatch, bound_servers):
         assert _wait_for(lambda: stat.S_IMODE(p.stat().st_mode) == 0o600), "the socket was not clamped to 0600"
 
 
+def test_the_owner_socket_keeps_an_idle_connection_longer_than_a_pooled_client_does(monkeypatch, bound_servers):
+    """uvicorn's default keep-alive (5 s) equals httpx's idle expiry, so a pooled client reused a connection the node
+    was closing that instant and got "Server disconnected without sending a response": all 17 dropped owner-socket
+    requests in the 1.5.36 to 1.5.45 stress runs went out 4.96 to 4.99 s after the client's previous one ended. The
+    node keeps an idle connection well past that, so the client always lets go of it first."""
+    import httpx
+    import topos.uds as uds_mod
+
+    assert uds_mod.KEEP_ALIVE_SECONDS >= 10 * httpx.Limits().keepalive_expiry
+    with _short_sock_dir() as p:
+        monkeypatch.setattr(uds_mod, "socket_path", lambda: p)
+        server = uds_mod._bind_once(object(), p)
+        bound_servers.append(server)
+        assert server is not None
+        assert server.config.timeout_keep_alive == uds_mod.KEEP_ALIVE_SECONDS
+        assert _wait_for(lambda: uds_mod.socket_is_live(p)), "the owner socket did not come up"
+        assert _wait_for(lambda: stat.S_IMODE(p.stat().st_mode) == 0o600), "the socket was not clamped to 0600"
+
+
 def test_the_clamp_lands_after_uvicorns_own_chmod(monkeypatch, bound_servers):
     """uvicorn binds the socket, chmods it 0666 itself, and only then listens. A clamp that
     lands between that bind and that chmod is undone by it, and the owner socket stays

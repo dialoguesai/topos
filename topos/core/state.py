@@ -194,6 +194,10 @@ _db_conn_path: str | None = None  # resolved path for current db_conn; invalidat
 #: Thread that owns ``db_conn`` — every other thread gets its own connection to
 #: the same file (see ``get_db_connection``). None until the database is opened.
 _conn_owner_thread: int | None = None
+#: The handle ``_db_conn_path`` describes. A test that injects a new ``db_conn``
+#: without resetting the path leaves the two disagreeing; comparing identities
+#: is how ``_get_owner_db_connection`` notices without a statement.
+_db_conn_described: sqlite3.Connection | None = None
 #: Per-thread connections keyed implicitly by thread identity.
 _thread_state = threading.local()
 #: Serializes every read/validate/close/swap of the owner globals above.
@@ -466,36 +470,60 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
     threads racing an initial open both build a connection; the loser's is
     closed at the swap.
     """
-    global db_conn, _db_conn_path, _conn_owner_thread
+    global db_conn, _db_conn_path, _conn_owner_thread, _db_conn_described
 
     bind_active_database()
 
     from ..config.settings import settings
 
     with _owner_conn_lock:
+        # Only the owner thread runs statements on db_conn here. From any other
+        # thread, PRAGMA database_list or SELECT 1 lands on a Connection its owner
+        # may be mid-execute on — the sharing this module exists to prevent, and
+        # the route by which the 2026-08-17 statement-cache KeyError reached the
+        # owner's handle — so other threads take the handle as its owner last
+        # validated it (their own handle is checked in _get_thread_db_connection).
+        # The exception is a handle nobody has described yet: an injected test
+        # handle, whose file has to be read off it once before any thread can
+        # open its own.
+        described = db_conn is not None and db_conn is _db_conn_described
+        if described and _db_conn_path is None:
+            # Read once and found to be in-memory: shared by every thread (see
+            # get_db_connection), and never re-pointed, so nothing to re-check.
+            return db_conn
+        validate = (
+            _conn_owner_thread is None
+            or threading.get_ident() == _conn_owner_thread
+            or not described
+        )
         # Respect injected in-memory sqlite handles used by tests, even if _db_conn_path
         # still points to a stale file-backed connection from a prior run.
-        if db_conn is not None:
+        if db_conn is not None and validate:
             try:
                 row = db_conn.execute("PRAGMA database_list").fetchone()
                 if row is not None:
                     db_file = str(row[2] or "").strip()  # seq, name, file
                     if db_file in {"", ":memory:"}:
                         _db_conn_path = None
+                        _db_conn_described = db_conn
                         return db_conn
                     if _db_conn_path is None:
                         _db_conn_path = str(Path(db_file).resolve())
+                    _db_conn_described = db_conn
             except Exception:
                 pass
 
         if db_conn is not None and settings.topos_database_path and _db_conn_path:
-            try:
-                db_conn.execute("SELECT 1")
-            except _UNHEALTHY_CONNECTION_ERRORS:
-                unregister_connection(db_conn)
-                db_conn = None
-                _db_conn_path = None
-            else:
+            healthy = True
+            if validate:
+                try:
+                    db_conn.execute("SELECT 1")
+                except _UNHEALTHY_CONNECTION_ERRORS:
+                    unregister_connection(db_conn)
+                    db_conn = None
+                    _db_conn_path = None
+                    healthy = False
+            if healthy:
                 try:
                     explicit_resolved = str(Path(settings.topos_database_path).resolve())
                 except (OSError, RuntimeError):
@@ -528,6 +556,8 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
             _db_conn_path = None
 
         if db_conn is not None:
+            if not validate:
+                return db_conn
             try:
                 db_conn.execute("SELECT 1")
                 # Scrub/adapters may have cleared Row factory on the shared conn.
@@ -565,6 +595,7 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
                 return db_conn
         db_conn = new_conn
         _db_conn_path = resolved
+        _db_conn_described = new_conn
         _conn_owner_thread = threading.get_ident()
         return db_conn
 
@@ -806,7 +837,8 @@ def _ensure_mcp_request_log_table(conn: sqlite3.Connection) -> None:
                         requester_id TEXT,
                         access_context TEXT,
                         verified_cls TEXT,
-                        verified_client_id TEXT
+                        verified_client_id TEXT,
+                        verification_outcome TEXT
                     )
                 """)
                 commit_connection(conn)
@@ -817,7 +849,7 @@ def _ensure_mcp_request_log_table(conn: sqlite3.Connection) -> None:
         cursor = conn.execute(f"PRAGMA table_info({MCP_REQUEST_LOG_TABLE})")
         columns = [row[1] for row in cursor.fetchall()]
         missing = [
-            col for col in ("source", "requester_id", "access_context", "verified_cls", "verified_client_id") if col not in columns
+            col for col in ("source", "requester_id", "access_context", "verified_cls", "verified_client_id", "verification_outcome") if col not in columns
         ]
         if missing:
             with with_db_write():
@@ -839,6 +871,7 @@ def record_mcp_request(
     uma_resource_id: Optional[str] = None,
     verified_cls: Optional[str] = None,
     verified_client_id: Optional[str] = None,
+    verification_outcome: Optional[str] = None,
 ) -> None:
     """
     Record one MCP tool invocation in the engine's DB.
@@ -851,6 +884,10 @@ def record_mcp_request(
     if not conn or not tool_name:
         return
     try:
+        from ..dashboard.verification import OUTCOMES
+
+        if tool_name != "verify_claim" or verification_outcome not in OUTCOMES:
+            verification_outcome = None
         _ensure_mcp_request_log_table(conn)
         requested_at = datetime.now(timezone.utc).isoformat()
         # Principal fabric P2: record the CHANNEL-verified principal next to the
@@ -887,9 +924,9 @@ def record_mcp_request(
             access_ctx = ROUTINE_ACCESS_CONTEXT
         with with_db_write():
             conn.execute(
-                f"INSERT INTO {MCP_REQUEST_LOG_TABLE} (tool_name, requested_at, source, requester_id, access_context, verified_cls, verified_client_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                f"INSERT INTO {MCP_REQUEST_LOG_TABLE} (tool_name, requested_at, source, requester_id, access_context, verified_cls, verified_client_id, verification_outcome) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (tool_name, requested_at, source or None, requester_id or None, access_ctx,
-                 verified_cls, verified_client_id),
+                 verified_cls, verified_client_id, verification_outcome),
             )
             commit_connection(conn)
         if is_routine_mcp_source(source) and resource_owner_user_id:

@@ -1,8 +1,11 @@
-"""verify_claim — mode-gated truthfulness check of a statement against the
-owner's fact store (PLAN_TRUTHFULNESS_PLUGIN.md §3.1).
+"""verify_claim — truthfulness check of a statement against the owner's fact
+store (PLAN_TRUTHFULNESS_PLUGIN.md §3.1). Fun mode is optional (DR-64).
 
 Containment contract (owner directive 2026-07-27):
-  * The mode's aperture is applied BEFORE retrieval and before any model call.
+  * A mode's aperture, when it has one, is applied BEFORE retrieval and before
+    any model call.
+  * A fact the disclosure rules withhold (owner_only, a calibration label, an
+    Off-limits person or record) is never evidence, in any mode.
   * An out-of-aperture claim short-circuits to the same neutral response as a
     claim with no evidence — refusal is indistinguishable from ignorance.
   * The response NEVER carries evidence text or record ids — lane stances,
@@ -21,10 +24,15 @@ import logging
 import os
 import re
 import sqlite3
+import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
+from ..engine.overload import ComputeUnavailable, unavailable_from_detail
+from ..engine.request_budget import check_budget
 
 from ..features.facts.store import FactStore
-from .verify_modes import VerifyMode, categorize, get_mode, registered_mode_names
+from ..features.lifecycle.blackhole_guard import BlackholeGuard
+from .verify_modes import DEFAULT_MODE, VerifyMode, categorize, get_mode, registered_mode_names
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +145,61 @@ def _prefix_match(token: str, other: str) -> bool:
     return len(token) >= 5 and len(other) >= 5 and token[:4] == other[:4]
 
 
+_SELF_LANE = "self"
+#: The most of the owner's related marks one check shows the judge (the exact one answers alone).
+_OWN_LABELS_SHOWN = 3
+_OWN_LABEL_MATCH_TOKENS = 2
+
+
+def _label_stance(label: str) -> Dict[str, Any]:
+    """The owner's mark as a lane: true backs it outright, false contradicts it outright, partly backs it at the
+    inbound lane's own confidence for a partial (0.5)."""
+    if label == "false":
+        return {"stance": "contradicts", "confidence": 1.0}
+    return {"stance": "supports", "confidence": 1.0 if label == "true" else 0.5}
+
+
+def _own_label_text(label: str, claim: str, note: Optional[str]) -> str:
+    """The mark as one line of self-lane evidence. Worded so the no-model judge reads its polarity: a false mark
+    carries a negation cue, a true one none."""
+    lead = {"true": "the owner confirmed this is true", "partly": "the owner said this is only partly true",
+            "false": "the owner said this is not true"}[label]
+    text = f"{lead}: {claim}"
+    return f"{text} ({note})" if note else text
+
+
+def _own_claim_evidence(conn: sqlite3.Connection, statement: str, mode: VerifyMode) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """(the label of the owner's mark on this exact statement, or None; the owner's marks on related claims as
+    self-lane entries). Exact is by the claim box's own key (case, spacing and a final stop do not matter); related
+    shares at least _OWN_LABEL_MATCH_TOKENS distinctive tokens. In a gated mode a related claim must sit inside the
+    aperture, as a fact must; the exact one is the statement itself, which the gate already passed."""
+    from .truth_checks import own_claim_key, own_claim_labels
+
+    rows = own_claim_labels(conn)
+    if not rows:
+        return None, []
+    key = own_claim_key(statement)
+    for row in rows:
+        if row["key"] == key:
+            return row["label"], []
+    claim_tokens = set(_content_tokens(statement))
+    related: List[Dict[str, Any]] = []
+    for row in rows:
+        if len(related) >= _OWN_LABELS_SHOWN:
+            break
+        tokens = set(_content_tokens(row["claim"]))
+        shared = sum(1 for token in claim_tokens if any(_prefix_match(token, other) for other in tokens))
+        if shared < _OWN_LABEL_MATCH_TOKENS:
+            continue
+        if mode.topic_gate:
+            claim_category, claim_safe = categorize(row["claim"])
+            if not claim_safe or claim_category not in mode.allowed_categories:
+                continue
+        related.append({"text": _own_label_text(row["label"], row["claim"], row.get("note")),
+                        "value": row["claim"], "hinted": False, "own_label": row["label"]})
+    return None, related
+
+
 def _neutral_lanes(mode: VerifyMode) -> Dict[str, Dict[str, Any]]:
     return {lane: {"stance": "no_evidence", "confidence": 0.0} for lane in mode.lanes}
 
@@ -148,6 +211,16 @@ def _lane_for_fact(fact: Dict[str, Any]) -> str:
     if asserted_by == "page-author":
         return "ambient"
     return "attributed"  # assistant / contact:<id>
+
+
+def _off_limits(guard: BlackholeGuard, fact: Dict[str, Any], text: str) -> bool:
+    """True when the fact touches an Off-limits person or record, by id or by name in what would reach the judge."""
+    payload = fact.get("payload") or {}
+    if any(guard.blocks_entity_id(payload.get(key)) for key in ("subject_entity_id", "object_entity_id")):
+        return True
+    if any(isinstance(ref, dict) and guard.blocks_record_id(ref.get("record_id")) for ref in fact.get("source_refs") or []):
+        return True
+    return guard.text_mentions_blackholed(text)
 
 
 def _llm_enabled() -> bool:
@@ -214,16 +287,21 @@ def _heuristic_lane_stance(claim: str, entries: List[Dict[str, Any]]) -> Dict[st
     }
 
 
-def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]]) -> Optional[Dict[str, Dict[str, Any]]]:
-    """One truth_verdict model call over all lanes; None on any failure so the
-    caller falls back to the heuristic."""
+def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]], *, audit: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Dict[str, Any]]]:
+    """One model call; explicit overload must not become a heuristic success."""
     try:
         from ..engine.client import get_engine_client_or_local
         from ..engine.tasks import ModelRequest, ProcessingTask
         from ..config.settings import settings
 
+        # Usage observations deduplicate by task id: a constant id silently
+        # discards every verification after the first. Never use claim text or
+        # caller-supplied identifiers as a diagnostic identity.
+        task_id = "truth_verdict:" + str(uuid.uuid4())
+        if audit is not None:
+            audit["task_id"] = task_id
         task = ProcessingTask(
-            id="truth_verdict",
+            id=task_id,
             type="truth_verdict",
             subtype="truth_verdict",
             source_id="truth",
@@ -231,7 +309,34 @@ def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]]) -> Optional[
             input={"claim": claim, "lanes": lane_texts},
             model_request=ModelRequest(provider="ollama", model=settings.ollama_query_model),
         )
+        check_budget()
         result = get_engine_client_or_local(None).run(task)
+        check_budget()
+        if result.status == "deferred":
+            for code in (429, 503):
+                unavailable = unavailable_from_detail(code, (result.output or {}).get("availability"))
+                if unavailable is not None:
+                    detail = result.output["availability"]
+                    reason = detail.get("reason")
+                    if unavailable.code == "compute_unavailable" and reason in ("cancelled", "deadline_exceeded"):
+                        from ..engine.request_budget import RequestStopped
+                        raise RequestStopped(reason)
+                    raise unavailable
+        if audit is not None:
+            # ProcessingResult already carries provider usage through both
+            # Engine clients. Retain only finite, numeric phase measurements;
+            # never copy free-form output, errors, prompts, or provider fields.
+            execution = getattr(result, "execution_meta", None)
+            duration = getattr(execution, "duration_ms", None)
+            if isinstance(duration, (int, float)) and not isinstance(duration, bool) and 0 <= duration <= 86_400_000:
+                audit.setdefault("timings_ms", {})["engine_adapter"] = duration
+            usage = (result.output or {}).get("usage")
+            phases = usage.get("timings") if isinstance(usage, dict) else None
+            if isinstance(phases, dict):
+                retained = {k: v for k, v in phases.items() if k in {"total_ms", "load_ms", "prefill_ms", "decode_ms"}
+                            and isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v <= 86_400_000}
+                if retained:
+                    audit["provider_timings_ms"] = retained
         if result.status != "completed":
             return None
         lanes = (result.output or {}).get("lanes")
@@ -250,7 +355,9 @@ def _llm_lane_stances(claim: str, lane_texts: Dict[str, List[str]]) -> Optional[
                 confidence = 0.0
             cleaned[str(lane)] = {"stance": stance, "confidence": round(confidence, 2)}
         return cleaned
-    except Exception as exc:  # noqa: BLE001 — judge failure must degrade, not crash
+    except ComputeUnavailable:
+        raise
+    except Exception as exc:  # noqa: BLE001 — other judge failures retain their existing fallback
         logger.warning("truth_verdict LLM failed, falling back to heuristic: %s", exc)
         return None
 
@@ -259,13 +366,20 @@ def verify_claim(
     conn: sqlite3.Connection,
     *,
     statement: str,
-    mode: str = "fun",
+    mode: str = DEFAULT_MODE,
     caller_app_id: str = "",
+    guard: Optional[BlackholeGuard] = None,
+    audit_sink: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Check ``statement`` against the owner's facts under ``mode``'s aperture.
+    """Check ``statement`` against the owner's facts under ``mode``.
 
     Returns a caller-safe response plus an ``_audit`` key the handler pops.
+    With no ``guard`` every Off-limits entry is withheld, as for a caller the node cannot place.
+    ``audit_sink``, when given, is the audit dict itself, filled as the check goes (``phase`` and ``phase_started``
+    included), so the handler can log how far a request got when it never returns.
     """
+    started = time.perf_counter()
+    check_budget()
     resolved = get_mode(mode)
     if resolved is None:
         return {
@@ -276,18 +390,25 @@ def verify_claim(
         return {"error": "caller_app_id_required"}
 
     statement = str(statement or "").strip()[: resolved.max_statement_chars]
-    audit: Dict[str, Any] = {
+    audit: Dict[str, Any] = audit_sink if audit_sink is not None else {}
+    audit.update({
         "mode": resolved.name,
         "caller_app_id": caller_app_id,
         "retrieval_touched": False,
         "judge": None,
         "evidence_counts": {},
-    }
+        "timings_ms": {},
+    })
+
+    def _phase(name: str) -> None:
+        audit["phase"] = name
+        audit["phase_started"] = time.perf_counter()
 
     def _neutral(reason: str, category: Optional[str] = None) -> Dict[str, Any]:
         # Out-of-aperture and no-evidence produce byte-identical caller-visible
         # shapes (category is included only for in-aperture claims).
         audit["reason"] = reason
+        audit["timings_ms"]["verify_total"] = round((time.perf_counter() - started) * 1000, 3)
         return {
             "mode": resolved.name,
             "category": category,
@@ -299,22 +420,47 @@ def verify_claim(
     if not statement:
         return _neutral("empty_statement")
 
-    category, fun_safe = categorize(statement)
+    category: Optional[str] = None
+    if resolved.topic_gate:
+        category, fun_safe = categorize(statement)
+        if not fun_safe or category not in resolved.allowed_categories:
+            audit["category"] = category
+            return _neutral("out_of_aperture")
     audit["category"] = category
-    if not fun_safe or category not in resolved.allowed_categories:
-        return _neutral("out_of_aperture")
 
-    # --- Evidence (facts only in v1; aperture applied per fact) -----------------------
+    # --- The owner's own word (the claim box, owner's decision of 5 Nov 2026) ----------
+    # A mark the owner made on this very statement answers it at once, with no retrieval
+    # and no model call: the self lane is the label, every other lane is empty. The
+    # aperture ran first, so in fun mode a sensitive claim stays neutral whatever its
+    # mark. A mark on a related claim (two shared distinctive words) joins the self
+    # lane's evidence below, worded so the heuristic judge reads its polarity.
+    own_exact, own_related = _own_claim_evidence(conn, statement, resolved)
+    audit["own_label"] = f"exact:{own_exact}" if own_exact else (f"related:{len(own_related)}" if own_related else "none")
+    if own_exact:
+        audit["judge"] = "owner_label"
+        audit["evidence_counts"] = {lane: 0 for lane in resolved.lanes}
+        lanes = _neutral_lanes(resolved)
+        lanes[_SELF_LANE if _SELF_LANE in lanes else resolved.lanes[0]] = _label_stance(own_exact)
+        audit["timings_ms"]["verify_total"] = round((time.perf_counter() - started) * 1000, 3)
+        return {"mode": resolved.name, "category": category, "lanes": lanes, "abstained": False, "_audit": audit}
+
+    # --- Evidence (facts only in v1; a mode's aperture applied per fact) --------------
+    retrieval_started = time.perf_counter()
+    _phase("retrieval")
+    guard = guard if guard is not None else BlackholeGuard(conn)
     audit["retrieval_touched"] = True
     store = FactStore(conn)
     tokens = _content_tokens(statement)
     hinted_predicates = _hinted_predicates(statement)
 
     lane_entries: Dict[str, List[Dict[str, Any]]] = {lane: [] for lane in resolved.lanes}
+    if own_related and _SELF_LANE in lane_entries:
+        lane_entries[_SELF_LANE].extend(own_related)
     seen_object_ids: set = set()
     candidates = list(store.search(tokens, limit=50))
     candidates += _facts_by_predicates(store, hinted_predicates)
     for fact in candidates:
+        check_budget()
         if sum(len(entries) for entries in lane_entries.values()) >= _MAX_FACT_EVIDENCE:
             break
         object_id = fact.get("object_id")
@@ -328,22 +474,28 @@ def verify_claim(
         predicate = str(payload.get("predicate") or "")
         if predicate.startswith("calibration_"):
             continue  # calibration labels require explicit signed truth-pack consent
-        fact_blob = f"{predicate.replace('_', ' ')} {payload.get('object_value') or ''}"
-        fact_category, fact_safe = categorize(fact_blob)
-        if not fact_safe or fact_category not in resolved.allowed_categories:
+        if resolved.topic_gate:
+            fact_blob = f"{predicate.replace('_', ' ')} {payload.get('object_value') or ''}"
+            fact_category, fact_safe = categorize(fact_blob)
+            if not fact_safe or fact_category not in resolved.allowed_categories:
+                continue
+        text = FactStore.render(fact)
+        if _off_limits(guard, fact, text):
             continue
         lane = _lane_for_fact(fact)
         if lane in lane_entries:
             lane_entries[lane].append({
-                "text": FactStore.render(fact),
+                "text": text,
                 "value": str(payload.get("object_value") or ""),
                 "hinted": predicate.lower() in hinted_predicates,
             })
 
     audit["evidence_counts"] = {lane: len(entries) for lane, entries in lane_entries.items()}
+    check_budget()
     audit["hinted_predicates"] = sorted(hinted_predicates)
     lane_texts = {lane: [entry["text"] for entry in entries]
                   for lane, entries in lane_entries.items()}
+    audit["timings_ms"]["retrieval_and_filter"] = round((time.perf_counter() - retrieval_started) * 1000, 3)
     if not any(lane_texts.values()):
         return _neutral("no_evidence", category=category)
 
@@ -351,7 +503,10 @@ def verify_claim(
     stances: Optional[Dict[str, Dict[str, Any]]] = None
     if _llm_enabled():
         populated = {lane: texts for lane, texts in lane_texts.items() if texts}
-        stances = _llm_lane_stances(statement, populated)
+        judge_started = time.perf_counter()
+        _phase("model_call")
+        stances = _llm_lane_stances(statement, populated, audit=audit)
+        audit["timings_ms"]["engine_roundtrip"] = round((time.perf_counter() - judge_started) * 1000, 3)
         audit["judge"] = "llm" if stances is not None else "heuristic_fallback"
     if stances is None:
         stances = {}
@@ -381,6 +536,7 @@ def verify_claim(
         else:
             lanes[lane] = deterministic
 
+    audit["timings_ms"]["verify_total"] = round((time.perf_counter() - started) * 1000, 3)
     return {
         "mode": resolved.name,
         "category": category,

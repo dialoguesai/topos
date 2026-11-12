@@ -55,6 +55,7 @@ from . import interest_family as fam
 from . import switches
 from .canonical import PolicyError, canonical_bytes, digest, parse_json
 from .contract import Hash, Identifier, Number, StrictModel
+from .. import local_serving
 
 VERSION = "topos-interest-relabel/v1"
 TABLE = "interest_relabels"
@@ -235,7 +236,7 @@ async def ask(prepared: dict, *, transport=None) -> Optional[str]:
                      else (open_transport(base_url=assessment_base_url()), True))
     try:
         await client.verify()
-        response = await client.client.post(client.base_url + "/api/chat", timeout=25, json={
+        response = await local_serving.post_async(client.client, client.base_url + "/api/chat", timeout=25, json={
             "model": MODEL, "stream": False, "think": False, "format": "json",
             "options": {"temperature": 0, "num_predict": 96},
             "messages": [{"role": "system", "content": PROMPT},

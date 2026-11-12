@@ -30,7 +30,22 @@ Design constraints (all learned live):
     stored, or that rebuild is older than TOPOS_GRAPH_REFRESH_MAX_AGE_S
     (default 6h; 0 turns the age limit off). On the owner's node the
     pipeline marked the graph for every browser-visit batch and paid two
-    rebuilds of ~130s each per batch, all reporting the same counts.
+    rebuilds of ~130s each per batch, all reporting the same counts;
+  * at most one automatic rebuild per TOPOS_GRAPH_REFRESH_MIN_INTERVAL_S
+    (default 2h; 0 turns it off), counted from the end of the last rebuild as
+    stored in ``graph_materialization_state.last_run_at``, so a restart keeps
+    the clock. Every message changes the fingerprint (it digests the mentions
+    and the message tables' participation columns), and on the owner's node
+    (4 Nov 2026) that kept a 603-1113s rebuild running 26% of the time, each
+    one moving 0-7 of 68,794 edges. A trigger inside the interval leaves the
+    graph dirty and arms one timer for the end of it. The interval also floors
+    the incomplete retry and the age limit. Nothing that reads the graph needs
+    it fresher than that: signal derivation, which the inline fill runs
+    before, reads only ``entities.mention_count`` from a rebuild (a tie-break
+    between same-name people in ``derivation/writer.py`` and an ordering in
+    ``person_reading.py``), and the entities it resolves against are written
+    by the entities job, not the rebuild. The owner's own rebuild (the
+    endpoint) does not go through here and is not held.
 """
 
 from __future__ import annotations
@@ -49,6 +64,7 @@ logger = logging.getLogger("topos.features.entities.graph_refresh")
 _DEFAULT_DEBOUNCE_S = 90.0
 _DEFAULT_MAX_AGE_S = 6 * 3600.0
 _DEFAULT_RETRY_S = 30 * 60.0
+_DEFAULT_MIN_INTERVAL_S = 2 * 3600.0
 # Suffix on a stored fingerprint whose rebuild reported a part incomplete.
 _INCOMPLETE = "|incomplete"
 
@@ -74,6 +90,14 @@ def _retry_seconds() -> float:
         return max(0.0, float(os.environ.get("TOPOS_GRAPH_REFRESH_RETRY_S", _DEFAULT_RETRY_S)))
     except (TypeError, ValueError):
         return _DEFAULT_RETRY_S
+
+
+def _min_interval_seconds() -> float:
+    """The least time between two automatic rebuilds, whatever changed; 0 = no limit."""
+    try:
+        return max(0.0, float(os.environ.get("TOPOS_GRAPH_REFRESH_MIN_INTERVAL_S", _DEFAULT_MIN_INTERVAL_S)))
+    except (TypeError, ValueError):
+        return _DEFAULT_MIN_INTERVAL_S
 
 
 def _enabled() -> bool:
@@ -133,9 +157,13 @@ def rebuild_if_inputs_changed(
        the marks up to here and no further: a mark that lands while the
        fingerprint is read, or while the rebuild runs, leaves the state dirty,
        and the next trigger looks again.
-    3. Fingerprint the inputs. Equal to the stored one, and the last rebuild
+    3. The last rebuild ended less than TOPOS_GRAPH_REFRESH_MIN_INTERVAL_S
+       ago (default 2h): rebuild nothing, absorb nothing, and arm one timer for
+       the end of the interval. Before the fingerprint, which costs 16.6s on
+       the owner's node and would only be read again then.
+    4. Fingerprint the inputs. Equal to the stored one, and the last rebuild
        younger than the age limit: absorb the marks, write nothing else.
-    4. Otherwise rebuild, then store this fingerprint -- the one taken BEFORE
+    5. Otherwise rebuild, then store this fingerprint -- the one taken BEFORE
        the rebuild read anything, so a change that lands mid-rebuild still
        differs next time. A rebuild that reports a part ``incomplete`` (a lane
        that raised, centrality that failed, goals clustered by tokens because
@@ -152,8 +180,13 @@ def rebuild_if_inputs_changed(
 
     closed = _close_dangling(conn)
     generation = _dirty_generation(conn)
-    fingerprint = graph_input_fingerprint(conn)
     stored, last_run_at = _stored_fingerprint(conn)
+    wait = _interval_left(last_run_at, _min_interval_seconds())
+    if wait > 0:
+        _refresher.arm_due(wait)
+        logger.info("graph refresh held: the last rebuild ended inside the interval; next look in %.0fs", wait)
+        return {"skipped": "interval", "due_in_s": round(wait, 1), "dangling_closed": closed}
+    fingerprint = graph_input_fingerprint(conn)
     stored_incomplete = bool(stored and stored.endswith(_INCOMPLETE))
     if stored_incomplete:
         stored = stored[: -len(_INCOMPLETE)]
@@ -232,6 +265,23 @@ def _stored_fingerprint(conn) -> Tuple[Optional[str], Optional[str]]:
     return (str(row[0]) if row[0] else None), (str(row[1]) if row[1] else None)
 
 
+def _interval_left(last_run_at: Optional[str], interval: float) -> float:
+    """Seconds until ``interval`` has passed since ``last_run_at``; 0 when it has, or the time is
+    unknown, unreadable or in the future (a clock that went back must not hold the graph for hours)."""
+    if interval <= 0 or not last_run_at:
+        return 0.0
+    try:
+        then = datetime.fromisoformat(last_run_at.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - then).total_seconds()
+    if age < 0:
+        return 0.0
+    return max(0.0, interval - age)
+
+
 def _overdue(last_run_at: Optional[str], limit: float) -> bool:
     if limit <= 0:
         return False
@@ -296,6 +346,22 @@ class _Refresher:
             self._timer.name = "topos-graph-refresh-debounce"
             self._timer.start()
 
+    def arm_due(self, delay: float) -> None:
+        """Look again once the interval ends, unless a look is already pending.
+
+        A mark that lands meanwhile replaces this timer with its debounce, and that look, still inside the
+        interval, arms this again: one pending look either way."""
+        if not _enabled():
+            return
+        with self._lock:
+            self._dirty = True
+            if self._timer is not None:
+                return
+            self._timer = threading.Timer(delay + 1.0, self._fire)
+            self._timer.daemon = True
+            self._timer.name = "topos-graph-refresh-due"
+            self._timer.start()
+
     def _fire(self) -> None:
         # A full rebuild during a derivation batch is both contended and
         # premature: the batch is still writing the entities this would index,
@@ -354,6 +420,7 @@ class _Refresher:
                 "last_run_at": self._last_run_at,
                 "last_error": self._last_error,
                 "debounce_s": _debounce_seconds(),
+                "min_interval_s": _min_interval_seconds(),
             }
 
     def shutdown(self) -> None:
@@ -446,7 +513,12 @@ def refresh_now_if_dirty() -> Dict[str, Any]:
     this, for every batch, so the check above hardly ever skipped anything; on
     the owner's node a single browser visit cost a full rebuild here (1.4.3).
     The rebuild function now skips when nothing the graph reads has changed
-    (``rebuild_if_inputs_changed``), and so does this.
+    (``rebuild_if_inputs_changed``), and so does this. It is held by the
+    rebuild interval too (4 Nov 2026, 27 inline fills in a day on the owner's
+    node): signal derivation does not need this rebuild's output (see the
+    module docstring), so an import inside the interval derives against the
+    last rebuild's graph, and a node's first import, with no rebuild yet,
+    still fills at once.
     """
     from ...core.state import get_db_connection
     from ...enrichment.pipeline_activity import is_derivation_in_flight

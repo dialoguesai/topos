@@ -22,6 +22,7 @@ Invented data only.
 """
 from __future__ import annotations
 
+from topos import local_serving
 import json
 
 import pytest
@@ -429,6 +430,8 @@ def test_judge_templates_v1_to_v3_are_selectable_and_v4_is_the_default(monkeypat
 @pytest.mark.real_support_judge
 @pytest.mark.asyncio
 async def test_the_local_judge_posts_the_closed_grammar_at_temperature_zero_and_reads_only_a_closed_reply(monkeypatch):
+    # The caller's own context; the serving layer (topos/local_serving.py) raises it on the wire, tested there.
+    monkeypatch.setattr(local_serving, "CONTEXT", 0)
     from topos.permissions_v2 import shadow_labeler_local as sl
     posted = []
 
@@ -553,7 +556,7 @@ def test_with_the_switch_on_a_yes_delivers(legacy, tmp_path, monkeypatch):
     assert body["outcome"] == "answered" and _receipt_sentences(receipt)["dropped_support"] == 0
 
 
-def test_with_the_switch_on_a_judge_that_fails_drops_not_raises(legacy, tmp_path, monkeypatch):
+def test_with_the_switch_on_a_provider_failure_is_unavailable(legacy, tmp_path, monkeypatch):
     monkeypatch.setenv(P + "ANSWER_SUPPORT_JUDGE", "true")
 
     async def judge(sentence, items, *, deadline, question=None):
@@ -561,7 +564,7 @@ def test_with_the_switch_on_a_judge_that_fails_drops_not_raises(legacy, tmp_path
 
     body, receipt = _service_path(legacy, tmp_path, monkeypatch, judge, "The owner is working on a synthetic task [1].")
     assert body == {"version": "topos-answer/v1", "outcome": "no_answer"}
-    assert _receipt_sentences(receipt)["dropped_support"] == 1 and receipt["reason"] == "all_sentences_dropped"
+    assert receipt["reason"] == "judge_unavailable"
 
 
 # --- V3: more items -------------------------------------------------------------------------------------------------

@@ -31,7 +31,7 @@ LABEL = "tpa_claude-code." + "ef" * 20
 PLANTED = "tpn_" + "planted" + "0123456789abcdef" * 2
 SECRETS = (ENV_KEY, ENV_OWNER_KEY, LABEL, PLANTED)
 
-STATUS_KEYS = {"node", "paired", "topos_id", "user_id_present", "control_plane", "outdated",
+STATUS_KEYS = {"node", "paired", "mode", "topos_id", "user_id_present", "control_plane", "outdated",
                "latest_version", "agents", "sources", "pairing", "exit_code"}
 NODE_KEYS = {"running", "version", "pid", "socket", "owner_key_persisted", "supervisor"}
 
@@ -127,7 +127,32 @@ def test_status_json_schema_and_exit_0_when_connected_and_paired(home, caplog):
     }]
     assert payload["pairing"] is None
     assert payload["exit_code"] == 0
+    assert payload["mode"] == "account"
     _assert_no_secret(result, caplog)
+
+
+# ----------------------------------------------------------------- local-only (exit 0, not paired)
+def test_a_local_only_node_is_healthy_but_not_paired(home, caplog):
+    node = _fake_node()
+    node.identity_mode = "local"
+    node.control_plane = "local_only"
+    with serve_fake_node(node, _socket_path()):
+        result = _run(status_cmd.status_command, ["--json"])
+        text = _run(status_cmd.status_command, [])
+    assert result.exit_code == 0, result.stdout + result.stderr
+    payload = json.loads(result.stdout)
+    assert set(payload) == STATUS_KEYS
+    assert payload["node"]["running"] is True
+    assert payload["mode"] == "local"
+    assert payload["paired"] is False
+    assert payload["topos_id"] == "topos-1"
+    assert payload["user_id_present"] is True
+    assert payload["control_plane"] == "local_only"
+    assert payload["exit_code"] == 0
+    assert "local:" not in result.stdout  # the local owner id is an id like any other: never printed
+    _assert_no_secret(result, caplog)
+    assert text.exit_code == 0
+    assert "without an account" in text.stdout and "topos-node pair" in text.stdout
 
 
 def test_status_human_output_has_no_secret(home, caplog):

@@ -223,6 +223,16 @@ INDEX_NARROW_OWN_ROW_EDITS = _switch(
     "index going. On by default, bound and unbound, since 1.5.16 (owner ruling of 22 Oct 2026: \"Yes, on for "
     "everyone\"). Off: an own-row edit removes the whole index, as 1.5.15. The zeroing of the file a narrowed publish "
     "replaces applies to every narrowed publish, whatever this switch says.")
+INDEX_NARROW_INTERESTS = _switch(
+    "INDEX_NARROW_INTERESTS", "bool", True, True,
+    "DR-70 (widens DR-31; read only while INDEX_NARROW_MEMBERS is on). A share index member that is a browsing interest "
+    "and is no longer the member its build admitted (its month's counted visits, label, strength band or label "
+    "assessment moved at the build's instant, or its cluster-month is no longer built) is withheld, and the rest of the "
+    "index keeps serving: the sweep publishes the index without it and owes one rebuild that brings it back re-derived. "
+    "On by default, bound and unbound (owner ruling of 5 Nov 2026: \"Narrow on drift\", after the hourly interest "
+    "refresh had rebuilt both share indexes every hour and a sweep had dropped a nine-minute-old index whole). Off: a "
+    "drifted interest removes the whole index, as 1.5.44. An error in the decision removes the whole index whatever "
+    "this says.")
 SEARCH_ATTRIBUTION = _switch(
     "SEARCH_ATTRIBUTION", "bool", False, False,
     "Owner-local attribution lines beside the timing lines (NR166 R0): write-gate wait and hold by code location "
@@ -489,7 +499,7 @@ SWITCHES = (
     DECIDE_OUTSIDE_GATE, OWNER_LANE, OWNER_LANE_SLOTS, OWNER_LANE_SHARED_MAX, OWNER_LANE_TYPES,
     BACKGROUND_YIELDS_TO_OWNER, REVIEW_PASS_BOUNDARY,
     REVIEW_PASS_BOUNDARY_MAX_AGE, SWEEP_INTEREST_VERDICT, SWEEP_INTEREST_VERDICT_FULL_EVERY,
-    INDEX_NARROW_MEMBERS, INDEX_NARROW_OWN_ROW_EDITS,
+    INDEX_NARROW_MEMBERS, INDEX_NARROW_OWN_ROW_EDITS, INDEX_NARROW_INTERESTS,
     OWNER_CAPTURE_APP_IDS, SELECTIVE_FACTS, ANSWER_SUBJECT_WORDS, ANSWER_SUPPORT_JUDGE, ANSWER_ITEMS,
     ANSWER_SHORT_WORD_NAMES, ANSWER_QUESTION_ANCHOR, ANSWER_SUPPORT_JUDGE_TEMPLATE,
     ANSWER_TIME_SCOPE, ANSWER_TIME_RETRIEVAL, ANSWER_TIME_FILL, ANSWER_TIME_PROMPT, ANSWER_TIME_GUARD,

@@ -9,18 +9,576 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
-### Removed
-- **The 1.5.23 reflection build is retired (GRANT_DECISIONS G6).** `[P]` `[O]` Since 1.5.25 the Moments app reads
-  `reflection_facts` and finds, composes and labels conversations itself, so the node's own reflection logic goes:
-  the `reflection_invitations`, `reflection_conversation` and `reflection_label` types and their `/api/local/` routes
-  (now refused as unknown types), the `reflection_sweep` job on the catch-up lane, and `query/reflection.py` with its
-  stance templates. `reflection_facts`, the `moments.joy` and `moments.tension` packs, and every owner-only guard on
-  `reflection_candidates`, `reflection_labels` and `reflection_label` objects stay: installed nodes still hold those
-  rows, and dropping them is the owner's call. A queued or leased `reflection_sweep` row left from before the upgrade
-  is closed at startup as done with a `retired` reason (`job_runner.RETIRED_KINDS`) instead of waiting for good.
+## [1.5.49] — 2026-11-10
 
-### Data impact
-- No migration; no table is dropped. Leftover `reflection_sweep` jobs are closed once at startup.
+### Added
+- **Provisional self-coherence measurements for the owner dashboard.** `[O]` A versioned, read-only literal-claim comparison reports aligned groups, potential tensions and coverage over a rolling 30-day window. Missing comparisons remain unknown; failures and owner corrections do not count as contradictions. Each group receives one vote. The home client can display these aggregates without a schema migration or changes to claim verification. See `docs/dashboard-measurements.md` for the formula and limits.
+- **Explicit grants for every bundled fact category.** `[P] [O]` New versioned consent covers all 30 categories, 237 pack predicates and the 12 known legacy predicates, including sensitive and inferred facts when selected. Structured values, dependent facts and named people use the same source permission and owner-protection checks. Previews and final responses enforce the selected categories and fact types. Existing v1 grants keep their original scope. Requires the matching control-plane and web release; no pack is enabled and no grant is widened automatically.
+
+
+- **Fact packs can keep up with new records by themselves: `topos-node packs auto on`.** `[E:derivation]` `[O]`
+  A fact pack reads a new record as it arrives only for a source whose lane runs the `derivation` job, and few
+  sources do. Everything else was read only by a backfill, and a backfill asks for a typed yes each time, so the
+  facts stopped keeping up whenever the command was not run. There is now one standing switch, off by default,
+  that means "keep my switched-on fact packs current". While it is on the node starts a catch-up run by itself,
+  on the same machinery as a confirmed backfill (`features/derivation/auto_catchup.py` on top of
+  `backfill_runs.py`).
+  - *Changes during a pending count.* The scheduler rechecks the owner switch and kill switch under the setting lock before starting. Turning it off or changing its timing while records are counted prevents that pending run.
+  - *Who turns it on.* Only the owner. `topos-node packs auto on [--quiet-minutes N] [--min-gap-minutes N]`
+    says what it will do, asks `[y/N]` once on a terminal, and sends one confirmed change; `packs auto off` asks
+    the same way; `packs auto status` is a read. The route is `PUT /v1/signal/derivation/backfill/auto
+    {enabled, quiet_s, min_gap_s}`: `dangerous` in the owner socket's census, and it checks the confirmed peer
+    itself, so the app can add a toggle and nothing else can set it. `GET` on the same path is an open read.
+    `TOPOS_PACKS_AUTO_CATCHUP=off` in the node's environment holds it off whatever the switch says.
+  - *When a run starts.* The node looks once a minute. A run starts when journal entries or messages have landed
+    since the last look, nothing new has landed for the quiet period (default 10 minutes), the last look ended at
+    least the minimum gap ago (default 1 hour), and no backfill is working. It reads the two record tables, not a
+    source's lane, so it covers every source at once, records an app pushed included. The node's own start counts
+    as an arrival, so nothing starts in the first quiet period after a restart. Both periods can be set by the
+    owner on the switch, or node-wide with `TOPOS_PACKS_AUTO_QUIET_S` and `TOPOS_PACKS_AUTO_MIN_GAP_S`.
+  - *What it reads.* Every switched-on pack that has something waiting, and recent records only: those dated on
+    or after the day before the last look that read everything it reached, and never more than 30 days back. The
+    first look after the switch is turned on reads the last 7 days. Older history stays `packs backfill`. A record
+    that lands late with a date before the window is counted and left for a backfill too; the window is not
+    widened for it, because that would also read every unread record of those days. Records already read cost a
+    key lookup and no model call.
+  - *What it never does.* It loads no model to look, and a look that finds nothing waiting starts no run. It
+    keeps no model resident, changes no setting, and uses the extractor and the verification setting the node
+    already has. It never runs beside another backfill.
+  - *Your backfill wins.* `topos-node packs backfill` while an automatic run is working is not refused: the
+    automatic run stops after the record in hand, and your run starts when it has. The app's single-batch
+    button waits the same way. `packs stop` stops an automatic run like any other.
+  - *How it works a run.* Like a confirmed backfill: it yields to your own requests between records, no write
+    transaction is open during a model call, and its own bookkeeping (two `engine_config` rows: your switch, and
+    how far the last look reached) is written through the write gate and committed each time, with nothing else
+    open on the connection. A node restart ends a run; the next look does the same window again.
+  - *Where to see it.* `topos-node packs status` marks an automatic run as such and adds the switch, what the
+    last look read and wrote, and when the next may start. The node log says the same in counts and dates.
+
+## [1.5.48] — 2026-11-10
+
+### Fixed
+- **The end of a backfill batch no longer stalls the node's other writers.** `[E:derivation]` After its last
+  record, `run_pack_backfill` stamped the pack's run with a bare `UPDATE pack_registry`, outside the write gate
+  and left uncommitted, and then embedded what the batch wrote (`index_derived_objects`). The indexer loads and
+  embeds every changed object first and takes the write gate only to store the vectors, so the backfill's
+  connection held SQLite's write lock through the whole embedding step and then queued for the gate. A gated
+  writer that started in that window held the gate while its `BEGIN IMMEDIATE` waited out the busy retries
+  (5 x 30 s, about 156 s) and failed with "database is locked"; the next one did the same; the backfill could
+  not commit until it got the gate. On a live node on 1.5.47 (10 Nov 2026) this stalled every other writer for
+  312 to 343 s, five times, at 5 of 9 batch ends, on the LLM route and the Topos Facts route alike; each time
+  `claim_next_job` logged a gate hold of about 156 s twice in a row. Three incoming writes timed out and were
+  redelivered, so nothing was lost. The stamp is now its own gated write, committed before the embedding step
+  starts (and rolled back if it fails), so the indexer is entered with nothing open on the connection. The
+  batch also commits its counters before handing an accepted assertion to the fact writer, which takes the
+  gate when it queues a conflict: the same order, without a model call in it, and not seen in that log. A stop
+  still runs the stamp and the embedding step, and an embedding failure is still reported in the batch's
+  counts and never raised.
+
+## [1.5.47] — 2026-11-10
+
+### Added
+- **`topos-node packs`: list fact packs and backfill their history from a terminal.** `[O]` A pack's history
+  from before it was switched on is read only when the owner asks, and the only way to ask was the app's
+  Data → Fact packs page: one press per batch of 200 records per pack, the request held open for the batch.
+  `topos-node packs backfill --pack ID … | --all-enabled [--since YYYY-MM-DD] [--limit N] [--until-done]
+  [--detach]` prints the plan (which packs, how far back, how many records wait for each, which model reads
+  each pack and which one checks what it finds, the batch size, and the local model's time at this node's
+  30-day average per extraction call), asks `[y/N]` once on the terminal, and starts one run. One yes covers
+  the whole job: nothing is pressed per batch or per pack. `packs list` shows every pack (switched on, facts
+  held, last run); `packs status [--follow]` shows the run; `packs stop` stops it.
+  - *How far back.* `--since 2026-04-01` reads only records dated that day or later. The walk is newest
+    first and stops at the date; older records are neither read nor marked, so a later backfill without the
+    date still reaches them. The count before the yes uses the same date.
+  - *What the yes authorises.* The owner's confirmation is one token, good for one request and at most 600 s,
+    and one batch of 200 records takes over an hour on the local models. So the yes authorises a run, not a
+    request: `POST /v1/signal/derivation/backfill/runs {pack_ids, limit, until_done, since}` takes the token once and
+    the node works through the plan itself on its own thread (`features/derivation/backfill_runs.py`), pack
+    after pack, batch after batch, each batch the same `run_pack_backfill` the app's control calls. The plan
+    (packs, date, batch size) is fixed at the yes; nothing can be added to a run. The route is `dangerous` in the owner socket's census, and
+    it checks the confirmed socket peer itself as well, so it is also refused over TCP and with
+    `TOPOS_OWNER_DOOR_SPLIT` off. There is no flag that answers for the person and no dispatcher message
+    type for a run: without a terminal the command exits 2 having sent nothing.
+  - *What bounds a run.* One run at a time. It lives in the node process only: a restart ends it and nothing
+    restarts it. It stops after the record in hand on Ctrl-C, on `packs stop`
+    (`POST …/backfill/runs/current/stop`, which needs no confirmation because it starts nothing) and on node
+    shutdown, and between records it yields to the owner's own requests (`owner_requests.pace`). Every finished
+    record is already keyed in `derivation_progress`, so the same command later picks up where the run
+    stopped. Five extraction calls failing in a row end the run (`model_unavailable`): a failed record stays
+    unmarked, so a run against a model that is down would otherwise never end.
+  - *The count before the yes.* `GET /v1/signal/derivation/backfill/plan?pack_id=…` counts the records a
+    backfill would reach: the same history window (the newest 20,000 journal entries and 20,000 messages),
+    each pack's role gate and its own prefilter, less what `derivation_progress` holds. It reads only. On a
+    scratch database of 40,000 records it took 1.2 s for 17 packs.
+    It also says which model would read each pack (Topos Facts or the local extraction model) and which
+    model verifies, without loading either: the Topos Facts pack list is read from its spec file in the
+    local cache. When a table fills the window it says that older records exist and are not reached.
+  - *Status.* `GET …/backfill/runs/current` answers states, counts per batch (processed, assertions, accepted,
+    written, quarantined, model errors), seconds per batch with extraction and verification apart, the model
+    that read and the model that checked each pack, and stamps; no record text or ids.
+
+### Changed
+- **A pack backfill reads with the extractor the owner picked for facts.** `[E:derivation]` `run_pack_backfill`
+  (the app's backfill control and `topos-node packs backfill`) always called the local extraction model; it
+  never looked at the pick under Settings → Models → Node functions → Facts extraction. Only the ingest job
+  did. Now it takes the ingest job's route: with Topos Facts picked, a pack its spec lists is read by the
+  classifier and never by the LLM, and its facts carry `topos-facts-v0.1` as their extractor;
+  `aspirations.goals` (`ROUTED_TO_LLM`) and packs outside the spec (v0.1 lists 27; not `moments.joy`,
+  `moments.tension` or `communication.style`) keep the local model. With nothing picked, which is the
+  default, nothing changes. A pick whose weights cannot load defers the batch as it does at ingest: the
+  reason is recorded where the facts settings read it, nothing is marked done, and the caller is told
+  (`topos_facts_unavailable`: 503 on the app's route, the end of a run); it does not fall back to the LLM
+  behind the pick. Every assertion still goes to the verifier. A batch's stats now carry `extract_model`,
+  `verify_model`, `extract_s` and `verify_s`. The backfill does not change the pick.
+- **The app's single backfill batch is refused while a confirmed run is working.** `[O]`
+  `POST /v1/signal/derivation/packs/{pack_id}/backfill` and the `run_pack_backfill` message answer
+  `backfill_already_running` (409 on the route) during a `topos-node packs backfill` run, and a run does not
+  start while a single batch is in flight, so a run never shares the local models with another backfill. Two
+  single batches from the app may still overlap, as before.
+
+### Fixed
+- **A backfill batch no longer holds SQLite's write lock across model calls.** `[E:derivation]` `run_pack_backfill`
+  marked the records its prefilter passed over without committing, then called the extraction model for the
+  next record; the call's own measurement row then stayed uncommitted across the verifier calls. The ingest job
+  stopped doing this in 1.5.45 (topos#271); the backfill path, which the app's control uses, did not. On a
+  scratch database with a stub model, 36 of the 60 model calls of a 30-record batch ran inside an open write
+  transaction; now none do (the batch commits before each call). At that rate a run of hundreds of batches
+  would have held the lock, and kept the node's other writers waiting, for over half of its model calls.
+
+## [1.5.46] — 2026-11-08
+
+### Added
+- **Local pushers: the browser extension writes into a local-first node directly.** `[O]` An app on this
+  computer that pushes rows (the Dialogues browser extension first) used to reach the node only through
+  the control plane, which stamped the writer, checked which sources the app may write, deduplicated by
+  `write_id` and answered CORS. A node with no account now does those four itself
+  (`topos/local_pushers.py`, `api/local_pushers.py`): `topos-node pushers add <app> --sources … --origin
+  chrome-extension://<id>` asks the owner once on a terminal and prints the app's key (`tpw_<app>.…`) once;
+  `POST /sources/{source_id}/ingest/batch` takes that key over loopback only, writes the batch as the owner's
+  capture app (`writer_class = owner_app`, `writer_app_id = <app>`, the stamp the control plane gives the
+  same app) under the node's own dataset, refuses a source the owner did not name (403 `source_not_allowed`),
+  and answers a repeated `write_id` (body or `Idempotency-Key`) with `deduplicated: true` and no second write.
+  CORS on the pusher doors is answered for the exact enrolled extension origins and never for a wildcard.
+  The key opens nothing else: every other route 401s it. `pushers list` / `pushers disconnect` manage it;
+  `GET /local-pushers/me` says what a key is good for. Connecting an account later moves the pushed rows
+  with everything else.
+
+### Fixed
+- **Naming the graph's communities no longer holds SQLite's write lock across model calls.** `[E:entities]` The
+  rebuild's stable-naming pass recorded each community's name (or refreshed a matched one) without committing it,
+  then asked the local model to name the next community, so every naming call after the first ran inside an open
+  write transaction: up to 60 calls of up to 45 s each. The rebuild runs in a child process that the node's write
+  gate does not reach, so the node's writers waited on the lock while holding the gate. In the 1.5.45 ingest
+  benchmark (7 Nov) a job claim held the gate 18.4 s that way and two more claims waited 14.6 s behind it; the hold
+  ended 13 ms before the rebuild child finished. Each name write now takes its own short gated hold and commits
+  before the next model call.
+- **A local request held until its caller's deadline is no longer sent.** When the node held a request for a busy
+  local model until the caller's own limit ran out, it sent the request anyway with half a second to answer. No node
+  call to the 9B on the owner's host has answered that fast (fastest 0.71 s, 4 to 7 Nov), so each one timed out on
+  the way and the host logged the hang-up as a 500 on `/api/chat`. In the 1.5.45 stress run two 25 s background calls
+  went out that way after 25.0 and 25.1 s behind a share's answer. All 71 of the host's `/api/chat` 500s from 4 to 7
+  Nov were node calls that hung up before an answer; most of the rest were 20 s background calls to the 27B that ran
+  out while it generated, which this does not change. Now a request the node has held is sent only while at least
+  0.5 s of its caller's limit is left (`SEND_MIN_SECONDS`); past that the caller gets `HoldExpired`, a `TimeoutError`,
+  and the host gets nothing. Verification maps it to `ModelUnavailable("deadline")`, as its other model failures. A
+  request the node never held goes as its caller sent it, whatever is left of the caller's deadline. Shell status
+  adds `not_sent`.
+- **The owner socket no longer drops a request that reuses an idle connection.** `[O]` uvicorn closes an idle
+  keep-alive connection after 5 s, and httpx keeps a pooled connection for reuse for the same 5 s. A client that
+  reused one just under 5 s idle sent its request on a connection the node was closing, and got "Server disconnected
+  without sending a response" with nothing in the node log. All 17 dropped owner-socket requests in the stress runs of
+  1.5.36 to 1.5.45 (Moments and verify_claim reads) went out 4.96 to 4.99 s after a request on the same client ended;
+  the stress harness reads Moments every 5 s. The owner socket now keeps an idle connection 75 s
+  (`uds.KEEP_ALIVE_SECONDS`), so a pooled client lets go of it first. On a bare uvicorn socket with the server's
+  keep-alive equal to the client's idle expiry, 10 of 100 reuses at just under it failed this way; with the server's
+  longer, none did.
+- **`topos-node import` reaches the node's ingestion routes.** `[O]` In 1.5.45 the default import (a ChatGPT
+  export) and `--list` sent `/ingestion/upload-local-path` and `/ingestion/local-exports`, but the node serves both
+  under `/v1`, so every import of the default source answered "Topos refused the import (http_404)". Proven on an
+  isolated scratch node on 7 Nov: the CLI's path got 404, the `/v1` path with an owner confirmation imported the
+  file. Other file sources (`/sources/{id}/ingest`) were not affected. A new test drives the command past its
+  terminal guard (terminal and prompt patched) and checks every path it sends against the app's own routes.
+- **The local model watchdog unloads only models this node uses.** `[O]` Both of its rules (unload an idle model a
+  node request is stuck behind; unload a model that grew 2 GiB past its load size) judged "idle" and "grown" from the
+  node's own requests, and the model host reports no client's requests. On 7 Nov, with scratch and bench nodes beside
+  the live one on one host, a scratch node that never used the 9B unloaded it for growth twice, and the live node
+  unloaded the 9B as idle three times in 40 s while another client used it. Node logs also counted each shared
+  recycle once per node. Now both rules act only on a model this node has sent a request to since the host loaded
+  it; a model drops out once the host no longer lists it and nothing of the node's is on it. On a one-node host,
+  Topos no longer unloads a model only another app has used, and after a restart a model the previous process left
+  loaded is the host's to evict until the node sends it a request. The shell status lists the models the watchdog
+  may unload (`local_serving.models_in_use`).
+
+## [1.5.45] — 2026-11-06
+
+### Added
+- **Local first: the node runs without an account.** `[O]` A node with no `TOPOS_KEY` used to stop at
+  startup (a prompt in a terminal, exit 2 without one), so nothing could be collected before the person
+  paired a Dialogues account in the browser. Now a missing key outside a cloud runtime means
+  **local-only mode** (`topos/local_identity.py`): the node mints its own owner id (`local:…`) and a
+  UUID Topos id on first start, the owner socket and local ingestion run as before, and no control-plane
+  client, presence loop or stamp pin is started. `topos-node status` reports `mode: local`,
+  `control_plane: local_only` and exits 0 (`paired` stays false: no account). `topos-node setup`
+  without `--connect` skips the key and account steps and ends in `done_local`; `--connect` pairs an
+  account and restarts a node that was running local-only so it reads the key.
+- **Connecting an account later keeps everything.** The first `connection_info` that reaches a
+  local-only node moves its rows to the account in one transaction: every owner column, every
+  `dataset_id` prefix, the Topos id where the control plane assigned a new one, and the raw-file
+  folders; the report lands in `engine_config.rescope_report`. After that the "never rewrite
+  `user_id`" rule applies as before.
+- **`GET /api/local/owner/rescope-report`** on the owner socket serves that report (per-table row counts,
+  renamed raw folders, whether the Topos id changed, when) or `rescope_report: null` on a node that never
+  moved; counts and flags only, no id. The install QA's connect-later check reads it instead of opening the
+  database file.
+- **`topos-node import <file> [--source …]`** puts a file that is already on this computer into Topos
+  over the owner socket (default: a ChatGPT export; `--sources` lists the file sources, `--list` the
+  exports the node finds on its own). No account and no network.
+- **The interest refresh receipt tells the open month's churn from a real change.** `[O]` On the owner's node
+  (5 Nov 2026) every hourly `interest_refresh` while the owner browsed found changes (+5 to +13 inserted, as many
+  closed) and queued a full rebuild of both share indexes, 150 to 480 s each with a 15 to 22 s write-gate hold at
+  publish. Read against the stored objects, 55 of the day's 59 renewals were the open month's interests stored again
+  with the same label, month and strength band: only the counted visits behind the content revision had moved. The
+  receipt now carries `digest_only`, the number of such renewals (absent from receipts written before it). Nothing
+  else changes: the rebuild is still queued, because the sealed member binds that revision and a release refuses a
+  member whose object moved. Whether the open month should bind its band instead is the owner's call, written up in
+  the side-session notes of 5 Nov.
+- **A share index the sweep drops for a drifted browsing interest says what moved.** `[O]` Six times in three days
+  (3 to 5 Nov 2026) the daemon sweep dropped a share's whole index at the `interest` stage, and the line said only
+  that. One drop was the clustering job rewriting every cluster placement; another followed an embedding and a
+  placement, written minutes after a build, of visits that occurred before it. The `interest` stale line is now
+  followed by one fixed word for the first drifted member (`gone`, `label`, `band`, `visits`, `content` or
+  `assessment`; `interest_index.drift_word`), and the `index_stale` event carries it as `sub`, as NR188's words are
+  carried. Attribution only in itself (the drop is DR-70's, below): the verdict is unchanged, and no word carries a
+  label, an id or a count.
+- **The owner's own word on a claim they typed answers the next check of it (owner's decision of 5 Nov 2026: "mark
+  it true, or false, or modify the truth of the claim ... then that information acts as a label that gets folded into
+  the topos' knowledge representation and can go to answer future claims").** `[O]` `[E:verify]` A new owner-class
+  type, `truth_own_claim_label`, with a `POST /api/local/truth_own_claim_label` route on the owner socket and the
+  truth door's refusal for every other caller before the payload is read: `{"statement", "label": "true"|"partly"|
+  "false", "note"?}` writes one `verified_claim` object (dimension `memory`, confidence 1.0 / 0.5 / 0.0, `created_by
+  = 'owner'`, `source: "claim_box"`, `speaker_kind: "owner"`, no source record), keyed by the normalised statement
+  (`own_claim:<sha256>`: case, spacing, quote marks and a final stop do not matter), so a second mark of the same
+  claim replaces the first; `{"statement", "label": null}` removes it; `{"statement"}` alone reads it. Owner-only with
+  no switch, as every label is (DR-49): never a shareable fact, never read by a share path, never indexed for search,
+  withheld from the table tools below the owner. `verify_claim` (v1, the `/v1/truth/verify-claim` door and the home
+  claim box) now reads these marks after the mode's aperture gate and before retrieval: a mark on the very statement
+  being checked answers it at once, with no retrieval and no model call (the `self` lane is the mark: true backs it
+  at 1.0, false contradicts it at 1.0, partly backs it at 0.5; the other lanes are empty; `_audit.judge` is
+  `owner_label`, `_audit.own_label` is `exact:<label>`), and a mark on a related claim (two shared distinctive words;
+  inside the aperture in fun mode) joins the self lane's evidence as one line the no-model judge reads with its
+  polarity ("the owner said this is not true: ..."), at most three, capped at the heuristic's 0.55 like any
+  corroboration. The answer carries the mark's stance only, never its note. Calibrate's card labels
+  (`truth_check:` keys) are not read here: the 27 Oct rule that those never feed back (`verify_v2.LABELS_AS_EVIDENCE`,
+  off) stands; these are the owner's declarations, made to be answered. Tests:
+  `tests/query/test_own_claim_label.py`. No migration.
+
+### Changed
+- The Terminal approval window says "the Topos on this computer" instead of "your existing TOPOS
+  account", and carries `HOME` and `TOPOS_UDS_PATH` into the window so a sandboxed node approves
+  against its own database.
+- **A share index whose browsing interest drifted is narrowed to its other members, not dropped (DR-70).** `[O]`
+  Behind `TOPOS_PERMISSIONS_V2_INDEX_NARROW_INTERESTS`, on by default (owner ruling of 5 Nov 2026, "Narrow on drift";
+  read only while `TOPOS_PERMISSIONS_V2_INDEX_NARROW_MEMBERS` is on): when the daemon sweep's `interest` step finds
+  interest members that are no longer the ones their build admitted, it adds exactly those members to NR188's withheld
+  set instead of failing the index. The sweep publishes the index without them, as it does for a member moved by new
+  data, the request path keeps answering from the rest, and the owed `members_narrowed` rebuild brings them back
+  re-derived. Nothing a recipient could read changes: every interest is decided again at the read's own clock, so a
+  drifted interest was already withheld at release; what changes is that the other members stay available instead of
+  waiting for the restore. On the owner's node on 5 Nov this drop took one share dark for ten minutes (seven answers
+  refused) after an embedding and a cluster placement landed for visits that occurred before the build. The `member
+  drift (interest: <word>)` line and the `index_stale` event (`sub`, `scope=member`) say which narrowing fired. Fail
+  closed as before: an error in the decision, a drift whose members cannot be told, or the switch off drops the whole
+  index. The pin is `test_interest_door.py::test_a_drifted_interest_is_withheld_and_the_undrifted_members_keep_serving`.
+
+### Fixed
+- **The Topos Facts encoders stay resident between derivation batches.** `[E:derivation]` The model cache's LRU
+  budget (3 slots) is sized for the small enrichment encoders, and every ingest chunk cycles more of them through
+  it (privacy filter, embeddings, NER, emotion, sentiment) than it holds, so the ~5 GiB Topos Facts encoders were
+  evicted and reloaded on every batch: 8 loads in 8 batches on an isolated node, 6 Nov 2026. The slot is now
+  pinned outside that budget for the run and released when the owner picks another provider or after
+  `TOPOS_FACTS_IDLE_SEC` unused (default 300 s, Ollama's own keep-alive, by a timer that does not wait for the
+  next pipeline: an idle node holds no model). The small encoders keep their full budget.
+- **The per-pack pass no longer holds SQLite's write lock across model calls.** `[E:derivation]` The job writes
+  on its own connection, outside the write gate, and committed once per record; in WAL the first write takes the
+  lock at execute time, so it was held across every extraction and verifier call of the record. The pipeline's
+  `claim_next_job` then took the gate and blocked on SQLite with every gated writer queued behind it: held 160 s
+  with waited=0, 383–3,017 s per 50-record run (5–6 Nov 2026, isolated node). The job now commits before each
+  model call; the lock is held for the write bursts only.
+- **A deferred pack batch is visible beyond one WARNING line.** `[E:derivation]` A picked Facts provider whose
+  weights could not load, or an unavailable verifier, deferred every batch with one log line each, and the app's
+  Facts extraction row showed the pick as if it were running. The job now records `{reason, at, batches}` under
+  `engine_config["derivation_last_deferral"]`, cleared by the next batch that runs, and `GET /v1/facts-llm-config`
+  returns it as `deferral`; the pipeline sees the batch as deferred (debt row, envelope), as it does the goals job.
+
+## [1.5.44] — 2026-11-05
+
+### Fixed
+- **Query work moved off the event loop now runs on the worker thread's own database connection.** `[O]` Since
+  8 Sep 2026 the query pipeline hands retrieval, the facts lanes and the session-store writes to a pool thread so the
+  loop keeps answering. The helper meant to give that thread its own handle first asked whether the work "stays on
+  the loop", a check that begins with `asyncio.get_running_loop()`; a pool thread has no loop, so there the answer was
+  always yes, and every offloaded read and write went through the event loop's connection while the loop went on
+  using it. A `sqlite3.Connection` has one transaction state, one statement cache and one last-error code. In the
+  4–5 Nov 2026 stress runs that sharing showed as a query artifact INSERT failing a constraint and holding the write
+  lock for 11.5 minutes (1.5.42), and as two session writes failing with "another row available" (1.5.43), which is
+  SQLite's SQLITE_ROW: a failing INSERT can only report it when another thread stepped a statement on the same handle
+  between the failure and the read of its error code. The worker now marks itself and resolves its own per-thread
+  connection; injected adapters (tests, harnesses) are untouched, since their work never leaves the loop. The adapter
+  bundle on a worker's handle is built once per thread.
+- **Every piece of work hopped off the event loop now runs on the worker thread's own database connection.** `[O]`
+  The fix above closed the query pipeline's hop; a sweep of the node's other 213 `asyncio.to_thread` and
+  `run_in_executor` calls found 24 more that handed the loop's connection to a worker, as an argument evaluated before
+  the hop or inside the closure the worker runs: the entity graph, graph search, graph activity, affinity recompute,
+  complexity (summary, timeline, topics, influence), pack backfill, Cypher query and tool-index routes and handlers,
+  the job-progress and disk-status routes, and the complexity-snapshot, derivation and fact-extraction enrichment
+  jobs — plus the derivation lane's first use of the derived-tables manager, which built it on the owner's handle, DDL
+  included, from a worker. Each now resolves its handle on the worker (`run_db_read` / `run_db_write` in the handlers,
+  a closure around the lane's own resolver in the routes and jobs). A test reads every hop in the package and fails on
+  a hand-off of that shape; fourteen sites are also driven against a file-backed owner connection to check which
+  handle the worker is given.
+- **A thread that does not own the node's database connection no longer runs statements on it.** `[O]`
+  `get_db_connection()` validated the owner's handle — `PRAGMA database_list`, then `SELECT 1` — from every calling
+  thread, under a lock the owner's own statements never take, so a worker asking for its own connection first touched
+  the loop's. That is the sharing the per-thread design exists to prevent, and the route by which a corrupted statement
+  cache (17 Aug 2026) could reach the owner's handle. Other threads now take the owner's handle as its owner last
+  validated it and open their own; the path check that notices a re-pointed database runs as before, from every
+  thread, and a handle nobody has described yet (one a test injected) is still read once.
+
+## [1.5.43] — 2026-11-04
+
+### Fixed
+- **A write that fails under the write gate no longer keeps SQLite's write lock.** `[O]` SQLite backs out a failed
+  statement but keeps its transaction, and in WAL a transaction that wrote keeps the write lock. The helper the query
+  session store writes through rolled back only after a stale-snapshot busy error, so any other error left that
+  thread's connection holding the lock. In a 4 Nov 2026 stress run on 1.5.42 one query artifact's INSERT failed a
+  constraint (its session foreign key, the only one it can fail; the message was not logged) and did this: every other
+  writer took the write gate and then waited out the 30 s busy timeout, job claims held the gate about 156 s each, the
+  node dropped inbound requests, and 11 of the run's 18 failed requests ended in the 11.5 minutes before the
+  transaction ended. A failed write now rolls back the transaction it opened before the error propagates; a batch the
+  caller already had open is still left to the caller. The warning names the call site and SQLite's message, which
+  names the failed constraint and no row values. Why that artifact's session row was missing is not yet known.
+
+## [1.5.42] — 2026-11-04
+
+### Changed
+- **Dashboard days can end at the owner's local midnight.** `[D]` `get_dashboard_measurements` takes an optional
+  `time_zone` (an IANA name such as `America/Los_Angeles`) and cuts every daily bucket at local midnight in that
+  zone, including 23- and 25-hour DST days and half-hour offsets. The response names the zone it actually used in
+  `time_zone`. A missing, malformed or unloadable zone keeps UTC days and reports `"UTC"`, so a client never labels
+  UTC buckets as local ones. Instants (`as_of`, `measured_since`, call times) stay UTC. With no zone, the output
+  matches 1.5.41 plus the new field.
+- **The people graph rebuilds at most once every 2 hours, and a rebuild scores only new or changed goals.** `[O] [E:entities]`
+  Every message changed the graph's input fingerprint, so the node rebuilt the whole graph whenever one arrived. On the
+  owner's node (4 Nov 2026) each rebuild took 603–1113 s and moved 0–7 of 68,794 edges, and the graph was rebuilding 26% of
+  the time (66–100% of each active hour). An automatic rebuild now waits until `TOPOS_GRAPH_REFRESH_MIN_INTERVAL_S` (7,200;
+  0 turns it off) has passed since the last one ended. The time is kept in `graph_materialization_state.last_run_at`, so a
+  restart does not start one early. A trigger inside the interval leaves the graph marked and looks again when it ends. This
+  holds the debounced refresh, the incomplete retry, the age limit, the startup check and the fill before signal derivation,
+  which reads only `entities.mention_count` from a rebuild. The owner's own rebuild is never held, and a node's first import
+  still builds its graph at once. The goal lane's all-pairs comparison was 92% of each rebuild. Its pair decisions are now
+  kept between rebuilds (`graph_goal_pair_items`, `graph_goal_pairs`: hashes of each goal's key and text, the rule and the
+  embedder, never the text), so a rebuild scores only goals that are new or changed. On a copy of the owner's node (9,877
+  goals) a rebuild after a day's 213 new goals took 75 s instead of 857 s, and the graph matched a full rebuild's. The first
+  rebuild after the upgrade fills the cache and takes as long as before (about 13 minutes). (#259)
+- **Share-index builds are about a third faster.** `[P]` A build ran the Off-limits matcher without its normalised-string
+  memory, so it normalised every token of every reading again for every row: 33 M calls and about 40% of a build's CPU on a
+  copy of the owner's node. The build now keeps the matcher's normalised strings of up to 64 characters while it runs. On the
+  copy, one 478-member share built in 130 s instead of 200 s and held the write gate 14.5 s instead of 20.5 s at publish, and
+  the published members, terms and vectors were byte-identical. The matching itself is unchanged, and so is the request
+  path. (#257)
+
+### Fixed
+- **The owner's request path survives index rebuilds and derive storms.** `[O]` After a restart the node rebuilds every share's search index (5.2, 6.8 and 6.2 minutes on the owner's node on 28 Oct 2026, 1.5.29) while derivation batches spawn graph rebuilds, and every owner frame's database read went through the loop's default thread pool, the pool those jobs fill: the doors themselves answer in milliseconds (`truth_claim_cards(500)` 8 ms, `weekly_stats` 29 ms, the calibration catalog one SELECT) but waited seconds for a worker, so the calibration screen failed ("We couldn't load your answers.") and `get_device_info` was answered from its snapshot 28 times in 30 minutes. Now (`core/owner_requests.py`): (1) a frame of an owner request type (`signal_*`, `truth_*`, `calibration_*`, `get_device_info`) runs its blocking steps (`run_db_read`/`run_db_write`, the dispatcher's off-loop handlers) on a small executor of its own that rebuilds, embedding jobs and derivation batches never use (4 workers; `TOPOS_OWNER_REQUEST_WORKERS`); (2) the share-index build yields while such a frame is being handled: between shares (the owner-change queue and the refresh loop's restore) and between batches within a share (every 32 candidates or members, and before each passage embedding), on the ungated read snapshot only, never under the write gate, at most 5 s per yield point, so a rebuild stretches around the owner's screens instead of queueing them. `device_for` logs the ML device once per component instead of once per embedding call (419 lines in 30 minutes). Kill switches `TOPOS_OWNER_REQUEST_EXECUTOR=off` and `TOPOS_OWNER_REQUEST_PACING=off`. Measured on a copy of the owner's database under a synthetic rebuild and derive storm: see the pull request. No migration.
+- **Writes no longer stall for five minutes behind the topic-cluster cleanup.** `[O]` The topic-cluster job's cleanup of
+  stale top-topic facts deleted rows on its own connection without the write gate and without committing, then waited for
+  the gate while holding SQLite's write lock. The job-queue claim holding the gate waited on that lock until it gave up,
+  about 160 s, and the next claim did the same, so every writer on the node waited about 320 s. In a 4 Nov stress run on
+  1.5.41, six requests hit their 180 s deadline in that window. The cleanup is now one delete under the write gate that
+  commits its own work. (#256)
+- **Commitments in an owner's direct messages know who they were made to.** `[O] [E:derivation]` "I'll send it after
+  lunch" names nobody. The prompt and verifier have taken the message's recipient since 6 Sep, but the ingest batch, the
+  history catch-up and the enable-offer trial never passed it, so the model wrote a placeholder counterparty that the
+  grounding check rejected and the promise never reached the ledger. Every job path now passes it, and only to the
+  commitments pack.
+  A one-person field written as a one-element list is read as the name instead of rejecting the whole assertion, and
+  diarisation labels (`Speaker 2`, `SPEAKER_00`, `spk_1`) are never a person. (#209)
+- **One unknown word no longer empties a summary answer.** `[O] [E:query]` The rare-word check dropped every candidate
+  when one word of the question appeared in no candidate and almost nowhere in the store, even when every other word was
+  matched. A person's name always looks like that, because the searchable text masks names. In a 12-question benchmark it
+  emptied 3 answers that raw search answered. An absent word now removes candidates only when it is not outnumbered by the
+  words the candidates do contain, and a lone made-up subject still does. The narrowing ledger records the kept part as
+  `absent_token_outnumbered`; the control plane relays that reason as `unrecognized` until it learns it. (#232)
+- **A restart no longer runs the interest refresh at once.** `[P]` The refresh kept its last run time in memory only, so
+  every start found it due, and on the owner's node it nearly always closes or re-inserts a few interests, which queues a
+  full rebuild of every interest grant. After a 4 Nov restart that was 306 s and 249 s of share-index rebuilds in the first
+  12 minutes, each publish holding the write gate 22–29 s. The time is now kept in `refresh-state.json`
+  (`last_interest_at`), and a restart inside the hour waits for the hour as an uninterrupted node would. A missing, future
+  or malformed time still runs it at once. (#258)
+
+## [1.5.41] — 2026-11-03
+
+### Added
+- **Topos Facts v0.1 as a Facts extraction option, off by default.** `[O] [P]` Settings → Node functions → Facts
+  extraction can now pick `topos_facts`: two published encoders (`Dialogues/topos-facts-gate-v0.1`, MIT, and
+  `Dialogues/topos-facts-reader-v0.1`, CC-BY-4.0), pinned by revision and run in process on CPU. When picked, the
+  per-pack pass and the history catch-up send every pack the classifier knows to it instead of the LLM, except
+  `aspirations.goals`, which stays on the local extraction model. Its output goes through the same parser, schema and
+  person-grounding checks as an LLM reply, the verifier still judges every assertion, and facts are stamped with
+  extractor model `topos-facts-v0.1`. If the weights cannot load, the batch defers and nothing is marked done.
+  `GET /v1/facts-llm-config` reports provider `topos_facts`, model `v0.1`, and a new `llm_model`: the LLM that still
+  serves goals and the triple pass. Every other reader of the Facts config keeps an LLM. On the 40-message synthetic
+  gold set, predicate precision is 0.81 against 0.53 for the 9B LLM, and recall is 0.45 against 0.83. The training data
+  is private, which `query.scope_head` would not accept for a routing head. The owner ruled on 3 Nov 2026 to ship it as
+  an opt-in exception. Nothing already processed is redone.
+
+### Fixed
+- **A local model whose runner keeps growing is unloaded once its current request ends, so it reloads at its load size.** The 9B runs
+  on the host's MLX runner, which keeps a prefix cache. On 3 Nov it grew from 8.4 GiB at load to 13.5 GiB (14.9 at
+  peak) in 35 minutes of stress while serving at 8,192, and the cache matched about 5 tokens per prompt. The host
+  sizes a model only when it loads it, so it kept loading the others into memory the 9B then grew into, and macOS
+  swap went from 0 to 13.5 GiB. The node's watchdog now reads the host's model sizes every 10 s. A model that has
+  grown 2 GiB past the smallest size reported for it at its context is held: new requests to it wait, the one it is
+  running finishes, and it is then unloaded. Waiting for it to go idle by itself was not enough: on the live node,
+  background work kept the 9B busy and it grew 6.9 GiB in 50 s (about 0.2 GiB per request). The decision uses only the sizes the host reports. Shell status
+  adds `recycles`, `last_recycle` and `recycle_growth_mib`. `TOPOS_LOCAL_MODEL_RECYCLE_GROWTH_MIB` sets the limit
+  (2,048), and 0 turns it off.
+- **Each local model is loaded only as large as its requests need, so the three fit together with less memory
+  free.** 1.5.40 sent every model 32,768 of context. Before a load the host predicts the model's memory at that
+  context (the 27B 16.4 GiB, llama3.2 6.1) and unloads the others when it does not fit what is free. On 3 Nov,
+  with about 2 GiB taken by another app, that was 10 evictions in a 15-minute stress run, each switch 30 to 46 s:
+  verify_claim's p95 went from 30 to 84 s and sharing answered 1 of 6. By the host's log that day (which names no
+  model, so requests were assigned by reading speed: an estimate), llama3.2's prompts never passed 1,560 tokens and
+  the 27B's 8,981. A model now starts at the first of 8,192, 16,384 or 32,768 that fits its request's
+  prompt and reply (2,048 tokens when the request does not say) and moves up only when a request needs more, never
+  down while the node runs: llama3.2 at 8,192 takes 2.9 GiB instead of 5.6. A request that needs more than 32,768
+  still keeps the larger context it asked for. `TOPOS_LOCAL_MODEL_CONTEXT_STEPS=0` serves every model at 32,768 as
+  before. Shell status adds `contexts` (each model's step) and `raised_context`.
+
+## [1.5.40] — 2026-11-03
+
+### Fixed
+- **No request waits behind an idle local model any more.** With the 27B loaded at home chat's 81,920 context, the
+  local model host served nothing else until the 27B's 30-minute keep_alive ran out. Reproduced with the node idle on
+  2 Nov: llama3.2 got no answer in 60 s, and one unload released it in 2.5 s. This was the 42 and 48 minute stalls in
+  the 1.5.38 stress runs and the `deadline_exceeded` at `model_call` on every failed verify_claim in 1.5.39's. A
+  watchdog (`topos/local_serving.py`) now unloads each loaded model no node request is using, once a node request has
+  waited 15 s for a model the host has not loaded (`TOPOS_LOCAL_MODEL_RELEASE_AFTER_S`; 0 turns it off). A model a
+  node request is generating on is never unloaded.
+- **The node moves between its local models instead of starving all but one.** The host runs one request per model at
+  a time and never swaps out a model with work queued on it. In the 3 Nov stress run, home chat and routines kept two
+  or three 27B requests queued, so verification (llama3.2) and the share writer (the 9B) waited out their deadlines:
+  verify_claim passed 7 of 18 and sharing answered 0 of 4. The node now sends one request per model at a time
+  (`TOPOS_LOCAL_MODEL_SLOTS`, default the host's `OLLAMA_NUM_PARALLEL` or 1) and holds the rest itself, the owner's and
+  answers' work first. While one of its requests has waited 3 s for a model the host has not loaded, it sends nothing
+  new to other models, so the model in the way finishes the request it is running, goes idle and is unloaded. A
+  background request waiting holds only background work. No request is held past 120 s or its caller's own deadline,
+  and the time held comes off the request's own timeout. Shell status adds `slots`, `held`, `longest_held_s`,
+  `switch_holds` and `held_s_max`.
+- **The owner's live chat goes ahead of a routine on the same local model.** In the second candidate's stress run the
+  27B served live home chat and routines from one queue, oldest first; 5 of its 11 requests were routines, and the
+  live chat waited behind them up to 120 s (home chat median 213 s for a 200 s target). Requests on one model are now
+  served by priority: the owner's own and answers first, then generation nobody watches stream (a non-streaming
+  `llm_generation`, which is how a routine's step arrives), then background work. A routine waiting for a model load
+  never holds the owner's chat. A hold for the model's own slot now lasts until the caller's own deadline (at most
+  600 s) instead of ending at 120 s, when it went to the host and queued oldest first again.
+- **One context per local model.** Every node request to the local host is now sent at one context: 32,768 on a host
+  of 32 GiB or more, which is that host's own default (`TOPOS_LOCAL_MODEL_CONTEXT`; 0 keeps each caller's own). The
+  callers asked for five sizes (81,920, 12,288, 8,192, 4,096 and none), so a model was reloaded under itself, the share
+  writer and judge even within one job. A request whose prompt needs more than 32,768 keeps the context it asked for.
+  At 32,768 the 27B takes 11.4 GiB instead of 14.7, and fits beside llama3.2 (5.6 GiB). Shell status shows both
+  under `local_serving`.
+
+## [1.5.39] — 2026-11-02
+
+### Added
+- **Any app can hold an owner grant** (DR-66). `topos-node agents add <name> --reads facts:<pack>,messages,journals`
+  enrols any name that is not a coding tool's, on a terminal, after a yes to a prompt that lists those reads. The
+  enrolment stores them in `agent_app_grants`. An app reaches only what its grant opens, and a disconnected app can
+  reconnect with a fresh yes. **An app enrolled before this release has no grant and reads nothing until it runs
+  `agents add` again.** No step in the upgrade: the table is created on first use.
+- **`message_context`**: a search match and up to 20 turns each side from its conversation (default 5), for an app whose
+  grant names `messages`, and the owner's app. Off-limits is applied by absence, as for a search.
+
+### Changed
+- **`reflection_facts` is now `pack_facts`**, limited to the packs on the app's grant, and the owner's own read covers
+  every pack that is on. The old type name answers for one release. `version` is `pack_facts/v1`.
+
+### Removed
+- **The node's app-specific code.** No special case for any app by name, and the `reflection_invitations`,
+  `reflection_conversation` and `reflection_label` doors, their routes and the reflection sweep are gone: apps compose,
+  the node serves data. The tables `reflection_candidates` and `reflection_labels` stay on disk, untouched and no longer
+  written, because they can hold the owner's own labels. A queued `reflection_sweep` job is never claimed.
+
+### Fixed
+- `[O]` `verify_claim` writes its content-free `truth verify_claim audit:` line on every exit, not only on success. A request that hits its deadline, is cancelled, gets `compute_unavailable` or errors now logs `outcome`, the last `phase` it reached (`retrieval` or `model_call`) and `phase_elapsed`. Success lines gain `outcome: ok`. No caller-visible change.
+
+## [1.5.38] — 2026-11-01
+
+### Changed
+- `[O]` Raise the default local routine allowance to 100 runs per owner and engine in a rolling 24-hour window. Operators can set a positive finite allowance with `TOPOS_ROUTINE_MAX_RUNS_PER_OWNER_24H`.
+
+### Added
+- `[O]` Explicit `TOPOS_ROUTINE_DEVELOPMENT_UNLIMITED_RUNS=true` configuration for intentional development and benchmark runs. It disables only the daily run quota; active-run exclusion, idempotency, compute admission, deadlines and delivery configuration remain enforced. The flag defaults off and applies node-wide after restart.
+- `[P]` Expose the effective routine run policy through local shell status so benchmark manifests can distinguish finite allowances from development mode.
+
+No schema migration, reprocessing, dependency, model or database/compute routing change. This release enables capacity testing; it does not claim a new capacity boundary or improved mixed-workload latency.
+
+## [1.5.37] — 2026-11-01
+
+### Fixed
+- `[O]` Bound standard claim verification to a shared 120-second default/maximum request lifetime, with shorter caller deadlines supported. Propagate cancellation and remaining time through database workers, local model startup and remote Engine calls; expired work cannot start new inference or return a late heuristic answer. Remote server-side enforcement requires an updated compute host.
+- `[O]` Bound budgeted HTTP work and native DNS resources per process, retaining capacity until actual cleanup finishes. This does not establish GPU cancellation or global provider admission; uninterruptible native DNS may still delay process exit.
+- `[O]` Include model verification in the existing permissioned-answer writer (100 seconds) and judge (60 seconds) phase ceilings. Stop further sentence judging after a provider failure, retaining fail-closed answer release and existing grant/model guards.
+
+### Added
+- `[O]` Content-free shared-answer diagnostics for fixed role, phase, outcome, HTTP status and elapsed time. No prompt, answer, exception text, token, URL or recipient identifier is added to these events; public receipt schemas are unchanged.
+
+No schema migration, reprocessing or model change. The separate shared provider-admission prototype and UI work are excluded.
+
+## [1.5.36] — 2026-11-01
+
+### Added
+- `[O]` Optional OpenTelemetry traces and metrics for node development and diagnostics, with HTTP/RPC/worker context propagation and local log correlation. Export requires explicit enablement and a destination; ordinary installs need no telemetry setup. Built-in spans exclude request contents, credentials and exception text. No schema migration, reprocessing, new log retention or automatic reporting to Dialogues.
+
+### Fixed
+- `[O]` Bound Engine HTTP execution and waiting queues, expire queued work, and retain active worker slots after caller disconnects. This is an endpoint worker budget, not a global GPU limit.
+- `[P]` Preserve explicit compute busy, unavailable and rate-limited outcomes across local/remote inference and generation. Avoid heuristic verification answers and extra generation retries on explicit overload.
+- `[O]` Record verification stage/provider timings and distinct task identities for repeated calls.
+- `[O]` Preserve the unsent outbox tail after a disconnected or cancelled send, while retaining bounded best-effort overflow behavior. Durable Offline Inbox delivery is unchanged.
+
+## [1.5.35] — 2026-11-01
+
+### Fixed
+- `[O]` Run standard claim verification on a database read worker so slow inference cannot block unrelated node requests. The worker owns its connection and privacy guard; authorization, local/remote Engine selection, and response contracts are unchanged. No migration or reprocessing.
+
+## [1.5.34] — 2026-10-31
+
+### Changed
+
+- `[P]` **`verify_claim`: fun mode is now optional, and a request that names no mode has none** (owner, 31 Oct 2026;
+  DISCLOSURE_RULES DR-64). The new default mode, `standard`, has no topic gate: no claim or fact is refused for lacking
+  a fun word or for a sensitive word, on the node's handler, the local door and the control plane's door. A caller that
+  wants the old aperture sends `"mode": "fun"`. What is still never evidence, in either mode: `owner_only` facts,
+  `calibration_` labels and anything Off-limits. The reply is still stances only, and `category` is null under `standard`.
+  `truth_prompts` and `truth_seed_fact` stay on `fun`, because what they produce is shown to the other person on a call.
+
+### Fixed
+
+- `[P]` **`verify_claim` now applies Off-limits to the facts it reads.** It read the fact store with no guard, so a fact
+  about a protected person could back a stance. Fun mode's narrow topics made that rare; it now holds in every mode.
+
+## [1.5.33] — 2026-10-31
+
+### Fixed
+- **A verify_claim answer no longer waits for its usage row.** `[O]` Since 1.5.32 both doors wrote the `mcp_request_log` row before answering, and that row takes the write gate: on the owner's node it waited 13-21 s behind other writers, so 30 s checks came back at up to 59 s. The row is now written behind the answer, one at a time and in answer order, so a held gate ties up one worker thread. A row still waiting at shutdown is lost: one call missing from the Home card.
+
+## [1.5.32] — 2026-10-30
+
+### Added
+- **Truth lane: the owner chooses how far back it checks, so it can backfill older history.** `[O]` `truth_inbound_settings` takes `window_days` (1–3650, default 7, the old fixed window). A row is owed a first check while its own time is inside the window; the lane still checks newest first, so new rows go before old ones and a wider window is worked back through at the owner's `rate_per_minute`. Before this the window was the constant `WINDOW_DAYS = 7`: turning the lane on never reached anything older than a week, and a loaded node's history stayed unchecked. A backfilled row counts in the week it is checked, not the week it was said, so a backfill run inside a week the weekly program reads raises that week's `checked`. What is owed is now read before the write gate is taken; only the in-flight check and the enqueue hold it. Measured on a migrated test database with 300,000 synthetic iMessage rows over ten years, a third of them the owner's (best of five): 27 ms at 7 days, 32 ms at a year, 71 ms at ten years; the planner walks the source's rows and sorts them whatever the window. No migration: the setting is one more field of the existing `engine_config` value.
+- **verify_claim calls appear on the Daily overview.** `[O]` Each answered `verify_claim` writes one `mcp_request_log` row (tool `verify_claim`, source the app the call names), the only record the overview's "When TOPOS was used", "Who used your TOPOS" and request history read; before this the door wrote a content-free audit line to the log and nothing the overview could count. A call relayed by the control plane's truth door (owner credential and its app allowlist) or made by the owner class is the owner's own use (`owner_self`, shown as "You"); an allowlisted local client's row names that client as the requester (`other`) beside its verified client id. Refused and failed calls write nothing, and a row that cannot be written never fails the answer. The owner door (`verify_claim_owner`) writes the same row, tool `verify_claim`, so the Home card's verify_claim count has both: its source is an optional `caller_app_id` (caller-asserted, gates nothing), else `owner-door`, so a test run of the labelled transcripts sent with `caller_app_id: "dev-transcripts"` shows as that (owner, 29 Oct 2026); an `unable` answer counts, an invalid, refused or failed one does not. Not counted here: the inbound lane's checks, which never pass a door, and the signed grant path (`permissions_v2_verify_claim`, which the grant ledger records). No migration.
+- **Daily measurements count verify_claim outcomes.** `[O]` The usage row each answered `verify_claim` (either door) writes now also stores the verdict as a nullable `verification_outcome`: `supported` true, `contradicted` false, `no_evidence` unanswerable (the older lane answer: non-conflicting support or contradiction true or false; no evidence, abstention or conflicting lanes unanswerable). `get_dashboard_measurements` gains a `verify_claim` block (population `answered_verify_claim_calls`) whose daily buckets split `count` into `true`, `false`, `unanswerable` and `unavailable`, for the Home card's result proportions. Unavailable is a row with no recorded outcome: one written before this build (never guessed or backfilled), an unknown answer shape, or `unable`, because a deadline or a failed model says nothing about the claim (owner, 29 Oct 2026). Same row, so no double counting; refused, failed and inbound-lane checks stay outside it. The column is added in place by the request log's existing write-time upgrade; a read never migrates. Reporting only: no answer changes. No migration.
+- **verify_claim: a claim is read on the day it was said, and dated only when its words name a time.** `[E:verify]` Two module switches in `verify_v2`, both on. `SAID_LOCAL_DAY`: the reader's `Conversation date:` is the day in the zone the claim was said in (`said_zone`), not the UTC day; 122 of the 123 rows below were said in the evening, so the reader had been told the next day. `DATED_BY_WORDS`: a claim keeps the reader's period only when the statement, or the turn just before it, names a time (`names_a_time`: today, yesterday, a weekday, a month, "last week", "three days ago", a year, a date); otherwise its period is cleared and the reader's date is taken out of its text, so it is checked as of when it was said, under the same evidence cutoff (`STRICT_AS_OF`). A plan (`intention`) keeps its window. Applied after the reading is stored, so a stored reading and the lane's `claim_key` keep the reader's dates; `stages.read.as_of_said` counts the claims cleared. Why: the local reader (qwen3.5:9b-mlx) gave a one-day period on the conversation day to 30 of 34 development yes rows whose words name no time (the hosted 70B, 2 to 5 of 34), and the period rule then refused the records, weeks older, that showed the claim. Measured 29 Oct 2026 on a copy of the owner's database, the 123 labelled rows of one recorded call, local model, both switches off then both on: yes rows backed, from 1 of 50 to 17 of 50; no rows wrongly backed, from 2 of 65 to 10 of 65 (the hosted 70B on 23 Oct: 20 of 50 and 14 of 65). 13 of the 17 yes gains and 7 of the 8 no gains are rows whose claim was cleared; with both on, 5 of the 10 wrong supports and 6 of the 17 right ones rest only on records more than 30 days older than the claim. The two switches were measured together, not apart. Off (either switch `False`): the 1.5.31 reading, the UTC day and the reader's period.
 
 ## [1.5.31] — 2026-10-28
 
@@ -52,6 +610,25 @@ The machine-readable twin of each release is
 - **verify_claim: contradictions, per category, none by default.** `[E:verify]` `[O]` For a claim whose turn falls in `verify_v2.CONTRADICTION_CATEGORIES` (empty), the judge may also label an excerpt "contradicts"; under the same two-order agreement and role/period rules as "shows", with no supporting record, the answer is `verdict: "contradicted"` and the contradicting excerpts carry `contradicts: true`. The truth lane stores it as `no_evidence`, reason `contradicted`, and a new `truth_checks.contradicted` flag (added in place; the verdict column's values do not change); cards carry `contradicted`, weekly stats count it. Callers of `verify_claim_owner` see the new verdict only for an opted-in category.
 - **verify_claim: the reader asks for no more claims than the effort checks, off by default.** `[E:verify]` With `verify_v2.LEAN_READ` on, the reader's output schema allows as many claims as the request's effort checks (one at effort low, the inbound truth lane's effort; three at high, unchanged). The reader was asked for up to three claims of eight fields each and the engine kept the first at effort low: on the owner's node a lane row's reader wrote 343 tokens for three claims and took 21.5 s against the lane's 20 s cap. Generation is greedy and left to right, so the main claim is written the same way; only the list closes sooner. Off: unchanged.
 - **Truth lane: load the local model before a check, off by default.** `[O]` With `TOPOS_VERIFY_V2_WARM_LOCAL=1`, the owner's inbound truth lane checks that its local model is loaded (`/api/ps`) before each model check and, when it is not, loads it (an empty `/api/generate`, kept 10 min) with up to 120 s, outside the row's 30 s deadline and 20 s reader cap. A load that does not finish defers the rest of the batch and stores nothing, so a model swap no longer spends one of a row's three checks. On the owner's node Ollama swaps the derivation 27B and the lane's 9B all day (a cold 9B load took 76 s, a warm reader call 9–13 s), and every row stored `unable` in the lane's first week had used all three checks. Batch counts gain `warmed`, `warm_failed` and `warm_s` while the switch is on. Off: unchanged. The hosted side is never touched. No migration.
+
+### Fixed
+- **Commitments read who an owner's direct message was sent to, on every derivation path.** `[E:derivation]` The
+  recipient label built for commitments on 6 Sep reached only the commitments lane; the ingest batch, the drip catch-up
+  and the enable-offer trial never passed it, so "I'll send it after lunch" had nobody to be promised to: the person
+  being texted is not named in the words, and a counterparty the record does not name is rejected by the grounding
+  guard. An owner-authored message in a conversation with exactly one other sender now carries that sender as its
+  recipient (the lane's existing rule); groups, other people's messages, AI chats, journals and transcripts are
+  unchanged, and a diarised voice ("Speaker 1") is never a DM partner. Only `template.RECIPIENT_LABEL_PACKS`
+  (commitments) read it: given the label, other packs bind the person being texted as the subject of facts that are
+  not about them (a thank-you read as a relationship event). The prompt, the parser's labels and the verifier's
+  addressing all go through `template.addressing_for`, the owner's backfill control included. No other person's words
+  are added to any prompt here (that is DR-62's change). `no-invalidation`: nothing already written is wrong; records
+  already read are not re-read.
+- **The fact parser takes `"person": ["<name>"]` as the name, and never takes "Speaker 2" as a person.** `[E:derivation]`
+  A one-person field written as a one-element array is unwrapped and checked like a string, where before the whole
+  assertion was rejected; two names in a one-person field are still refused. Diarisation labels (`Speaker 2`,
+  `SPEAKER_00`, `spk_1`, `Speaker A`) fail `person_field_ok`, so a transcript's name for an unidentified voice is never
+  stored as a person.
 
 ## [1.5.28] — 2026-10-26
 

@@ -325,21 +325,25 @@ async def get_entity_graph(
     from ..features.entities.reads import entity_graph
     from ..features.lifecycle.blackhole_guard import owner_ui_guard
 
-    conn = _entities_conn()
-    return await asyncio.to_thread(
-        entity_graph,
-        conn,
-        guard=owner_ui_guard(conn),
-        limit_nodes=limit_nodes,
-        limit_edges=limit_edges,
-        min_weight=min_weight,
-        include_closed=include_closed,
-        as_of=as_of,
-        selection=selection,
-        offset=offset,
-        event_after=event_after,
-        event_before=event_before,
-    )
+    def _read():
+        # Resolved on the worker, where it is used; the guard built from the
+        # handle carries that handle, so it is built there too.
+        conn = _entities_conn()
+        return entity_graph(
+            conn,
+            guard=owner_ui_guard(conn),
+            limit_nodes=limit_nodes,
+            limit_edges=limit_edges,
+            min_weight=min_weight,
+            include_closed=include_closed,
+            as_of=as_of,
+            selection=selection,
+            offset=offset,
+            event_after=event_after,
+            event_before=event_before,
+        )
+
+    return await asyncio.to_thread(_read)
 
 
 @router.post("/entities/graph/rebuild")
@@ -414,9 +418,10 @@ async def search_entity_graph(
 
     _check_tier_vector()
     service = get_signal_service()
-    conn = _entities_conn()
 
     def _run():
+        conn = _entities_conn()
+
         def search_fn(*, query, limit, event_after=None, event_before=None):
             return service.search_vectors(
                 query=query,
@@ -471,15 +476,17 @@ async def entity_graph_activity_route(
     from ..features.entities.reads import entity_graph_activity
     from ..features.lifecycle.blackhole_guard import owner_ui_guard
 
-    conn = _entities_conn()
-    return await asyncio.to_thread(
-        entity_graph_activity,
-        conn,
-        guard=owner_ui_guard(conn),
-        min_weight=min_weight,
-        since=since,
-        until=until,
-    )
+    def _read():
+        conn = _entities_conn()
+        return entity_graph_activity(
+            conn,
+            guard=owner_ui_guard(conn),
+            min_weight=min_weight,
+            since=since,
+            until=until,
+        )
+
+    return await asyncio.to_thread(_read)
 
 
 @router.get("/entities/{entity_id}")
@@ -596,7 +603,7 @@ async def post_affinity_recompute(_api_key: str = Depends(require_api_key)):
 
     from ..features.entities.affinity_owner import recompute_affinity_now
 
-    return await asyncio.to_thread(recompute_affinity_now, _entities_conn())
+    return await asyncio.to_thread(lambda: recompute_affinity_now(_entities_conn()))
 
 
 @router.get("/affinity/pairs")
@@ -1115,19 +1122,16 @@ async def complexity_summary(
     """
     import asyncio
 
-    from ..core.state import get_db_connection
     from ..features.complexity.engine import get_complexity_summary
 
-    conn = get_db_connection()
-    if conn is None:
-        raise HTTPException(status_code=503, detail="database unavailable")
     return await asyncio.to_thread(
-        get_complexity_summary,
-        conn,
-        recompute=recompute,
-        weeks=weeks,
-        window_days=window_days,
-        half_life_days=half_life_days,
+        lambda: get_complexity_summary(
+            _entities_conn(),
+            recompute=recompute,
+            weeks=weeks,
+            window_days=window_days,
+            half_life_days=half_life_days,
+        )
     )
 
 
@@ -1139,13 +1143,11 @@ async def complexity_timeline(
 ):
     import asyncio
 
-    from ..core.state import get_db_connection
     from ..features.complexity.engine import get_shift_timeline
 
-    conn = get_db_connection()
-    if conn is None:
-        raise HTTPException(status_code=503, detail="database unavailable")
-    return await asyncio.to_thread(get_shift_timeline, conn, recompute=recompute, weeks=weeks)
+    return await asyncio.to_thread(
+        lambda: get_shift_timeline(_entities_conn(), recompute=recompute, weeks=weeks)
+    )
 
 
 @router.get("/complexity/topics/daily")
@@ -1157,13 +1159,9 @@ async def complexity_topics_daily(
     """Per-day supertopic shares — the braid's substrate (PLAN_TIMELINE_UNIFIED.md E2)."""
     import asyncio
 
-    from ..core.state import get_db_connection
     from ..features.complexity.topics_daily import topics_daily
 
-    conn = get_db_connection()
-    if conn is None:
-        raise HTTPException(status_code=503, detail="database unavailable")
-    return await asyncio.to_thread(topics_daily, conn, days=days, top=top)
+    return await asyncio.to_thread(lambda: topics_daily(_entities_conn(), days=days, top=top))
 
 
 @router.get("/complexity/influence")
@@ -1177,20 +1175,17 @@ async def complexity_influence(
 ):
     import asyncio
 
-    from ..core.state import get_db_connection
     from ..features.complexity.engine import get_influence_threads
 
-    conn = get_db_connection()
-    if conn is None:
-        raise HTTPException(status_code=503, detail="database unavailable")
     return await asyncio.to_thread(
-        get_influence_threads,
-        conn,
-        recompute=recompute,
-        weeks=weeks,
-        top_k=top_k,
-        window_days=window_days,
-        target=target,
+        lambda: get_influence_threads(
+            _entities_conn(),
+            recompute=recompute,
+            weeks=weeks,
+            top_k=top_k,
+            window_days=window_days,
+            target=target,
+        )
     )
 
 
@@ -1277,16 +1272,173 @@ async def post_pack_backfill(
     limit: int = Body(200, embed=True, ge=1, le=1000),
     _api_key: str = Depends(require_api_key),
 ):
-    """Bounded owner-initiated history backfill (lens catalog control)."""
+    """Bounded owner-initiated history backfill (lens catalog control): one batch, held open.
+
+    Refused 409 `backfill_already_running` while a confirmed run is working through its packs
+    (`backfill_runs`): a run and a single batch never share the local models. An automatic catch-up
+    run is not a reason to refuse: it is asked to stop after the record in hand and this batch waits
+    for it (`yield_to_owner`), on a worker thread."""
     import asyncio as _asyncio
 
-    from ..features.derivation.surfaces import run_pack_backfill
+    from ..features.derivation.backfill_runs import BackfillBusy, single_batch, yield_to_owner
+    from ..features.derivation.surfaces import BackfillDeferred, run_pack_backfill
 
     try:
-        stats = await _asyncio.to_thread(run_pack_backfill, _entities_conn(), pack_id, limit)
+        await _asyncio.to_thread(yield_to_owner)
+        with single_batch():
+            stats = await _asyncio.to_thread(lambda: run_pack_backfill(_entities_conn(), pack_id, limit))
+    except BackfillBusy as busy:
+        raise HTTPException(status_code=409, detail={
+            "error": busy.code, "message": "A backfill run is already working; wait for it or stop it."}) from busy
+    except BackfillDeferred as deferred:
+        # The owner picked Topos Facts and its weights cannot load: nothing was read or marked.
+        raise HTTPException(status_code=503, detail={
+            "error": deferred.code, "message": "The facts model that is picked could not load."}) from deferred
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"pack_id": pack_id, **stats}
+
+
+# --- one confirmed backfill RUN (features/derivation/backfill_runs.py) -------------------------
+# The owner's yes on a terminal (or the app) authorises a run: these packs, back to this date, this
+# batch size, one batch each or until done. The node then works through it itself; the caller follows
+# it by reading `runs/current`. Only the start is a change; the plan and the status are counts.
+
+
+def _backfill_refusal(status: int, code: str, message: str):
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse({"error": code, "message": message}, status_code=status,
+                        headers={"Cache-Control": "no-store"})
+
+
+def _confirmed_owner_socket() -> bool:
+    """The request came over the owner socket from a peer that may change things: the app, the dev
+    proxy on a node that allows it, or a confirmation the owner just gave on a terminal. The socket
+    layer's gate already asked this for the route (`owner_door_routes`: dangerous); asking again here
+    keeps a run's start closed over TCP, where that gate does not run, and with the split flag off."""
+    from ..uds import current_socket_peer, current_transport, peer_may_change
+
+    peer = current_socket_peer()
+    return current_transport() == "uds" and peer is not None and peer_may_change(peer)
+
+
+@router.get("/derivation/backfill/plan")
+async def get_backfill_plan(
+    pack_id: list[str] = Query(default=[]),
+    since: Optional[str] = Query(default=None, max_length=10),
+    _api_key: str = Depends(require_api_key),
+):
+    """What a backfill of these packs would do: records waiting per pack (dated `since` or later,
+    when given), counted with each pack's own role gate and prefilter over the window a backfill
+    walks, and the model that would read each pack. Counts and model names; nothing runs."""
+    import asyncio as _asyncio
+
+    from ..features.derivation import backfill_runs as runs
+
+    asked = [str(p) for p in pack_id][:500]
+    try:
+        return await _asyncio.to_thread(lambda: runs.backfill_plan(_entities_conn(), asked, since))
+    except runs.BackfillRefused as refused:
+        return _backfill_refusal(400, refused.code, str(refused))
+
+
+@router.post("/derivation/backfill/runs")
+async def post_backfill_run(
+    body: Dict[str, Any] = Body(...),
+    _api_key: str = Depends(require_api_key),
+):
+    """Start the one backfill run: `{pack_ids: [...], limit: 1..1000, until_done: bool, since: "YYYY-MM-DD"|null}`.
+
+    202 with the run's snapshot. 403 `owner_confirmation_required` unless the caller is the app or
+    presents the owner's confirmation on the socket; 409 `backfill_already_running` while a run or a
+    single batch is in flight; 404 `unknown_pack` / 409 `pack_not_enabled` / 400 for a plan that
+    cannot run. Nothing in the body can widen a run that is already going."""
+    import asyncio as _asyncio
+
+    from ..features.derivation import backfill_runs as runs
+    from ..uds import OWNER_CONFIRMATION_MESSAGE
+
+    if not _confirmed_owner_socket():
+        return _backfill_refusal(403, "owner_confirmation_required", OWNER_CONFIRMATION_MESSAGE)
+    if not isinstance(body, dict) or set(body) - {"pack_ids", "limit", "until_done", "since"} \
+            or not isinstance(body.get("until_done", False), bool):
+        return _backfill_refusal(400, "backfill_plan_invalid", "body is {pack_ids, limit, until_done, since}")
+    limit = body.get("limit", runs.DEFAULT_BATCH_LIMIT)
+    try:
+        since = runs.validate_since(body.get("since"))
+        ordered = await _asyncio.to_thread(
+            lambda: runs.validate_plan(_entities_conn(), body.get("pack_ids"), limit))
+        run = runs.start_run(ordered, limit, bool(body.get("until_done", False)), since=since)
+    except runs.BackfillRefused as refused:
+        status = {"unknown_pack": 404, "pack_not_enabled": 409}.get(refused.code, 400)
+        return _backfill_refusal(status, refused.code, str(refused))
+    except runs.BackfillBusy as busy:
+        return _backfill_refusal(409, busy.code, "A backfill is already running; follow it or stop it first.")
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse({"run": run.snapshot()}, status_code=202, headers={"Cache-Control": "no-store"})
+
+
+# --- the standing switch: keep the switched-on packs current (features/derivation/auto_catchup.py) ---
+# Reading it is a read. Setting it is the owner's: it lets the node start runs by itself from then on.
+
+
+@router.get("/derivation/backfill/auto")
+async def get_backfill_auto(_api_key: str = Depends(require_api_key)):
+    """The automatic catch-up: on or off, its two periods, how the last automatic look ended and when
+    the next may start. State words, stamps and counts; nothing runs and no model is loaded."""
+    import asyncio as _asyncio
+
+    from ..features.derivation import auto_catchup as auto
+
+    return await _asyncio.to_thread(lambda: auto.describe(_entities_conn()))
+
+
+@router.put("/derivation/backfill/auto")
+async def put_backfill_auto(
+    body: Dict[str, Any] = Body(...),
+    _api_key: str = Depends(require_api_key),
+):
+    """Turn the automatic catch-up on or off: `{enabled: bool, quiet_s?: int, min_gap_s?: int}`.
+
+    403 `owner_confirmation_required` unless the caller is the app or presents the owner's confirmation
+    on the socket, for off as for on: the setting is the owner's. 400 `auto_catchup_invalid` for a body
+    that is not that. Answers the same body as the read."""
+    import asyncio as _asyncio
+
+    from ..features.derivation import auto_catchup as auto
+    from ..uds import OWNER_CONFIRMATION_MESSAGE
+
+    if not _confirmed_owner_socket():
+        return _backfill_refusal(403, "owner_confirmation_required", OWNER_CONFIRMATION_MESSAGE)
+    if not isinstance(body, dict) or set(body) - {"enabled", "quiet_s", "min_gap_s"} or "enabled" not in body:
+        return _backfill_refusal(400, auto.AutoRefused.code, "body is {enabled, quiet_s, min_gap_s}")
+    try:
+        return await _asyncio.to_thread(lambda: auto.set_switch(
+            _entities_conn(), body["enabled"], quiet_s=body.get("quiet_s"), min_gap_s=body.get("min_gap_s")))
+    except auto.AutoRefused as refused:
+        return _backfill_refusal(400, refused.code, str(refused))
+
+
+@router.get("/derivation/backfill/runs/current")
+async def get_backfill_run(_api_key: str = Depends(require_api_key)):
+    """The active run, else the last one this node process finished, else `{"run": null}`.
+    States, counts and seconds per batch (extraction and verification apart), the model that read and
+    the model that checked each pack, and stamps; no record text or ids."""
+    from ..features.derivation import backfill_runs as runs
+
+    return {"run": runs.current()}
+
+
+@router.post("/derivation/backfill/runs/current/stop")
+async def post_backfill_run_stop(_api_key: str = Depends(require_api_key)):
+    """Ask the active run to stop after the record in hand. Stopping starts nothing and unmarks
+    nothing, so it needs no confirmation; a rerun resumes from `derivation_progress`."""
+    from ..features.derivation import backfill_runs as runs
+
+    stopping = runs.stop()
+    return {"stopping": stopping is not None, "run": stopping or runs.current()}
 
 
 @router.put("/entities/communities/{community_id}/name")

@@ -166,6 +166,7 @@ CENSUS: Tuple[RouteRule, ...] = (
     _x("POST", "/api/local/truth_weekly_stats", "dispatcher: truth_weekly_stats (a read of counts; owner class only)"),
     _x("POST", "/api/local/truth_claim_cards", "dispatcher: truth_claim_cards (a read; owner class only)"),
     _x("POST", "/api/local/truth_claim_label", "dispatcher: truth_claim_label is in DANGEROUS_TYPES (owner class only)"),
+    _x("POST", "/api/local/truth_own_claim_label", "dispatcher: truth_own_claim_label is in DANGEROUS_TYPES (owner class only)"),
     # connected_apps.py — through the dispatcher (mcp_client_* types; enroll/revoke/decide/revoke_elevation are dangerous there)
     _x("POST", "/v1/signal/connected-apps/elevations/decide", "dispatcher: mcp_client_decide_elevation"),
     _x("POST", "/v1/signal/connected-apps/elevations/request", "dispatcher: mcp_client_request_elevation (a third party's request)"),
@@ -188,6 +189,8 @@ CENSUS: Tuple[RouteRule, ...] = (
     _o("POST", "/sources/{source_id}/contacts/auto-resolve", "contact-name curation; no share, grant or delete"),
     _o("PUT", "/sources/{source_id}/contacts/{contact_id}", "contact-name curation; no share, grant or delete"),
     _d("POST", "/sources/{source_id}/ingest", "writes records under the owner's name: a planting door"),
+    # api/local_pushers.py — the extension reaches this over TCP with its own key; on the owner socket it is the same door
+    _d("POST", "/sources/{source_id}/ingest/batch", "writes a batch of records under the owner's name: a planting door"),
     _d("PUT", "/sources/{source_id}/settings", "sync_schedule and proof_standing are changes; enabled/posture/exclude_spam pass",
        _settings_keys_open),
     _d("POST", "/sources/{source_id}/sync", "source_sync of a non-transcript source (Q3: needs a confirmation)"),
@@ -310,6 +313,15 @@ CENSUS: Tuple[RouteRule, ...] = (
     _d("POST", "/v1/signal/derivation/offers/resolve", "signal: derivation pack offers"),
     _d("PUT", "/v1/signal/derivation/packs/{pack_id}", "signal: derivation pack configuration"),
     _d("POST", "/v1/signal/derivation/packs/{pack_id}/backfill", "signal: derivation"),
+    # One confirmed backfill RUN (features/derivation/backfill_runs.py): starting it puts hours of local-model
+    # work on the node and writes facts, so it needs the app or the owner's yes on a terminal, and the route
+    # checks the confirmed peer itself as well. Stopping one starts nothing and unmarks nothing.
+    _d("POST", "/v1/signal/derivation/backfill/runs", "signal: starts a multi-batch derivation run"),
+    _o("POST", "/v1/signal/derivation/backfill/runs/current/stop",
+       "stops the active backfill run between records; never starts one, and a rerun resumes"),
+    # The standing switch (features/derivation/auto_catchup.py): on, the node starts catch-up runs by itself
+    # from then on; off is the owner's setting to change as well. The route checks the confirmed peer itself.
+    _d("PUT", "/v1/signal/derivation/backfill/auto", "signal: the owner's switch for automatic catch-up runs"),
     _d("PUT", "/v1/signal/entities/communities/{community_id}/name", "signal: entity curation"),
     _d("POST", "/v1/signal/entities/graph/rebuild", "signal: rebuilds the entity graph"),
     _d("DELETE", "/v1/signal/entities/{entity_id}/blackhole", "signal_unblackhole_entity (Off-limits)"),
@@ -360,11 +372,12 @@ OWNER_AGENT_ROUTES: Tuple[Tuple[str, str], ...] = (
     ("GET", "/sources/{source_id}/settings"),
     ("GET", "/v1/shell/status"),
     ("GET", "/api/local/owner/scope"),
+    ("GET", "/api/local/owner/rescope-report"),
     ("GET", "/api/local/owner/sources/{source_id}"),
 )
 
 
-#: The HTTP routes an enrolled APP (``mcp_clients.APP_AGENT_TYPES``, GRANT_DECISIONS G1) may call on the socket: the
+#: The HTTP routes an enrolled APP (``mcp_clients.AppGrant``, DR-66) may call on the socket: the
 #: dispatch door alone. An app reads through message types on its own list; the coding agents' read routes (the source
 #: list, the shell status, the scope) are not its business.
 APP_AGENT_ROUTES: Tuple[Tuple[str, str], ...] = (

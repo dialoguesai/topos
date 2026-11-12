@@ -62,6 +62,12 @@ WRITER_UNRECORDED = ""
 _PRINCIPAL_OWNER_APP = "owner_app"
 _PRINCIPAL_CP_RELAY = "cp_relay"
 _PRINCIPAL_OWNER_AUTOMATION = "owner_automation"
+#: The channel ``auth.resolve_local_pusher`` mints for an enrolled local pusher
+#: (``topos/local_pushers.py``): the owner's capture app writing over loopback with
+#: its own key, the local analogue of the control plane's rule C stamp.
+_CHANNEL_LOCAL_PUSHER = "local_pusher"
+#: The two channels on which an ``owner_app`` principal names the capture app.
+_APP_NAMING_CHANNELS = frozenset({_PRINCIPAL_CP_RELAY, _CHANNEL_LOCAL_PUSHER})
 
 
 def normalize_writer_class(value: Any) -> Optional[str]:
@@ -102,18 +108,21 @@ def writer_class_for_principal(principal: Any, *, owner_class: str = WRITER_OWNE
 def writer_app_for_principal(principal: Any) -> Optional[str]:
     """The capture app an ``owner_app`` relay write came through, or None.
 
-    Only a verified relay stamp names an app: the CP signs ``client_id`` into
-    the stamp, and under rule C (``control_plane/owner_write_stamp.py``) it
-    stamps ``app_ingest`` only for the owner's own attested capture apps. A
-    socket write, an unstamped relay write and every non-owner class name none,
-    so no caller can claim an app by sending one.
+    Two channels name an app, and both verify it before this reads it: a relay
+    stamp, where the CP signs ``client_id`` in and under rule C
+    (``control_plane/owner_write_stamp.py``) stamps ``app_ingest`` only for the
+    owner's own attested capture apps; and the local pusher door
+    (``topos/local_pushers.py``), where the owner enrolled the app on a terminal
+    and its own key resolved to its row. A socket write, an unstamped relay write
+    and every non-owner class name none, so no caller can claim an app by sending
+    one.
     """
     if principal is None:
         return None
     cls = str(getattr(principal, "cls", "") or "").strip().lower()
     channel = str(getattr(principal, "channel", "") or "").strip().lower()
     app = str(getattr(principal, "client_id", "") or "").strip()
-    if cls != _PRINCIPAL_OWNER_APP or channel != _PRINCIPAL_CP_RELAY or not app:
+    if cls != _PRINCIPAL_OWNER_APP or channel not in _APP_NAMING_CHANNELS or not app:
         return None
     return app
 

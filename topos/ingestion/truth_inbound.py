@@ -12,13 +12,16 @@ imports, app ingest, voice transcripts, journal readers) calls :func:`after_rows
 rows from any other door, and a lane coming out of a pause, are picked up. A job is kind ``truth_inbound_check`` on
 the catch-up worker's lane (``job_runner._CATCHUP_KINDS``), beside the embeddings catch-up, and its payload holds
 ``[table, record_id]`` pairs only, never text. At most one is queued or running at a time; each finished batch queues
-the next.
+the next. What is owed is read before the write gate is taken (a wide window reads more rows); only the in-flight check
+and the enqueue hold it.
 
-What is owed. A row of a chosen source from the last :data:`WINDOW_DAYS` days (by its own time), with text, and no
-``truth_checks`` row yet: newest first, so turning the lane on checks the past week, and a first sync of years of
-history does not queue years of checks. A row is checked once, unless its check came back ``unable``: then the lane
-checks it again (:func:`recheck_due`, ``truth_checks.recheck_reason``) at once when the lane's model, effort or reader
-timeout is not the one that check ran with, else after :data:`RECHECK_COOLDOWN_S`; at most
+What is owed. A row of a chosen source from the last ``window_days`` days (the owner's setting, default
+:data:`WINDOW_DAYS`; by the row's own time), with text, and no ``truth_checks`` row yet: newest first, so turning the
+lane on checks the past week, and a first sync of years of history does not queue years of checks unless the owner
+widens the window to backfill it, which the lane then works through newest first at the owner's rate, behind new
+rows. A row is checked once, unless its check came back ``unable``: then the lane checks it again
+(:func:`recheck_due`, ``truth_checks.recheck_reason``) at once when the lane's model, effort or reader timeout is not
+the one that check ran with, else after :data:`RECHECK_COOLDOWN_S`; at most
 ``truth_checks.MAX_ATTEMPTS`` checks in all, never once the owner labelled it, and only while the row is still a
 chosen source's row with text (the filters new rows get, with no time window). New rows go first; re-checks fill the
 rest of a batch. A re-check replaces the row's result in place (``truth_checks.recheck``): one row per record, its
@@ -58,6 +61,7 @@ logger = logging.getLogger("topos.ingestion.truth_inbound")
 
 #: pipeline_jobs kind. A queued row outlives the build that wrote it, so the kind is never renamed.
 KIND = "truth_inbound_check"
+#: The default look-back (``config.truth_inbound.DEFAULT_WINDOW_DAYS``); the owner's ``window_days`` replaces it.
 WINDOW_DAYS = 7
 BATCH_SIZE = 50
 MAX_BATCH_SIZE = 200
@@ -139,9 +143,9 @@ def truth_source_for_definition(source_def: Any) -> Optional[str]:
 
 
 # --- discovery ------------------------------------------------------------------------------------------------------
-def _cutoff(now: datetime) -> str:
+def _cutoff(now: datetime, window_days: int = WINDOW_DAYS) -> str:
     # A date prefix compares correctly against every stored time format (Z, offset, naive).
-    return (now - timedelta(days=WINDOW_DAYS)).date().isoformat()
+    return (now - timedelta(days=window_days)).date().isoformat()
 
 
 def _chosen(sources: List[str]) -> List[Tuple[str, str, str, str, tuple]]:
@@ -164,11 +168,12 @@ def _chosen(sources: List[str]) -> List[Tuple[str, str, str, str, tuple]]:
     return out
 
 
-def owed(conn: Any, sources: List[str], limit: int, *, now: Optional[datetime] = None) -> List[List[str]]:
-    """``[table, record_id]`` pairs still to check for the chosen sources, newest first."""
+def owed(conn: Any, sources: List[str], limit: int, *, now: Optional[datetime] = None,
+         window_days: int = WINDOW_DAYS) -> List[List[str]]:
+    """``[table, record_id]`` pairs still to check for the chosen sources from the last ``window_days``, newest first."""
     from ..query.truth_checks import CHECKS_TABLE, _present
 
-    cutoff = _cutoff(now or datetime.now(timezone.utc))
+    cutoff = _cutoff(now or datetime.now(timezone.utc), window_days)
     checked = _present(conn, CHECKS_TABLE)
     found: List[Tuple[str, str, str]] = []
     for table, id_column, time_column, extra, params in _chosen(sources):
@@ -241,16 +246,20 @@ def enqueue_truth_checks(conn: Any, *, now: Optional[datetime] = None) -> Option
     if settings["model"] == "hosted" and until is not None and until > moment:
         return None
     ensure_pipeline_jobs_schema(conn)
+    in_flight = "SELECT 1 FROM pipeline_jobs WHERE kind=? AND status IN ('queued','running') LIMIT 1"
+    if conn.execute(in_flight, (KIND,)).fetchone():
+        return None
+    ensure_tables(conn)  # takes the gate only when a table or column is missing
     signature = signature_for(_chat_for(settings["model"]), settings["model"])
-    # The in-flight check and the enqueue under one hold of the (reentrant) gate: two triggers at once queue one job.
+    # Read off the gate: a backfill's window reaches years of rows. A row checked between this read and the job is
+    # skipped by the job (_prepare), so a slightly stale list costs nothing.
+    records = owed(conn, settings["sources"], BATCH_SIZE, now=moment, window_days=settings["window_days"])
+    records += recheck_due(conn, settings["sources"], signature, BATCH_SIZE - len(records), now=moment)
+    if not records:
+        return None
+    # The in-flight check again and the enqueue under one hold of the (reentrant) gate: two triggers queue one job.
     with with_db_write():
-        if conn.execute("SELECT 1 FROM pipeline_jobs WHERE kind=? AND status IN ('queued','running') LIMIT 1",
-                        (KIND,)).fetchone():
-            return None
-        ensure_tables(conn)
-        records = owed(conn, settings["sources"], BATCH_SIZE, now=moment)
-        records += recheck_due(conn, settings["sources"], signature, BATCH_SIZE - len(records), now=moment)
-        if not records:
+        if conn.execute(in_flight, (KIND,)).fetchone():
             return None
         return enqueue_job(conn, kind=KIND, payload={"records": records})
 
