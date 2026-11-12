@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **A grantee reads a topic cluster only when all its members come from sources the grant's scope covers.** `[P]`
+  On the scope `query` door, clusters were picked for a grantee by dimension label alone. A dimension spans tables
+  a scope does not (`memory` holds AI chats, coding sessions, messages and the journal), and a cluster's label is
+  written from its members' words. So a `messages:read` grantee got the label and size of a cluster built only
+  from ChatGPT and Claude Code sessions, and an AI-chats grantee one built only from iMessage. The quoted centre
+  text was already dropped; the label was not. `_load_ranked_clusters` now keeps a cluster below the owner only
+  when its `source_mix` is non-empty and inside the scope's `default_source_ids`. One outside member withholds the
+  whole cluster, and a cluster with no recorded mix is withheld. A scope that grants `topic_clusters` itself reads
+  them as before, and the owner (`owner_raw` or `owner_mode`) reads every cluster. Disclosure rule DR-75. Test:
+  `tests/query/test_topic_cluster_stays_inside_the_scope_sources.py` (its four leak cases fail without the fix).
+  Not covered: attention digests, time and availability items, and the complexity summary are also computed
+  over every record and served in summary mode.
+
 ## [1.5.50] — 2026-11-11
 
 ### Added

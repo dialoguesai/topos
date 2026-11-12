@@ -5159,8 +5159,10 @@ def _load_ranked_clusters(
     limit: int = _CLUSTER_LIMIT,
     primary_dimensions: Optional[List[str]] = None,
     disclosure_tier: str = "owner_raw",
+    manifest: Optional[ScopeResolutionManifest] = None,
+    owner_mode: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Ranked clusters with the black-hole policy applied to every exit.
+    """Ranked clusters with the black-hole policy and the scope's sources applied to every exit.
 
     Wrapped rather than filtered inline for the same reason
     `_build_summary_items` is: the loader has four return paths (two early
@@ -5168,13 +5170,60 @@ def _load_ranked_clusters(
     two call sites. One choke point here is what makes a future fifth path
     impossible to leak through.
     """
+    clusters = _load_ranked_clusters_unfiltered(
+        query_text, limit=limit, primary_dimensions=primary_dimensions
+    )
+    clusters = _clusters_inside_scope_sources(
+        clusters, manifest, disclosure_tier=disclosure_tier, owner_mode=owner_mode
+    )
     return _blackhole_policy_for_clusters(
-        _load_ranked_clusters_unfiltered(
-            query_text, limit=limit, primary_dimensions=primary_dimensions
-        ),
+        clusters,
         conn=_cluster_policy_connection(),
         disclosure_tier=disclosure_tier,
     )
+
+
+def _clusters_inside_scope_sources(
+    clusters: List[Dict[str, Any]],
+    manifest: Optional[ScopeResolutionManifest],
+    *,
+    disclosure_tier: str,
+    owner_mode: bool = False,
+) -> List[Dict[str, Any]]:
+    """For anyone but the owner, a cluster only from the sources the scope covers.
+
+    A cluster is chosen for a scope by its dimension label, and a dimension spans
+    tables the scope does not: `memory` holds AI chats, coding sessions, messages and
+    the journal alike. Its label is written from its members' words and its count is
+    theirs, so a `messages:read` grantee was handed the themes of the owner's ChatGPT
+    and Claude Code sessions, and an AI-chats grantee those of their texts. The cluster's
+    `source_mix` says which sources its members came from; it is served only when every
+    one of them is a source the scope declares (`default_source_ids`). A cluster with no
+    recorded mix cannot be shown to be inside the grant and is withheld, as a brief is.
+    A scope that grants the clusters themselves (`topic_clusters` among its tables)
+    reads them as before: the cluster is then the granted object, not a summary of
+    another scope's rows.
+    """
+    # The owner reads their own clusters across scopes at any tier: the same owner
+    # capability that lifts the derived floor in `retrieve` (`request.owner_mode`).
+    if owner_mode or str(disclosure_tier or "") == "owner_raw" or not clusters:
+        return clusters
+    if manifest is None:
+        return []
+    if "topic_clusters" in (manifest.canonical_tables or []):
+        return clusters
+    allowed = {str(s).strip() for s in (manifest.default_source_ids or []) if str(s).strip()}
+    if not allowed:
+        return []
+    kept: List[Dict[str, Any]] = []
+    for cluster in clusters:
+        mix = cluster.get("source_mix")
+        if not isinstance(mix, dict) or not mix:
+            continue
+        sources = {str(s).strip() for s, n in mix.items() if str(s).strip() and (n is None or n)}
+        if sources and sources <= allowed:
+            kept.append(cluster)
+    return kept
 
 
 def _cluster_policy_connection():
@@ -8524,6 +8573,8 @@ class DefaultSignalRetrievalAdapter:
                 query_text,
                 primary_dimensions=manifest.primary_dimensions,
                 disclosure_tier=request.disclosure_tier,
+                manifest=manifest,
+                owner_mode=bool(request.owner_mode),
             )
             if ranked_clusters:
                 touched.append("topic_clusters")
