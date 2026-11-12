@@ -53,7 +53,7 @@ from . import (answer_domain, answer_gate, answer_time, kept_stamp, owner_accoun
     switches)
 from .answer_generation import (JUDGE_UNAVAILABLE, CheckedAnswer, JudgeOutOfTime, account_words_as_asked, build_prompt,
     close_answer, judge_sentences, node_name_words, owner_name_words, owner_party_words, people_words,
-    question_lacks_permitted_anchor, sieve_answer, tense_guard_on, withhold_protected_items)
+    question_lacks_permitted_anchor, shared_context_on, sieve_answer, tense_guard_on, withhold_protected_items)
 from .answer_protocol import (ASK, FETCH, K_ANSWER, K_ANSWER_LEGACY, LEGACY_ACCEPTED_VERSION, MAX_ANSWER_CHARS,
     VERSION, AnswerPending, AskIntent, FetchIntent, NoAnswer, WRITER_KEYS, answer_bytes_cap, answer_chars_cap,
     answer_within_caps, effective_disclosure, effective_mode, parse_answer_output, records_cap, same_answer_authority)
@@ -974,6 +974,11 @@ class AnswerService:
             # before, byte for byte).
             **({"items_withheld_protected": job.items_withheld_protected}
                if switches.on(switches.ANSWER_PROTECTED_ITEM_FILTER) else {}),
+            # ANSWER_SHARED_CONTEXT: the switch was on when this receipt was written, so a prompt this job built
+            # shared one budget between its items' text. Written on every receipt while it is on, like the count
+            # above, also for a job that built no prompt (question_protected, nothing_matched, deferred); off, the
+            # receipt of before, byte for byte. A fixed word, never a length or a text.
+            **({"context_budget": "shared"} if shared_context_on() else {}),
             "model": {"tag": MODEL, "digest": MODEL_REVISION}, "template_version": job.template or answer_template(),
             "outcome": ("deferred" if deferred
                         else "answered" if checked is not None and checked.body.outcome == "answered" else "no_answer"),

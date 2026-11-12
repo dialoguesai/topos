@@ -343,6 +343,16 @@ def answer_vector_floor(env=None) -> float:
     return max(0, min(100, switches.number(switches.ANSWER_VECTOR_FLOOR, env))) / 100
 
 
+def lexical_options(env=None) -> dict:
+    """How the word lane reads a query (`search_lanes.lexical`), from the node's two switches, both off by default:
+    `SEARCH_PLURAL_FOLD` (a query word also matches its regular plural or singular) and `SEARCH_REQUEST_WORDS` (the
+    words a request is phrased with are left out). Read once per request and handed to every `rank` of it: named
+    search, batch and answers. They move which permitted members the word lane scores inside the request's window;
+    each one still passes the same `_walk`, so they never move what a grant permits."""
+    return {"plural_fold": switches.on(switches.SEARCH_PLURAL_FOLD, env),
+            "drop_request_words": switches.on(switches.SEARCH_REQUEST_WORDS, env)}
+
+
 def _fact_of_ontology_switched_off(conn, key, opaque, member, enabled) -> bool:
     """Whether a refused candidate is a fact whose ontology is not in `enabled` (the owner's switches on this read).
     Reads only the candidate's own row; anything it cannot read or name is not one, so it counts as any refusal."""
@@ -553,6 +563,7 @@ class MessageSearchRelease:
                 fill = answer_time.fill_on()
                 # GD-R: answers mode's own vector floor, read once per retrieval (25, the default, is 1.5.9's).
                 vector_floor = answer_vector_floor()
+                words = lexical_options()
                 for step in steps:
                     low, high = (lower_us, upper_us) if step is None else step.window.bounds_us(lower_us, upper_us)
                     if low > high:
@@ -561,13 +572,14 @@ class MessageSearchRelease:
                         continue
                     scored = rank(loaded, question, query_vector, limit=counted_window, spare=spare,
                                   lower_us=low, upper_us=high, precision=policy.search.release_event_time,
-                                  vector_floor=vector_floor)
+                                  vector_floor=vector_floor, **words)
                     # Lane 172: the window's other items follow the matched ones (`rank`'s `fill`), but only the
                     # matched ones count toward a step being enough, so a question with a subject still climbs the
                     # ladder or widens to where its subject is (review of topos#113, finding 1).
                     orders.append(rank(loaded, question, query_vector, limit=counted_window, spare=spare,
                                        lower_us=low, upper_us=high, precision=policy.search.release_event_time,
-                                       fill=True, vector_floor=vector_floor) if fill and step is not None else scored)
+                                       fill=True, vector_floor=vector_floor, **words)
+                                  if fill and step is not None else scored)
                     matched.append(frozenset(scored))
             deciding = _Decision(self, grant_id, verified, loaded_state)
             with with_db_write() if deciding.gated else deciding:
@@ -808,6 +820,7 @@ class MessageSearchRelease:
         # 4-5. Per query: its vector (a failure is lexical-only for that query alone), then its ranking inside P.
         from .search_lanes import within
         orders = []
+        words = lexical_options()
         for number, ((intent, _signed, _request), (lower_us, upper_us)) in enumerate(zip(parsed, bounds)):
             query_vector = None
             if within(loaded, lower_us, upper_us).vectors and loaded.model and self.embedder is not None:
@@ -818,7 +831,8 @@ class MessageSearchRelease:
             started = self._stage("embed", started, item=number)
             orders.append(rank(loaded, intent.query, query_vector, limit=candidate_limits(policy, intent.k)[0],
                                spare=candidate_limits(policy, intent.k)[1],
-                               lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time))
+                               lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time,
+                               **words))
             started = self._stage("rank", started, item=number)
         by_id = {member.opaque_id: member for member in loaded.members}
         expired()
@@ -921,7 +935,8 @@ class MessageSearchRelease:
         # 5. Rank inside P.
         counted_window, spare = candidate_limits(policy, intent.k)
         order = rank(loaded, intent.query, query_vector, limit=counted_window, spare=spare,
-                     lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time)
+                     lower_us=lower_us, upper_us=upper_us, precision=policy.search.release_event_time,
+                     **lexical_options())
         by_id = {member.opaque_id: member for member in loaded.members}
         started = self._stage("rank", started)
 
