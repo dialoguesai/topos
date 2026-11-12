@@ -1370,3 +1370,87 @@ and real-model comparison limitations remain unchanged.
 - **Deployment:** none. No node, grant, index or setting was changed.
 - **Rollback:** unset the switch (off is the word lane, the prompt and the receipt of 1.5.49); or revert the
   commit. No stored data or index format changes.
+
+
+### Regression gate — RQ-2026-11-12-SHARE-SWITCHES — before
+
+- Recorded (UTC): 2026-11-12T03:02:59.729519+00:00
+- Note: Baseline on main for #290: three off-by-default share switches (plural fold, request words, shared answer context).
+- Report: [machine-readable results](response-quality-runs/20261112T030259729519Z-RQ-2026-11-12-SHARE-SWITCHES-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | pending |
+
+### RQ-2026-11-12-SHARE-SWITCHES: what the paired gate covers for #290
+
+- The before run is on origin/main (ce1c165e), in a separate worktree; the two after runs are on the #290 branch,
+  with the three switches off as shipped and with all three set on through the environment. Same catalog, same
+  runner, same node interpreter, same web checkout, each in an isolated HOME with a throwaway database path.
+- All three runs: 717 of 717 pass, no regression, no fix. That was expected: of the twelve files the catalog selects,
+  one touches sharing (`tests/permissions_v2/test_shared_model_recovery.py`), and none exercises share search
+  ranking or the answer writer's context. So this gate shows the change breaks no catalogued contract, with the
+  switches off or on; it says nothing about answer quality on the share path.
+- The real-model companion gate was not run. It drives the home agent over frozen MCP results, so no node sharing
+  code runs in it and a before/after pair would compare identical code. No live baseline exists for the share path;
+  that lane does not exist yet. The switches ship off for this reason.
+
+### Regression gate — RQ-2026-11-12-SHARE-SWITCHES — after
+
+- Recorded (UTC): 2026-11-12T03:03:19.636027+00:00
+- Note: #290 as shipped: all three share switches off (default).
+- Report: [machine-readable results](response-quality-runs/20261112T030319636027Z-RQ-2026-11-12-SHARE-SWITCHES-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | 86 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+
+### Regression gate — RQ-2026-11-12-SHARE-SWITCHES — after
+
+- Recorded (UTC): 2026-11-12T03:03:37.449444+00:00
+- Note: #290 with all three share switches set on through the environment (not the shipped default).
+- Report: [machine-readable results](response-quality-runs/20261112T030337449444Z-RQ-2026-11-12-SHARE-SWITCHES-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 53 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 145 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | 86 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
