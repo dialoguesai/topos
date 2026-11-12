@@ -340,7 +340,10 @@ def test_list_names_a_pack_file_that_is_not_loading(cli, monkeypatch):
 
 
 def test_the_group_has_no_command_that_adds_a_pack_without_asking():
-    """`add` is the only writer, and it takes no option that could answer for the person."""
+    """`add` is the only writer, and it takes no option that could answer for the person. What it does take: the
+    file, `--check`, `--json`, the two effects the one question can also cover (`--on`, `--backfill`), the window
+    that opens that question, and the digest that binds the window to the bytes that were checked."""
     add = packs_cmd.packs_group.commands["add"]
-    assert sorted(p.name for p in add.params) == ["check", "file"]
+    assert sorted(p.name for p in add.params) == ["as_json", "check", "expected", "file", "open_terminal",
+                                                  "switch_on", "window"]
     assert not [p for p in add.params if p.name in ("yes", "force", "assume_yes")]

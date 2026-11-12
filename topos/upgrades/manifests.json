@@ -1531,7 +1531,9 @@
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "[E:derivation] [O] topos-node packs add FILE --on [--backfill 30d|all|YYYY-MM-DD] adds a pack, switches it on and starts its history run after one [y/N] on a terminal that names each effect; packs on ID and packs off ID switch a pack the same way through a new owner-socket route (PUT /v1/signal/derivation/packs/{id}/switch: owner confirmation required, refused over TCP, never switches on a pack that needs consent, and switches on an added pack only as the definition that was shown); packs try FILE runs a pack file's own eval examples on the local model through the node's admission and writes nothing; packs add --check --json reports the file, the install outcome and the prefilter's routing words. No migration and no reprocessing; nothing is added, switched on or read by the upgrade."
+      ]
     }
   ]
 }
