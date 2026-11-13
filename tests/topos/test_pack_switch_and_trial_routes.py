@@ -344,3 +344,46 @@ def test_a_trial_on_a_node_with_no_local_model_says_so(door, node, model, monkey
         look = client.get(TRY)
     assert look.status_code == 200 and look.json() == {"model": None, "available": "no", "max_examples": 20}
     assert model == []
+
+
+# ----------------------------------------------------------------------------- the older doors close the same way
+# `PUT /derivation/packs/{id}` and the single-batch `POST /derivation/packs/{id}/backfill` predate the switch above.
+# Over TCP they asked for the API key and nothing else, so any local process holding the key switched a pack on (an
+# outward one too, with `consent: true` in the body) or read history with no person asked. They now ask what the
+# switch asks. The web app's own switch is a relay message (`put_derivation_pack`), not these routes.
+@pytest.mark.parametrize("split", ["1", "0"])
+def test_the_older_switch_and_batch_are_refused_without_a_confirmed_socket_caller(door, node, monkeypatch, split):
+    monkeypatch.setenv("TOPOS_OWNER_DOOR_SPLIT", split)
+    batches = []
+    monkeypatch.setattr(surfaces, "run_pack_backfill", lambda conn, pack_id, limit, **kw: batches.append(pack_id) or {})
+    try:
+        with _tcp(door) as tcp:
+            for pack_id, body in ((SHIPPED, {"enabled": True}), (OUTWARD, {"enabled": True, "consent": True})):
+                response = tcp.put(f"{BASE}/{pack_id}", json=body)
+                assert response.status_code == 403 and response.json() == REFUSAL, pack_id
+                assert not _enabled(node.conn, pack_id)
+            surfaces.set_pack_enabled(node.conn, SHIPPED, True)
+            off = tcp.put(f"{BASE}/{SHIPPED}", json={"enabled": False})
+            assert off.status_code == 403 and _enabled(node.conn, SHIPPED), "off is the owner's too"
+            batch = tcp.post(f"{BASE}/{SHIPPED}/backfill", json={"limit": 5})
+            assert batch.status_code == 403 and batch.json() == REFUSAL
+    finally:
+        door.app.dependency_overrides.clear()
+    with door.socket() as client:
+        assert client.post(f"{BASE}/{SHIPPED}/backfill", json={"limit": 5}).status_code == 403
+        assert client.put(f"{BASE}/{SHIPPED}", json={"enabled": False}).status_code == 403
+        assert batches == [] and _enabled(node.conn, SHIPPED)
+
+
+def test_the_older_switch_and_batch_still_serve_the_owners_yes_on_the_socket(door, node, monkeypatch) -> None:
+    batches = []
+    monkeypatch.setattr(surfaces, "run_pack_backfill",
+                        lambda conn, pack_id, limit, **kw: batches.append((pack_id, limit)) or {"read": 0})
+    with door.socket() as client:
+        on = client.put(f"{BASE}/{SHIPPED}", json={"enabled": True}, headers=_yes())
+        assert on.status_code == 200, on.text
+        assert on.json() == {"pack_id": SHIPPED, "enabled": True, "consented": False}
+        assert _enabled(node.conn, SHIPPED)
+        batch = client.post(f"{BASE}/{SHIPPED}/backfill", json={"limit": 5}, headers=_yes())
+        assert batch.status_code == 200, batch.text
+        assert batches == [(SHIPPED, 5)]
