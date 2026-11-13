@@ -270,7 +270,9 @@ def _frame(msg_type, payload, req_id="req-1"):
 @pytest.mark.asyncio
 async def test_the_relay_records_a_batch_and_reads_the_summary_back(node_db):
     """The control plane's frame carries no stamp and names the signed-in owner, as its home-chat routes do."""
-    turn = record(submitted_at=NOW_MS - DAY_MS)
+    # The relay path reads the node's real clock (the summary's 30-day window is counted back from now), so the
+    # turn is dated against that clock too. Dated against NOW_MS, it fell out of the window 30 days after NOW_MS.
+    turn = record(submitted_at=turn_timings.now_ms() - DAY_MS)
     response = await dispatch_relay_message(
         _frame("record_home_chat_turn_timings", {"user_id": "owner-account", "records": [turn]}))
     assert response["status"] == "ok" and response["payload"]["stored"] == 1
@@ -361,8 +363,10 @@ def test_a_node_whose_ledger_never_ran_still_records(conn):
 def test_gc_trims_rows_the_node_recorded_more_than_the_retention_ago(conn):
     from topos.features.lifecycle.gc import apply_audit_retention
 
-    put(conn, record(submitted_at=NOW_MS - DAY_MS))
     real_now = turn_timings.now_ms()
+    # Retention counts back from the real clock, so the row that must survive is recorded a day before it, not a day
+    # before NOW_MS (which would itself pass the 90 days and be trimmed from mid-January 2027).
+    put(conn, record(submitted_at=real_now - DAY_MS), now_ms=real_now - DAY_MS)
     put(conn, record(submitted_at=real_now - 120 * DAY_MS), now_ms=real_now - 120 * DAY_MS)
     put(conn, record(submitted_at=real_now - 5 * DAY_MS), now_ms=real_now - 5 * DAY_MS)
     before = len(stored(conn))
