@@ -44,11 +44,25 @@ def _socket():
     return NodeSocket(timeout_s=600.0)
 
 
-def _file_sources() -> Dict[str, str]:
+def _bundled_file_sources() -> Dict[str, str]:
     from topos.sources.definitions import is_file_delivery
     from topos.sources.registry import REGISTRY
 
     return {sid: d.display_name for sid, d in REGISTRY.items() if is_file_delivery(d)}
+
+
+def _file_sources() -> Dict[str, str]:
+    # Runtime installs live in the running node, not this fresh CLI process's registry. With the node down, the
+    # bundled list stands in, so `--sources` still answers and an import reaches the node-down exit (4, JSON).
+    from topos.mcp_server import NodeDown, NodeRefused
+    try:
+        result = _socket().request_sync("GET", "/sources")
+    except NodeDown:
+        return _bundled_file_sources()
+    except NodeRefused as exc:
+        raise click.ClickException(f"Topos refused the source list ({exc.code or exc.status}).") from None
+    return {d["source_id"]: d.get("display_name") or d["source_id"] for d in result.get("sources", [])
+            if d.get("delivery") == "owner_upload" or (not d.get("delivery") and d.get("source_type") == "file")}
 
 
 def _emit(doc: Dict[str, Any], *, as_json: bool, lines: list[str]) -> None:

@@ -9,7 +9,19 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **A pack is switched, and its history read, only with the owner's yes, over every local door.** `[E:derivation]` `[O]`
+  `PUT /v1/signal/derivation/packs/{id}` and the single-batch `POST /v1/signal/derivation/packs/{id}/backfill`
+  asked a TCP caller for the API key and nothing else, so a local process holding the key could switch a pack on
+  or off (an outward one too, by sending `consent: true`) or read history with no person asked. Both now answer
+  only the owner socket, from a peer that may change things (the app, or a yes the owner just gave on a
+  terminal), as `packs on`/`off` and a run's start already did; anything else gets 403
+  `owner_confirmation_required`. The web app's switch and backfill are relay messages and are unchanged.
+
+## [1.5.54] — 2026-11-12
+
 ### Added
+- **A private source from your own JSON, JSONL or CSV file, with no account or developer key.** `[O]` `sources infer` drafts a definition from a sample, `sources add --check` validates it, `sources add --open-terminal` asks the owner once in a Terminal window, and `sources inspect` shows what was installed. See `docs/private-sources.md`.
 - **A fact pack goes from a drafted file to reading your records with one yes: `topos-node packs add FILE --on --backfill 30d`.** `[E:derivation]` `[O]`
   Until now a pack you added could only be switched on in the app, which needs a Dialogues account, and reading
   its history was a second command with a second question. Now one question names every effect (the pack is
@@ -40,15 +52,6 @@ The machine-readable twin of each release is
     word of the pack's own gold examples. An everyday word there ("every", "today") sends most of your records
     to the model. The list is the engine's own, so a drafter can see it and reword. It counts none of your
     records.
-
-### Fixed
-- **A pack is switched, and its history read, only with the owner's yes, over every local door.** `[E:derivation]` `[O]`
-  `PUT /v1/signal/derivation/packs/{id}` and the single-batch `POST /v1/signal/derivation/packs/{id}/backfill`
-  asked a TCP caller for the API key and nothing else, so a local process holding the key could switch a pack on
-  or off (an outward one too, by sending `consent: true`) or read history with no person asked. Both now answer
-  only the owner socket, from a peer that may change things (the app, or a yes the owner just gave on a
-  terminal), as `packs on`/`off` and a run's start already did; anything else gets 403
-  `owner_confirmation_required`. The web app's switch and backfill are relay messages and are unchanged.
 
 ## [1.5.53] — 2026-11-12
 

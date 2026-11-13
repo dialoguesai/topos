@@ -27,6 +27,8 @@ def db(tmp_path, monkeypatch) -> Path:
     path = tmp_path / "node.db"
     sqlite3.connect(str(path)).close()
     monkeypatch.setattr(pushers_cmd, "_database_path", lambda: path)
+    from topos.sources.registry import REGISTRY
+    monkeypatch.setattr(pushers_cmd, "_source_registry", lambda: REGISTRY)
     return path
 
 
@@ -137,3 +139,18 @@ def test_a_disconnected_app_re_enrols_on_a_fresh_yes_with_a_new_key(db, monkeypa
     second = json.loads(_run(ADD + ["--json"], input_text="y\n").stdout)["key"]
     assert first != second
     assert _verify(db, first) is None and _verify(db, second) is not None
+
+
+def test_add_before_topos_has_started_still_checks_bundled_sources(tmp_path, monkeypatch):
+    """An installer may enrol a pusher before the node runs. A stopped node means only bundled sources can be
+    named; it must not refuse the command outright."""
+    from topos.mcp_server import NodeDown
+
+    class _Down:
+        def request_sync(self, *a, **k):
+            raise NodeDown("down")
+
+    import topos.mcp_server as mcp_server
+    monkeypatch.setattr(mcp_server, "NodeSocket", lambda *a, **k: _Down())
+    from topos.sources.registry import REGISTRY
+    assert pushers_cmd._source_registry() is REGISTRY

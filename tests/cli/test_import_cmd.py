@@ -171,3 +171,18 @@ def test_every_path_the_command_sends_is_a_route_the_node_serves(cli):
 def test_the_route_check_would_have_caught_1545():
     assert not _served("POST", "/ingestion/upload-local-path")
     assert not _served("GET", "/ingestion/local-exports")
+
+
+def test_with_the_node_down_the_source_list_falls_back_and_the_import_exits_4_in_json(monkeypatch, tmp_path):
+    """Reading the node's source list must not turn a stopped node into a plain-text exit 1: the bundled file
+    sources stand in, and the import itself reports the node down as before (JSON, exit 4)."""
+    down = _Socket({("GET", "/sources"): NodeDown("down"), ("GET", "/api/local/owner/scope"): NodeDown("down")})
+    monkeypatch.setattr(import_cmd, "_socket", lambda: down)
+    sources = import_cmd._file_sources()
+    assert import_cmd.CHATGPT_SOURCE in sources
+    monkeypatch.setattr(import_cmd, "sys", SimpleNamespace(stdin=_Stream(True), stdout=_Stream(True), exit=sys.exit))
+    export = tmp_path / "conversations.json"
+    export.write_text("[]", encoding="utf-8")
+    result = CliRunner().invoke(import_cmd.import_command, [str(export), "--json"], catch_exceptions=False)
+    assert result.exit_code == import_cmd.EXIT_NODE_DOWN
+    assert json.loads(result.output)

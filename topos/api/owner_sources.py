@@ -520,3 +520,125 @@ async def sync(source_id: str, payload: Optional[dict] = Body(None), principal=D
          "already_running": bool(outcome.get("already_running"))},
         headers=_NO_STORE,
     )
+
+
+@router.post("/sources/prepare")
+async def prepare_private_source(payload: dict = Body(...), principal=Depends(resolve_request_principal)):
+    """Validate supplied data without installing, reading files, or contacting a registry."""
+    _owner(principal, reads=True)
+    try:
+        result, _scope = await _private_source_plan(payload)
+    except (ValueError, TypeError, KeyError) as exc:
+        # Validation is a successful read with diagnostics about the caller's supplied definition.
+        # Keep these separate from transport/auth refusals, whose bodies the CLI never prints.
+        return JSONResponse({"status": "invalid", "errors": [str(exc)]}, headers=_NO_STORE)
+    return JSONResponse(result, headers=_NO_STORE)
+
+
+@router.get("/private-sources/{source_id}")
+async def private_source_status(source_id: str, principal=Depends(resolve_request_principal)):
+    """Read this node's persisted definition; callers cannot select another owner's scope."""
+    _owner(principal, reads=True)
+    from topos.sources.local_create import ID_RE
+    from topos.sources.install_service import list_installs, _list_user_tables, INSTALL_TABLE
+    from topos.ingestion.ai_tool_sync import resolve_owner_scope
+
+    if not ID_RE.fullmatch(source_id):
+        raise HTTPException(400, "Invalid source id", headers=_NO_STORE)
+    def read():
+        conn = _conn()
+        scope = resolve_owner_scope(conn)
+        if not scope:
+            raise HTTPException(409, "Topos has no local identity yet", headers=_NO_STORE)
+        if INSTALL_TABLE not in _list_user_tables(conn):
+            return []
+        return [row.to_dict() for row in list_installs(scope=scope, source_id=source_id, initialize_schema=False) if row.is_active]
+    active = await asyncio.to_thread(read)
+    return JSONResponse({"source_id": source_id, "installed": bool(active), "installs": active}, headers=_NO_STORE)
+
+
+async def _private_source_plan(payload):
+    from topos.sources.local_create import prepare, digest
+    from topos.ingestion.ai_tool_sync import resolve_owner_scope
+
+    plan = await prepare(payload)
+    def scope_and_tables():
+        from topos.sources.install_service import _list_user_tables
+        from topos.sources.registry import REGISTRY
+        conn = _conn()
+        current = REGISTRY.get(plan["source_id"])
+        owned = {t.get("table_id") for t in (current.tables or [])} if current else set()
+        requested = {t["table_id"] for t in plan["source_definition_json"].get("tables") or []}
+        if (requested - owned) & set(_list_user_tables(conn)):
+            raise ValueError("A requested data table already exists; choose a new source/table name")
+        return resolve_owner_scope(conn)
+    scope = await asyncio.to_thread(scope_and_tables)
+    if not scope:
+        raise ValueError("Topos has no local identity yet; start it before adding a source")
+    plan["target"] = {key: scope[key] for key in ("user_id", "topos_id", "dataset_id")}
+    plan["plan_sha256"] = digest({"content": plan["plan_sha256"], "target": plan["target"]})
+    return plan, scope
+
+
+# Serialise this create-only workflow through install and optional import. The install service also
+# holds its own lock, shared with the existing install doors, while checking for an existing definition.
+_private_source_lock = asyncio.Lock()
+
+
+@router.post("/sources/install-private")
+async def install_private_source(payload: dict = Body(...), principal=Depends(resolve_request_principal)):
+    """One owner-approved local definition, optionally followed by a bounded sample import.
+
+    No registry publication, cloud key, caller-selected identity, or automatic producer enrollment.
+    A failed import leaves the installed definition in place and reports both stages explicitly.
+    """
+    _owner(principal)
+    if not _confirmed_owner_socket():
+        raise HTTPException(403, "owner_confirmation_required", headers=_NO_STORE)
+    from dataclasses import asdict
+    from topos.sources import install_service
+    from topos.sources.registry import REGISTRY
+    from topos.sources.local_create import digest, sample_format
+
+    async with _private_source_lock:
+        try:
+            plan, scope = await _private_source_plan(payload)
+            if payload.get("plan_sha256") != plan["plan_sha256"]:
+                raise ValueError("Plan changed; prepare it again before approval")
+            definition = plan["source_definition_json"]
+            sample = payload.get("sample")
+            if sample is not None and definition["source_type"] != "file":
+                raise ValueError("Install stream definitions without --sample; enroll the producer separately")
+            def install():
+                with install_service._LOCK:
+                    # Never turn creation into an implicit replacement of an existing source.
+                    current = REGISTRY.get(definition["source_id"])
+                    if current is not None and digest(asdict(current)) != plan["definition_sha256"]:
+                        raise ValueError("source_id already exists with a different definition; choose a new id")
+                    return install_service.install_source(source_definition_json=definition, scope=scope)
+            installed = await asyncio.to_thread(install)
+        except (ValueError, TypeError, KeyError) as exc:
+            raise HTTPException(400, str(exc), headers=_NO_STORE) from None
+        receipt = {"status": "installed", "registered": False, "installed": True,
+                   "source_id": installed.source_id, "install_id": installed.install_id,
+                   "definition_sha256": plan["definition_sha256"], "plan_sha256": plan["plan_sha256"],
+                   "sample_import": None, "warnings": plan["warnings"]}
+        if sample is not None:
+            from topos.ingestion.ingest_helpers import ingest_file_payload
+            from topos.features.provenance.writer_class import WRITER_OWNER_IMPORT
+            try:
+                result = await ingest_file_payload(dataset_id=scope["dataset_id"],
+                    schema_id=definition["schema_id"], source_id=installed.source_id,
+                    file_bytes=sample["content"].encode("utf-8"),
+                    file_format=sample_format(sample["file_name"]), writer_class=WRITER_OWNER_IMPORT)
+                count = int(result.get("records_processed") or 0)
+                errors = int(result.get("errors_count") or 0)
+                ok = result.get("status") == "ok" and count > 0 and errors == 0
+                receipt["sample_import"] = {"status": "ingested" if ok else "failed",
+                    "records_processed": count, "errors_count": errors, "job_id": result.get("job_id")}
+                receipt["status"] = "ingested" if ok else "import_failed"
+            except Exception as exc:  # Definition was committed; never hide that partial success or echo sample data.
+                logger.warning("Private source sample import failed: %s", type(exc).__name__)
+                receipt["status"] = "import_failed"
+                receipt["sample_import"] = {"status": "failed", "error": "sample_import_failed"}
+        return JSONResponse(receipt, headers=_NO_STORE)
