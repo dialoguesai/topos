@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.55] — 2026-11-13
+
 ### Added
 - **An app can hold an owner grant: `topos-node agents add <app> --reads everything`.** `[O]` (DR-76)
   The app then reads what a coding tool connected to this Topos reads: a search of every kind of record (not
