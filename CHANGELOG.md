@@ -9,6 +9,16 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **An app can hold an owner grant: `topos-node agents add <app> --reads everything`.** `[O]` (DR-76)
+  The app then reads what a coding tool connected to this Topos reads: a search of every kind of record (not
+  only messages and journals), counts and sources. On top of that it reads the facts of every pack you switch
+  on and the turns around a message. Off-limits people and sensitive kinds stay held back, as they do from a
+  coding tool. Nothing else changes: the app is enrolled on your terminal after a yes to a question that says
+  all this, it reaches only the dispatch door on the owner socket, every read is recorded under its name, and it
+  writes nothing unless you also give it `--feedback`. A grant stored before this release reads what it did.
+  `topos-node agents add <app> --reads ...` with narrower words, or `agents disconnect <app>`, takes it back.
+
 ## [1.5.54] — 2026-11-12
 
 ### Added

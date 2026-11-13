@@ -1550,7 +1550,9 @@
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "[O] DR-76: topos-node agents add <app> --reads everything gives an app an owner grant: a coding agent's reads (query of any scope, aggregate, get_sources) plus pack_facts for every pack and message_context, on the dispatch door only; Off-limits and sensitive kinds held back as from a coding agent. Stored as everything: true on the app's grant row; a stored row without it reads what it did. No migration and no reprocessing."
+      ]
     }
   ]
 }
