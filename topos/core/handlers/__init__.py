@@ -373,7 +373,7 @@ def _app_query_in_bounds(principal: Any, payload: Any) -> bool:
     can carry another scope, so an app's query has none. A coding agent's query is not narrowed here."""
     from ...mcp_clients import app_agent_of, app_grant_of
 
-    if not app_agent_of(principal):
+    if not app_agent_of(principal) or app_grant_of(principal).everything:   # an owner grant queries as a coding agent
         return True
     return isinstance(payload, dict) and not payload.get("manifest") and payload.get("access_mode") == "raw" \
         and payload.get("scope_id") in app_grant_of(principal).scopes

@@ -9,6 +9,27 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.55] — 2026-11-13
+
+### Added
+- **An app can hold an owner grant: `topos-node agents add <app> --reads everything`.** `[O]` (DR-76)
+  The app then reads what a coding tool connected to this Topos reads: a search of every kind of record (not
+  only messages and journals), counts and sources. On top of that it reads the facts of every pack you switch
+  on and the turns around a message. Off-limits people and sensitive kinds stay held back, as they do from a
+  coding tool. Nothing else changes: the app is enrolled on your terminal after a yes to a question that says
+  all this, it reaches only the dispatch door on the owner socket, every read is recorded under its name, and it
+  writes nothing unless you also give it `--feedback`. A grant stored before this release reads what it did.
+  `topos-node agents add <app> --reads ...` with narrower words, or `agents disconnect <app>`, takes it back.
+
+### Fixed
+- **A pack is switched, and its history read, only with the owner's yes, over every local door.** `[E:derivation]` `[O]`
+  `PUT /v1/signal/derivation/packs/{id}` and the single-batch `POST /v1/signal/derivation/packs/{id}/backfill`
+  asked a TCP caller for the API key and nothing else, so a local process holding the key could switch a pack on
+  or off (an outward one too, by sending `consent: true`) or read history with no person asked. Both now answer
+  only the owner socket, from a peer that may change things (the app, or a yes the owner just gave on a
+  terminal), as `packs on`/`off` and a run's start already did; anything else gets 403
+  `owner_confirmation_required`. The web app's switch and backfill are relay messages and are unchanged.
+
 ## [1.5.54] — 2026-11-12
 
 ### Added

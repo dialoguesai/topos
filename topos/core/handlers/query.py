@@ -681,7 +681,7 @@ async def handle_pack_facts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
     from ...query.pack_facts import PackFactsRequestError, parse_request, read
     from .common import run_db_read
 
-    granted = app_grant_of(principal).packs if reader == "agent" else None
+    granted = app_grant_of(principal).granted_packs() if reader == "agent" else None
     try:
         request = parse_request(message.get("payload"), granted)
     except PackFactsRequestError as exc:
@@ -740,8 +740,8 @@ async def handle_fact_feedback(message: Dict[str, Any]) -> Optional[Dict[str, An
     def run(conn: Any) -> Dict[str, Any]:
         from ...features.lifecycle.blackhole_guard import guard_from_message
 
-        return record(conn, request, app=app, guard=guard_from_message(conn, message), granted=grant.packs,
-                      feedback=grant.feedback)
+        return record(conn, request, app=app, guard=guard_from_message(conn, message),
+                      granted=grant.feedback if grant.everything else grant.packs, feedback=grant.feedback)
 
     try:
         result = await run_db_write(run)

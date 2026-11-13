@@ -68,13 +68,24 @@ APP_READ_SCOPES: Dict[str, str] = {"messages": "messages:read", "journals": "hea
 #: How the approval prompt says each scope.
 APP_READ_PLAIN: Dict[str, str] = {"messages:read": "your messages and the turns around them",
                                   "health:read": "your journals and mood signals"}
+#: The ``--reads`` word for an owner grant (DR-76): the app reads what a coding agent reads, plus every pack's facts and
+#: the turns around a message. Off-limits and special-class content stay held back, as they are from a coding agent.
+APP_READ_EVERYTHING = "everything"
+#: A coding agent's three reads (``core.handlers.OWNER_AGENT_ALLOWED_TYPES``; a test holds the two equal). Named here
+#: because that module imports this one.
+CODING_AGENT_READS = frozenset({"query", "aggregate", "get_sources"})
+APP_EVERYTHING_PLAIN = ("everything a coding tool can read: a search of every kind of record you have (messages, "
+                        "journals, AI chats, calendar, places, activity and the rest), counts and sources, the facts of "
+                        "every pack you switch on, and the turns around a message; Off-limits people and sensitive kinds "
+                        "stay held back")
 
 
 @dataclass(frozen=True)
 class AppGrant:
     """What the owner let one app read (DISCLOSURE_RULES DR-66), stored on its enrolment and shown on the approval
-    prompt. An app is not a coding agent: it never reaches the coding agents' ``aggregate`` and ``get_sources``, and on
-    the socket it reaches the dispatch door alone (``owner_door_routes.APP_AGENT_ROUTES``). No grant reads nothing.
+    prompt. An app is not a coding agent: unless the owner gave it ``everything`` (DR-76) it never reaches the coding
+    agents' ``aggregate`` and ``get_sources``, and on the socket it reaches the dispatch door alone, whatever its grant
+    (``owner_door_routes.APP_AGENT_ROUTES``). No grant reads nothing.
 
     ``feedback`` is the one thing an app may write, and it is a grant of its own (DR-72): the packs on whose facts it
     may record the owner's reaction and rank (``query/fact_feedback.py``). It is given with ``--feedback`` and never by
@@ -84,9 +95,20 @@ class AppGrant:
     packs: Tuple[str, ...] = ()
     scopes: Tuple[str, ...] = ()
     feedback: Tuple[str, ...] = ()
+    #: An owner grant (DR-76, ``--reads everything``): every scope and every pack, as a coding agent plus the app reads.
+    everything: bool = False
+
+    def reads_pack(self, pack: str) -> bool:
+        return self.everything or pack in self.packs
+
+    def granted_packs(self) -> Optional[Tuple[str, ...]]:
+        """The packs a read is held to, or None for an owner grant (every pack the owner switched on)."""
+        return None if self.everything else self.packs
 
     def message_types(self) -> frozenset:
         types = set()
+        if self.everything:
+            types |= CODING_AGENT_READS | {"pack_facts", "reflection_facts", "message_context"}
         if self.packs:
             types |= {"pack_facts", "reflection_facts"}  # the old name, for one release
         if self.scopes:
@@ -102,7 +124,8 @@ class AppGrant:
     def words(self) -> List[str]:
         """The ``--reads`` words that make this grant."""
         by_scope = {scope: word for word, scope in APP_READ_SCOPES.items()}
-        return [f"facts:{pack}" for pack in self.packs] + [by_scope[scope] for scope in self.scopes if scope in by_scope]
+        return ([APP_READ_EVERYTHING] if self.everything else []) + [f"facts:{pack}" for pack in self.packs] \
+            + [by_scope[scope] for scope in self.scopes if scope in by_scope]
 
     def feedback_words(self) -> List[str]:
         """The ``--feedback`` words that make this grant."""
@@ -110,6 +133,8 @@ class AppGrant:
 
     def plain(self) -> str:
         """The grant in words for the approval prompt."""
+        if self.everything:
+            return APP_EVERYTHING_PLAIN
         parts = [f"facts from {', '.join(self.packs)}"] if self.packs else []
         return "; ".join(parts + [APP_READ_PLAIN.get(scope, scope) for scope in self.scopes])
 
@@ -122,18 +147,22 @@ NO_GRANT = AppGrant()
 
 
 def parse_app_reads(words: Iterable[str]) -> AppGrant:
-    """``facts:<pack>``, ``messages`` and ``journals`` -> the grant, or ValueError naming the word it does not take."""
+    """``facts:<pack>``, ``messages``, ``journals`` and ``everything`` -> the grant, or ValueError naming the word it does
+    not take."""
     packs: List[str] = []
     scopes: List[str] = []
+    everything = False
     for raw in words:
         word = str(raw or "").strip()
-        if word.startswith("facts:") and word[len("facts:"):].strip():
+        if word == APP_READ_EVERYTHING:
+            everything = True
+        elif word.startswith("facts:") and word[len("facts:"):].strip():
             packs.append(word[len("facts:"):].strip())
         elif word in APP_READ_SCOPES:
             scopes.append(APP_READ_SCOPES[word])
         else:
-            raise ValueError(f"unknown read {word!r}; use facts:<pack>, {', '.join(APP_READ_SCOPES)}")
-    return AppGrant(tuple(dict.fromkeys(packs)), tuple(dict.fromkeys(scopes)))
+            raise ValueError(f"unknown read {word!r}; use facts:<pack>, {', '.join(APP_READ_SCOPES)}, {APP_READ_EVERYTHING}")
+    return AppGrant(tuple(dict.fromkeys(packs)), tuple(dict.fromkeys(scopes)), everything=everything)
 
 
 def parse_app_grant(reads: Iterable[str], feedback: Iterable[str] = ()) -> AppGrant:
@@ -149,10 +178,10 @@ def parse_app_grant(reads: Iterable[str], feedback: Iterable[str] = ()) -> AppGr
         pack = word[len("facts:"):].strip() if word.startswith("facts:") else ""
         if not pack:
             raise ValueError(f"unknown feedback {word!r}; use facts:<pack>")
-        if pack not in grant.packs:
+        if not grant.reads_pack(pack):
             raise ValueError(f"feedback on {pack} needs facts:{pack} in --reads too")
         packs.append(pack)
-    return AppGrant(grant.packs, grant.scopes, tuple(dict.fromkeys(packs)))
+    return AppGrant(grant.packs, grant.scopes, tuple(dict.fromkeys(packs)), everything=grant.everything)
 
 #: Elevation ceiling (owner decision, Who's Asking §06): a consented client may
 #: reach `facts`, never `facts_all` — special-class content (health, beliefs,
@@ -330,9 +359,10 @@ def read_app_grant(conn: sqlite3.Connection, client_id: str) -> AppGrant:
         row = conn.execute(f"SELECT reads_json FROM {APP_GRANTS_TABLE} WHERE client_id = ?", (client_id,)).fetchone()
         reads = json.loads(row[0]) if row else {}
         packs = tuple(reads.get("packs") or ())
+        everything = reads.get("everything") is True   # only a stored true opens it; anything else is a narrow grant
         # A row written before feedback grants has no such key: no feedback. A pack the row does not also read is dropped.
-        feedback = tuple(pack for pack in (reads.get("feedback") or ()) if pack in packs)
-        return AppGrant(packs, tuple(reads.get("scopes") or ()), feedback)
+        feedback = tuple(pack for pack in (reads.get("feedback") or ()) if everything or pack in packs)
+        return AppGrant(packs, tuple(reads.get("scopes") or ()), feedback, everything)
     except (sqlite3.Error, ValueError, TypeError, AttributeError):
         logger.warning("app grant read failed for %r", client_id, exc_info=True)  # DB trouble must never widen a grant
         return NO_GRANT
@@ -384,7 +414,7 @@ def mint_agent_label(conn: sqlite3.Connection, *, client: str, approved: bool = 
                 ON CONFLICT(client_id) DO UPDATE SET reads_json = excluded.reads_json, granted_at = excluded.granted_at
                 """,
                 (cid, json.dumps({"packs": list(grant.packs), "scopes": list(grant.scopes),
-                                  "feedback": list(grant.feedback)}), _now()),
+                                  "feedback": list(grant.feedback), "everything": grant.everything}), _now()),
             )
         commit_connection(conn)
     row = dict(get_client(conn, cid) or {})
@@ -473,10 +503,12 @@ def apps_granted_pack(conn: sqlite3.Connection, pack_id: str) -> int:
     count = 0
     for (reads_json,) in rows:
         try:
-            packs = (json.loads(reads_json) or {}).get("packs") or ()
+            reads = json.loads(reads_json) or {}
+            packs = reads.get("packs") or ()
+            everything = reads.get("everything") is True
         except (ValueError, TypeError, AttributeError):
             continue
-        count += 1 if pack_id in packs else 0
+        count += 1 if everything or pack_id in packs else 0
     return count
 
 

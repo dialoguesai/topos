@@ -1547,6 +1547,15 @@
       ]
     },
     {
+      "version": "1.5.55",
+      "summary": "Release 1.5.55.",
+      "steps": [],
+      "notes": [
+        "[O] DR-76: topos-node agents add <app> --reads everything gives an app an owner grant: a coding agent's reads (query of any scope, aggregate, get_sources) plus pack_facts for every pack and message_context, on the dispatch door only; Off-limits and sensitive kinds held back as from a coding agent. Stored as everything: true on the app's grant row; a stored row without it reads what it did. No migration and no reprocessing.",
+        "[E:derivation] [O] PUT /v1/signal/derivation/packs/{id} and the single-batch POST /v1/signal/derivation/packs/{id}/backfill now refuse every caller but a confirmed owner-socket peer (403 owner_confirmation_required); over TCP the API key alone no longer switches a pack or reads history. Relay messages from the app are unchanged. No migration."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

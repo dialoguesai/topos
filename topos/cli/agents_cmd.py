@@ -285,7 +285,8 @@ def agents_group() -> None:
     help="Enrol on the approval `topos-node pair --add-agent` recorded (no prompt).",
 )
 @click.option("--open-terminal", is_flag=True, help="Open the approval prompt in Terminal on macOS; no command typing needed.")
-@click.option("--reads", default=None, help="For an app: what it may read, comma separated: facts:<pack>, messages, journals.")
+@click.option("--reads", default=None, help="For an app: what it may read, comma separated: facts:<pack>, messages, journals, "
+              "or everything (what a coding tool reads, plus every pack's facts).")
 @click.option("--feedback", default=None,
               help="For an app: the packs whose facts it may put your reaction and rank on, comma separated: "
                    "facts:<pack>. Each must also be in --reads. Off unless you give it.")
