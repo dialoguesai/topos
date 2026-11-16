@@ -426,11 +426,27 @@ def _block_is_harness(text: str) -> bool:
     return bool(_HARNESS_BLOCK_RE.match(text) or _NO_PLACEHOLDER_RE.match(text))
 
 
+_BROWSER_CONTEXT_RE = re.compile(
+    r"(?ms)^[ \t]*<in-app-browser-context(?:\s[^>]*)?>.*?</in-app-browser-context>"
+)
+
+
+def _clean_user_block(text: str) -> Tuple[str, int]:
+    # Codex Desktop appends the human request to this same input_text block.
+    # Remove only a complete ambient wrapper, never the request after it.
+    cleaned, count = _BROWSER_CONTEXT_RE.subn("", text)
+    if count:
+        cleaned = cleaned.strip()
+        cleaned = re.sub(r"^## My request:[ \t]*\n", "", cleaned).strip()
+    if _block_is_harness(cleaned):
+        return "", count + 1
+    return cleaned, count
+
+
 def _user_text(content: Any) -> Tuple[str, int]:
-    """Join the ``input_text`` blocks that are not harness blocks. Returns the
-    text and how many harness blocks were removed."""
+    """Keep human text, excluding harness blocks and embedded browser context."""
     if isinstance(content, str):
-        return ("" if _block_is_harness(content) else content, 1 if _block_is_harness(content) else 0)
+        return _clean_user_block(content)
     parts: List[str] = []
     removed = 0
     for block in content if isinstance(content, list) else []:
@@ -439,10 +455,10 @@ def _user_text(content: Any) -> Tuple[str, int]:
         text = block.get("text")
         if not isinstance(text, str):
             continue
-        if _block_is_harness(text):
-            removed += 1
-            continue
-        parts.append(text)
+        cleaned, count = _clean_user_block(text)
+        removed += count
+        if cleaned:
+            parts.append(cleaned)
     return "\n".join(parts).strip(), removed
 
 

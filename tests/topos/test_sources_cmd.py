@@ -183,3 +183,13 @@ def test_reclassify_touches_apply_needs_a_human_at_a_terminal():
     assert result.exit_code == 1
     assert "run it in your own terminal" in result.stderr
     assert _doors(node) == []
+
+
+def test_replay_requires_one_session_and_sends_explicit_flag():
+    invalid = _run(['sync', 'codex_sessions', '--replay'])
+    assert invalid.exit_code == 2
+    node = _node()
+    with serve_fake_node(node, _socket_path()):
+        result = _run(['sync', 'codex_sessions', '--session', '/tmp/synthetic.jsonl', '--replay'])
+    assert result.exit_code == 0, result.output
+    assert _doors(node) == [('codex_sessions', 'sync', {'session_path': '/tmp/synthetic.jsonl', 'replay': True})]

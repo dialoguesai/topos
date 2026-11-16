@@ -418,3 +418,42 @@ def test_a_batch_of_one_never_cuts_a_reply_in_two(reader, codex_root):
         "codex:msg_h_a6", "codex:msg_h_a7", "codex:msg_h_a8",
     ]
     assert rows[1]["content"].count("\n\n") == 2
+
+
+@pytest.mark.parametrize('as_blocks', [False, True])
+@pytest.mark.parametrize('prefix', ['', '# Files mentioned by the user:\n\nimage.png\n\n'])
+def test_browser_context_preserves_request_in_same_block(reader, as_blocks, prefix):
+    request = "Please explain how this sample function works."
+    text = (prefix + '<in-app-browser-context source="ambient-ui-state">\n'
+            'Current URL: https://example.test/private-context\n'
+            '</in-app-browser-context>\n\n## My request:\n' + request)
+    content = [{'type': 'input_text', 'text': text}] if as_blocks else text
+    actual, removed = reader._user_text(content)
+    assert request in actual
+    assert 'private-context' not in actual
+    assert 'in-app-browser-context' not in actual
+    assert removed == 1
+    if not prefix:
+        assert actual == request
+    else:
+        assert 'image.png' in actual
+
+
+@pytest.mark.parametrize('text', [
+    '<in-app-browser-context>ambient only</in-app-browser-context>',
+    '<in-app-browser-context>incomplete ambient block',
+    '<environment_context>system context</environment_context>',
+])
+def test_harness_only_stays_excluded(reader, text):
+    actual, removed = reader._user_text([{'type': 'input_text', 'text': text}])
+    assert actual == ''
+    assert removed == 1
+
+
+def test_separate_human_block_and_ordinary_markup_preserved(reader):
+    actual, removed = reader._user_text([
+        {'type': 'input_text', 'text': '<in-app-browser-context>ambient</in-app-browser-context>'},
+        {'type': 'input_text', 'text': 'Explain <section> markup.'},
+    ])
+    assert actual == 'Explain <section> markup.'
+    assert removed == 1
