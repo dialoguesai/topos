@@ -9,6 +9,12 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Keep Codex Desktop requests that share a text block with ambient browser context.** `[O]`
+  The importer removes the complete browser-context wrapper while retaining the human request.
+  `sources sync --session PATH --replay` recovers skipped messages from one enabled coding source
+  without changing its normal incremental checkpoint or file cursors.
+
 ## [1.5.55] — 2026-11-13
 
 ### Added

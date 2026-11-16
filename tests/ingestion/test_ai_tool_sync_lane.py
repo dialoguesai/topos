@@ -593,3 +593,41 @@ def test_the_loop_runs_until_the_reader_touched_no_file(node, monkeypatch) -> No
     assert result["status"] == "ok" and result["records_processed"] == 3
     assert len(reader.calls) == 3, "two batches with files behind them, then the empty one that ends the run"
     assert result["files_touched"] == 2
+
+
+def test_replay_recovers_older_rows_without_moving_incremental_state(node, monkeypatch):
+    from topos.ingestion import ai_tool_sync as lane
+    from topos.ingestion.checkpoints.file_cursors import FileCursorStore
+    from topos.ingestion.checkpoints.checkpoint_store import IngestionCheckpoint
+    from topos.ingestion.checkpoints.sqlite_checkpoint_store import SqliteCheckpointStore
+
+    fake = arm(monkeypatch, node, reader=FakeReader(_batch()))
+    enable(node, SOURCE)
+    cursors = FileCursorStore(node)
+    path = '/synthetic/one-session.jsonl'
+    cursors.put(SOURCE, path, size=100, mtime=1, offset=100, record_count=4)
+    checkpoints = SqliteCheckpointStore(node)
+    checkpoints.save_checkpoint(IngestionCheckpoint(dataset_id=DATASET, schema_id=SCHEMA,
+        last_record_id='2026-11-16T23:00:00.000Z', metadata={'existing': True}))
+    seen = []
+    def read(**kw):
+        seen.append((kw['since_unix'], kw['session_path'], kw['cursors'].get(SOURCE, path)))
+        batch = fake(**kw)
+        kw['cursors'].put(SOURCE, path, size=200, mtime=2, offset=200, record_count=8)
+        return batch
+    monkeypatch.setattr(lane, '_reader_for', lambda tool: read)
+    result = _run(sync_options={'replay': True}, session_path=path)
+    assert result['status'] == 'ok', result
+    assert len(chat_rows(node)) == 4
+    assert seen[0] == (None, path, None)
+    assert seen[1][2].offset == 200
+    assert cursors.get(SOURCE, path).offset == 100
+    assert checkpoints.get_checkpoint(DATASET, SCHEMA).last_record_id == '2026-11-16T23:00:00.000Z'
+
+
+def test_replay_refuses_without_session(node, monkeypatch):
+    reader = arm(monkeypatch, node, reader=FakeReader(_batch()))
+    enable(node, SOURCE)
+    result = _run(sync_options={'replay': True})
+    assert result['code'] == 'replay_requires_session'
+    assert reader.calls == []

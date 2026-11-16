@@ -527,11 +527,16 @@ sources_resume = _toggle("resume", "resumed", "Resume the hourly sync and the ho
 @sources_group.command("sync")
 @click.argument("source_id", type=SOURCE)
 @click.option("--session", "session_path", metavar="PATH", default=None, help="Sync one transcript file only.")
+@click.option("--replay", is_flag=True, help="Re-read --session to recover skipped messages; keeps normal sync cursors.")
 @_JSON_OPTION
 @_QUIET_OPTION
-def sources_sync(source_id: str, session_path: Optional[str], as_json: bool, quiet: bool) -> None:
+def sources_sync(source_id: str, session_path: Optional[str], replay: bool, as_json: bool, quiet: bool) -> None:
     """Sync now (refused unless the source is enabled)."""
+    if replay and not session_path:
+        raise click.UsageError("--replay requires --session")
     entry = _other_kind(source_id)
+    if replay and entry is not None:
+        raise click.UsageError("--replay is only available for AI coding transcripts")
     if entry is not None and entry.kind == KIND_EXTENSION:
         click.echo(f"{entry.name} is sent by a browser extension as it happens; there is nothing to sync from here.",
                    err=True)
@@ -563,6 +568,8 @@ def sources_sync(source_id: str, session_path: Optional[str], as_json: bool, qui
         return payload, f"{source_id} synced:{detail or ' done'}."
 
     body = {"session_path": session_path} if session_path else {}
+    if replay:
+        body["replay"] = True
     _door(source_id, "sync", body, as_json=as_json, quiet=quiet, project=project)
 
 

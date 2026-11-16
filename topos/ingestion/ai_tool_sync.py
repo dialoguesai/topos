@@ -959,6 +959,9 @@ def _run_locked(
     source_id, schema_id = spec.source_id, spec.schema_id
     batch_size = _bounded_int(batch_size, default=DEFAULT_BATCH_SIZE, lo=MIN_BATCH_SIZE, hi=MAX_BATCH_SIZE)
     pause_seconds = _bounded_float(options.get("pause_seconds"), default=0.0, lo=0.0, hi=MAX_PAUSE_SECONDS)
+    replay = options.get("replay") is True
+    if replay and not session_path:
+        return _refused("replay_requires_session", "Replay requires one transcript file.")
     mode = str(options.get("mode") or MODE_SINCE_LAST).strip().lower()
     start_unix, start_error = _resolve_sync_start_unix(options)
     if start_error:
@@ -967,7 +970,9 @@ def _run_locked(
     store = SqliteCheckpointStore(db_conn)
     checkpoint = store.get_checkpoint(dataset_id, schema_id)
     last_record_id = str(checkpoint.last_record_id or "") if checkpoint else ""
-    if mode in _SINCE_LAST_MODES:
+    if replay:
+        since_unix = None
+    elif mode in _SINCE_LAST_MODES:
         since_unix = _iso_to_unix(last_record_id)
     elif mode == MODE_FULL_HISTORY:
         since_unix = None
@@ -982,7 +987,7 @@ def _run_locked(
         return _refused(PARSER_UNAVAILABLE, f"This build can't read {spec.display_name} transcripts yet.")
     try:
         reader = _reader_for(spec.tool)
-        cursors = _PendingCursorStore(_cursor_store_for(db_conn))
+        cursors = _PendingCursorStore(_MemoryCursorStore() if replay else _cursor_store_for(db_conn))
     except (ImportError, AttributeError):
         return _refused(READER_UNAVAILABLE, f"This build can't read {spec.display_name} transcripts yet.")
     parser = parser_cls(dataset_id=dataset_id, _schema_id=schema_id)
@@ -1003,6 +1008,8 @@ def _run_locked(
     batch_num = 0
 
     def _save(last: str) -> None:
+        if replay:
+            return  # A repair must not move the normal incremental checkpoint.
         store.save_checkpoint(IngestionCheckpoint(
             dataset_id=dataset_id,
             schema_id=schema_id,

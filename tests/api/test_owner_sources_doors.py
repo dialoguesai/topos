@@ -481,3 +481,20 @@ def test_an_enrolled_agent_reads_the_rescope_report_on_the_socket_only(node) -> 
             assert client.get(BASE + "/rescope-report").status_code == 403
     finally:
         app.dependency_overrides.pop(resolve_request_principal, None)
+
+
+def test_replay_is_targeted_and_passed_to_owner_sync_job(node):
+    from topos.pipeline.job_store import get_job
+    app, conn, _reader = node
+    with _client(app) as client:
+        assert client.post(BASE + f'/sources/{SOURCE}/enable', json={'backfill': 'all'}).status_code == 200
+        conn.execute("UPDATE pipeline_jobs SET status='done'")
+        conn.commit()
+        for invalid in ({'replay': True}, {'replay': 'yes', 'session_path': '/invented/s.jsonl'}):
+            assert client.post(BASE + f'/sources/{SOURCE}/sync', json=invalid).status_code == 400
+        response = client.post(BASE + f'/sources/{SOURCE}/sync', json={
+            'replay': True, 'session_path': '/invented/s.jsonl'})
+    assert response.status_code == 200, response.text
+    options = get_job(conn, response.json()['job_id'])['payload']['sync_options']
+    assert options['replay'] is True
+    assert options['session_path'] == '/invented/s.jsonl'

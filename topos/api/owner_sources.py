@@ -54,7 +54,7 @@ _PREVIEW_FIELDS = frozenset({"skip"})
 _ENABLE_FIELDS = frozenset({"skip", "backfill"})
 _MESSENGER_FIELDS = frozenset({"backfill"})
 EXTENSION_SOURCE = "extension_source"
-_SYNC_FIELDS = frozenset({"session_path"})
+_SYNC_FIELDS = frozenset({"session_path", "replay"})
 _RECLASSIFY_FIELDS = frozenset({"apply"})
 
 
@@ -490,6 +490,9 @@ async def sync(source_id: str, payload: Optional[dict] = Body(None), principal=D
     session_path = body.get("session_path")
     if session_path is not None and not isinstance(session_path, str):
         raise HTTPException(400, "owner_sources_payload_invalid", headers=_NO_STORE)
+    replay = body.get("replay", False)
+    if not isinstance(replay, bool) or (replay and not str(session_path or "").strip()):
+        raise HTTPException(400, "owner_sources_payload_invalid", headers=_NO_STORE)
     from topos.core.state import get_db_connection
     from topos.ingestion.ai_tool_sync import resolve_owner_scope, sync_refusal
     from topos.ingestion.local_sync_jobs import enqueue_local_sync
@@ -509,6 +512,8 @@ async def sync(source_id: str, payload: Optional[dict] = Body(None), principal=D
     options: Dict[str, Any] = {"mode": "since_last", "trigger": "hook" if session_path else "manual"}
     if session_path:
         options["session_path"] = session_path.strip()
+    if replay:
+        options["replay"] = True
     outcome = await enqueue_local_sync(
         source_id=sid, dataset_id=checked["scope"]["dataset_id"], sync_options=options,
         conn_factory=get_db_connection,
