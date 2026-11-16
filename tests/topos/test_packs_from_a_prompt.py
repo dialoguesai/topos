@@ -10,9 +10,7 @@ the digest of the definition it showed, then ONE run start, each with its own co
 leaves the stages before it done and says so. A pack that writes about other people is refused before anything
 is asked or sent. The commands print a projection, never a response body.
 
-A terminal and a person are patched (``isatty`` on the module's ``sys``, ``click.confirm``); the owner socket is
-an in-memory fake that records each request, except in the last two tests, which run the commands against the
-real routes behind the real socket wrapper on a real unix socket. The model is never called. Synthetic only.
+The tests use disposable data and a simulated socket server. No model calls run.
 """
 from __future__ import annotations
 
