@@ -41,3 +41,20 @@ def test_anchor_window_is_ranked_inside_dataset_and_thread(table, thread, key):
     payload['anchor_id'] = 'outside'
     assert _conversation_anchor_offset(conn,table,where,values,'sequence ASC',payload,6,0) == 0
     conn.close()
+
+
+def test_journal_entry_filter_reads_one_entry_inside_scope():
+    from topos.core.handlers.database_explorer import _row_filter_order_key
+    conn = sqlite3.connect(":memory:")
+    conn.execute('CREATE TABLE journal_entries (entry_id TEXT, entry_at TEXT, dataset_id TEXT)')
+    conn.executemany('INSERT INTO journal_entries VALUES (?, ?, ?)', [("tl-a", "2026-11-16T17:40:00", "mine"), ("tl-b", "2026-11-16T19:00:00", "mine"), ("tl-a", "2026-11-16T17:40:00", "theirs")])
+    where, params = _conversation_row_selection("journal_entries", {"entry_id", "entry_at", "dataset_id"}, "dataset_id", "mine", {"filter_column": "entry_id", "filter_value": "tl-a"})
+    rows = conn.execute(f'SELECT entry_id, dataset_id FROM journal_entries{where} ORDER BY entry_at DESC, "{_row_filter_order_key("journal_entries")}" ASC', params).fetchall()
+    assert rows == [("tl-a", "mine")]
+    conn.close()
+
+
+@pytest.mark.parametrize("table,column", [("journal_entries", "content"), ("journal_entries", "source_id"), ("calendar_events", "event_id")])
+def test_journal_and_other_tables_refuse_unlisted_columns(table, column):
+    with pytest.raises(ValueError):
+        _conversation_row_selection(table, {column, "entry_id"}, None, None, {"filter_column": column, "filter_value": "x"})

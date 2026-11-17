@@ -9,6 +9,13 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **The owner's app can read one journal entry by its id.** `[P]`
+  `get_table_rows` on `journal_entries` now takes the row filter `entry_id`, inside the same
+  dataset scope as every other read, so the viewer's journal page opens the entry a timeline
+  card points to. Other journal columns are still refused. The control plane must allow the
+  same filter before it reaches the node.
+
 ### Fixed
 - **Keep Codex Desktop requests that share a text block with ambient browser context.** `[O]`
   The importer removes the complete browser-context wrapper while retaining the human request.
