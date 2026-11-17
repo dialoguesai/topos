@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.56] — 2026-11-17
+
 ### Added
 - **The owner's app can read one journal entry by its id.** `[P]`
   `get_table_rows` on `journal_entries` now takes the row filter `entry_id`, inside the same
