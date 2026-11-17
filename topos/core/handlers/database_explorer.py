@@ -897,13 +897,26 @@ async def handle_get_table_count(message: Dict[str, Any]) -> Optional[Dict[str, 
         logger.error("Failed to get table count: %s", exc, exc_info=True)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
+# Tables a viewer may narrow to one thread or one record, the columns it may
+# filter on, and the record key that breaks ties in the filtered order. The
+# control plane keeps the same list (routes/database_explorer.py); a table
+# missing there is refused before it reaches the node.
+_ROW_FILTERS = {
+    "ai_chat_messages": ({"conversation_id", "message_id"}, "message_id"),
+    "conversation_messages": ({"conversation_id", "message_id"}, "message_id"),
+    "transcript_segments": ({"transcript_id", "segment_id"}, "segment_id"),
+    # The viewer's journal page reads one entry, opened from the timeline.
+    "journal_entries": ({"entry_id"}, "entry_id"),
+}
+
+
+def _row_filter_order_key(table_name):
+    """Record key appended to a filtered read's ORDER BY so pages are stable."""
+    return _ROW_FILTERS[table_name][1]
+
+
 def _conversation_row_selection(table_name, col_names, scope_field, scope_value, payload, placeholder="?"):
     """Narrow an existing authorized table read; never replace its tenant predicate."""
-    allowed = {
-        "ai_chat_messages": {"conversation_id", "message_id"},
-        "conversation_messages": {"conversation_id", "message_id"},
-        "transcript_segments": {"transcript_id", "segment_id"},
-    }
     column = payload.get("filter_column")
     value = payload.get("filter_value")
     terms, params = [], []
@@ -911,7 +924,8 @@ def _conversation_row_selection(table_name, col_names, scope_field, scope_value,
         terms.append(f'"{scope_field}" = {placeholder}')
         params.append(scope_value)
     if column is not None or value is not None:
-        if (column not in allowed.get(table_name, set()) or column not in col_names
+        allowed = _ROW_FILTERS.get(table_name, (set(), ""))[0]
+        if (column not in allowed or column not in col_names
                 or not isinstance(value, str) or not value or len(value) > 2048):
             raise ValueError("Invalid conversation row filter")
         terms.append(f'"{column}" = {placeholder}')
@@ -1079,8 +1093,7 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
                 where, values = _conversation_row_selection(
                     table_name, col_names, scope_field, scope_value, payload, placeholder)
                 if payload.get("filter_column"):
-                    key = "segment_id" if table_name == "transcript_segments" else "message_id"
-                    order_clause += f', "{key}" ASC'
+                    order_clause += f', "{_row_filter_order_key(table_name)}" ASC'
                 offset = _conversation_anchor_offset(conn, table_name, where, values, order_clause, payload, limit, offset, placeholder)
                 sql = (f'SELECT * FROM "{table_name}"{where} ORDER BY {order_clause} '
                        f'LIMIT {placeholder} OFFSET {placeholder}')
@@ -1132,8 +1145,7 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
             where, values = _conversation_row_selection(
                 table_name, col_names, scope_field, scope_value, payload)
             if payload.get("filter_column"):
-                key = "segment_id" if table_name == "transcript_segments" else "message_id"
-                order_clause += f', "{key}" ASC'
+                order_clause += f', "{_row_filter_order_key(table_name)}" ASC'
             offset = _conversation_anchor_offset(conn, table_name, where, values, order_clause, payload, limit, offset)
             sql = f'SELECT * FROM "{table_name}"{where} ORDER BY {order_clause} LIMIT ? OFFSET ?'
             sql_params = values + (limit + 1, offset)
