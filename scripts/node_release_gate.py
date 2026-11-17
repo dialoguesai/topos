@@ -122,7 +122,8 @@ def run_gate(plan: dict, evidence_path: Path | None, repository: str) -> None:
             if git("rev-parse", "HEAD^{tree}") != plan["tree"] or git("rev-parse", "HEAD") != plan["head"]:
                 raise ValueError("The node checkout changed during the rig; rerun on the final commit")
             evidence = {"schema": 1, "pass": True, "failures": [], "tree": plan["tree"],
-                        "head": plan["head"], "base": plan["base"]}
+                        "head": plan["head"], "base": plan["base"],
+                        "warnings": [w for w in verdict.get("warnings") or [] if isinstance(w, str)]}
             evidence_path = Path(out) / "node-release-gate.json"
             evidence_path.write_text(json.dumps(evidence, indent=2) + "\n", encoding="utf-8")
         except (OSError, ValueError, subprocess.CalledProcessError):
@@ -130,6 +131,8 @@ def run_gate(plan: dict, evidence_path: Path | None, repository: str) -> None:
             raise
         print(f"Saved matching-tree evidence: {evidence_path}")
     validate_evidence(evidence, plan["tree"])
+    for warning in evidence.get("warnings") or []:
+        print(f"Rig D warning (the pass stands): {warning}")
     # Explicit repository prevents accidentally marking another origin. `gh`
     # uses the release operator's existing repository permission, no new secret.
     record_status(plan, repository, "success")
