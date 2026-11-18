@@ -506,6 +506,49 @@ def _unusable_num_ctx(payload: Dict[str, Any]) -> Optional[str]:
 _LLM_GENERATION_TASKS: Dict[str, asyncio.Task] = {}
 
 
+@handles("model_catalog")
+async def handle_model_catalog(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    from ...principal import current_principal, CP_RELAY
+    from ...services.llm.delegated import catalog
+    principal = current_principal()
+    req_id = message.get("id")
+    if not principal or principal.cls != CP_RELAY or principal.channel != "cp_relay":
+        return {"id": req_id, "status": "error", "error_code": 403, "error": "relay_required"}
+    try:
+        return {"id": req_id, "status": "ok", "payload": await asyncio.wait_for(catalog(), timeout=25)}
+    except Exception:
+        return {"id": req_id, "status": "error", "error_code": 503, "error": "local_catalog_unavailable"}
+
+
+@handles("model_chat")
+async def handle_model_chat(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """CP-authorized delegated model use, never an owner principal or a data read."""
+    from ...principal import current_principal, CP_RELAY
+    from ...services.llm.delegated import chat
+    principal = current_principal()
+    req_id = str(message.get("id") or "")
+    if not principal or principal.cls != CP_RELAY or principal.channel != "cp_relay":
+        return {"id": req_id, "status": "error", "error_code": 403, "error": "relay_required"}
+    if not req_id:
+        return None
+    current = asyncio.current_task()
+    if current:
+        _LLM_GENERATION_TASKS[req_id] = current
+    try:
+        async def emit(delta):
+            await engine_state.control_plane_client.send_message(
+                {"id": req_id, "status": "chunk", "payload": {"delta": delta}})
+        result = await asyncio.wait_for(chat(message.get("payload") or {}, emit), timeout=295)
+        return {"id": req_id, "status": "ok", "payload": result}
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Provider errors may contain prompts. Only a fixed error crosses the relay.
+        return {"id": req_id, "status": "error", "error_code": 502, "error": "model_execution_failed"}
+    finally:
+        _LLM_GENERATION_TASKS.pop(req_id, None)
+
+
 @handles("llm_generation")
 async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

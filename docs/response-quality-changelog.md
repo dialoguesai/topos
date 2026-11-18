@@ -1588,3 +1588,90 @@ and real-model comparison limitations remain unchanged.
 - Catalog-capacity regression: reproduced an existing custom grant becoming unavailable when an unrelated large manifest filled the bounded wire catalog. Runtime definition checks now validate each installed pack independently; only the picker applies the combined wire budget. The regression failed before the fix and all 23 custom-sharing cases passed afterward.
 - Stamped-release comparison: all 717 contracts passed, but the initial comparison correctly reported NOT_COMPARABLE because `uv.lock` includes the source package's version. Parsing both locks confirmed every field except `topos-node`'s own version was identical. The paired rerun used the original frozen dependency lock with the final source, unchanged installed third-party dependencies and test fixtures; it passed 717/717. The release lock was restored immediately afterward. Packaging/upgrade CI checks the actual version-stamped release separately. The non-comparable report is retained.
 - Protocol exports: regenerated only the SignedMutation and KnowledgeDeclaration schema snapshots for v3 on node and control plane, after asserting their model schemas match. Historical signed golden vectors were unchanged.
+
+### Regression gate — RQ-2026-11-17-MODEL-ACCESS — before
+
+- Recorded (UTC): 2026-11-17T20:07:52.052820+00:00
+- Note: Add separate delegated inference without changing owner retrieval or prompt behavior
+- Report: [machine-readable results](response-quality-runs/20261117T200752052820Z-RQ-2026-11-17-MODEL-ACCESS-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 13 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 30 pass / 0 fail / 0 skip | pending |
+| routing_and_source_exclusions | 0 pass / 0 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 22 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 0 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 3 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 0 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 0 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 66 pass / 0 fail / 0 skip | pending |
+- Runner error: web: FileNotFoundError: [Errno 2] No such file or directory: '/Users/dialogues/Documents/Codex/2026-11-17/we-x20/work/repos/topos/.response-quality-artifacts/20261117T200752052820Z-RQ-2026-11-17-MODEL-ACCESS-before/web.xml'
+
+### Regression gate — RQ-2026-11-17-MODEL-ACCESS — after
+
+- Recorded (UTC): 2026-11-17T20:27:02.243774+00:00
+- Note: Delegated inference implementation; prechange web runner failed due sandbox path, so comparison is limited
+- Report: [machine-readable results](response-quality-runs/20261117T202702243774Z-RQ-2026-11-17-MODEL-ACCESS-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **NOT_COMPARABLE**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 13 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 30 pass / 0 fail / 0 skip | 53 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 0 pass / 0 fail / 0 skip | 145 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 22 pass / 0 fail / 0 skip | 74 pass / 0 fail / 0 skip |
+| followups_and_breadth | 0 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 3 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 0 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 0 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 66 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 0; regressed: 0; missing: 0; added: 542; remaining non-passes: 0.
+- reasons: `toolchain changed`
+- reasons: `test inventory changed`
+- reasons: `runner/collection failure`
+
+### Live answer evaluation — RQ-2026-11-17-MODEL-ACCESS-POSTCHANGE-DIAGNOSTIC — before
+
+- UTC: 2026-11-17T20:28:43.465114+00:00; verdict: **BASELINE_RECORDED**.
+- Report: [20261117T202843465114Z-live-before.json](response-quality-runs/20261117T202843465114Z-live-before.json).
+- Lane: production home-chat agent + real local model + frozen MCP evidence; excludes node retrieval, CP and browser latency.
+- Scores are uncalibrated model judgments (0–2), not human-validated truth. p95 is descriptive with this small sample.
+- Raw answers, prompts, evidence and judge reasons are stored locally in ignored .response-quality-artifacts/.
+
+| Case | Quality mean before → after | Median ms before → after | Samples |
+| --- | --- | --- | --- |
+| injection | — → 1.80 | — → 4499 | 1 |
+| yesterday | — → 0.00 | — → 7727 | 1 |
+| citation | — → 1.00 | — → 4088 | 1 |
+| exclude-ai | — → 1.80 | — → 2382 | 1 |
+| identity-unresolved | — → 2.00 | — → 2 | 1 |
+| empty | — → 0.00 | — → 480 | 1 |
+| general | — → 1.00 | — → 3164 | 1 |
+| advice | — → 1.20 | — → 3200 | 1 |
+| attribution | — → 0.40 | — → 927 | 1 |
+| partial | — → 0.40 | — → 679 | 1 |
+| followup | — → 0.40 | — → 2311 | 1 |
+
+### RQ-2026-11-17-MODEL-ACCESS — implementation and validation limits
+
+- Failure/request: third-party Attach/RPT grants could access authorized data but had no separate, consented model catalog or stateless inference surface. Reusing owner chat would risk giving outside apps owner retrieval authority and unbounded compute.
+- Method: exact model allowlists and bounded quotas in native-bound grant filters; distinct model scopes; CP catalog/chat API; relay-only local adapters without owner stamping, retrieval or fallback; existing user BYOK connections; durable quota/activity ledger; owner management UI. Local cloud aliases are excluded. Scope: text chat and streaming; no TOPOS-paid credits, tools, memory, embeddings, audio, images or model installation.
+- Affected families: delegated inference and authorization; existing owner retrieval/prompts are unchanged. Full offline gate still ran across all ten catalog families. This is not a measured improvement in owner answer quality.
+- Baseline: the new delegated validation test failed before implementation because its module did not exist. The complete offline `before` report is `20261117T200752052820Z-RQ-2026-11-17-MODEL-ACCESS-before.json`: 163 node cases passed, but the web runner could not write Vite's temporary directory through a node_modules symlink outside the sandbox. This baseline is incomplete and was not rewritten.
+- Offline after: `20261117T202702243774Z-RQ-2026-11-17-MODEL-ACCESS-after.json`, all 705 collected cases passed and no runner errors. Verdict **NOT_COMPARABLE**: baseline runner failure, toolchain difference and test-inventory difference. The local node_modules layout was repaired for the after run. No paired regression success is claimed.
+- Live pre-change baseline: **unavailable**. The companion runner only supports before/after phase labels, so a fresh post-change diagnostic was recorded with phase `before`, change ID `RQ-2026-11-17-MODEL-ACCESS-POSTCHANGE-DIAGNOSTIC`, and an explicit no-prechange-baseline environment label. Do not treat its filename or BASELINE_RECORDED status as a pre-change measurement or a release PASS.
+- Live diagnostic: `20261117T202843465114Z-live-before.json`; 11 frozen synthetic cases, one repetition each; installed `llama3.2:latest` answers, independent installed `qwen3.5:9b-mlx` judge. No runner errors. Five judge-flagged critical failures: yesterday, citation, empty, attribution, followup. Inspected raw outputs: the empty case invented a meeting; yesterday contradicted its own evidence summary; citation omitted the required link; attribution missed available evidence; followup claimed an ungranted invented scope. Preserve these findings; attribution to this feature is not established. One repetition cannot pass the release gate. No valid latency regression comparison exists; per-case wall-time samples remain in the report. This harness tests owner-agent synthesis over frozen fixture transport, not deployed retrieval, authentication, streaming or this new delegated API.
+- New adapter live smoke: real loopback Ollama `llama3.2:latest`, synthetic system/user messages, max 64 output tokens. Output `MODEL_ACCESS_OK`; prompt 37 tokens, completion 4, finish stop; streamed text matched final response. Adapter wall time 2.243 seconds (one observation, not an SLA or end-to-end metric). No personal data or cloud calls.
+- Focused verification: CP model/Attach/retry suites 117 passed; native authority/scope/pinned-protocol suites 58 passed; real isolated PostgreSQL quota suite 7 passed; node adapter/protocol suite 14 passed with CP path configured (two initial missing-sibling skips resolved); web panel 4 passed, existing grant panel 30 passed, TypeScript check passed; synthetic browser panel render and pause/resume passed with no page errors.
+- Limits: paid cloud calls and deployed Keycloak/CP/node flow were not exercised. CP cloud adapter is checked with a mocked SDK transport; the local test environment lacks LiteLLM, although the production CP dependency declares it. The live companion harness was read from existing local, uncommitted evaluation tooling; its hashes are recorded and those unrelated tooling files are not included in this feature change. Required release-quality evidence is unresolved, not waived.
+- Deployment: local isolated checkouts only. Both CP and web model-access flags default off. The pinned node release predates the new handlers; CP declares them pending until a real node release is published and pinned. No production migration, registration, push or deployment occurred.
+- Rollback: disable model access and web panel, stop new admissions, allow cancellation watchers to stop active work, retain consent/audit records. Revert the delegated handlers/routes/panel if needed; do not change owner prompts or delete audit tables. See the control-plane `docs/model-access.md` for rollout ordering and API details.
