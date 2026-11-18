@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.57] — 2026-11-18
+
 ### Added
 - **The control plane can run an app's chat on the owner's local models.** `[P]` Two relay types, `model_catalog` and
   `model_chat`, answer only the control-plane relay principal; a local HTTP caller, an owner app or an owner agent gets
