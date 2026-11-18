@@ -406,7 +406,10 @@ class HostedDeviceService:
             detail="Pairing is not available for hosted runtimes",
         )
 
-    async def get_device_info(self, context: Optional[Dict[str, Any]] = None) -> DeviceInfoResponse:
+    async def get_device_info(
+        self, context: Optional[Dict[str, Any]] = None, *, wait_for_storage: bool = True,
+    ) -> DeviceInfoResponse:
+        _ = wait_for_storage  # a hosted runtime walks no storage
         ctx = context if isinstance(context, dict) else {}
         user_id = str(ctx.get("owner_user_id") or settings.topos_user_id or "").strip() or None
         dataset_id = _hosted_dataset_id(ctx, user_id)
