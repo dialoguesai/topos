@@ -277,7 +277,11 @@ class LocalDeviceService:
         _ = (pairing_code, keep_existing_data)
         raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Pairing not implemented")
 
-    async def get_device_info(self, context: Optional[Dict[str, Any]] = None) -> DeviceInfoResponse:
+    async def get_device_info(
+        self, context: Optional[Dict[str, Any]] = None, *, wait_for_storage: bool = True,
+    ) -> DeviceInfoResponse:
+        """``wait_for_storage=False`` never waits for the storage walk: with no value yet the sizes are None and the
+        walk starts behind the caller. The startup seed reads it so (app.py), and connects at once."""
         _ = context
         # Get user_id from database (set by connection_info handler) or fall back to settings
         user_id = None
@@ -310,7 +314,12 @@ class LocalDeviceService:
                 # refreshed behind the caller (StorageSnapshot): this reads the
                 # last value and holds no thread, and only the very first read
                 # after a start awaits the walk in flight, bounded.
-                database_size_bytes, storage_breakdown = await _storage_snapshot.wait(db_path)
+                if wait_for_storage:
+                    database_size_bytes, storage_breakdown = await _storage_snapshot.wait(db_path)
+                else:
+                    latest = _storage_snapshot.latest(db_path)
+                    if latest is not None:
+                        database_size_bytes, storage_breakdown = latest
 
         upgrade_fields: Dict[str, Any] = {
             "upgrade_baseline": None,

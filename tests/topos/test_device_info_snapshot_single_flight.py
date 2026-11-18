@@ -110,6 +110,21 @@ async def test_a_value_past_the_ttl_is_answered_at_once_and_refreshed_behind_the
 
 
 @pytest.mark.asyncio
+async def test_a_read_that_does_not_wait_for_storage_answers_at_once_and_starts_the_walk(device):
+    """The node's startup seed reads so (app.py), before it connects: no sizes yet, and the first walk starts behind
+    it, so the first read that does wait waits only for what is left of that walk."""
+    service, snapshot, walk, _clock = device
+    walk.seconds = 1.0
+    started = time.monotonic()
+    info = await service.get_device_info(wait_for_storage=False)
+    assert time.monotonic() - started < walk.seconds / 2, "the read waited for the walk"
+    assert info.database_size_bytes is None and info.storage_breakdown is None
+    assert snapshot.walks == 1 and snapshot.in_flight
+    assert (await service.get_device_info()).database_size_bytes == 4096     # the walk it started; no second one
+    assert snapshot.walks == 1 and walk.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_the_first_read_waits_for_the_walk_and_a_failed_walk_keeps_the_last_value(device):
     service, snapshot, walk, clock = device
     started = time.monotonic()

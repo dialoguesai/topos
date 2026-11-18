@@ -692,11 +692,16 @@ async def startup_event() -> None:
             verify_ssl=settings.control_plane_verify_ssl,
         )
 
-        # Seed before connecting so the first CP poll can fall back. The
-        # 5s snapshot path used to wait forever when this was empty.
+        # Seed before connecting so the first CP poll can fall back: a get_device_info the app loop does not answer
+        # in 5 s is answered from this snapshot. The 5s snapshot path used to wait forever when this was empty.
+        # Never on the storage walk: the first read after a start waits for the dbstat walk of the whole database
+        # (up to 20 s, and a multi-GB file takes all of it), and from 1.5.30 every start kept the node off the
+        # control plane that long, for a seed that was then dropped (the service answers a model, never a dict).
+        # The seed has no sizes; the first real answer brings them, and the walk it needs starts here.
         try:
-            seed_payload = await get_services().device.get_device_info(context=None)
-            if isinstance(seed_payload, dict):
+            seed = await get_services().device.get_device_info(context=None, wait_for_storage=False)
+            seed_payload = seed.model_dump() if hasattr(seed, "model_dump") else seed
+            if isinstance(seed_payload, dict) and seed_payload:
                 state.control_plane_client.set_device_info_snapshot(seed_payload)
                 logger.info("Device-info snapshot seeded before CP registration")
         except Exception as seed_exc:  # noqa: BLE001

@@ -17,6 +17,15 @@ The machine-readable twin of each release is
   warnings (control-plane#252: M3 warns, not fails, when two owners' medians are under 10 ms apart) are printed after
   a pass and kept in `node-release-gate.json`; the pass and the status line are unchanged.
 
+### Fixed
+- **A restarted node is back on the control plane about 20 s sooner.** `[O]` Before it connects, the node seeds the
+  device-info snapshot its client answers from when the app loop is too slow. That seed waited for the first storage
+  walk of the whole database (up to 20 s since 1.5.30, and a multi-GB database takes all of it), and was then dropped:
+  the service answers a model and the seed was kept only as a dict, so it never landed after it was added in 1.3.55.
+  The seed now skips the walk (no sizes; the first real answer brings them, and the walk starts behind the seed), it
+  lands, and the client starts at once. On the 1.5.56 install restart the node was off the control plane for 32 s,
+  20.2 s of it this wait.
+
 ## [1.5.56] — 2026-11-17
 
 ### Added
