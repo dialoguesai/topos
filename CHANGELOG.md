@@ -9,6 +9,15 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **The control plane can run an app's chat on the owner's local models.** `[P]` Two relay types, `model_catalog` and
+  `model_chat`, answer only the control-plane relay principal; a local HTTP caller, an owner app or an owner agent gets
+  `relay_required`. The catalog lists the local Ollama's text models (cloud aliases and embedding models are left out,
+  and a model is checked again just before it runs). Chat runs one of them on the caller's messages alone, with no owner
+  retrieval, tools, memory or fallback, through the same admission queue as the owner's own work. A provider error
+  crosses the relay as a fixed error, never its text. The control plane keeps model access off by default and treats
+  these types as pending until a node release that has them is pinned. Owner chat is unchanged.
+
 ### Changed
 - **The release gate refuses a Rig D control-plane tree behind main's rig code.** `[O]` Before the rig starts,
   `scripts/run_any_to_any_release.py` fetches control-plane main and stops when `A2A_RIG_CP_TREE` lacks main's newest
