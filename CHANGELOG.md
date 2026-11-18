@@ -9,6 +9,14 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **The release gate refuses a Rig D control-plane tree behind main's rig code.** `[O]` Before the rig starts,
+  `scripts/run_any_to_any_release.py` fetches control-plane main and stops when `A2A_RIG_CP_TREE` lacks main's newest
+  `scripts/a2a_rig` commit; a tree ahead of main is accepted. 1.5.55 and 1.5.56 ran on a tree from 23 Oct whose runner
+  still timed each owner's offline probes in a window of its own, and 1.5.56 failed M3 twice on that alone. The rig's
+  warnings (control-plane#252: M3 warns, not fails, when two owners' medians are under 10 ms apart) are printed after
+  a pass and kept in `node-release-gate.json`; the pass and the status line are unchanged.
+
 ## [1.5.56] — 2026-11-17
 
 ### Added
