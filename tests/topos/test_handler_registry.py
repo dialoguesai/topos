@@ -162,6 +162,8 @@ SUPPORTED_MESSAGE_TYPES = [
     "messenger_relationship_signals",
     "messenger_relationships",
     "migrate_browser_plugin_app_id",
+    "model_catalog",
+    "model_chat",
     "ollama_install",
     "ollama_install_status",
     "ollama_list_models",
