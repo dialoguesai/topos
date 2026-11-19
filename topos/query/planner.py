@@ -19,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import time_phrases
+
 
 def query_planner_enabled() -> bool:
     return os.environ.get("TOPOS_QUERY_PLANNER", "on").strip().lower() not in (
@@ -218,8 +220,14 @@ _EARLIEST_INSTANT = "1970-01-01T00:00:00+00:00"
 def _normalize_temporal_phrases(text: str) -> str:
     """Normalize equivalent duration wording before every temporal consumer."""
     numbers = dict(zip(('one two three four five six seven eight nine ten eleven twelve').split(), range(1,13)))
-    text = re.sub(r"\b(last|past) (one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve) (hours?|days?|weeks?)\b",
+    # "the past few days", "the last couple of weeks", "in the last hour": a count the
+    # forms below can read. A few is three, a couple is two.
+    text = re.sub(r"\b(last|past) (few|couple(?: of)?) (hours|days|weeks|months|years)\b",
+                  lambda m: f"{m[1]} {3 if m[2].lower() == 'few' else 2} {m[3]}", text, flags=re.I)
+    text = re.sub(r"\b(last|past) hour\b", lambda m: f"{m[1]} 1 hours", text, flags=re.I)
+    text = re.sub(r"\b(last|past) (one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve) (hours?|days?|weeks?|months?|years?)\b",
                   lambda m: f"{m[1]} {numbers[m[2].lower()]} {m[3]}", text, flags=re.I)
+    text = re.sub(r"\b(last|past) (\d+) (month|year)\b", lambda m: f"{m[1]} {m[2]} {m[3]}s", text, flags=re.I)
     text = re.sub(r"\bprevious (week|month)\b", lambda m:'last '+m[1], text, flags=re.I)
     text = re.sub(r"\bpast (?:a |one )?week\b", 'past 7 days', text, flags=re.I)
     text = re.sub(r"\b(last|past) (\d{1,2}) weeks?\b", lambda m:f"{m[1]} {int(m[2])*7} days", text, flags=re.I)
@@ -227,12 +235,16 @@ def _normalize_temporal_phrases(text: str) -> str:
     return text
 
 
-def _relative_match(query_text: str) -> Optional["re.Match[str]"]:
+def _relative_match(query_text: str, now: Optional[datetime] = None):
     """The phrase `_single_relative_time_range` resolved, found in the same precedence order.
 
     When the sentence names several windows, the boundary word governing this phrase moves
-    their union span."""
+    their union span. Returns something with `.start()`: a regex match, or a
+    `time_phrases.PhraseMatch` whose start is where the period itself begins."""
     query_text = _normalize_temporal_phrases(query_text)
+    specific = time_phrases.first(query_text, now or datetime.now(timezone.utc))
+    if specific is not None:
+        return specific
     match = re.search(r"\b(?:last|past) (\d{1,3}) (?:days|hours?)\b|\bpast month\b", query_text, re.I)
     if match:
         return match
@@ -258,7 +270,7 @@ def _apply_time_boundary(
     if not window:
         return window
     query_text = _normalize_temporal_phrases(query_text)
-    match = _relative_match(query_text)
+    match = _relative_match(query_text, now)
     if match is None:
         return window
     governing = _BOUNDARY_RE.search(query_text[: match.start()].rstrip())
@@ -266,18 +278,41 @@ def _apply_time_boundary(
         return window
     word = governing.group(1).lower()
     start_raw, end_raw = window
-    today = now.strftime("%Y-%m-%d")
+    # The edges are the CALLER's midnights, like the window they move. They used to be
+    # stamped +00:00 on the caller's local date, so "since last week" asked in Chicago
+    # ended at 17:59 local today and an evening's rows fell outside it.
+    today_end = _day_edge(now, now.strftime("%Y-%m-%d"), end=True)
     if word in ("before", "prior to"):
         day_before = datetime.fromisoformat(start_raw[:10]) - timedelta(days=1)
-        adjusted = (_EARLIEST_INSTANT, day_before.strftime("%Y-%m-%dT23:59:59+00:00"))
+        adjusted = (_EARLIEST_INSTANT, _day_edge(now, day_before.strftime("%Y-%m-%d"), end=True))
     elif word == "after":
         day_after = datetime.fromisoformat(end_raw[:10]) + timedelta(days=1)
-        adjusted = (day_after.strftime("%Y-%m-%dT00:00:00+00:00"), f"{today}T23:59:59+00:00")
+        adjusted = (_day_edge(now, day_after.strftime("%Y-%m-%d"), end=False), today_end)
     else:  # since: the named period itself, and everything after it
-        adjusted = (start_raw, f"{today}T23:59:59+00:00")
-    if adjusted[0] > adjusted[1]:
+        adjusted = (start_raw, today_end)
+    if _as_instant(adjusted[0]) > _as_instant(adjusted[1]):
         return window
     return adjusted
+
+
+def _as_instant(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _day_edge(now: datetime, day: str, *, end: bool) -> str:
+    """Midnight (or 23:59:59) of calendar day `day` on the caller's own clock.
+
+    With no caller clock `now` is UTC and this is the `+00:00` stamp it always was. With
+    one, a written date is the same day "yesterday" is: the owner's, not Greenwich's.
+    """
+    year, month, dom = (int(part) for part in day[:10].split("-"))
+    base = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+    edge = base.replace(
+        year=year, month=month, day=dom,
+        hour=23 if end else 0, minute=59 if end else 0, second=59 if end else 0, microsecond=0,
+    )
+    return edge.isoformat()
 
 
 _DIMENSION_KEYWORDS = {
@@ -290,14 +325,26 @@ _DIMENSION_KEYWORDS = {
 }
 
 
-def _explicit_time_range(query_text: str) -> Optional[Tuple[str, str]]:
+def _explicit_time_range(query_text: str, now: Optional[datetime] = None) -> Optional[Tuple[str, str]]:
+    """A written date ("November 18", "2026-11-18") as whole calendar days.
+
+    The days are the caller's when the caller sent a clock. Measured 19 Nov 2026 from
+    US Central: "yesterday" was 18 Nov 00:00 to 23:59 at -06:00, and "on November 18"
+    was the same date at +00:00, six hours earlier at both ends, so the one day asked
+    two ways returned two different sets of rows.
+    """
     from .retrieval import _iso_date_hints
 
     hints = _iso_date_hints(query_text)
     if not hints:
         return None
     days = sorted(hints)
-    return (f"{days[0]}T00:00:00+00:00", f"{days[-1]}T23:59:59+00:00")
+    if now is None:
+        return (f"{days[0]}T00:00:00+00:00", f"{days[-1]}T23:59:59+00:00")
+    try:
+        return (_day_edge(now, days[0], end=False), _day_edge(now, days[-1], end=True))
+    except ValueError:
+        return (f"{days[0]}T00:00:00+00:00", f"{days[-1]}T23:59:59+00:00")
 
 
 def _relative_time_range(query_text: str, now: datetime) -> Optional[Tuple[str, str]]:
@@ -319,8 +366,14 @@ def _relative_time_range(query_text: str, now: datetime) -> Optional[Tuple[str, 
 
 def _single_relative_time_range(query_text: str, now: datetime) -> Optional[Tuple[str, str]]:
     """The first window the sentence names, in precedence order (hours, past month, days, then
-    the named periods). Right for one phrase; `_relative_time_range` decides when there are more."""
+    the named periods). Right for one phrase; `_relative_time_range` decides when there are more.
+
+    The phrases in `time_phrases` are read before any of those: each is more specific than
+    a table entry it may contain ("the day before yesterday", "yesterday morning")."""
     query_text = _normalize_temporal_phrases(query_text)
+    specific = time_phrases.first(query_text, now)
+    if specific is not None:
+        return specific.window
     hours = re.search(r"\b(?:last|past) (\d{1,3}) hours?\b", query_text, re.I)
     if hours:
         return ((now.astimezone(timezone.utc) - timedelta(hours=int(hours[1]))).astimezone(now.tzinfo).isoformat(), now.isoformat())
@@ -379,6 +432,11 @@ def _all_relative_ranges(query_text: str, now: datetime) -> List[Tuple[str, str]
     """
     query_text = _normalize_temporal_phrases(query_text)
     found: List[Tuple[str, str]] = []
+    # The specific phrases first, then their characters are blanked so the table below
+    # does not read "yesterday" a second time out of "the day before yesterday".
+    specific = time_phrases.find_all(query_text, now)
+    found.extend(match.window for match in specific)
+    query_text = time_phrases.blank(query_text, specific)
     for match in re.finditer(r"\b(?:last|past) \d{1,3} hours?\b|\bpast month\b", query_text, re.I):
         window = _single_relative_time_range(match.group(), now)
         if window:
@@ -478,13 +536,31 @@ def _residual(query_text: str, entities: List[Dict[str, Any]]) -> str:
             first = name.split()[0]
             if len(first) > 2:
                 residual = re.sub(rf"\b{re.escape(first)}\b", " ", residual, flags=re.I)
+    residual = time_phrases.strip(residual)
     residual = re.sub(
-        r"\b(today|yesterday|this week|last week|this month|last month|(?:last|past) \d+ days)\b",
+        r"\b(today|yesterday|this week|last week|this month|last month|(?:last|past) \d+ (?:days|hours?))\b",
         " ",
         residual,
         flags=re.I,
     )
     return " ".join(residual.split())
+
+
+def strip_time_phrases(query_text: str) -> str:
+    """The question without the words that only say WHEN.
+
+    The window already carries those. Left in, they become content a row has to contain:
+    "what did I talk about last week" asked rows for the word "week".
+    """
+    text = time_phrases.strip(_normalize_temporal_phrases(str(query_text or "")))
+    text = re.sub(
+        r"\b(today|yesterday|this week|last week|this month|last month|past month|"
+        r"(?:last|past) \d+ (?:days|hours?))\b",
+        " ",
+        text,
+        flags=re.I,
+    )
+    return " ".join(text.split())
 
 
 def build_query_plan(
@@ -507,7 +583,7 @@ def build_query_plan(
         except Exception:
             plan.entities = []
 
-    explicit = _explicit_time_range(q)
+    explicit = _explicit_time_range(q, now)
     if explicit:
         plan.time_range = explicit
     else:
@@ -538,6 +614,62 @@ def build_query_plan(
     return plan
 
 
+#: The owner recalling a conversation of their own: "what did I talk about with AI
+#: yesterday", "what did I ask Claude Code last week", "what were my AI chats about".
+#: Frequency asks ("how often did I talk to Sam") are statistics, not recall.
+_CONVERSATION_RECALL_RE = re.compile(
+    r"\b(?:did|have|had) i (?:just |already |ever )?"
+    r"(?:talk(?:ed)?|chat(?:ted)?|discuss(?:ed)?|ask(?:ed)?|sa(?:y|id)|t(?:ell|old)|mention(?:ed)?|"
+    r"text(?:ed)?|messag(?:e|ed)|sp(?:eak|oke|oken)|wr(?:ite|ote|itten)|prompt(?:ed)?|us(?:e|ed))\b"
+    r"|\bhave i been (?:talking|chatting|discussing|asking|saying|telling|texting|messaging|"
+    r"writing|prompting|using)\b"
+    r"|\b(?:was|were) (?:my|the) (?:\w+ ){0,2}(?:chats?|conversations?|messages?|sessions?|prompts?) about\b",
+    re.I,
+)
+#: The general shape of the same thing: a question word, then "did I" / "have I".
+#: "What did I browse yesterday", "who did I text", "where did I go last weekend".
+#: The call sites only act on it when the plan also holds a time range.
+_OWN_ACTIVITY_RECALL_RE = re.compile(
+    r"\b(?:what|who|whom|where|which)\b[^.?!]{0,40}?\b(?:did|have|had) i\b"
+    r"|\bwhat (?:was|were) i (?:\w+ing)\b",
+    re.I,
+)
+#: A conversation WITH a particular person is not this path's to answer. Its rows are the
+#: person's thread, which the entity-thread lane finds by identity; the strict window
+#: would replace a quiet week of that thread with every other thread's rows from the same
+#: week (measured 19 Nov 2026: 8 thread rows became 24 rows of other conversations). An AI
+#: is not a person, and "anyone" is nobody in particular.
+_NOT_A_PERSON = (
+    r"(?:chatgpt|gpt(?:-?\d[\w.]*)?|claude|gemini|copilot|perplexity|grok|codex|cursor|"
+    r"(?:(?:an?|the|my|any|some)\s+)?(?:a\.i\.|ai|chat ?bots?|llms?)|"
+    r"anyone|anybody|someone|somebody|people|everyone|everybody|who|whom)\b"
+)
+_WITH_PERSON_RE = re.compile(
+    r"\b(?:talk(?:ed|ing|s)?|chat(?:ted|ting|s)?|spoke|speak(?:ing|s)?|said|say(?:ing)?|"
+    r"discuss(?:ed|ing|es)?|text(?:ed|ing|s)?|messag(?:ed|ing|es?)|mention(?:ed)?|wr(?:ite|ote|itten))"
+    r"(?: about)?(?: \S+){0,3} (?:to|with) (?!" + _NOT_A_PERSON + r")[a-z]",
+    re.I,
+)
+#: "ask Sam", "text my mom", "told Sara": the person as the verb's own object. A name is
+#: recognised by its capital, so this one reads the text as typed.
+_PERSON_OBJECT_RE = re.compile(
+    r"\b(?:[Aa]sk(?:ed)?|[Tt]ell|[Tt]old|[Tt]ext(?:ed)?|[Mm]essag(?:e|ed))\s+"
+    r"(?!(?i:" + _NOT_A_PERSON + r"))(?:my\s+[a-z]+|[A-Z][a-z]+)"
+)
+_FREQUENCY_RE = re.compile(
+    r"\b(?:how often|how frequently|how many|how much|how long|most|least|frequency|statistics?|stats)\b",
+    re.I,
+)
+
+
 def is_dated_activity_query(query: str) -> bool:
     """Event recall, rather than identity, aggregate statistics or goal browsing."""
+    text = query or ""
+    if (
+        (_CONVERSATION_RECALL_RE.search(text) or _OWN_ACTIVITY_RECALL_RE.search(text))
+        and not _FREQUENCY_RE.search(text)
+        and not _WITH_PERSON_RE.search(text)
+        and not _PERSON_OBJECT_RE.search(text)
+    ):
+        return True
     return bool(re.search(r"\b(?:been up to|(?:was|am) I (?:doing|up to)|have I been doing|been working|worked on|working on|did I work on|the work I did|did I do|my activity|my activities|main activities|work did I progress|code changes|recap of (?:yesterday|today)|summary of (?:yesterday|today))\b", query, re.I))
