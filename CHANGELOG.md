@@ -9,6 +9,38 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **A Grow journal entry keeps where it was written, for the owner only.** `[S1]` `[C]` `[P]` Grow's Cloud Function
+  will add `latitude`, `longitude` (WGS84 degrees), `location_accuracy_m` (metres) and `location_taken_at` (ISO 8601,
+  UTC) to a `grow_journal` app_ingest record when the entry has a position. Before this the time-log normalizer
+  dropped them and only the raw retention row kept them. Migration `journal_entries_coordinates_v1` adds the four
+  columns to `journal_entries`, nullable and additive. The normalizer validates them (both halves in range, or none
+  kept) and the time-log mapper and canonical store write them exact. Owner rulings of 18 Nov 2026 (DISCLOSURE_RULES
+  DR-77): "Only me", and the default grant never returns exact location. Only the owner's own app (`owner_app`, at the
+  `owner_raw` tier) reads them: its query rows and its table reads.
+  Every other caller goes without, including inside a raw table's `payload_json`, and a sort by them is dropped:
+  - journal grants and shared views (the disclosure list specs, the grantee query pipeline, the permissions_v2
+    `JournalEntryResult`);
+  - outside AI clients, routines and the owner's coding agent;
+  - an owner-grant app (DR-76);
+  - an unstamped relay call.
+
+  Nothing derived reads them: they are stripped from the records handed to enrichment, so no embedding, index, fact,
+  statistic or location fan-out holds a copy. New grant field transforms `coordinates_to_100m`, `coordinates_to_1km`
+  and `coordinates_to_10km` sit beside `timestamp_to_date` in `FILTER_CATALOG`, `uma_filters` and `query/disclosure.py`.
+  They keep 3, 2 or 1 decimal places, round both halves together, and raise the accuracy to the cell's radius. They
+  reach no grantee while `disclosure/coordinates.COORDINATES_SHAREABLE` is False, because the grantee paths drop the
+  columns first.
+  Delete scrubs the four columns. No reprocessing: no stored record carries a position yet.
+
+### Fixed
+- **Deleting a Grow time-log entry with its lineage now removes its raw retention row.** `[O]` The entry is named
+  `tl-<grow id>` and the raw row is keyed by the Grow id, so the upstream sweep never matched it. After the owner
+  deleted the entry, the raw row kept the entry's text, and from now on its position. `data_explorer_row_delete` now
+  also deletes the source's `raw_*` row under the id the entry was minted from
+  (`journal_time_log_normalize.time_log_raw_record_id`), and only when the entry's id is exactly `tl-` plus its
+  recorded `session_num`. A row-only delete keeps raw rows, as before.
+
 ## [1.5.57] — 2026-11-18
 
 ### Added

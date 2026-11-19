@@ -569,6 +569,15 @@ def _delete_canonical_row(
     )
 
 
+def _time_log_raw_key(table_name: str, row: Dict[str, Any]) -> Optional[str]:
+    """The raw retention key of a time-log journal entry (``journal_time_log_normalize.time_log_raw_record_id``)."""
+    if table_name != "journal_entries":
+        return None
+    from .ingestion.journal_time_log_normalize import time_log_raw_record_id
+
+    return time_log_raw_record_id(row.get("entry_id"), row.get("metadata_json"))
+
+
 def _delete_upstream_rows(
     conn: Any,
     *,
@@ -576,6 +585,7 @@ def _delete_upstream_rows(
     source_record_id: str,
     skip_tables: Set[str],
     actions: List[TableAction],
+    raw_only: bool = False,
 ) -> int:
     deleted_total = 0
     for table_name in _list_user_tables(conn):
@@ -585,6 +595,7 @@ def _delete_upstream_rows(
             or table_name in _PROTECTED_TABLES
             or table_name in skip_tables
             or not _is_upstream_table(table_name, columns)
+            or (raw_only and not table_name.startswith("raw_"))
         ):
             continue
         predicates: List[str] = []
@@ -762,6 +773,19 @@ def delete_database_rows(
                         source_record_id=str(lineage.source_record_id),
                         skip_tables=skip_tables,
                         actions=actions,
+                    )
+                raw_key = _time_log_raw_key(table, row)
+                if lineage.source_id and raw_key and raw_key != lineage.source_record_id:
+                    # A time-log journal entry is named `tl-<raw id>`: its raw retention row (the record as the app
+                    # sent it, text and position included; DISCLOSURE_RULES DR-77) is keyed by the raw id, which
+                    # the sweep above never matched. Raw tables of the same source only.
+                    _delete_upstream_rows(
+                        conn,
+                        source_id=str(lineage.source_id),
+                        source_record_id=raw_key,
+                        skip_tables=skip_tables,
+                        actions=actions,
+                        raw_only=True,
                     )
                 if (
                     lineage.canonical_table

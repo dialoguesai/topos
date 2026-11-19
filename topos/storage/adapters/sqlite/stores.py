@@ -424,6 +424,30 @@ def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool
     return column in cols
 
 
+def _owner_position_columns(
+    conn: sqlite3.Connection,
+    table: str,
+    spec_key: str,
+    disclosure_tier: str,
+) -> tuple:
+    """The journal position columns to add to this list read, or () (DISCLOSURE_RULES DR-77).
+
+    Only the owner's own surface at the owner tier, through the full journal spec: the disclosure specs, every
+    grantee, an outside client, a routine and the owner's coding agent read none. The columns land beside
+    ``place_name`` in the row, so a query's ``rows`` carry ``latitude``, ``longitude`` (numbers),
+    ``location_accuracy_m`` (number or null) and ``location_taken_at`` (ISO text or null) on an entry that has a
+    position, and no such key on one that has none.
+    """
+    if table != "journal_entries" or spec_key != "journal_entries" or disclosure_tier != "owner_raw":
+        return ()
+    from ....disclosure.coordinates import COORDINATE_COLUMNS, owner_reads_coordinates
+
+    if not owner_reads_coordinates():
+        return ()
+    present = {row[1] for row in conn.execute("PRAGMA table_info(journal_entries)").fetchall()}
+    return tuple(COORDINATE_COLUMNS) if set(COORDINATE_COLUMNS) <= present else ()
+
+
 def _native_list_spec_key(
     conn: sqlite3.Connection,
     table: str,
@@ -500,6 +524,11 @@ class SQLiteCanonicalStore:
         if table == "activity_events" and disclosure_tier == "owner_raw" and _table_has_column(self._conn, table, "metadata_json"):
             base = base.replace("occurred_at AS event_at", "occurred_at AS event_at, metadata_json")
             col_names = [*col_names, "metadata_json"]
+        position = _owner_position_columns(self._conn, table, spec_key, disclosure_tier)
+        if position:
+            base = base.replace("place_name, source_id,", "place_name, " + ", ".join(position) + ", source_id,", 1)
+            col_names = [*col_names[: col_names.index("place_name") + 1], *position,
+                         *col_names[col_names.index("place_name") + 1:]]
         params: List[Any] = []
         clauses: List[str] = []
         # Wrap the spec so filters/ordering see its aliased columns (content,
@@ -561,6 +590,12 @@ class SQLiteCanonicalStore:
         params.extend([limit, offset])
         rows = self._conn.execute(query, params).fetchall()
         items = [dict(zip(col_names, row)) for row in rows]
+        if position:
+            from ....disclosure.coordinates import has_position
+
+            # A row with no position carries no position keys at all, rather than four nulls per entry.
+            items = [item if has_position(item) else {k: v for k, v in item.items() if k not in position}
+                     for item in items]
         return ListPage(items=items, total=total, offset=offset, limit=limit)
 
     def upsert(self, table: str, record: Dict[str, Any], *, idempotency_key: Optional[str] = None) -> str:

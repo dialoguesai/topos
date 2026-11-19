@@ -27,6 +27,17 @@ deletes or rewrites a fact removes its keys too
 
 Everything here is deterministic recompute-from-remainder: cheap at personal
 scale and exact (no residue), unlike attempting inverse updates.
+
+Nothing to purge, by construction: where a journal entry was written
+(``journal_entries.latitude``, ``longitude``, ``location_accuracy_m``,
+``location_taken_at``; DISCLOSURE_RULES DR-77). The position lives on the
+entry's own row and in its raw retention payload only. The record handed to
+signal derivation and enrichment has it stripped
+(``ingestion.canonical_pipeline._prepare_signal_record``), and no statistic,
+embedding, index, fact or location fan-out names the columns, so deleting the
+entry (and, for the raw copy, its upstream rows) leaves no copy here.
+``tests/ingestion/test_journal_coordinates.py`` deletes an entry and scans every
+table for the values.
 """
 
 from __future__ import annotations

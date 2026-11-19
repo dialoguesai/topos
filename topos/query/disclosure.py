@@ -8,6 +8,14 @@ from typing import Any, Dict, List, Optional
 
 from shared.filtering import FieldTransform, filter_manifest_from_storage
 
+from ..disclosure.coordinates import (
+    LATITUDE,
+    LONGITUDE,
+    PRECISION_TRANSFORMS,
+    grantee_rows,
+    is_precision_transform,
+    round_position,
+)
 from ..disclosure.tier import strip_ingest_pii_transforms
 from ..uma_filters import apply_filter_manifest, extract_field_transforms, query_filter_manifest, UMAFilterError
 from . import narrowing as _N
@@ -98,7 +106,11 @@ def _apply_field_transforms(rows: List[Dict[str, Any]], transforms: Optional[Lis
         tids = [singular] if singular else plural
         if not isinstance(tids, list) or not tids or any(not isinstance(tid, str) for tid in tids):
             raise UMAFilterError("Invalid mandatory query field transform")
-        if set(tids) - {"pii_redaction", "nsfw_sanitization", "timestamp_to_date"}:
+        precision = [tid for tid in tids if is_precision_transform(tid)]
+        if precision and (len(tids) != 1 or field not in (LATITUDE, LONGITUDE)):
+            # A position coarsens as one pair, by one level, named on either half (DISCLOSURE_RULES DR-77).
+            raise UMAFilterError("Invalid mandatory query field transform")
+        if set(tids) - {"pii_redaction", "nsfw_sanitization", "timestamp_to_date", *PRECISION_TRANSFORMS}:
             raise UMAFilterError("Unsupported mandatory query field transform")
         compiled.append((field, table_id, tids))
     out: List[Dict[str, Any]] = []
@@ -108,6 +120,12 @@ def _apply_field_transforms(rows: List[Dict[str, Any]], transforms: Optional[Lis
             if table_id and copy.get("_table") and copy.get("_table") != table_id:
                 continue
             if field not in copy:
+                continue
+            if is_precision_transform(tids[0]):
+                try:
+                    copy = round_position(copy, tids[0])
+                except ValueError:
+                    raise UMAFilterError("Coordinate transform requires a number") from None
                 continue
             if not isinstance(copy[field], str):
                 raise UMAFilterError("Mandatory query field transform requires text")
@@ -196,6 +214,10 @@ class DisclosureFilterPipeline:
 
                 rows = exclude_nsfw_rows_for_grantee(rows, tier=disclosure_tier)  # type: ignore[arg-type]
                 applied.append("nsfw_exclusion")
+                # Where a journal entry was written is the owner's (DISCLOSURE_RULES DR-77). The grantee list specs
+                # never select it; this is the backstop for any row that reaches a grantee packet another way.
+                # It runs before the grant's transforms, so a precision transform finds nothing to coarsen.
+                rows = grantee_rows(rows)
                 transforms = strip_ingest_pii_transforms(transforms)
                 if transforms is not None:
                     applied.append("ingest_disclosure_pii")

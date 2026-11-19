@@ -276,6 +276,10 @@ def _vocabulary(raw: list, plain: list) -> bool:
             and not any(root in plain[0] for root in jgf.SPECIAL_ROOTS))
 
 
+# The text columns guard 2b scans. Where the entry was written (latitude, longitude, location_accuracy_m,
+# location_taken_at; DISCLOSURE_RULES DR-77) is deliberately absent: numbers and a timestamp carry no word a
+# special-category list can match, and the position never reaches the inferred path, whose released item is the
+# fixed JournalEntryResult shape. Listing them would change nothing the guard decides while moving VERSION.
 ENTRY_COLUMNS = ("content", "people", "category", "mood_tag", "place_name")
 MAX_METADATA_ITEMS = 2000
 

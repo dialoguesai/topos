@@ -41,9 +41,13 @@ def _bump_generation_after_canonicalize(db_conn, source_id: str, result: "Canoni
 
 
 def _prepare_signal_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    from ..disclosure.coordinates import COORDINATE_COLUMNS
     from ..enrichment.jobs.canonical.brief_fallback import prepare_signal_record
 
-    return prepare_signal_record(record)
+    # A journal entry's position stays on its row (DISCLOSURE_RULES DR-77): the record handed to signal derivation
+    # and enrichment (embeddings, entities, extraction, timeline) never carries it, so no derived layer can hold a
+    # copy that would outlive the entry or reach a grantee.
+    return prepare_signal_record({k: v for k, v in record.items() if k not in COORDINATE_COLUMNS})
 
 
 _STALE_SEGMENT_DERIVED_TABLES = (
