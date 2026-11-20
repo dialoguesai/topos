@@ -1331,12 +1331,20 @@ def _list_canonical_rows(
     disclosure_tier: str = "owner_raw",
     contains: Optional[List[str]] = None,
     record_ids: Optional[List[str]] = None,
+    time_range: Optional[Tuple[str, str]] = None,
+    spread: bool = False,
 ) -> List[Dict[str, Any]]:
     # A table this node has never created holds no rows — the one funnel every
     # canonical lane goes through (scope routes, the entity-thread lane, the
     # employer heuristic) so no future lane can reach around the probe.
     if _canonical_table_absent(adapters, table):
         return []
+    if time_range:
+        return _list_canonical_rows_in_window(
+            adapters, table, source_ids=source_ids, limit=limit,
+            disclosure_tier=disclosure_tier, contains=contains,
+            time_range=time_range, spread=spread,
+        )
     # `record_ids` narrows the DISCLOSED page to named rows. It is a filter on the
     # same tiered query, not a lookup: an adapter that predates it serves the plain
     # page and the caller still intersects by id, so the worst case is a wider
@@ -1400,6 +1408,80 @@ def _list_canonical_rows(
     if any(_ts(r) for r in rows):
         rows.sort(key=_ts, reverse=True)
     return rows[:limit]
+
+
+#: Newest rows read per source when a window is BROWSED (no subject to match). The page
+#: handed back is `limit`; this is how far back inside the window the sample can reach.
+_WINDOW_SCAN_LIMIT = 400
+
+
+def _spread_sample(rows: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    """`limit` rows at even steps through `rows`, first and last included.
+
+    A browsed window is "what happened then", and the newest `limit` rows of a busy day
+    are its last hour. Rows arrive newest first, so even steps through them are even
+    steps through the activity (a busy hour still gets more of the sample than a quiet one).
+    """
+    if limit <= 0 or len(rows) <= limit:
+        return rows
+    if limit == 1:
+        return rows[:1]
+    step = (len(rows) - 1) / (limit - 1)
+    return [rows[round(index * step)] for index in range(limit)]
+
+
+def _list_canonical_rows_in_window(
+    adapters: AdapterBundle,
+    table: str,
+    *,
+    source_ids: List[str],
+    limit: int,
+    disclosure_tier: str,
+    contains: Optional[List[str]],
+    time_range: Tuple[str, str],
+    spread: bool,
+) -> List[Dict[str, Any]]:
+    """The disclosed page, restricted to rows whose own clock is inside `time_range`.
+
+    The window goes to the adapter, so it is applied BEFORE the page limit. Applied after
+    (the only place it used to be applied) the page was the newest `limit` matches in the
+    whole store, and a window older than those matched nothing.
+
+    An adapter that cannot take a window returns nothing here rather than an unwindowed
+    page passed off as a windowed one; the caller then falls back to the ordinary fetch.
+    """
+    rows: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for source_id in source_ids or [None]:
+        try:
+            page = adapters.canonical.list(
+                table,
+                limit=_WINDOW_SCAN_LIMIT if spread else limit,
+                offset=0,
+                source_id=source_id,
+                disclosure_tier=disclosure_tier,
+                contains=contains,
+                event_after=time_range[0],
+                event_before=time_range[1],
+            )
+        except TypeError:
+            return []
+        for row in page.items:
+            record_id = str(row.get("record_id") or row.get("message_id") or "")
+            key = (record_id + "|" + str(row.get("identifier") or "")) if record_id else str(row)
+            if key in seen:
+                continue
+            seen.add(key)
+            item = dict(row)
+            item.setdefault("_table", table)
+            rows.append(item)
+
+    def _ts(row: Dict[str, Any]) -> float:
+        stamp = _parse_row_timestamp(row)
+        return stamp.timestamp() if stamp is not None else float("-inf")
+
+    rows.sort(key=_ts, reverse=True)
+    return _spread_sample(rows, limit) if spread else rows[:limit]
 
 
 def _row_summary_text(table: str, row: Dict[str, Any], *, scope_id: str = "") -> str:
@@ -1522,6 +1604,7 @@ def _route_canonical_rows(
     rare_query_tokens: Optional[List[str]] = None,
     rare_query_token_groups: Optional[List[Dict[str, int]]] = None,
     browse_fallback: bool = False,
+    time_range: Optional[Tuple[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     """Router: content tokens must MATCH rows (full-table SQL filter); a query
     that only names the surface (or has no tokens) BROWSES recent rows; a
@@ -1539,6 +1622,15 @@ def _route_canonical_rows(
             getattr(adapters.signal, "_conn", None), table, query_text,
             limit=limit, disclosure_tier=disclosure_tier,
         )
+    if time_range:
+        windowed = _route_canonical_rows_in_window(
+            adapters, table, query_text=query_text, source_ids=source_ids,
+            limit=limit, disclosure_tier=disclosure_tier, time_range=time_range,
+        )
+        if windowed:
+            return windowed
+        # Nothing inside the window: everything below is the ordinary fetch, unchanged,
+        # and `_prefer_time_window` flags what it returns as out of window.
     query_lower = (query_text or "").lower()
     tokens = _query_tokens(query_text)
     residual = _residual_content_tokens(tokens, tables=[table])
@@ -1619,6 +1711,91 @@ def _route_canonical_rows(
             disclosure_tier=disclosure_tier,
         )
     return []
+
+
+#: Words for the ACT of conversing. In a dated ask over a message table they say what
+#: kind of row is wanted, and every row of the table is that kind: "what did I talk
+#: about yesterday" is not a search for rows containing "talk". Measured 19 Nov 2026:
+#: that reading returned 3 of the day's 277 rows.
+_CONVERSATION_ACT_TOKENS = frozenset(
+    {"talk", "talks", "talked", "talking", "chat", "chats", "chatted", "chatting",
+     "discuss", "discussed", "discussing", "discussion", "discussions", "ask", "asks",
+     "asked", "asking", "say", "says", "said", "saying", "tell", "tells", "told",
+     "telling", "mention", "mentions", "mentioned", "speak", "spoke", "spoken",
+     "conversation", "conversations", "convo", "convos", "message", "messages",
+     "messaged", "messaging", "text", "texts", "texted", "texting", "prompt", "prompts",
+     "prompted", "use", "used", "using", "write", "wrote", "written", "session",
+     "sessions"}
+)
+
+
+#: The same for the other dated tables: the verb that names what the table records. "What
+#: did I browse yesterday" asked `activity_events` for rows containing the word "browse"
+#: and got 2 of the day's 393 (measured 19 Nov 2026). Read only by the windowed fetch.
+_WINDOW_ACT_TOKENS: Dict[str, frozenset] = {
+    "ai_chat_messages": _CONVERSATION_ACT_TOKENS,
+    "conversation_messages": _CONVERSATION_ACT_TOKENS,
+    "activity_events": frozenset(
+        {"browse", "browsed", "browsing", "visit", "visited", "visiting", "read", "reading",
+         "watch", "watched", "watching", "look", "looked", "looking", "search", "searched",
+         "searching", "open", "opened", "view", "viewed", "see", "saw", "seen", "page", "pages"}
+    ),
+    "journal_entries": frozenset(
+        {"journal", "journaled", "journaling", "write", "wrote", "written", "writing", "log",
+         "logged", "note", "noted", "notes", "entry", "entries"}
+    ),
+    "location_events": frozenset(
+        {"go", "went", "gone", "going", "visit", "visited", "travel", "traveled", "travelled", "been"}
+    ),
+    "calendar_events": frozenset(
+        {"meet", "met", "attend", "attended", "scheduled", "have", "had", "happen", "happened"}
+    ),
+    "financial_transactions": frozenset(
+        {"buy", "buying", "spend", "spending", "pay", "paying", "purchased", "order", "ordered"}
+    ),
+}
+
+
+def _route_canonical_rows_in_window(
+    adapters: AdapterBundle,
+    table: str,
+    *,
+    query_text: str,
+    source_ids: List[str],
+    limit: int,
+    disclosure_tier: str,
+    time_range: Tuple[str, str],
+) -> List[Dict[str, Any]]:
+    """The rows of `table` inside the plan's window that the ask is about.
+
+    Two readings, decided by what is left of the question once its time words are gone:
+
+    * a SUBJECT is left ("the tide gauge", "Claude Code"): rows inside the window that
+      match it, newest first. An empty result is returned as empty, and the caller's
+      ordinary fetch runs, so a subject that is not in the window is never answered with
+      the window's unrelated rows.
+    * nothing is left ("what did I talk about yesterday", "what did I browse last
+      Friday"): the window IS the question, and a sample across it is returned.
+
+    The time words are removed first because the window already carries them. Left in,
+    "last week" asked rows for the word "week" and "last Friday" for the word "friday".
+    """
+    from .planner import strip_time_phrases
+
+    subject = strip_time_phrases(query_text)
+    residual = _residual_content_tokens(_query_tokens(subject), tables=[table])
+    acts = _WINDOW_ACT_TOKENS.get(table)
+    if acts:
+        residual = [token for token in residual if token not in acts]
+    if residual:
+        return _list_canonical_rows(
+            adapters, table, source_ids=source_ids, limit=limit,
+            disclosure_tier=disclosure_tier, contains=residual, time_range=time_range,
+        )
+    return _list_canonical_rows(
+        adapters, table, source_ids=source_ids, limit=min(limit, _SUMMARY_ITEM_CAP),
+        disclosure_tier=disclosure_tier, time_range=time_range, spread=True,
+    )
 
 
 def _canonical_row_to_item(
@@ -1946,6 +2123,7 @@ def _load_canonical_summary_items(
             rare_query_tokens=rare_query_tokens,
             rare_query_token_groups=rare_query_token_groups,
             browse_fallback=browse_fallback,
+            time_range=getattr(plan, "time_range", None) if plan else None,
         )
         for row in rows:
             item = _canonical_row_to_item(

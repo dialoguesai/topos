@@ -512,6 +512,8 @@ class SQLiteCanonicalStore:
         disclosure_tier: str = "owner_raw",
         contains: Optional[List[str]] = None,
         record_ids: Optional[List[str]] = None,
+        event_after: Optional[str] = None,
+        event_before: Optional[str] = None,
     ) -> ListPage:
         if table not in self._NATIVE_TABLES:
             return ListPage(items=[], total=0, offset=offset, limit=limit)
@@ -579,13 +581,25 @@ class SQLiteCanonicalStore:
         if wanted_ids:
             clauses.append("record_id IN (" + ",".join("?" for _ in wanted_ids) + ")")
             params.extend(wanted_ids)
+        order_col, direction = _NATIVE_ORDER_COL.get(table, ("record_id", "ASC"))
+        if order_col not in col_names:
+            order_col, direction = "record_id", "ASC"
+        if event_after or event_before:
+            # A window on the row's own clock, compared as INSTANTS: the stored text is
+            # "…Z", "…+00:00" or a local offset depending on the writer, and `julianday`
+            # reads all three. A table with no clock has no row provably inside a window.
+            if order_col == "record_id":
+                return ListPage(items=[], total=0, offset=offset, limit=limit)
+            if event_after:
+                clauses.append(f"julianday({order_col}) >= julianday(?)")
+                params.append(event_after)
+            if event_before:
+                clauses.append(f"julianday({order_col}) <= julianday(?)")
+                params.append(event_before)
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         count_row = self._conn.execute(f"SELECT COUNT(*) FROM ({query})", params).fetchone()
         total = int(count_row[0]) if count_row else 0
-        order_col, direction = _NATIVE_ORDER_COL.get(table, ("record_id", "ASC"))
-        if order_col not in col_names:
-            order_col, direction = "record_id", "ASC"
         query += f" ORDER BY {order_col} {direction} LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         rows = self._conn.execute(query, params).fetchall()
@@ -647,7 +661,12 @@ class SQLiteCanonicalStore:
         disclosure_tier: str = "owner_raw",
         contains: Optional[List[str]] = None,
         record_ids: Optional[List[str]] = None,
+        event_after: Optional[str] = None,
+        event_before: Optional[str] = None,
     ) -> ListPage:
+        # `event_after` / `event_before` bound the row's own clock (inclusive). Like
+        # `record_ids` they select FROM the disclosed page: one more WHERE clause on the
+        # same tiered query.
         # `record_ids` selects FROM the disclosed page, never around it: the tier,
         # the protection list and the NSFW withhold are applied by the same query
         # whether or not ids are named. It is how a lane that already knows WHICH
@@ -662,10 +681,18 @@ class SQLiteCanonicalStore:
                 disclosure_tier=disclosure_tier,
                 contains=contains,
                 record_ids=record_ids,
+                event_after=event_after,
+                event_before=event_before,
             )
 
         query = "SELECT payload_json FROM wiki_canonical_records WHERE table_name=?"
         params: List[Any] = [table]
+        if event_after:
+            query += " AND julianday(json_extract(payload_json, '$.event_at')) >= julianday(?)"
+            params.append(event_after)
+        if event_before:
+            query += " AND julianday(json_extract(payload_json, '$.event_at')) <= julianday(?)"
+            params.append(event_before)
         if source_id is not None:
             query += " AND source_id=?"
             params.append(source_id)

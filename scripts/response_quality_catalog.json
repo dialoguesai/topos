@@ -13,7 +13,9 @@
     "dates_and_recency": {
       "node": [
         "tests/query/test_activity_recap_recency.py",
-        "tests/query/test_fusion_recency.py"
+        "tests/query/test_fusion_recency.py",
+        "tests/query/test_plain_time_phrases.py",
+        "tests/query/test_dated_ask_reads_its_window.py"
       ],
       "web": [
         "lib/mcp/localEventTime.test.ts"
@@ -23,6 +25,7 @@
       "web": [
         "lib/mcp/scopeQueryRouter.test.ts",
         "lib/mcp/scopeRoutingRules.test.ts",
+        "lib/mcp/aiCounterpartRouting.test.ts",
         "lib/mcp/homeChatAgent.toolElection.test.ts"
       ]
     },
