@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.58] — 2026-11-19
+
 ### Added
 - **A Grow journal entry keeps where it was written, for the owner only.** `[S1]` `[C]` `[P]` Grow's Cloud Function
   will add `latitude`, `longitude` (WGS84 degrees), `location_accuracy_m` (metres) and `location_taken_at` (ISO 8601,
