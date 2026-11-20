@@ -7,6 +7,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from shared.filtering import FieldTransform, FilterManifest, field_transforms_from_storage, filter_manifest_from_storage
 
+from .disclosure.coordinates import LATITUDE as COORDINATE_LATITUDE
+from .disclosure.coordinates import LONGITUDE as COORDINATE_LONGITUDE
+from .disclosure.coordinates import is_precision_transform, round_position
+
 logger = logging.getLogger("topos.uma_filters")
 
 
@@ -540,6 +544,17 @@ def _apply_field_transforms(
                     _applied()
                 else:
                     _skip("value_not_datetime")
+            elif is_precision_transform(ft.transform_id):
+                # Coarsen a journal entry's position (DISCLOSURE_RULES DR-77): both halves together, whichever the
+                # transform names. Grantee paths drop the columns first while DR-77 keeps them owner-only.
+                if ft.field in (COORDINATE_LATITUDE, COORDINATE_LONGITUDE):
+                    try:
+                        updated = round_position(updated, ft.transform_id)
+                        _applied()
+                    except ValueError:
+                        _skip("value_not_number")
+                else:
+                    _skip("field_not_coordinate")
             elif (apply_privacy is not None and ft.transform_id in privacy_ids) or (
                 apply_ollama is not None and ft.transform_id in ollama_ids
             ):
@@ -725,6 +740,17 @@ async def _apply_field_transforms_async(
                     _applied()
                 else:
                     _skip("value_not_datetime")
+            elif is_precision_transform(ft.transform_id):
+                # Coarsen a journal entry's position (DISCLOSURE_RULES DR-77): both halves together, whichever the
+                # transform names. Grantee paths drop the columns first while DR-77 keeps them owner-only.
+                if ft.field in (COORDINATE_LATITUDE, COORDINATE_LONGITUDE):
+                    try:
+                        updated = round_position(updated, ft.transform_id)
+                        _applied()
+                    except ValueError:
+                        _skip("value_not_number")
+                else:
+                    _skip("field_not_coordinate")
             elif (apply_privacy is not None and ft.transform_id in privacy_ids) or (
                 apply_ollama_sync is not None and ft.transform_id in ollama_ids
             ):

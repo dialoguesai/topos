@@ -353,6 +353,10 @@ from .dashboard_measurements_v1 import (
     MIGRATION_ID as DASHBOARD_MEASUREMENTS_V1_ID,
     apply_dashboard_measurements_v1_up,
 )
+from .journal_entries_coordinates_v1 import (
+    MIGRATION_ID as JOURNAL_COORDINATES_V1_ID,
+    apply_journal_entries_coordinates_v1_up,
+)
 
 # Append-only. Never rename, reorder, or delete a shipped id — fixes are new entries.
 # ``always_run`` matches the historical ensure_migrations_applied re-run set.
@@ -508,6 +512,10 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(88, DASHBOARD_MEASUREMENTS_V1_ID, apply_dashboard_measurements_v1_up, always_run=True),
     _spec(89, SERVE_SPANS_V1_ID, apply_serve_spans_v1_up),
     _spec(90, DERIVATION_PROCESSING_V1_ID, apply_derivation_processing_v1_up),
+    # 91, 18 Nov 2026: where a journal entry was written (Grow's phone position), four nullable columns on
+    # journal_entries, owner-only (DISCLOSURE_RULES DR-77). Additive, PRAGMA-guarded, reads no row; always_run like
+    # the other journal column steps (26-30) because journal_entries can appear after this step first ran.
+    _spec(91, JOURNAL_COORDINATES_V1_ID, apply_journal_entries_coordinates_v1_up, always_run=True),
 ]
 
 
@@ -547,6 +555,7 @@ __all__ = [
     "EXTRACTION_ARTIFACTS_ID",
     "JOURNAL_PEOPLE_ID",
     "JOURNAL_PLACE_NAME_ID",
+    "JOURNAL_COORDINATES_V1_ID",
     "JOURNAL_DURATION_ID",
     "JOURNAL_ENDS_AT_ID",
     "JOURNAL_STARTS_AT_ID",

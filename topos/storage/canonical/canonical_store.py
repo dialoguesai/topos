@@ -1121,7 +1121,41 @@ class SQLiteCanonicalStore(CanonicalStore):
                 "UPDATE journal_entries SET event_time_json=? WHERE entry_id=? AND event_time_json IS NULL",
                 (stated, entry_id),
             )
+        self._write_journal_position(entry_id, record)
         return CanonicalRef(record_id=entry_id, created=existing is None)
+
+    def _journal_coordinate_columns(self) -> bool:
+        cached = self.__dict__.get("_journal_coordinates")
+        if cached is None:
+            from ...disclosure.coordinates import COORDINATE_COLUMNS
+
+            try:
+                names = {row[1] for row in self._conn.execute("PRAGMA table_info(journal_entries)").fetchall()}
+            except sqlite3.Error:
+                names = set()
+            cached = self.__dict__["_journal_coordinates"] = set(COORDINATE_COLUMNS) <= names
+        return cached
+
+    def _write_journal_position(self, entry_id: str, record: Dict[str, Any]) -> None:
+        """Where the entry was written, exact and owner-only (DISCLOSURE_RULES DR-77).
+
+        Written only when the record carries a position, and then all four columns together. A record without one
+        leaves the stored position as it was: Grow's function leaves the fields out both when an entry has no
+        position and when the phone has not saved it yet (it writes the position up to 15 s after the entry), and
+        its fingerprint means a dropped value is never sent again. Clearing a position needs its own signal; the
+        entry's deletion takes it with the row.
+        """
+        from ...disclosure.coordinates import ACCURACY, LATITUDE, LONGITUDE, TAKEN_AT, coordinate_fields, has_position
+
+        # Validated again here: a journal record can reach the store from writers other than the time-log parser.
+        fields = coordinate_fields(record)
+        if not has_position(fields) or not self._journal_coordinate_columns():
+            return
+        self._conn.execute(
+            "UPDATE journal_entries SET latitude=?, longitude=?, location_accuracy_m=?, location_taken_at=? "
+            "WHERE entry_id=?",
+            (fields[LATITUDE], fields[LONGITUDE], fields[ACCURACY], fields[TAKEN_AT], entry_id),
+        )
 
     def _upsert_profile_record(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
         record_id = str(record.get("record_id") or record.get("source_record_id") or "")

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
+
+from ..disclosure.coordinates import coordinate_fields
 
 
 def _coerce_bool(value: Any) -> bool:
@@ -93,6 +96,30 @@ def build_time_log_content(payload: Dict[str, Any]) -> str:
     return "\n\n".join(parts)
 
 
+def time_log_raw_record_id(entry_id: Any, metadata_json: Any) -> Optional[str]:
+    """The raw retention key a time-log entry was minted from, or None.
+
+    ``normalize_time_log_payload`` names an entry ``tl-<num>``, where ``num`` is the record's ``num`` or, failing
+    that, the id the raw retention row is stored under, and keeps ``num`` as ``metadata_json.session_num``. The
+    entry's own ``source_record_id`` is the ``tl-`` id, so an upstream delete keyed on it never reached the raw row,
+    which kept the entry's text and position after the owner deleted it. Returned only when the id was minted
+    exactly that way.
+    """
+    entry = str(entry_id or "").strip()
+    metadata = metadata_json
+    if isinstance(metadata, str):
+        try:
+            metadata = json.loads(metadata)
+        except ValueError:
+            return None
+    if not isinstance(metadata, dict):
+        return None
+    num = str(metadata.get("session_num") or "").strip()
+    if not num or entry != f"tl-{num}":
+        return None
+    return num
+
+
 def normalize_time_log_payload(payload: Dict[str, Any], record_id: str, dataset_id: str) -> Dict[str, Any]:
     num = str(payload.get("num") or record_id).strip()
     entry_id = f"tl-{num}" if num else f"tl-{record_id}"
@@ -131,6 +158,10 @@ def normalize_time_log_payload(payload: Dict[str, Any], record_id: str, dataset_
         "completed": _coerce_bool(payload.get("completed")),
         "location": location,
         "group": group,
+        # Where the entry was written, when the app sent a position (Grow, 18 Nov 2026): latitude, longitude,
+        # location_accuracy_m, location_taken_at, exact and owner-only (DISCLOSURE_RULES DR-77). All four None
+        # when the record carries no usable position; see topos.disclosure.coordinates.
+        **coordinate_fields(payload),
         "_metadata": {
             "session_num": num,
             "goal_word_count": payload.get("goalWordCount"),

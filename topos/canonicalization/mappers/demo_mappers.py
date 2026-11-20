@@ -157,6 +157,12 @@ class JournalTimeLogMapper(CanonicalMapper):
             "duration": p.get("duration") or p.get("duration_minutes"),
             "people": p.get("people"),
             "place_name": p.get("place_name"),
+            # Owner-only position (DISCLOSURE_RULES DR-77); never copied into metadata_json, which grantee
+            # paths and the inferred-fact guards read.
+            "latitude": p.get("latitude"),
+            "longitude": p.get("longitude"),
+            "location_accuracy_m": p.get("location_accuracy_m"),
+            "location_taken_at": p.get("location_taken_at"),
             "source_record_id": entry_id,
             "metadata_json": metadata,
         }

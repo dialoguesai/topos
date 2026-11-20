@@ -217,6 +217,36 @@ FILTER_CATALOG: Dict[str, FilterDefinition] = {
         ui_group="Redaction",
         compute_tier="low",
     ),
+    # Coarsen where a journal entry was written, as timestamp_to_date coarsens a time (owner ruling 18 Nov 2026,
+    # DISCLOSURE_RULES DR-77). Named on `latitude` or `longitude`; both halves round together and the accuracy
+    # becomes at least the cell's radius. Owner-only today: grantee paths drop the columns before transforms run.
+    "coordinates_to_100m": _catalog_entry(
+        "coordinates_to_100m",
+        FilterCategory.SANITIZATION,
+        "Round a position to about 100 m (3 decimal places).",
+        runtime_status=FilterRuntimeStatus.SUPPORTED_NOW,
+        handler_id="sanitization.coordinates_to_100m",
+        ui_group="Redaction",
+        compute_tier="low",
+    ),
+    "coordinates_to_1km": _catalog_entry(
+        "coordinates_to_1km",
+        FilterCategory.SANITIZATION,
+        "Round a position to about 1 km (2 decimal places).",
+        runtime_status=FilterRuntimeStatus.SUPPORTED_NOW,
+        handler_id="sanitization.coordinates_to_1km",
+        ui_group="Redaction",
+        compute_tier="low",
+    ),
+    "coordinates_to_10km": _catalog_entry(
+        "coordinates_to_10km",
+        FilterCategory.SANITIZATION,
+        "Round a position to about 10 km (1 decimal place).",
+        runtime_status=FilterRuntimeStatus.SUPPORTED_NOW,
+        handler_id="sanitization.coordinates_to_10km",
+        ui_group="Redaction",
+        compute_tier="low",
+    ),
     "raw_to_summary": _catalog_entry(
         "raw_to_summary",
         FilterCategory.SANITIZATION,

@@ -1000,6 +1000,11 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
         offset = max(0, int(payload.get("offset") or 0))
         order_by = (payload.get("order_by") or payload.get("sort_column") or "").strip() or None
         order_dir = (payload.get("order_dir") or payload.get("sort_direction") or "").strip() or None
+        from ...data_explorer_tables import owner_only_order_column
+
+        if owner_only_order_column(order_by):
+            # An owner-only column (DISCLOSURE_RULES DR-77) is withheld below; its order would still tell.
+            order_by = None
         scope_strategy: Optional[str] = None
         query_plan: List[str] = []
         started_at = time_module.perf_counter()

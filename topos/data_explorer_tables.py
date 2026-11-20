@@ -61,14 +61,33 @@ def is_owner_only_table(table_name: str) -> bool:
 
 
 def withhold_owner_only_rows(table_name: str, rows: list) -> list:
-    """Drop owner-only ``signal_objects`` rows unless the owner's own surface is asking."""
-    if str(table_name or "").strip() != "signal_objects":
-        return rows
+    """Drop owner-only rows and fields unless the owner's own surface is asking.
+
+    Rows: ``signal_objects`` of the owner-only types. Fields: where a journal entry was written (``latitude``,
+    ``longitude``, ``location_accuracy_m``, ``location_taken_at``; DISCLOSURE_RULES DR-77), from every table's rows
+    and from inside a raw table's ``payload_json``, which keeps the record as the app sent it.
+    """
     from .principal import OWNER_APP, current_principal
 
     if getattr(current_principal(), "cls", None) == OWNER_APP:
         return rows
+    from .disclosure.coordinates import withhold_coordinates
+
+    rows = withhold_coordinates(rows)
+    if str(table_name or "").strip() != "signal_objects":
+        return rows
     return [r for r in rows if not (isinstance(r, dict) and r.get("object_type") in OWNER_ONLY_SIGNAL_OBJECT_TYPES)]
+
+
+def owner_only_order_column(column: object) -> bool:
+    """True when sorting by ``column`` would rank rows by an owner-only field for a caller short of the owner.
+
+    Sorting by a withheld column still tells its order (who was furthest north), so the table tools drop such a
+    sort for anyone but the owner's own surface and fall back to the table's default order.
+    """
+    from .disclosure.coordinates import COORDINATE_COLUMNS, owner_reads_coordinates
+
+    return str(column or "").strip() in COORDINATE_COLUMNS and not owner_reads_coordinates()
 
 
 def hidden_from_current_principal(table_name: str) -> bool:
