@@ -1,6 +1,6 @@
 """Topos Control Plane Version Information."""
 
-__version__ = "1.5.57"
-__version_info__ = (1, 5, 57)
+__version__ = "1.5.58"
+__version_info__ = (1, 5, 58)
 
 __all__ = ["__version__", "__version_info__"]
