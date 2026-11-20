@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.59] — 2026-11-20
+
 ### Changed
 - **A journal entry is Off-limits only when it names a whole Off-limits name.** `[P]` A journal entry was withheld
   whole when any single word of an Off-limits name or alias appeared in it, in any case. So a name with an everyday
