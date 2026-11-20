@@ -254,11 +254,19 @@ def test_the_45_shapes_of_2_october_are_all_here():
                 assert entity_boundary.skeleton(alias) in WORDS_2_3, alias
 
 
+# v11 (owner ruling of 20 Nov 2026): a journal row withholds on a whole name or alias only. These shapes are a form of
+# ONE word of a longer name with no one-word alias, so a journal row releases them; every other kind still withholds.
+ONE_WORD_OF_A_LONGER_NAME = frozenset({17, 19, 22, 25, 36})
+
+
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("shape", SHAPES, ids=SHAPE_IDS)
 def test_each_shape_is_withheld_in_every_kind(shape, kind):
     boundary = gate(shape.canonical, shape.aliases)
-    if kind == "journal_entry":
+    if kind == "journal_entry" and SHAPES.index(shape) in ONE_WORD_OF_A_LONGER_NAME:
+        assert not withheld(kind, boundary, shape.text, shape.column)
+        assert len(shape.canonical.split()) > 1 and not shape.aliases
+    elif kind == "journal_entry":
         assert withheld(kind, boundary, shape.text, shape.column)
     else:
         assert withheld(kind, boundary, shape.prose or shape.text)
@@ -274,7 +282,9 @@ def test_each_shape_was_released_whole_in_a_journal_row_before_v8(shape, monkeyp
 def test_a_bare_first_name_or_surname_written_as_a_name_withholds_in_every_kind(kind):
     boundary = gate("Quillon Marsh-Edevane")
     for text in ("Lunch with Quillon after the run.", "Edevane called about the boat."):
-        assert withheld(kind, boundary, text), text
+        # v11: a journal row withholds on the whole name only; every other kind reads the capitalised part (v8)
+        assert withheld(kind, boundary, text) is (kind != "journal_entry"), text
+    assert withheld(kind, boundary, "Lunch with Quillon Marsh-Edevane after the run.")
     assert not withheld(kind, boundary, "Lunch after the run, then the boat.")
 
 
@@ -289,12 +299,16 @@ def test_outside_a_journal_row_a_part_that_is_an_ordinary_word_in_lower_case_is_
     assert withheld(kind, boundary, "We walked to Brooks place at dawn.")           # a form, as in a journal row
 
 
-def test_a_journal_row_and_an_interest_label_keep_the_part_anywhere():
+def test_a_journal_row_and_an_interest_label_read_whole_names_only_since_v11():
+    """v3-v10 kept a bare part anywhere for these; v11 (owner ruling of 20 Nov 2026) reads whole names only."""
     boundary = gate("Wren Thistledown", ("Brook Mallory",))
-    assert withheld("journal_entry", boundary, "We walked along the brook at dawn.")
-    assert "offlimits" in interest_family._label_failures(
+    assert not withheld("journal_entry", boundary, "We walked along the brook at dawn.")
+    assert withheld("journal_entry", boundary, "We walked along with brook mallory at dawn.")
+    assert "offlimits" not in interest_family._label_failures(
         "cluster-1", "brook walks", [], [], NO_KEYS, NO_KEYS, {"record": set()}, frozenset(), boundary)
-    assert boundary.name_part_match_only("journal_entries", {"content": "along the brook"})
+    assert "offlimits" in interest_family._label_failures(
+        "cluster-1", "brook mallory walks", [], [], NO_KEYS, NO_KEYS, {"record": set()}, frozenset(), boundary)
+    assert not boundary.name_part_match_only("journal_entries", {"content": "along the brook"})
     assert not boundary.name_part_match_only("conversation_messages", {"content": "along the brook"})
     assert boundary.name_part_match_only("conversation_messages", {"content": "with Brook"})
 
@@ -382,4 +396,4 @@ def test_v8_only_ever_adds_to_v7(monkeypatch):
 
 
 def test_the_boundary_version_is_v9():
-    assert entity_boundary.VERSION == "node-observed-entity-boundary/v10"   # v9: BL-126 (1.5.1); v10: BL-172 (1.5.4)
+    assert entity_boundary.VERSION == "node-observed-entity-boundary/v11"   # v9: BL-126 (1.5.1); v10: BL-172 (1.5.4); v11: journal whole names only

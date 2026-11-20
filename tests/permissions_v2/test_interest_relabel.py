@@ -172,7 +172,7 @@ def test_a_cluster_the_owner_excluded_is_never_asked_about(db, case):
         cluster(db, "tc_site", "velocipedia / pemberly hollis")
     elif case == "offlimits_name_part":
         off_limits(db)
-        cluster(db, "tc_site", "velocipedia / hollis rides")
+        cluster(db, "tc_site", "velocipedia / Hollis rides")
     elif case == "excluded_entity":
         excluded_entity(db)
         cluster(db, "tc_site", "velocipedia / nimbus meetups")
@@ -280,7 +280,7 @@ def test_calls_stop_at_the_limit_and_the_try_resumes_later_told_the_rule_alone(d
 
 @pytest.mark.parametrize("answer,rule,shown", [
     ("pemberly hollis interviews", "offlimits", None),                 # an Off-limits name
-    ("hollis woodworking videos", "offlimits", None),                  # a bare part of one
+    ("Hollis woodworking videos", "offlimits", None),                  # a bare part of one, written as a name (v11)
     ("nimbus guild meetups", "excluded_label", None),                  # an excluded entity
     ("orla quennell interviews", "label_person", "orla quennell interviews"),   # a person entity's name
     ("quennell cycling talks", "label_person", "quennell cycling talks"),       # ...or a word of one a visit mentions
@@ -324,7 +324,7 @@ def test_an_answer_is_judged_as_the_index_build_will_judge_it(db):
     assert run(db, "anything")[0]["calls"] == 0
 
 
-@pytest.mark.parametrize("answer", ["velocipedia hollis rides", "velocipedia nimbus guild rides"])
+@pytest.mark.parametrize("answer", ["velocipedia Hollis rides", "velocipedia nimbus guild rides"])
 def test_an_answer_that_breaks_a_form_rule_and_an_exclusion_is_not_shown_again(db, answer):
     """The first rule it broke is a form rule; what decides whether it is shown is every rule it broke."""
     off_limits(db)
@@ -448,8 +448,8 @@ def test_a_second_label_that_stops_passing_withholds_the_month_and_has_one_try_l
 
 
 def test_a_second_label_the_owner_has_since_excluded_is_erased_and_never_shown_again(db):
-    run(db, "hollis style touring bikes")
-    assert build(db).objects[0].label == "hollis style touring bikes"
+    run(db, "Hollis style touring bikes")
+    assert build(db).objects[0].label == "Hollis style touring bikes"
     off_limits(db)
     built = build(db)
     base = fam.label_revision("tc_site", OWN)
@@ -459,7 +459,7 @@ def test_a_second_label_the_owner_has_since_excluded_is_erased_and_never_shown_a
     assert prepared["input"]["last"] == {"rule": "offlimits", "label": None}
     assert rl.prune(db, owner_id=OWNER, built=built) == {"deleted": 0, "erased": 1}
     db.commit()
-    assert "hollis" not in table_text(db)
+    assert "hollis" not in table_text(db).lower()
     assert (row(db).label, row(db).refused, row(db).tries) == (None, "offlimits", 1)
     assert rl.prune(db, owner_id=OWNER, built=build(db)) == {"deleted": 0, "erased": 0}
 
@@ -489,13 +489,13 @@ def test_a_second_label_is_erased_when_the_own_label_is_excluded(db):
 def test_a_second_label_is_erased_when_the_own_label_comes_to_name_an_off_limits_person(db):
     """The second label itself names nothing excluded; the cluster's own label does, now. The cluster is the
     owner's explicit exclusion from then on: withheld, never asked about again, and its second label not kept."""
-    cluster(db, "tc_site", "velocipedia / hollis rides")
+    cluster(db, "tc_site", "velocipedia / Hollis rides")
     db.commit()
     run(db, GOOD)
     assert build(db).objects[0].label == GOOD
     off_limits(db)
     built = build(db)
-    base = fam.label_revision("tc_site", "velocipedia / hollis rides")
+    base = fam.label_revision("tc_site", "velocipedia / Hollis rides")
     assert built.objects == [] and august(db).label_withheld == "label_host" and built.label_retries == []
     assert built.second_unusable == {base: "offlimits"}
     assert rl.prune(db, owner_id=OWNER, built=built) == {"deleted": 0, "erased": 1}
@@ -562,7 +562,7 @@ def test_a_refusal_the_previous_release_stored_under_the_prompt_revision_alone_i
 
 
 def test_an_erased_label_is_a_refusal_under_the_current_checks(db):
-    run(db, "hollis style touring bikes")
+    run(db, "Hollis style touring bikes")
     off_limits(db)
     assert rl.prune(db, owner_id=OWNER, built=build(db)) == {"deleted": 0, "erased": 1}
     db.commit()

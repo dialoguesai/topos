@@ -555,7 +555,8 @@ def test_an_off_limits_label_is_withheld(db):
 
 
 @pytest.mark.parametrize("label,withheld", [
-    ("hollis / woodworking", "offlimits"),            # the last name alone
+    ("hollis / woodworking", None),                   # v11: the last name alone, in lower case, is the word
+    ("Hollis / woodworking", "offlimits"),            # the last name alone, written as a name
     ("Pemberly restorations", "offlimits"),           # the first name alone
     ("Hollis's workshop tours", "offlimits"),         # a possessive is still the word
     ("pemberly hollis woodworking", "offlimits"),     # the whole name, as before
@@ -564,7 +565,8 @@ def test_an_off_limits_label_is_withheld(db):
 ])
 def test_a_bare_part_of_an_off_limits_name_withholds_the_label(db, label, withheld):
     """The journal family's rule, on the label: with the model's `unknown` no longer withholding (floors v2),
-    a first or last name alone is caught deterministically here."""
+    a first or last name alone is caught deterministically here. Since v11 the journal family reads whole names
+    only, so a lower-case part is the word; a part written as a name is still caught by the label's own check."""
     _off_limits(db, "Pemberly Hollis")
     assert _with_label(db, label) == withheld
 

@@ -71,6 +71,13 @@ def v2_hits(text, terms):
     return bool(short_terms.intersection(tokens) or any(term in compact for term in long_terms))
 
 
+def _protect_again(path, canonical, aliases):
+    """Replace the one protected entry with the same name and these aliases."""
+    with _db(path) as conn:
+        conn.execute("DELETE FROM entity_blackholes WHERE blackhole_id='b-zeb'")
+    _protect(path, canonical, aliases)
+
+
 def _protect(path, canonical, aliases):
     from topos.storage.db.migrations.entity_blackhole_v1 import apply_entity_blackhole_v1_up
     with _db(path) as conn:
@@ -209,12 +216,12 @@ def test_the_boundary_version_moved_so_every_earlier_index_requalifies(monkeypat
     """Candidate 10's journal name parts took v3 and ran on the owner's node; v4 added the short forms, v5 the
     inflected ones and v6 the named forms and tag characters, so an index built against any earlier version
     re-qualifies (v7 added readings and endings, v8 the forms in every kind: N6)."""
-    assert entity_boundary.VERSION == "node-observed-entity-boundary/v10"
+    assert entity_boundary.VERSION == "node-observed-entity-boundary/v11"
     current = boundary("Abe").revision
     for earlier in ("node-observed-entity-boundary/v3", "node-observed-entity-boundary/v4",
                     "node-observed-entity-boundary/v5", "node-observed-entity-boundary/v6",
                     "node-observed-entity-boundary/v7", "node-observed-entity-boundary/v8",
-                    "node-observed-entity-boundary/v9"):
+                    "node-observed-entity-boundary/v9", "node-observed-entity-boundary/v10"):
         monkeypatch.setattr(entity_boundary, "VERSION", earlier)
         assert boundary("Abe").revision != current
 
@@ -338,8 +345,12 @@ def v3_hits(text, terms, parts):
     ("Em Varnell", "Emma"), ("Jo Varnell", "JOEYY"),
 ])
 def test_a_journal_entry_naming_a_short_first_name_by_its_forms_is_withheld(node, person, text):
+    """v11 (owner ruling of 20 Nov 2026): a journal row reads whole names only. The first name alone of a two-word
+    name releases in any form; given as a one-word alias, it is a whole alias and every form of it withholds."""
     _protect(node, person, [])                                       # the full name only, no alias
     _entry(node, "e1", f"Walked home with {text} after the draft.")
+    assert _floors_code(node, "e1") is None
+    _protect_again(node, person, [person.split()[0]])                # the first name as its own alias
     assert _floors_code(node, "e1") == "entity_protected"
 
 
@@ -366,7 +377,7 @@ def test_a_particle_or_a_title_in_a_name_takes_no_bare_match_and_a_title_no_form
     _entry(node, "e-part", "Wren called about the draft.")
     assert _floors_code(node, "e-particles") is None
     assert _floors_code(node, "e-title") is None
-    assert _floors_code(node, "e-part") == "entity_protected"
+    assert _floors_code(node, "e-part") is None                       # v11: one word of the name, in a journal
 
 
 def test_name_word_forms_reach_every_kind_since_v8():
@@ -376,11 +387,12 @@ def test_name_word_forms_reach_every_kind_since_v8():
     journal = {"entry_id": "j1", "source_id": "s", "content": "Zebby wrote back."}
     matched, _revision = gate.observe(table="journal_entries", record_id="j1", source_id="s", dataset_id=None,
                                       row=journal)
-    assert matched and gate.name_part_match_only("journal_entries", journal)
+    # v11: a journal row reads whole names only, so a form of one word of the name releases there
+    assert not matched and not gate.name_part_match_only("journal_entries", journal)
     assert not gate._hits(journal)                       # whole terms alone release it: the name rule withholds it
     assert gate.mentions_protected("Zebby wrote back.")
     assert gate.name_part_match_only("conversation_messages", journal)
-    assert gate.legacy_veto("journal_entries", journal) and gate.legacy_veto("signal_objects", journal)
+    assert not gate.legacy_veto("journal_entries", journal) and gate.legacy_veto("signal_objects", journal)
 
 
 def test_name_words_come_from_every_name_the_closure_reaches():
@@ -394,8 +406,7 @@ def test_name_words_come_from_every_name_the_closure_reaches():
     gate = EntityBoundary(conn)
     assert {"jo", "ed"} <= gate.name_short_words
     for text in ("Joey called.", "Eddie called."):
-        row = {"entry_id": "j1", "source_id": "s", "content": text}
-        assert gate.observe(table="journal_entries", record_id="j1", source_id="s", dataset_id=None, row=row)[0], text
+        assert gate.mentions_protected(text), text      # every kind but a journal row reads the forms (v11)
 
 
 def test_a_name_word_change_moves_the_boundary_revision():
@@ -613,13 +624,13 @@ def test_a_journal_entry_naming_a_protected_person_by_an_inflected_form_is_withh
 def test_a_three_letter_name_word_takes_inflected_forms_and_a_two_letter_one_none(node):
     _protect(node, "Ula Varnell", [])                                  # the full name only, no alias
     _entry(node, "e-word", "Kolacja u Uli w piatek.")
-    assert _floors_code(node, "e-word") == "entity_protected"
+    assert _floors_code(node, "e-word") is None                        # v11: one word of the name, in a journal
     gate = boundary(canonical="Ana de la Cruzado")
     assert gate.name_short_words == {"ana", "de", "la"}
     row = {"entry_id": "j1", "source_id": "s", "content": "Flew home via Las Vegas and Des Moines."}
     assert not gate.observe(table="journal_entries", record_id="j1", source_id="s", dataset_id=None, row=row)[0]
     row = {"entry_id": "j2", "source_id": "s", "content": "Lunch with Anita today."}
-    assert gate.observe(table="journal_entries", record_id="j2", source_id="s", dataset_id=None, row=row)[0]
+    assert not gate.observe(table="journal_entries", record_id="j2", source_id="s", dataset_id=None, row=row)[0]
     assert gate.mentions_protected("Lunch with Anita today.")          # since v8 (N6) every kind reads name words
 
 

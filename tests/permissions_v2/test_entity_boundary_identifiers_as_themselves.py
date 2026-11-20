@@ -110,7 +110,7 @@ def test_no_identifier_is_looked_for_in_a_key_only_in_values():
     assert not entry({"fields": {"quorra7": 3, "work": []}})              # nested keys, and one with a digit
     assert entry({"area": "work"}) and entry({"notes": ["called quorra7 twice"]})   # the same words as VALUES
     # a NAME in a key withholds, as it always did: this round changes nothing for names
-    assert entry({"Quorra Vellaby": "birthday"}) and entry({"vellaby": 1})
+    assert entry({"Quorra Vellaby": "birthday"}) and not entry({"vellaby": 1})   # v11: one word of a name releases
 
 
 def test_a_term_that_is_somebodys_name_is_read_as_a_name_whoever_lists_it_as_a_handle():

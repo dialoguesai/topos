@@ -1722,14 +1722,14 @@ def test_a_second_label_naming_an_off_limits_name_or_a_person_is_refused_in_the_
     conn.close()
     T = NOW_US // 1_000_000
     loop = interest_loop(tmp_path, bad_label, Clock(T), FakeWorker(), interests=True, relabels=True)
-    second_model.answers[:] = ["hollis cycling tours", "orla quennell cycling talks"]
+    second_model.answers[:] = ["Hollis cycling tours", "orla quennell cycling talks"]
     receipt = loop.run_interests()
     assert (receipt.relabel_calls, receipt.relabelled, receipt.inserted) == (2, 0, 3)
     assert second_model.asked[1]["last"] == {"rule": "offlimits", "label": None}
     assert site_month(bad_label) == ("label_host", SITE_LABEL, 2)
     result = second_label_result(bad_label)
     assert (result.label, result.refused) == (None, "label_person")
-    assert "hollis" not in relabel_table(bad_label) and "quennell" not in relabel_table(bad_label)
+    assert "hollis" not in relabel_table(bad_label).lower() and "quennell" not in relabel_table(bad_label)
 
 
 def test_second_tries_wait_once_for_a_restore_that_is_owed(tmp_path, bad_label, model, second_model):
