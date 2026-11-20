@@ -152,8 +152,13 @@ def test_the_release_passes_a_line_start_form_that_the_prompt_shows_mid_sentence
     shown = shown_item(message("1", GAP), "none").body
     assert shown == "Saturday plans Ostrows are visiting for lunch"
     assert boundary.mentions_protected(shown)                       # as the prompt shows it, it is not
-    # The same form mid-sentence in a row: the veto withholds it (the release never needs Fix A for it).
-    assert withheld(kind, boundary, "The Ostrows are visiting for lunch")
+    # The same form mid-sentence in a row: the veto withholds it (the release never needs Fix A for it). Since v11 a
+    # journal row reads whole names only, so there it is the whole name's form that withholds.
+    if kind == "journal_entry":
+        assert not withheld(kind, boundary, "The Ostrows are visiting for lunch")
+        assert withheld(kind, boundary, "The Harlan Ostrows are visiting for lunch")
+    else:
+        assert withheld(kind, boundary, "The Ostrows are visiting for lunch")
 
 
 def test_a_fact_or_relationship_sentence_moves_its_values_first_word_mid_sentence():

@@ -313,7 +313,7 @@ def test_the_readings_never_leave_an_invisible_control_in_the_source():
 
 
 def test_the_boundary_version_is_v10():
-    assert entity_boundary.VERSION == "node-observed-entity-boundary/v10"   # v10: BL-172 (1.5.4)
+    assert entity_boundary.VERSION == "node-observed-entity-boundary/v11"   # v10: BL-172 (1.5.4); v11: journal whole names only
     current = gate("Tev Morrant", ("Tev",)).revision
     for earlier in ("node-observed-entity-boundary/v8", "node-observed-entity-boundary/v9"):
         with pytest.MonkeyPatch.context() as monkeypatch:

@@ -247,7 +247,7 @@ def _august(conn, *, case):
     elif case == "offlimits_name_part_label":
         conn.execute("INSERT INTO entity_blackholes (blackhole_id, entity_id, canonical_name, normalized_name, "
                      "rebuild_state) VALUES ('bh-1','','Pemberly Hollis','pemberly hollis','complete')")
-        cluster(conn, "tc_hobby", "hollis / woodworking")
+        cluster(conn, "tc_hobby", "Hollis / woodworking")   # v11: a part written as a name
     elif case == "person_label":
         conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json) "
                      "VALUES ('p-1','person','Orla Quennell','orla quennell','[]')")
@@ -369,7 +369,7 @@ def test_a_bad_label_withholds_the_month_until_a_second_label_passes_every_check
 @pytest.mark.parametrize("answer, exclusion", [
     ("pemberly hollis cycling", "INSERT INTO entity_blackholes (blackhole_id, entity_id, canonical_name, "
      "normalized_name, rebuild_state) VALUES ('bh-1','','Pemberly Hollis','pemberly hollis','complete')"),
-    ("hollis cycling tours", "INSERT INTO entity_blackholes (blackhole_id, entity_id, canonical_name, "
+    ("Hollis cycling tours", "INSERT INTO entity_blackholes (blackhole_id, entity_id, canonical_name, "
      "normalized_name, rebuild_state) VALUES ('bh-1','','Pemberly Hollis','pemberly hollis','complete')"),
     ("orla quennell cycling", "INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, "
      "aliases_json) VALUES ('p-1','person','Orla Quennell','orla quennell','[]')"),

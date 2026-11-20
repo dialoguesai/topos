@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **A journal entry is Off-limits only when it names a whole Off-limits name.** `[P]` A journal entry was withheld
+  whole when any single word of an Off-limits name or alias appeared in it, in any case. So a name with an everyday
+  word in it hid every entry that used that word ("a taco place", "a 60-year-old"). On a copy of a live node, 84 of
+  712 journal entries were withheld from routines, and a daily summary lost an evening's entry. Entity boundary v11
+  (`EntityBoundary._hits_read`, `one_word_name`): a journal row now withholds only on a whole name or alias. That
+  still covers any case, doubled spaces, punctuation, and invisible or look-alike characters inside it. A name or
+  alias that is one word keeps all its forms: pet names, endings, possessives. One word of a longer name never
+  withholds there, bare or in a form. The same applies to interest labels and inferred fact values, which follow the
+  journal's rule; a label's own check still catches a part written as a name. On that copy, 10 of 712 are
+  withheld. Messages and every other kind keep the v8 rule. A journal entry that names an Off-limits person by first
+  or last name alone now releases; the owner accepted that. `VERSION` moves to v11, so every share index
+  re-qualifies once. Owner ruling of 20 Nov 2026.
+
 ## [1.5.58] — 2026-11-19
 
 ### Added

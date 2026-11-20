@@ -321,6 +321,22 @@ def _off_limits(path, canonical: str, aliases=()):
 
 
 @pytest.mark.parametrize("content", [
+    "Lunch with Quillon Marsh near the harbour.",    # the whole name
+    "Lunch with QUILLON MARSH near the harbour.",    # case
+    "Lunch with Qu\u00edllon Marsh near the harbour.",   # an accent
+    "Lunch with Quil\u200blon Marsh near the harbour.",  # an invisible character inside the name
+    "Lunch with Quillon  Marsh near the harbour.",   # a doubled space
+    "Borrowed Quillon Marsh's bike.",                # a possessive of the name
+    "Called Vessarine Q. Marsh-Ellowick today.",     # the whole alias
+])
+def test_a_whole_off_limits_name_withholds_a_journal_row(node, content):
+    """v11 (owner ruling of 20 Nov 2026): a journal row withholds on a whole name or alias, in every variation."""
+    _off_limits(node, "Quillon Marsh", aliases=["Vessarine Q. Marsh-Ellowick"])
+    _entry(node, "e1", content)
+    assert _floors_code(node, "e1") == "entity_protected"
+
+
+@pytest.mark.parametrize("content", [
     "Lunch with Quillon near the harbour.",          # a bare first name
     "Marsh came by after the run.",                  # a bare last name
     "Borrowed Quillon's bike.",                      # a possessive of a part
@@ -331,23 +347,28 @@ def _off_limits(path, canonical: str, aliases=()):
     "Called Vessarine today.",                       # a bare part of an alias
     "Called Ellowick today.",                        # a bare part of a hyphenated alias
 ])
-def test_a_bare_part_of_an_off_limits_name_withholds_a_journal_row(node, content):
-    """OD-58 held-out (30 Sep): 57 of 57 whole-name, alias, possessive, invisible-character, punctuated and
-    column-only references withheld; the one bare-first-name and the one bare-last-name row released, because
-    a whole-name term is one skeleton. For journal rows the boundary now reads each part of the names too."""
+def test_one_word_of_an_off_limits_name_releases_a_journal_row(node, content):
+    """OD-58 held-out (30 Sep) found a bare first or last name released by whole-name matching, and v3 read each
+    part of the names for journal rows. v11 (owner ruling of 20 Nov 2026) withdraws that: any one word of a longer
+    name, in any case or form, is fine in a journal row; the residual is accepted."""
     _off_limits(node, "Quillon Marsh", aliases=["Vessarine Q. Marsh-Ellowick"])
     _entry(node, "e1", content)
-    assert _floors_code(node, "e1") == "entity_protected"
+    assert _floors_code(node, "e1") is None
 
 
-def test_a_bare_name_part_in_any_column_withholds_a_journal_row(node):
-    """The journal Off-limits surface is every column of the row (IF-5 section 1), for parts as for names."""
+def test_a_whole_name_in_any_column_withholds_a_journal_row_and_one_word_does_not(node):
+    """The journal Off-limits surface is every column of the row (IF-5 section 1); since v11 a whole name only."""
     _off_limits(node, "Quillon Marsh")
-    _entry(node, "e-people", "Lunch near the harbour.", people="Quillon")
-    _entry(node, "e-place", "Coffee after the run.", place_name="Marsh Cafe")
-    _entry(node, "e-meta", "Tea after the run.", metadata_json=json.dumps({"tags": ["quillon"]}))  # distinct text: twins alias
+    _entry(node, "e-people", "Lunch near the harbour.", people="Quillon Marsh")
+    _entry(node, "e-place", "Coffee after the run.", place_name="Quillon Marsh Cafe")
+    _entry(node, "e-meta", "Tea after the run.", metadata_json=json.dumps({"tags": ["quillon marsh"]}))  # distinct text: twins alias
     for entry_id in ("e-people", "e-place", "e-meta"):
         assert _floors_code(node, entry_id) == "entity_protected", entry_id
+    _entry(node, "w-people", "Lunch by the harbour.", people="Quillon")
+    _entry(node, "w-place", "Coffee after the swim.", place_name="Marsh Cafe")
+    _entry(node, "w-meta", "Tea after the swim.", metadata_json=json.dumps({"tags": ["quillon"]}))
+    for entry_id in ("w-people", "w-place", "w-meta"):
+        assert _floors_code(node, entry_id) is None, entry_id
 
 
 @pytest.mark.parametrize("content", [
@@ -372,8 +393,8 @@ def test_a_two_letter_name_part_is_not_a_part(node):
     _entry(node, "e-alias-part", "Marsh came by after the run.")
     assert _floors_code(node, "e-bo") is None
     assert _floors_code(node, "e-q") is None
-    assert _floors_code(node, "e-part") == "entity_protected"
-    assert _floors_code(node, "e-alias-part") == "entity_protected"
+    assert _floors_code(node, "e-part") is None                 # v11: one word of a name is fine in a journal
+    assert _floors_code(node, "e-alias-part") is None
 
 
 def test_the_census_can_count_the_rows_only_a_name_part_withholds(node):
@@ -386,11 +407,12 @@ def test_the_census_can_count_the_rows_only_a_name_part_withholds(node):
     with _db(node) as conn:
         boundary = EntityBoundary(conn)
         rows = {row["entry_id"]: dict(row) for row in conn.execute("SELECT * FROM journal_entries")}
+    # v11: a journal row reads whole names only, so no journal row is withheld by a part alone.
     assert [boundary.name_part_match_only("journal_entries", rows[i]) for i in ("e-part", "e-whole", "e-clear")] == [
-        True, False, False]
+        False, False, False]
     # N6 extends this census attribution to every kind; this capitalized part also protects messages.
     assert boundary.name_part_match_only("conversation_messages", rows["e-part"])
-    for entry_id, code in (("e-part", "entity_protected"), ("e-whole", "entity_protected"), ("e-clear", None)):
+    for entry_id, code in (("e-part", None), ("e-whole", "entity_protected"), ("e-clear", None)):
         assert _floors_code(node, entry_id) == code, entry_id
 
 

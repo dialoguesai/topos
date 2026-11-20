@@ -189,22 +189,24 @@ def test_name_parts_reach_every_kind_since_v8(protected_corpus):
         assert boundary.name_parts == {"mara", "example"}      # the alias "M.E." has no three-letter part
         journal = {"entry_id": "j1", "source_id": "s", "content": "Mara wrote back."}
         matched, _revision = boundary.observe(table="journal_entries", record_id="j1", source_id="s", dataset_id=None, row=journal)
-        assert matched
-        assert boundary.name_part_match_only("journal_entries", journal)
-        assert not boundary._hits(journal)                     # the whole-term scan alone would release it
+        assert not matched                                      # v11: one word of a name releases a journal row
+        assert not boundary.name_part_match_only("journal_entries", journal)
+        assert not boundary._hits(journal)                     # the whole-term scan alone releases it too
         assert boundary.name_part_match_only("conversation_messages", journal)
         message = {"message_id": "m1", "conversation_id": "thread-1", "source_id": "source-1", "dataset_id": "dataset-1",
                    "sender_id": "owner-handle", "content": "Mara wrote back."}
         matched, _revision = boundary.observe(table="conversation_messages", record_id="m1", source_id="source-1",
                                               dataset_id="dataset-1", row=message)
         assert matched                                          # v8 (N6): every kind reads the name rule
-        assert boundary.legacy_veto("journal_entries", journal)
+        assert not boundary.legacy_veto("journal_entries", journal)   # v11: whole names only in a journal row
         assert boundary.legacy_veto("signal_objects", {"payload_json": json.dumps({"object_value": "Mara"})})
         lower = {"payload_json": json.dumps({"object_value": "a mara at the zoo"})}
-        assert boundary.legacy_veto("journal_entries", lower)  # a journal row keeps the part anywhere (v3)
+        assert not boundary.legacy_veto("journal_entries", lower)
         assert not boundary.legacy_veto("signal_objects", lower)   # elsewhere a lower-case part is the word
+        whole = {"entry_id": "j2", "source_id": "s", "content": "mara example wrote back."}
+        assert boundary.legacy_veto("journal_entries", whole)    # the whole name, in any case, still withholds
         with pytest.raises(PolicyError, match="entity_protected") as caught:
-            boundary.check(table="journal_entries", record_id="j1", source_id="s", dataset_id=None, row=journal)
+            boundary.check(table="journal_entries", record_id="j2", source_id="s", dataset_id=None, row=whole)
         assert "Mara" not in str(caught.value)
 
 
@@ -212,7 +214,7 @@ def test_a_name_part_change_moves_the_boundary_revision(protected_corpus):
     """Two spellings with one whole-term skeleton but different parts are different protection decisions for a
     journal row, so cached bases (the search index, `check` context revisions) re-qualify; the version moved too."""
     # v3 parts .. v6 named, v7 readings, v8 every kind, v9 BL-126, v10 BL-172
-    assert VERSION == "node-observed-entity-boundary/v10"
+    assert VERSION == "node-observed-entity-boundary/v11"
 
     def closure():
         with sqlite3.connect(protected_corpus[0].path) as conn:

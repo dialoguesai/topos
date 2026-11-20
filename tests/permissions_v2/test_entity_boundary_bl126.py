@@ -78,8 +78,9 @@ def test_a_shorter_username_is_still_found_only_as_itself():
 @pytest.mark.parametrize("text", ["Quorras car is in the drive.", "Vellabys house is the blue one.",
                                   "Rain all day. Quorras bike got wet."])
 def test_a_possessive_with_no_apostrophe_opening_a_sentence_withholds(text):
-    """Rule: `long_possessives` in the genitive's opening place. Take it out and each is released."""
-    assert everywhere(protecting("Quorra Vellaby"), text) == [True] * 3
+    """Rule: `long_possessives` in the genitive's opening place. Take it out and each is released. Since v11 a
+    journal row reads whole names only, and one name's possessive is one word of it: the journal releases it."""
+    assert everywhere(protecting("Quorra Vellaby"), text) == [True, False, True]
 
 
 @pytest.mark.parametrize("text", ["Quorras is not a word I know.", "Roses are red."])
@@ -89,7 +90,7 @@ def test_it_is_a_possessive_only_before_a_word_that_is_not_a_function_word(text)
 
 
 def test_the_possessive_mid_sentence_was_already_read():
-    assert everywhere(protecting("Quorra Vellaby"), "We parked behind Quorras car.") == [True] * 3
+    assert everywhere(protecting("Quorra Vellaby"), "We parked behind Quorras car.") == [True, False, True]   # v11
 
 
 # --- a name part in a script written without spaces ------------------------------------------------------------------
@@ -99,8 +100,8 @@ def test_the_possessive_mid_sentence_was_already_read():
                                        ("สมชาย ใจดี", "วันนี้ไปกินข้าวกับสมชายที่ร้าน")])
 def test_a_name_part_in_a_script_without_spaces_is_found_inside_a_run(name, text):
     """Rule: `name_parts` keeps a two-character part in such a script, and `_reading_hits` looks for it in a run. Take
-    either out and the first three are released."""
-    assert everywhere(protecting(name), text) == [True] * 3
+    either out and the first three are released. Since v11 a journal row reads whole names only: one part releases."""
+    assert everywhere(protecting(name), text) == [True, False, True]
 
 
 @pytest.mark.parametrize("text", ["今日は雨です。", "中田さんに会った。", "田んぼの中。"])

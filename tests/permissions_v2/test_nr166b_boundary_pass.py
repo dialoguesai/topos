@@ -404,12 +404,15 @@ def test_the_reading_is_in_the_key(handled):
     names-only column, and for identifiers: four answers, never one served for another."""
     conn = read(handled)
     boundary, plain = EntityBoundary(conn), EntityBoundary(conn)
-    text = "the example of it"
+    text, titled = "the example of it", "The Example of it"
     readings = [lambda b: b._hits({"note": text}, True, True), lambda b: b._hits({"note": text}, True, False),
                 lambda b: b._hits({"people": text}, True, False), lambda b: b._hits({"note": text}),
-                lambda b: b._hits({"note": "write to mvell@example.org"}, True, False)]
+                lambda b: b._hits({"note": "write to mvell@example.org"}, True, False),
+                lambda b: b._hits({"note": titled}, True, True), lambda b: b._hits({"note": titled}, True, False)]
     expected = [reading(plain) for reading in readings]
-    assert expected[0] is True and expected[1] is False and expected[2] is True and expected[4] is True
+    # v11: a journal row (the first and sixth readings) reads whole names only; a message reads a titled part.
+    assert expected[0] is False and expected[1] is False and expected[2] is True and expected[4] is True
+    assert expected[5] is False and expected[6] is True
     with boundary.one_pass():
         assert [reading(boundary) for reading in readings] == expected
         assert [reading(boundary) for reading in reversed(readings)] == list(reversed(expected))

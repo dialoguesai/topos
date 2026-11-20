@@ -26,7 +26,13 @@ stays, measured on a copy of the owner's node: outside a journal row a BARE part
 capitalised (as a name), because a part that is also an ordinary word written in lower case is that word there (on
 that copy 665 of the 692 owner messages the uniform rule would have newly withheld held a part only that way); every
 form of a part withholds exactly as in a journal row. A journal row, an interest label and an inferred fact's value
-keep the v3 rule (a bare part anywhere).
+kept the v3 rule (a bare part anywhere) until v11.
+
+Since v11 (owner ruling of 20 Nov 2026) a journal row, an interest label and an inferred fact's value withhold on a
+WHOLE protected name or alias only, in any case and in every variation the whole-term reading reads (spacing,
+punctuation, invisible and look-alike characters, a short alias's pet-name forms); one word of a longer name, in any
+case or form, is not a match there. This withdraws the v3 part rule above for those families, and with it the
+OD-58 catch of a bare first or last name: the owner accepted that residual. Messages and every other kind keep v8.
 """
 from __future__ import annotations
 
@@ -74,7 +80,11 @@ from .english_short_words import WORDS_2_3, WORDS_4, WORDS_ENDING_S_3_4
 # ё as "yo", katakana and Hangul in Latin), a name's marked vowels spelled as two letters (name_parts), and a short
 # name's fleeting-vowel, yo-diminutive, Finnish pet and Celtic forms read wherever written titled (v10_forms). Matching
 # only widens.
-VERSION = "node-observed-entity-boundary/v10"
+# v11 (owner ruling of 20 Nov 2026): the first NARROWING. A journal row (and an interest label or an inferred fact's
+# value, which cite its rule) withholds on a whole protected name or alias only, never on one word of a longer name
+# (`_hits`). On a copy of the owner's node one Off-limits entry whose name holds two everyday words withheld 61 of 710
+# journal entries from routines for those words alone ("60-year-old", "a taco place"). Every other kind keeps v8.
+VERSION = "node-observed-entity-boundary/v11"
 # The context REVISION a share index seals for each member (`check`; search_index.py `entity_dependencies` and
 # `entity_context_revision`) is content-based (BL-155, 1.5.2): it leaves out the columns the message store
 # rewrites on every sync batch that touches a conversation (conversations_tables.py `_upsert_conversation_row`
@@ -358,6 +368,13 @@ def short_name_words(value: str) -> set:
                 and (len(part) == 3 or not _VOWELS.isdisjoint(part))):
             words.add(part)
     return words
+
+
+def one_word_name(value: str) -> bool:
+    """Whether a name is ONE word (v11): its parts are then the whole name, not a word of a longer one. A journal row
+    reads only these parts and short words, so a one-word name or alias keeps every form ("Torpon" of "Torppo",
+    "Таечка" of "Тая") while one word of a longer name is no match there."""
+    return len(WORDS.findall(normalized(value))) == 1
 
 
 # A term shorter than this matches whole tokens only: initials and short names must not match every occurrence
@@ -1789,6 +1806,8 @@ class EntityBoundary:
         self.name_parts = set()
         # Its two- and three-letter name words, which also withhold through their pet-name forms (short_name_words).
         self.name_short_words = set()
+        # v11: the parts and short words of the names that are ONE word (one_word_name): all a journal row reads.
+        self.whole_name_parts, self.whole_short_words = set(), set()
         self._context_cache = {}
         # NR166B: what the current `one_pass` scope remembers (a `_Pass`), None outside one.
         self._pass = None
@@ -1999,6 +2018,7 @@ class EntityBoundary:
                     name_values = _spelled(self._name_values(row))
                     self.name_parts.update(*map(name_parts, name_values))
                     self.name_short_words.update(*map(short_name_words, name_values))
+                    self._collect_whole(name_values)
                     add("contact", [row.get("contact_id")])
                     if row.get("identifiers_json"):
                         values = _decode(row["identifiers_json"])
@@ -2017,6 +2037,7 @@ class EntityBoundary:
                     add("term", map(skeleton, display), name=True)
                     self.name_parts.update(*map(name_parts, display))
                     self.name_short_words.update(*map(short_name_words, display))
+                    self._collect_whole(display)
                     if row.get("known_usernames_json"):
                         names = _decode(row["known_usernames_json"])
                         if not isinstance(names, list) or any(not isinstance(name, str) for name in names):
@@ -2088,6 +2109,14 @@ class EntityBoundary:
             self.name_terms.update(named)
             self.name_parts.update(*map(name_parts, spellings))
             self.name_short_words.update(*map(short_name_words, spellings))
+            self._collect_whole(spellings)
+
+    def _collect_whole(self, values) -> None:
+        """v11: the parts and short words of each of these names that is one word (one_word_name)."""
+        for value in values:
+            if value and one_word_name(value):
+                self.whole_name_parts.update(name_parts(value))
+                self.whole_short_words.update(short_name_words(value))
 
     @staticmethod
     def _waits_whole(flag) -> bool:
@@ -2205,8 +2234,14 @@ class EntityBoundary:
         # punctuated spelling of the part still counts.
         names, identifiers, whole_identifiers = self._groups
         short_terms, long_terms = split_terms(names)
-        parts = self.name_parts if name_parts else frozenset()
-        part_words = self.name_short_words if name_parts else frozenset()
+        # v11 (owner ruling of 20 Nov 2026): a journal row, and every reading that cites the journal's rule (an
+        # interest label, an inferred fact's value), withholds on a WHOLE protected name or alias only: in any case,
+        # through every variation the whole-term reading reads (spacing, punctuation, invisible and look-alike
+        # characters), and, for a name that is one word, through every form of it. One word of a longer name, bare
+        # or in a form, is no match there. Every other kind reads all the parts, as since v8.
+        whole_only = name_parts and bare_parts_anywhere
+        parts = (self.whole_name_parts if whole_only else self.name_parts) if name_parts else frozenset()
+        part_words = (self.whole_short_words if whole_only else self.name_short_words) if name_parts else frozenset()
         memory = self._pass if self._pass is not None and self._pass.usable() else None
         if any(self._text_hits(memory, ("name", bool(name_parts), bool(bare_parts_anywhere), key in NAMES_ONLY_COLUMNS),
                                text, short_terms, long_terms, parts=parts, part_words=part_words,

@@ -102,7 +102,8 @@ def test_the_names_of_the_same_entry_are_read_exactly_as_before():
                        ("message", "the vellaby question"), ("journal_entry", "nothing of note today")):
         assert withheld(kind, marked, text) == withheld(kind, unmarked, text), (kind, text)
     assert withheld("message", marked, "Lunch with Quorra on Friday.")
-    assert withheld("journal_entry", marked, "saw vellaby by the canal")
+    assert not withheld("journal_entry", marked, "saw vellaby by the canal")       # v11: one word of the name
+    assert withheld("journal_entry", marked, "saw quorra vellaby by the canal")
 
 
 def test_a_value_that_is_not_listed_stays_a_name_even_when_it_looks_like_a_handle():
@@ -115,7 +116,8 @@ def test_a_value_that_is_not_listed_stays_a_name_even_when_it_looks_like_a_handl
 def test_an_entry_without_the_list_reads_every_alias_as_a_name_as_before(identifiers):
     boundary = gate(identifiers=identifiers)
     assert {"contact", "default", "mail", "example", "hopewell"} <= boundary.name_parts
-    assert withheld("journal_entry", boundary, "Lost a contact lens at the pool again.")
+    assert withheld("message", boundary, "Contact the landlord about the boiler.")
+    assert withheld("journal_entry", boundary, "Saw hopewell at the pool again.")   # a one-word alias, whole (v11)
 
 
 @pytest.mark.parametrize("stored", ["{not json", json.dumps({"a": 1}), json.dumps([1, 2]), json.dumps("x")])
