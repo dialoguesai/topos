@@ -290,14 +290,17 @@ def test_an_item_that_carries_only_the_id_of_their_conversation_is_withheld(conn
 
 
 def test_a_journal_item_is_read_by_the_journal_rule(conn):
-    """At the doors a journal entry withholds on a bare part of a protected name in lower case too; any other kind,
-    where it is written as a name. An item says which it is, and is read the same way."""
+    """At the doors a journal entry withholds on a whole protected name only, in any case (v11); any other kind on a
+    part written as a name. An item says which it is, and is read the same way."""
     excluded(conn, dict(display="Rose Ashgrove"))
     carry_contact_excludes(conn)
     conn.commit()
+    journal = dict(retrieval_source="canonical:journal_entries")
     lower = "Bought a rose for the table."
     assert exit_filter(ROUTINE, conn, [item(lower)]) == [item(lower)]
-    assert exit_filter(ROUTINE, conn, [item(lower, retrieval_source="canonical:journal_entries")]) == []
+    assert exit_filter(ROUTINE, conn, [item(lower, **journal)]) == [item(lower, **journal)]
+    assert exit_filter(ROUTINE, conn, [item("Rose came by.", **journal)]) == [item("Rose came by.", **journal)]
+    assert exit_filter(ROUTINE, conn, [item("tea with rose ashgrove", **journal)]) == []
     assert exit_filter(ROUTINE, conn, [item("Rose came by.")]) == []
 
 

@@ -104,7 +104,8 @@ def test_handles_usernames_and_the_id_are_written_as_identifiers_and_give_no_nam
         assert not journal(boundary, text), text
     assert not boundary.mentions_protected("Contact the landlord about the boiler.")
     assert not boundary.mentions_protected("keep in contact with the landlord")
-    assert journal(boundary, "Tea with Quorra after work.")             # the name, as before
+    assert journal(boundary, "Tea with Quorra Vellaby after work.")     # the whole name, as before
+    assert not journal(boundary, "Tea with Quorra after work.")         # v11: one word of a longer name releases
     assert journal(boundary, "Wrote to q.vellaby@mail.example.")        # the address, as itself
 
 
