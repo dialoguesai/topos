@@ -1675,3 +1675,245 @@ and real-model comparison limitations remain unchanged.
 - Limits: paid cloud calls and deployed Keycloak/CP/node flow were not exercised. CP cloud adapter is checked with a mocked SDK transport; the local test environment lacks LiteLLM, although the production CP dependency declares it. The live companion harness was read from existing local, uncommitted evaluation tooling; its hashes are recorded and those unrelated tooling files are not included in this feature change. Required release-quality evidence is unresolved, not waived.
 - Deployment: local isolated checkouts only. Both CP and web model-access flags default off. The pinned node release predates the new handlers; CP declares them pending until a real node release is published and pinned. No production migration, registration, push or deployment occurred.
 - Rollback: disable model access and web panel, stop new admissions, allow cancellation watchers to stop active work, retain consent/audit records. Revert the delegated handlers/routes/panel if needed; do not change owner prompts or delete audit tables. See the control-plane `docs/model-access.md` for rollout ordering and API details.
+
+### Regression gate — RQ-2026-11-19-AI-DAY-WINDOW — before
+
+- Recorded (UTC): 2026-11-19T19:33:33.565916+00:00
+- Note: Home chat answered "What did I talk about with AI yesterday?" with "no records" while 277 AI messages from that day sat in the coding-sessions store. Hypotheses: generic AI asks route only to the ChatGPT store (or to text messages, or nowhere); the date window is applied after a newest-50 keyword fetch instead of to the fetch; many plain time phrases get no window. New failing cases added before this baseline: tests/query/test_plain_time_phrases.py, tests/query/test_dated_ask_reads_its_window.py, lib/mcp/aiCounterpartRouting.test.ts.
+- Report: [machine-readable results](response-quality-runs/20261119T193333565916Z-RQ-2026-11-19-AI-DAY-WINDOW-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 77 pass / 63 fail / 0 skip | pending |
+| routing_and_source_exclusions | 149 pass / 14 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | pending |
+
+### Regression gate — RQ-2026-11-19-AI-DAY-WINDOW-B — before
+
+- Recorded (UTC): 2026-11-19T20:07:06.464236+00:00
+- Note: Second baseline for the same change, taken on unmodified production code (node 78696e03, web 565ac6ba) after the three new test files were corrected: cases that contradicted pinned behaviour were removed (a bare day of the month, bare "AI chats" with no period, periods that have not started) and controls were added. The first baseline (RQ-2026-11-19-AI-DAY-WINDOW) is retained and is not comparable with the after run.
+- Report: [machine-readable results](response-quality-runs/20261119T200706464236Z-RQ-2026-11-19-AI-DAY-WINDOW-B-before.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **FAIL**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | pending |
+| dates_and_recency | 87 pass / 67 fail / 0 skip | pending |
+| routing_and_source_exclusions | 150 pass / 14 fail / 0 skip | pending |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | pending |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | pending |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | pending |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | pending |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | pending |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | pending |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | pending |
+
+### Live answer evaluation — RQ-2026-11-19-AI-DAY-WINDOW-B — before
+
+- UTC: 2026-11-19T20:07:37.073370+00:00; verdict: **BASELINE_RECORDED**.
+- Report: [20261119T200737073370Z-live-before.json](response-quality-runs/20261119T200737073370Z-live-before.json).
+- Lane: production home-chat agent + real local model + frozen MCP evidence; excludes node retrieval, CP and browser latency.
+- Scores are uncalibrated model judgments (0–2), not human-validated truth. p95 is descriptive with this small sample.
+- Raw answers, prompts, evidence and judge reasons are stored locally in ignored .response-quality-artifacts/.
+
+| Case | Quality mean before → after | Median ms before → after | Samples |
+| --- | --- | --- | --- |
+| injection | — → 1.40 | — → 4330 | 3 |
+| followup | — → 0.40 | — → 738 | 3 |
+| partial | — → 0.53 | — → 1594 | 3 |
+| advice | — → 0.40 | — → 6271 | 3 |
+| exclude-ai | — → 1.80 | — → 1993 | 3 |
+| yesterday | — → 0.00 | — → 5867 | 3 |
+| attribution | — → 0.40 | — → 1132 | 3 |
+| citation | — → 1.67 | — → 2943 | 3 |
+| empty | — → 1.27 | — → 588 | 3 |
+| identity-unresolved | — → 2.00 | — → 1 | 3 |
+| general | — → 1.00 | — → 1238 | 3 |
+
+### Regression gate — RQ-2026-11-19-AI-DAY-WINDOW-B — after
+
+- Recorded (UTC): 2026-11-19T20:13:21.576608+00:00
+- Note: Generic AI asks route to both AI stores and away from text messages; the date window is applied to the canonical fetch; plain time phrases get a window; a question-word recall of the owner's own dated activity takes the strict in-window path.
+- Report: [machine-readable results](response-quality-runs/20261119T201321576608Z-RQ-2026-11-19-AI-DAY-WINDOW-B-after.json)
+- Catalog: `response-quality-contracts-1`; none: synthetic fixtures and mocked generation; not a live-model evaluation.
+- Gate: **PASS**. Skips and existing failures are not waived.
+- Limits: contract/replay coverage, not live-model faithfulness or latency. Test timings are not response timings.
+
+| Question family | Before | After |
+| --- | --- | --- |
+| identity_and_dataset | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| dates_and_recency | 87 pass / 67 fail / 0 skip | 154 pass / 0 fail / 0 skip |
+| routing_and_source_exclusions | 150 pass / 14 fail / 0 skip | 164 pass / 0 fail / 0 skip |
+| empty_and_incomplete_evidence | 86 pass / 0 fail / 0 skip | 86 pass / 0 fail / 0 skip |
+| followups_and_breadth | 17 pass / 0 fail / 0 skip | 17 pass / 0 fail / 0 skip |
+| citations_and_attribution | 22 pass / 0 fail / 0 skip | 22 pass / 0 fail / 0 skip |
+| work_recall_and_recommendations | 18 pass / 0 fail / 0 skip | 18 pass / 0 fail / 0 skip |
+| general_knowledge_negative_controls | 172 pass / 0 fail / 0 skip | 172 pass / 0 fail / 0 skip |
+| cache_and_access_boundaries | 29 pass / 0 fail / 0 skip | 29 pass / 0 fail / 0 skip |
+| query_and_synthesis_contracts | 146 pass / 0 fail / 0 skip | 146 pass / 0 fail / 0 skip |
+
+- Fixed: 81; regressed: 0; missing: 0; added: 0; remaining non-passes: 0.
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_browsed_window_is_sampled_across_itself`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[Did I talk to anyone yesterday?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[What did I ask Claude Code last week?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[What did I ask Claude Code to do yesterday?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[What did I browse yesterday?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[What did I chat about with AI on Monday?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[What did I talk about with AI yesterday?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[What did I use AI for yesterday?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[What have I been discussing with ChatGPT this week?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[What have I read this week?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[What websites did I visit last Friday?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[What were my AI chats about yesterday?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[Where did I go last weekend?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_a_dated_conversation_recall_is_a_dated_activity_ask[Who did I text yesterday?]`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_an_empty_window_keeps_the_existing_soft_fallback`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_last_week_is_found_behind_three_busy_days`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_the_in_memory_adapter_takes_the_same_window`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_the_list_adapter_takes_a_window`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_the_owner_packet_for_yesterday_holds_only_yesterday`
+- fixes: `node::tests/query/test_dated_ask_reads_its_window.py::tests.query.test_dated_ask_reads_its_window::test_yesterday_is_the_whole_day_not_the_rows_that_share_the_verb`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_day_is_that_single_day[2 days ago-expected3]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_day_is_that_single_day[3 days ago-expected4]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_day_is_that_single_day[a couple of days ago-expected5]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_day_is_that_single_day[a day ago-expected6]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_day_is_that_single_day[day before yesterday-expected1]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_day_is_that_single_day[the day before yesterday-expected0]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_day_is_that_single_day[two days ago-expected2]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_span_reaches_back_from_now[in the last 3 months-expected0]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_span_reaches_back_from_now[in the last hour-expected4]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_span_reaches_back_from_now[in the past couple of weeks-expected3]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_span_reaches_back_from_now[in the past few days-expected1]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_span_reaches_back_from_now[in the past year-expected5]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_counted_span_reaches_back_from_now[the last few days-expected2]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_period[2 weeks ago-expected3]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_period[a month ago-expected4]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_period[a week ago-expected2]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_period[in December-expected9]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_period[in October 2025-expected10]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_period[in October-expected7]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_period[last October-expected8]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_period[last weekend-expected0]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_period[last year-expected6]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_period[over the weekend-expected1]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_period[this year-expected5]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_named_zone_keeps_its_own_offset_across_a_dst_change`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_part_of_a_day[last night-expected0]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_part_of_a_day[this afternoon-expected2]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_part_of_a_day[this morning-expected1]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_part_of_a_day[yesterday afternoon-expected4]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_part_of_a_day[yesterday evening-expected5]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_part_of_a_day[yesterday morning-expected3]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_weekday_is_its_most_recent_past_occurrence[Monday morning-expected3]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_weekday_is_its_most_recent_past_occurrence[last Friday-expected1]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_weekday_is_its_most_recent_past_occurrence[last Thursday-expected5]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_weekday_is_its_most_recent_past_occurrence[on Monday-expected0]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_weekday_is_its_most_recent_past_occurrence[on Tuesday night-expected2]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_weekday_is_its_most_recent_past_occurrence[this past Wednesday-expected4]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_written_date_is_the_callers_calendar_day_like_yesterday_is[on 2026-11-18]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_written_date_is_the_callers_calendar_day_like_yesterday_is[on Nov 18th]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_written_date_is_the_callers_calendar_day_like_yesterday_is[on November 18, 2026]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_a_written_date_is_the_callers_calendar_day_like_yesterday_is[on November 18]`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_since_a_weekday_runs_from_that_day_to_the_end_of_today`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_the_boundary_words_keep_the_callers_own_midnight`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_the_time_words_do_not_reach_the_semantic_query`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_this_evening_once_it_has_begun`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_this_weekend_on_the_weekend_is_the_one_under_way`
+- fixes: `node::tests/query/test_plain_time_phrases.py::tests.query.test_plain_time_phrases::test_two_named_windows_are_still_one_span`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::a named AI product keeps its own store > ChatGPT stays on the chat store and off the coding one`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::a named AI product keeps its own store > a coding tool spoken to like a person still reaches the coding store`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::a named AI product keeps its own store > an ask addressed to Claude is not a text message`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::an ask about AI in general reads both AI stores > Summarize my AI conversations from yesterday`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::an ask about AI in general reads both AI stores > What did I ask AI yesterday?`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::an ask about AI in general reads both AI stores > What did I ask the chatbot yesterday?`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::an ask about AI in general reads both AI stores > What did I chat with AI about yesterday?`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::an ask about AI in general reads both AI stores > What did I discuss with my AI assistants last week?`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::an ask about AI in general reads both AI stores > What did I talk about with AI yesterday?`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::an ask about AI in general reads both AI stores > What did I use AI for yesterday?`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::an ask about AI in general reads both AI stores > What have I been asking an LLM about this week?`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::an ask about AI in general reads both AI stores > What were my AI chats about yesterday?`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::an ask about AI in general reads both AI stores > asks both stores for summaries`
+- fixes: `web::lib/mcp/aiCounterpartRouting.test.ts::lib/mcp/aiCounterpartRouting.test.ts::what must not change > a person AND an AI in one question keeps both`
+
+### Live answer evaluation — RQ-2026-11-19-AI-DAY-WINDOW-B — after
+
+- UTC: 2026-11-19T20:13:49.260819+00:00; verdict: **FAIL**.
+- Report: [20261119T201349260819Z-live-after.json](response-quality-runs/20261119T201349260819Z-live-after.json).
+- Lane: production home-chat agent + real local model + frozen MCP evidence; excludes node retrieval, CP and browser latency.
+- Scores are uncalibrated model judgments (0–2), not human-validated truth. p95 is descriptive with this small sample.
+- Raw answers, prompts, evidence and judge reasons are stored locally in ignored .response-quality-artifacts/.
+
+| Case | Quality mean before → after | Median ms before → after | Samples |
+| --- | --- | --- | --- |
+| injection | 1.40 → 1.40 | 4330 → 4509 | 3 |
+| followup | 0.40 → 0.40 | 738 → 725 | 3 |
+| partial | 0.53 → 0.60 | 1594 → 1551 | 3 |
+| advice | 0.40 → 0.40 | 6271 → 6155 | 3 |
+| exclude-ai | 1.80 → 1.80 | 1993 → 1179 | 3 |
+| yesterday | 0.00 → 0.00 | 5867 → 5916 | 3 |
+| attribution | 0.40 → 0.40 | 1132 → 1131 | 3 |
+| citation | 1.67 → 1.60 | 2943 → 2995 | 3 |
+| empty | 1.27 → 1.20 | 588 → 611 | 3 |
+| identity-unresolved | 2.00 → 2.00 | 1 → 1 | 3 |
+| general | 1.00 → 1.00 | 1238 → 1263 | 3 |
+
+Comparison: `{"verdict": "FAIL", "reasons": [], "quality_regressions": ["followup/groundedness/below_floor", "followup/completeness/below_floor", "followup/relevance/below_floor", "followup/attribution/below_floor", "followup/critical_failure", "partial/groundedness/below_floor", "partial/completeness/below_floor", "partial/uncertainty/below_floor", "partial/relevance/below_floor", "partial/attribution/below_floor", "partial/critical_failure", "yesterday/groundedness/below_floor", "yesterday/completeness/below_floor", "yesterday/uncertainty/below_floor", "yesterday/relevance/below_floor", "yesterday/attribution/below_floor", "yesterday/critical_failure", "citation/attribution", "citation/attribution/below_floor", "citation/critical_failure", "empty/groundedness/below_floor", "empty/completeness/below_floor", "empty/relevance", "empty/relevance/below_floor", "empty/attribution/below_floor", "empty/critical_failure", "injection/groundedness/below_floor", "injection/completeness/below_floor", "injection/attribution/below_floor", "injection/critical_failure", "advice/groundedness/below_floor", "advice/completeness/below_floor", "advice/uncertainty/below_floor", "advice/relevance/below_floor", "advice/attribution/below_floor", "advice/critical_failure", "exclude-ai/attribution/below_floor", "general/groundedness/below_floor", "general/uncertainty/below_floor", "general/attribution/below_floor", "attribution/groundedness/below_floor", "attribution/completeness/below_floor", "attribution/relevance/below_floor", "attribution/attribution/below_floor", "attribution/critical_failure"], "latency_regressions": []}`
+
+### RQ-2026-11-19-AI-DAY-WINDOW — implementation and validation limits
+
+- Failure: on 19 Nov 2026 the home chat (local runtime, `smtek/Qwen3.8-27B:IQ2_M`, node 1.5.57, app `565ac6ba`) answered "What did I talk about with AI yesterday?" with "didn't find any records of conversations from that day" after 3 min 24 s. The store held 277 AI messages from that day.
+- Cause, in the order the turn met them:
+  1. Routing (web). The question matched only `ai_topics` ("talk about"), so one `query_scope` went to `ai_conversations:read`, whose sources are the ChatGPT ones (newest row 4 Nov). The day's messages were Claude Code and Codex sessions in `ai_coding_sessions:read`, which was never asked. Neighbours measured with `routeScopeQueries`: "What did I ask AI yesterday?", "What did I chat with AI about yesterday?", "What did I ask the chatbot yesterday?" and "What did I talk to Codex about yesterday?" went to `messages:read` (text messages) alone; "What were my AI chats about yesterday?" and "What did I use AI for yesterday?" matched no rule.
+  2. Window applied after the fetch (node). The canonical lane fetched the newest 50 rows containing a content word of the question and then kept those inside the window. On a snapshot of the same store, asked of the coding scope directly: "yesterday" returned 3 of the day's 277 rows (the ones containing "talk"); "last week" returned 0 in-window rows and 17 out-of-window ones.
+  3. Empty window filled anyway (node). With nothing inside the window the chat scope returned 25 items (5 flagged out of window, 20 undated facts, statistics and dossiers; 45,466 characters), which the local model spent 114 s reading before writing "no records".
+  4. Time phrases with no window (node). Of 56 phrasings tried on `build_query_plan`, 37 produced no window (last night, this morning, N days ago, weekdays, weekends, this/last year, the last N months, a month name, the past few days, in the last hour) and "the day before yesterday" produced 1970 through two days ago. A written date ("on November 18") was cut at UTC midnight while "yesterday" was cut at the caller's.
+- Method:
+  - Web `lib/mcp/scopeRoutingRules.ts`: `isGenericAiAsk` adds both AI scopes when AI is the thing spoken with, asked or used, or when "AI chats / conversations" is asked about for a period; `isAskAddressedToAi` keeps an ask addressed to an AI out of `messages:read` unless the question also names texts or messages; Codex and Cursor accept the conversational verbs. `lib/mcp/workEvidence.ts`: coding tools and "chatbot / LLM" are AI counterparts, not people. The chat store stays the primary route. "My AI chats" with no period, and a bare "Claude", route as before (pinned by the eval catalog and `scopeRoutingRules.test.ts`).
+  - Node `topos/query/time_phrases.py` (new) read by `planner.py` ahead of its table; `_explicit_time_range` and the before/after/since edges use the caller's clock.
+  - Node `retrieval.py`: `_route_canonical_rows` tries the window first (`event_after` / `event_before` on `canonical.list`, compared as instants in SQLite and in the in-memory adapter). Time words, and each dated table's own verb ("talk", "browse", "journal"), are not needles there. With no subject left the window is sampled at even steps to 25 rows. A subject with no match inside the window falls through to the unchanged fetch.
+  - Node `planner.is_dated_activity_query`: a question-word recall of the owner's own activity ("what did I talk about / browse / text …", "who did I …", "where did I …") takes the strict dated path that "what did I work on" had. Excluded: frequency questions, and a conversation with a particular person ("with my mom", "ask Sara"), which keeps the entity-thread path. The predicate only acts where the plan holds a time range and the caller is the owner.
+- Affected families: dates_and_recency, routing_and_source_exclusions. All ten ran.
+- Offline gate: three new test files were added to the catalog before any production change (`tests/query/test_plain_time_phrases.py`, `tests/query/test_dated_ask_reads_its_window.py`, `lib/mcp/aiCounterpartRouting.test.ts`). Two baselines exist. The first, `20261119T193333565916Z-RQ-2026-11-19-AI-DAY-WINDOW-before.json` (745 pass, 77 fail, all 77 in the new files), is not comparable with the after run: the new test files were corrected afterwards, once the first implementation showed three of their expectations contradicted behaviour other tests pin (a bare day of the month must get no window; "my AI chats" with no period keeps one store; a period that has not started gets no window). No expectation in a pre-existing test was changed. Production code was then restored to node `78696e03` and web `565ac6ba` and the second baseline taken with the final tests: `20261119T200706464236Z-RQ-2026-11-19-AI-DAY-WINDOW-B-before.json`, 756 pass, 81 fail, all 81 in the three new files. After: `20261119T201321576608Z-RQ-2026-11-19-AI-DAY-WINDOW-B-after.json`, **PASS**, 837 of 837, no runner errors.
+- Live companion gate: run with the local, uncommitted harness (copied into the worktrees for the run and removed after; it is not part of this change), answer model `llama3.2:latest`, judge `qwen3.5:9b-mlx`, three repeats, 11 frozen synthetic cases, machine in use. The owner's selected model (`smtek/Qwen3.8-27B:IQ2_M`) was not used: at its measured speed the paired run would have held the machine for about two hours. Before `20261119T200737073370Z-live-before.json`, after `20261119T201349260819Z-live-after.json`, verdict **FAIL**. The failures are below-floor and critical-failure findings that are in the baseline with the same counts in every case. All 33 answers, all generation prompts and all tool calls are byte-identical between the two phases, so the two reported score drops (citation/attribution, empty/relevance) are the judge scoring the same text differently. No latency regression was reported. This lane has no AI-ask case and serves frozen evidence, so it exercised neither the new routes nor node retrieval: it shows this change did not move those 11 cases, and nothing about the motivating question. The red verdict is recorded, not waived.
+- Other suites on the final code: web full suite 8,728 passed, 90 skipped, TypeScript check clean. Node: `tests/query` plus every other test file importing the changed modules, 3,533 passed, 19 skipped, 15 expected failures, none failed.
+- Measured on a read-only snapshot of the owner's store (same snapshot, same clock, unmodified `78696e03` against this change; counts only, summary mode, owner principal, 25-item packet):
+
+| Scope and question | Before: in window / total | After: in window / total |
+| --- | --- | --- |
+| chat store, "talk about with AI yesterday" | 0 / 25 (45,466 chars) | 0 / 0, `no_match` (313 chars) |
+| coding store, "talk about with AI yesterday" | 3 / 25 | 25 / 25 |
+| coding store, "… last week" | 0 / 25 | 25 / 25, six days represented |
+| coding store, "… on November 3" | 2 / 25 (UTC day) | 25 / 25 (caller's day) |
+| coding store, "… last Friday", "two days ago", "last night" | no window | 25 / 25 each |
+| coding store, "… on 2026-09-01" | 0 / 25 | 25 / 25 |
+| messages, "Who did I text yesterday?" | 0 / 25 | 25 / 25 |
+| messages, "What did I text about last weekend?" | no window | 25 / 25 |
+| activity, "What did I browse yesterday?" | 2 / 25 | 25 / 25 |
+| activity, "What websites did I visit last Friday?" | no window | 25 / 25 |
+| journal, "What did I journal about last week?" | 2 / 25 | 25 / 25 |
+| places, "Where did I go last weekend?" | no window | 25 / 25 |
+| schedule, "What meetings did I have yesterday?" | 0 / 25 | 12 / 12 |
+| work, "What did I work on yesterday?" (control) | 16 / 16 | 16 / 16 |
+| messages, "… with my mom last week?" (control) | 2 / 25, 8 thread rows | 2 / 25, 8 thread rows |
+
+- Limits:
+  - The snapshot run calls the node's query code in-process. It is not a home-chat turn: no control plane, no app, no model. The deployed path was not exercised and nothing is deployed.
+  - The strict path returns only in-window rows, so undated facts, statistics and dossiers no longer pad a dated recall. A packet of full message rows is larger than the padded one it replaces (coding store, yesterday: 22,273 to 75,793 characters before the app's own trimming). Answer time on the local model was not measured.
+  - "My AI chats" with no period still reads the chat store only. A bare "Claude" still routes to the chat store, not the coding one. The work recap ("what did I work on yesterday") still reads `ai_conversations:read` and not `ai_coding_sessions:read`: its four scopes are the routing budget. Each is a ruling, not a bug fix.
+  - Not read: a bare day of the month ("on the 5th", an existing rule), a period that has not started ("tonight" at noon, "this weekend" on a weekday, a future month; a time-signal eval case pins the last), numeric dates ("11/18"), "the week before last", "recently". A written date with no year still takes the current year.
+  - `_WINDOW_ACT_TOKENS` is a word list per table. A verb missing from it is treated as a subject and has to match a row.
+  - Found and not fixed: this store has no ChatGPT message after 4 Nov although ChatGPT pages were visited on each of the 14 days after it. That is capture, not query.
+- Deployment: none. Changes sit uncommitted in `worktrees/node-day-window` and `worktrees/app-day-window`.
+- Rollback: revert the two rule blocks in `scopeRoutingRules.ts` and the `AI_COUNTERPART` line in `workEvidence.ts`; on the node, remove the `time_phrases` calls from `planner.py`, the `time_range` argument from `_route_canonical_rows` and the two recall patterns from `is_dated_activity_query`. The adapter arguments are optional and inert when unused.

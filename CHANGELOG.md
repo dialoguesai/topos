@@ -9,6 +9,31 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **A dated question reads the rows inside its dates.** `[P]` The canonical lane fetched the newest 50 rows that
+  matched a word of the question and only then kept the ones inside the window, so a window older than those 50
+  matched nothing: on a store of 61,000 coding-session messages, "what did I talk about with AI last week" came back
+  with no row from last week and 17 from this one. The window now goes to the fetch (`event_after` / `event_before`
+  on the canonical list adapters, compared as instants). The words that only say when ("last week", "Friday") and
+  the verb that names what the table records ("talk", "browse", "journal") are no longer things a row must contain;
+  with no subject left, the window is sampled across its whole length instead of from its newest hour. A subject absent from the
+  window still falls back to the ordinary fetch, flagged out of window.
+- **"What did I talk about / ask / discuss … yesterday" is a dated recall.** `[P]` For the owner it now takes the
+  strict path "what did I work on yesterday" already had: only rows inside the window, and an empty packet when the
+  store holds none, instead of 25 items from other months. The same holds for the other question-word recalls of the
+  owner's own activity ("what did I browse", "who did I text", "where did I go"). Frequency questions ("how often did
+  I talk to …") and a conversation with a particular person ("with my mom", "ask Sara") are unchanged.
+- **More plain time phrases get a window.** `[P]` `topos/query/time_phrases.py`: last night, this morning /
+  afternoon / evening, tonight, yesterday morning, the day before yesterday, N days / weeks / months / years ago,
+  weekdays ("on Monday", "last Friday", "since Monday"), this / last / over the weekend, this / last year, this / last
+  quarter, the last / past N months, the past few days, in the last hour, and a month name ("in October"). All of
+  these ran with no window before; "the day before yesterday" ran with 1970 through two days ago. A period that has
+  not started ("tonight" at noon, "this weekend" on a Thursday, "December 2027") and a bare day of the month ("on the
+  5th") are still not read.
+- **A written date is the caller's calendar day.** `[P]` "On November 18" was cut at UTC midnight while "yesterday"
+  was cut at the caller's, so one day asked two ways returned different rows; the edges moved by "before", "after"
+  and "since" had the same fault. Both follow the `now` the caller sends. With no caller clock they are UTC as before.
+
 ## [1.5.57] — 2026-11-18
 
 ### Added

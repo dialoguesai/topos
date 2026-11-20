@@ -13,6 +13,26 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _instant(value: Any):
+    from datetime import datetime, timezone
+
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _inside_window(row: Dict[str, Any], event_after: Optional[str], event_before: Optional[str]) -> bool:
+    """The SQLite adapter's window rule: the row's own clock, compared as an instant."""
+    stamp = _instant(row.get("event_at") or row.get("starts_at") or row.get("entry_at") or "")
+    if stamp is None:
+        return False
+    after = _instant(event_after) if event_after else None
+    before = _instant(event_before) if event_before else None
+    return (after is None or stamp >= after) and (before is None or stamp <= before)
+
+
 class InMemoryCanonicalStore:
     def __init__(self) -> None:
         self._tables: Dict[str, Dict[str, Dict[str, Any]]] = {}
@@ -36,10 +56,14 @@ class InMemoryCanonicalStore:
         disclosure_tier: str = "owner_raw",
         contains: Optional[List[str]] = None,
         record_ids: Optional[List[str]] = None,
+        event_after: Optional[str] = None,
+        event_before: Optional[str] = None,
     ) -> ListPage:
         rows = list(self._tables.get(table, {}).values())
         if source_id is not None:
             rows = [r for r in rows if r.get("source_id") == source_id]
+        if event_after or event_before:
+            rows = [r for r in rows if _inside_window(r, event_after, event_before)]
         if record_ids is not None:
             wanted = {str(r) for r in record_ids if str(r).strip()}
             rows = [
