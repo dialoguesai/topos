@@ -8,7 +8,8 @@ its ``created_at``, and ``attempts`` / ``read_timeout_s`` / ``checked_at`` say h
 one ran. ``engine_version`` / ``engine_sha16`` stamp every row with the engine build of its last check. ``truth_labels`` holds the owner's
 judgement of a claim (true / partly / false and an optional note), one per check; a new submit replaces it. Both
 are created lazily on first write, as ``ai_chat_message_facets`` is, so a node that never turns the lane on keeps
-neither (no migration). Both are in ``data_explorer_tables.OWNER_ONLY_TABLES``: the legacy table tools serve them to
+neither (no migration). Forward audit events and citation edges are described in
+``docs/claim-audit-history.md``; historical checks are never backfilled as new events. Both are in ``data_explorer_tables.OWNER_ONLY_TABLES``: the legacy table tools serve them to
 the owner's own app only.
 
 A label also writes one ``verified_claim`` signal object (dimension ``memory``) with the label as its confidence
@@ -32,7 +33,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from ..storage.db.write_gate import commit_connection, with_db_write
+from . import truth_audit
+from ..storage.db.write_gate import batched_writes, commit_connection, with_db_write
 
 CHECKS_TABLE = "truth_checks"
 LABELS_TABLE = "truth_labels"
@@ -143,7 +145,7 @@ _DDL = (
         paused INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY (day, source)
     )""",
-)
+) + truth_audit.DDL
 #: Columns added after 1.5.19 shipped the table: added in place, on first use, to a table an earlier build created
 #: (the table itself was created lazily, with no migration, so its columns are too). ``attempts`` counts the checks
 #: of the record (1 for every row stored before retries existed); ``read_timeout_s`` is the reader cap the last check
@@ -203,7 +205,7 @@ def _missing_columns(conn: sqlite3.Connection) -> List[Tuple[str, str, str]]:
 def ensure_tables(conn: sqlite3.Connection) -> None:
     """Create the tables on first use, and add the later tables and columns to what an earlier build created. The
     probes are reads, so a node that has everything takes no write gate."""
-    if (tables_present(conn) and all(_present(conn, t) for t in (DISMISSALS_TABLE, SKIPS_TABLE, LANE_DAILY_TABLE))
+    if (tables_present(conn) and all(_present(conn, t) for t in (DISMISSALS_TABLE, SKIPS_TABLE, LANE_DAILY_TABLE, truth_audit.EVENTS, truth_audit.EDGES))
             and not _missing_columns(conn)):
         return
     with with_db_write():
@@ -432,7 +434,7 @@ def record_check(conn: sqlite3.Connection, check: Dict[str, Any]) -> Optional[st
         raise TruthRequestError("invalid_check")
     check_id = uuid.uuid4().hex
     created = now_utc()
-    with with_db_write():
+    with batched_writes(conn):
         cursor = conn.execute(
             f"INSERT OR IGNORE INTO {CHECKS_TABLE} (check_id, record_table, record_id, conversation_id, source, "
             "speaker_kind, week, category, claim_text, verdict, reason, cited_refs_json, effort, model, latency_ms, "
@@ -446,6 +448,8 @@ def record_check(conn: sqlite3.Connection, check: Dict[str, Any]) -> Optional[st
              created.isoformat(), check.get("engine_version"), check.get("engine_sha16"),
              1 if check.get("contradicted") else None, *_reading_columns(check)),
         )
+        if cursor.rowcount:
+            truth_audit.append(conn, check_id, "attempt", created.isoformat(), check=check)
         commit_connection(conn)
     return check_id if cursor.rowcount else None
 
@@ -537,7 +541,7 @@ def recheck(conn: sqlite3.Connection, check: Dict[str, Any], attempt: int) -> Op
         raise TruthRequestError("invalid_check")
     if type(attempt) is not int or not 2 <= attempt <= MAX_ATTEMPTS:
         raise TruthRequestError("invalid_check")
-    with with_db_write():
+    with batched_writes(conn):
         found = conn.execute(
             f"SELECT c.check_id FROM {CHECKS_TABLE} c WHERE c.record_table=? AND c.record_id=? AND c.verdict='unable' "
             f"AND c.attempts=? AND NOT EXISTS (SELECT 1 FROM {LABELS_TABLE} l WHERE l.check_id = c.check_id)",
@@ -557,6 +561,7 @@ def recheck(conn: sqlite3.Connection, check: Dict[str, Any], attempt: int) -> Op
              now_utc().isoformat(), check.get("engine_version"), check.get("engine_sha16"),
              1 if check.get("contradicted") else None, reading_json, polarity, claim_key, said_at, shown, due_at, found[0]),
         )
+        truth_audit.append(conn, str(found[0]), "attempt", now_utc().isoformat(), check=check)
         commit_connection(conn)
     return str(found[0])
 
@@ -628,8 +633,8 @@ def label_claim(conn: sqlite3.Connection, check_id: Any, label: Any, note: Any =
                "source": check["source"], "check_id": check["check_id"], "disclosure": "owner_only"}
     refs = [{"table": check["record_table"], "record_id": check["record_id"]}]
     key = f"truth_check:{check['check_id']}"
-    with with_db_write():
-        existing = conn.execute(f"SELECT label_id FROM {LABELS_TABLE} WHERE check_id=?", (check["check_id"],)).fetchone()
+    with batched_writes(conn):
+        existing = conn.execute(f"SELECT label_id, label FROM {LABELS_TABLE} WHERE check_id=?", (check["check_id"],)).fetchone()
         label_id = str(existing[0]) if existing else uuid.uuid4().hex
         conn.execute(
             f"INSERT INTO {LABELS_TABLE} (label_id, check_id, label, note, labelled_at, evidence_ok) VALUES (?, ?, ?, ?, ?, ?) "
@@ -639,6 +644,8 @@ def label_claim(conn: sqlite3.Connection, check_id: Any, label: Any, note: Any =
         )
         conn.execute(f"DELETE FROM {DISMISSALS_TABLE} WHERE check_id=?", (check["check_id"],))
         _write_verified_claim(conn, key, payload, LABEL_CONFIDENCE[label], refs, valid_from, now)
+        truth_audit.append(conn, check["check_id"], "label", now, previous_label=existing[1] if existing else None,
+                           label=label, evidence_ok=evidence_ok)
         commit_connection(conn)
     return {"ok": True, "label_id": label_id}
 
@@ -652,7 +659,7 @@ def dismiss_claim(conn: sqlite3.Connection, check_id: Any, reason: Any, note: An
     check, note = _claim_check(conn, check_id, note)
     ensure_tables(conn)
     now = now_utc().isoformat()
-    with with_db_write():
+    with batched_writes(conn):
         existing = conn.execute(f"SELECT dismissal_id FROM {DISMISSALS_TABLE} WHERE check_id=?", (check["check_id"],)).fetchone()
         dismissal_id = str(existing[0]) if existing else uuid.uuid4().hex
         conn.execute(
@@ -660,6 +667,8 @@ def dismiss_claim(conn: sqlite3.Connection, check_id: Any, reason: Any, note: An
             "ON CONFLICT(check_id) DO UPDATE SET reason=excluded.reason, note=excluded.note, dismissed_at=excluded.dismissed_at",
             (dismissal_id, check["check_id"], reason, note, now),
         )
+        prior = conn.execute(f"SELECT label FROM {LABELS_TABLE} WHERE check_id=?", (check["check_id"],)).fetchone()
+        truth_audit.append(conn, check["check_id"], "dismiss", now, previous_label=prior[0] if prior else None, reason=reason)
         conn.execute(f"DELETE FROM {LABELS_TABLE} WHERE check_id=?", (check["check_id"],))
         conn.execute("DELETE FROM signal_objects WHERE object_type=? AND object_key=?",
                      (OBJECT_TYPE, f"truth_check:{check['check_id']}"))
@@ -675,10 +684,11 @@ def skip_claim(conn: sqlite3.Connection, check_id: Any, reason: Any = None, evid
     check, _ = _claim_check(conn, check_id, None)
     ensure_tables(conn)
     skip_id = uuid.uuid4().hex
-    with with_db_write():
+    with batched_writes(conn):
         conn.execute(f"INSERT INTO {SKIPS_TABLE} (skip_id, check_id, reason, evidence_opened, skipped_at) VALUES (?, ?, ?, ?, ?)",
                      (skip_id, check["check_id"], reason, None if evidence_opened is None else int(evidence_opened),
                       now_utc().isoformat()))
+        truth_audit.append(conn, check["check_id"], "skip", now_utc().isoformat(), reason=reason, evidence_opened=evidence_opened)
         commit_connection(conn)
     return {"ok": True, "skip_id": skip_id}
 
@@ -812,10 +822,11 @@ def forget_records(conn: sqlite3.Connection, records: Optional[Iterable[Any]] = 
                 f"SELECT c.check_id FROM {CHECKS_TABLE} c WHERE c.record_table = ?{_gone_from(conn, table)}", (table,))]
     if not gone:
         return 0
-    with with_db_write():
+    with batched_writes(conn):
         for start in range(0, len(gone), 500):
             chunk = gone[start:start + 500]
             marks = ",".join("?" for _ in chunk)
+            truth_audit.forget(conn, chunk)
             conn.execute(f"DELETE FROM {LABELS_TABLE} WHERE check_id IN ({marks})", chunk)
             for side_table in (DISMISSALS_TABLE, SKIPS_TABLE):
                 if _present(conn, side_table):

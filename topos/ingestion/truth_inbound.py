@@ -414,6 +414,8 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
         table, _, record_id = str(item.get("ref") or "").partition(":")
         if table and record_id:
             cited.append({"table": table, "record_id": record_id, "role": item.get("role"), "date": item.get("date")})
+    from ..query.truth_audit import timings
+
     latency = (result.get("timings_ms") or {}).get("total")
     reading = result.get("reading") if isinstance(result.get("reading"), dict) and result["reading"].get("claims") else None
     claim_key, polarity = reading_key(reading) if reading else (None, None)
@@ -425,6 +427,7 @@ def check_row(record: Dict[str, Any], result: Dict[str, Any], *, model: Optional
         "category": result.get("category"), "claim_text": (str(claim.get("text") or "") or None) if claim else None,
         "verdict": verdict, "reason": str(reason)[:120] if reason else None, "cited_refs": cited, "effort": EFFORT,
         "model": model, "latency_ms": latency, "read_timeout_s": read_timeout_s,
+        "timings_ms": timings(result.get("timings_ms")),
         "engine_version": str(result.get("version") or VERSION)[:80], "engine_sha16": engine_sha16() or None,
         "contradicted": contradicted,
         "reading_json": json.dumps(reading) if reading else None, "polarity": polarity, "claim_key": claim_key,
