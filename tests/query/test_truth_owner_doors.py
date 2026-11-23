@@ -496,7 +496,7 @@ def test_the_truth_tables_and_verified_claims_are_withheld_from_the_table_tools_
     # truth_skips and truth_lane_daily were served to any principal by the legacy table tools.
     assert {"truth_checks", "truth_labels"} <= OWNER_ONLY_TABLES and OWNER_ONLY_TABLE_PREFIXES == ("truth_",)
     truth_tables = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", "\n".join(store._DDL))
-    assert set(truth_tables) == {"truth_checks", "truth_labels", "truth_dismissals", "truth_skips", "truth_lane_daily"}
+    assert set(truth_tables) == {"truth_checks", "truth_labels", "truth_dismissals", "truth_skips", "truth_lane_daily", "truth_events", "truth_evidence_edges"}
     assert all(is_owner_only_table(t) for t in truth_tables) and is_owner_only_table("truth_anything_later")
     assert not is_owner_only_table("conversation_messages") and not is_owner_only_table("truthiness")
     assert all(store._present(node.conn, t) for t in truth_tables)

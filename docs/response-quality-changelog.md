@@ -1917,3 +1917,15 @@ Comparison: `{"verdict": "FAIL", "reasons": [], "quality_regressions": ["followu
   - Found and not fixed: this store has no ChatGPT message after 4 Nov although ChatGPT pages were visited on each of the 14 days after it. That is capture, not query.
 - Deployment: none. Changes sit uncommitted in `worktrees/node-day-window` and `worktrees/app-day-window`.
 - Rollback: revert the two rule blocks in `scopeRoutingRules.ts` and the `AI_COUNTERPART` line in `workEvidence.ts`; on the node, remove the `time_phrases` calls from `planner.py`, the `time_range` argument from `_route_canonical_rows` and the two recall patterns from `is_dated_activity_query`. The adapter arguments are optional and inert when unused.
+
+## 2026-11-23 — claim audit instrumentation (no response behavior change)
+
+Rechecks and latest-label writes previously discarded prior states. Added
+forward-only owner audit events, citation snapshots and preservation of existing
+stage timings; see [claim audit history](claim-audit-history.md). No retrieval,
+ranking, prompt, model, fallback, retry or timeout policy changes. This does not
+claim improved answer quality. Synthetic history regressions failed before the
+implementation. Paired answer-quality and real-model generation gates do not
+apply to this instrumentation-only scope and were not run. Deployment is pending;
+rollback to the prior binary leaves additive audit tables intact. Historical
+attempts, automatic acceptance and cross-pipeline provenance remain unknown.
