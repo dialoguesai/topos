@@ -5,9 +5,11 @@ Why. A fact pack reads a new record as it arrives only for a source whose canoni
 backfill is one typed yes each time (`topos-node packs backfill`). So on a node where most records
 come from sources without that job, facts stop keeping up the day the owner stops running the command.
 
-What this is. One switch, off by default, that means "keep my switched-on fact packs current". Only the
-owner turns it on or off (`topos-node packs auto on|off`, one typed yes on a terminal, or the app through
-the same confirmed route). While it is on the node starts a catch-up run by itself, on the machinery a
+What this is. One switch, ON by default on every node, that means "keep my switched-on fact packs
+current": facts follow new records continuously, with no backfill to start by hand. A node that never set
+the switch reads as on (`DEFAULT_ENABLED`); only the owner turns it off or back on (`topos-node packs auto
+on|off`, one typed yes on a terminal, or the app through the same confirmed route), and an owner's off is
+stored and kept across upgrades. While it is on the node starts a catch-up run by itself, on the machinery a
 confirmed backfill uses (`backfill_runs`): the same one-run slot, the same batch (`run_pack_backfill`),
 the same yield to the owner's requests between records, the same progress keys.
 
@@ -73,11 +75,15 @@ KILL_ENV = "TOPOS_PACKS_AUTO_CATCHUP"
 QUIET_ENV = "TOPOS_PACKS_AUTO_QUIET_S"
 MIN_GAP_ENV = "TOPOS_PACKS_AUTO_MIN_GAP_S"
 
+#: What the switch reads as on a node where the owner never set it. On (owner ruling 24 Nov 2026): fact
+#: packs the owner switched on keep current for everyone, not only on nodes whose owner found the switch.
+DEFAULT_ENABLED = True
+
 DEFAULT_QUIET_S = 600
 DEFAULT_MIN_GAP_S = 3600
 QUIET_RANGE_S = (60, 24 * 3600)
 MIN_GAP_RANGE_S = (300, 7 * 24 * 3600)
-#: The first look after the switch is turned on reads this many days back.
+#: The first look on a node (or after the owner turns the switch back on) reads this many days back.
 FIRST_WINDOW_DAYS = 7
 #: A look re-reads this many days before the last one, for records that carry an earlier date.
 OVERLAP_DAYS = 1
@@ -168,7 +174,8 @@ def read_switch(conn: sqlite3.Connection) -> Dict[str, Any]:
     raw = _read_json(conn, ENGINE_CONFIG_KEY_SWITCH)
     quiet = _period(raw.get("quiet_s"), QUIET_RANGE_S)
     gap = _period(raw.get("min_gap_s"), MIN_GAP_RANGE_S)
-    return {"enabled": raw.get("enabled") is True,
+    enabled = raw.get("enabled") if isinstance(raw.get("enabled"), bool) else DEFAULT_ENABLED
+    return {"enabled": enabled, "enabled_set": isinstance(raw.get("enabled"), bool),
             "quiet_s": quiet if quiet is not None else _env_seconds(QUIET_ENV, DEFAULT_QUIET_S, QUIET_RANGE_S),
             "min_gap_s": gap if gap is not None else _env_seconds(MIN_GAP_ENV, DEFAULT_MIN_GAP_S, MIN_GAP_RANGE_S),
             "quiet_set": quiet is not None, "min_gap_set": gap is not None,
@@ -195,7 +202,7 @@ def set_switch(conn: sqlite3.Connection, enabled: Any, *, quiet_s: Any = None, m
         if value is not None and _period(value, bounds) is None:
             raise AutoRefused(f"{label} must be a whole number of seconds from {bounds[0]} to {bounds[1]}")
     before = _read_json(conn, ENGINE_CONFIG_KEY_SWITCH)
-    was_on = before.get("enabled") is True
+    was_on = read_switch(conn)["enabled"]
     switch = {"enabled": enabled,
               "quiet_s": quiet_s if quiet_s is not None else _period(before.get("quiet_s"), QUIET_RANGE_S),
               "min_gap_s": min_gap_s if min_gap_s is not None else _period(before.get("min_gap_s"), MIN_GAP_RANGE_S),
@@ -482,7 +489,8 @@ def describe(conn: sqlite3.Connection, *, now: Optional[datetime] = None,
             nxt["state"] = "due" if wait <= 0 else ("waiting_for_gap" if gap_left >= quiet_left
                                                     else "waiting_for_quiet")
             nxt["not_before"] = _iso(now + timedelta(seconds=wait))
-    return {"enabled": switch["enabled"], "kill_switch": off, "changed_at": switch["changed_at"],
+    return {"enabled": switch["enabled"], "enabled_set": switch["enabled_set"], "kill_switch": off,
+            "changed_at": switch["changed_at"],
             "quiet_s": switch["quiet_s"], "min_gap_s": switch["min_gap_s"],
             "quiet_set": switch["quiet_set"], "min_gap_set": switch["min_gap_set"],
             "first_window_days": FIRST_WINDOW_DAYS, "max_window_days": MAX_WINDOW_DAYS,
