@@ -1583,7 +1583,9 @@
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "Fact-pack automatic catch-up ON by default (packs_auto_catchup): no step. A node where the owner never set the switch now reads it as on, so after the upgrade the node keeps its switched-on fact packs current by itself: the first look comes after the startup delay and a 10-minute quiet period, reads records dated in the last 7 days for the packs that are switched on and have something waiting, then what landed since the last look, at most once an hour. It uses the extractor and verifier setting the node already has (the local model, which is started if it is installed and not running) and loads no model when nothing is waiting. An owner who turned the switch off keeps it off (the stored value wins). Records older than the first window stay `topos-node packs backfill`. TOPOS_PACKS_AUTO_CATCHUP=off in the node's environment holds it off."
+      ]
     }
   ]
 }

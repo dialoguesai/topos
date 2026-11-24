@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **Fact packs keep current on every node by default.** `[D]` The automatic catch-up (topos#282) shipped off, so a
+  node's switched-on fact packs read new journal entries and messages only when the owner ran
+  `topos-node packs backfill`, or for the one source whose lane lists the `derivation` job. On a live node no pack
+  ran for 13 days after the last hand-started backfill, and the moments views built on them went empty. The switch
+  now reads as on wherever the owner never set it (`auto_catchup.DEFAULT_ENABLED`): about 12 minutes after records
+  land and go quiet, at most once an hour, the node reads them for the packs that are switched on, on the extractor
+  the owner picked. An owner's stored off is kept; `topos-node packs auto off` still needs one typed yes, and
+  `TOPOS_PACKS_AUTO_CATCHUP=off` still holds it off node-wide. The status says "on (the default)" until the owner
+  sets it (`enabled_set`). The first look reads 7 days back; older gaps stay a backfill. Owner ruling of
+  24 Nov 2026.
+
 ## [1.5.59] — 2026-11-20
 
 ### Changed

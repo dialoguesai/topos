@@ -279,7 +279,10 @@ def _auto(body: Any) -> Optional[Dict[str, Any]]:
                 "older_records": _int(last.get("older_records")),
                 "totals": ({**{k: _int(totals.get(k)) for k in _COUNT_KEYS},
                             **{k: _seconds(totals.get(k)) for k in _TIME_KEYS}} if totals is not None else None)}
-    return {"enabled": body["enabled"], "kill_switch": body.get("kill_switch") is True,
+    # `enabled_set` is new with the default-on switch; a node before it only set the switch when the owner did.
+    enabled_set = body["enabled_set"] if isinstance(body.get("enabled_set"), bool) else bool(body.get("changed_at"))
+    return {"enabled": body["enabled"], "enabled_set": enabled_set,
+            "kill_switch": body.get("kill_switch") is True,
             "changed_at": _stamp(body.get("changed_at")),
             "quiet_s": _int(body.get("quiet_s")), "min_gap_s": _int(body.get("min_gap_s")),
             "first_window_days": _int(body.get("first_window_days")),
@@ -295,7 +298,8 @@ def _auto_lines(auto: Dict[str, Any]) -> List[str]:
     elif not auto["enabled"]:
         head = "Automatic catch-up: off. `topos-node packs auto on` keeps the switched-on packs current."
     else:
-        head = "Automatic catch-up: on" + (f" since {auto['changed_at']} UTC." if auto["changed_at"] else ".")
+        head = ("Automatic catch-up: on" + (f" since {auto['changed_at']} UTC." if auto["changed_at"] and auto["enabled_set"]
+                                           else " (the default)."))
     lines = [head]
     if auto["enabled"] and not auto["kill_switch"]:
         lines.append(f"  It looks when new journal entries or messages have landed and none has arrived for "

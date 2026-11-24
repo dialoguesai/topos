@@ -1,6 +1,7 @@
 """The automatic catch-up for fact packs (`features/derivation/auto_catchup`, the switch routes in `api/signal`).
 
-protects: with the owner's standing switch off (the default) the node never starts a backfill run by itself. With it
+protects: the standing switch is ON by default on every node (a fresh node keeps its switched-on packs current with
+no owner action); with the owner's switch off the node never starts a backfill run by itself. With it
 on, new journal entries or messages from any source, a quiet period with no arrivals and a minimum gap since the last
 look start exactly ONE run on the confirmed-run machinery, over the switched-on packs that have something waiting and
 over recent records only: what landed since the last look, never the older history. It never starts beside another
@@ -162,7 +163,7 @@ class _Looks:
     """The scheduler's looks, driven by hand: a clock and a wall time that move only when the test says so, real
     batches on a connection of their own per batch, and the run's end recorded on a connection of its own."""
 
-    def __init__(self, node, on: bool = True) -> None:
+    def __init__(self, node, on: Optional[bool] = True) -> None:
         self.node = node
         self.t = 0.0
         self.now = node.now
@@ -170,8 +171,8 @@ class _Looks:
         self.gated: List[bool] = []
         self._opened: List[sqlite3.Connection] = []
         node.conn.set_trace_callback(self._trace)
-        if on:
-            auto.set_switch(node.conn, True, now=self.now)
+        if on is not None:                      # None: leave the switch as a fresh node has it (the default)
+            auto.set_switch(node.conn, on, now=self.now)
 
     def _trace(self, statement: str) -> None:
         if "INTO engine_config" in statement and "packs_auto_catchup" in statement:
@@ -228,7 +229,7 @@ class _Looks:
 def looks(node):
     made: List[_Looks] = []
 
-    def make(on: bool = True) -> _Looks:
+    def make(on: Optional[bool] = True) -> _Looks:
         made.append(_Looks(node, on))
         return made[-1]
 
@@ -265,9 +266,30 @@ def test_switch_changed_while_counting_cannot_start_a_run(node, looks, monkeypat
     assert not runs.busy()
 
 
-def test_off_is_the_default_and_a_look_then_starts_nothing(node, model, looks) -> None:
+def test_on_is_the_default_and_a_fresh_node_keeps_its_packs_current_with_no_owner_action(node, model, looks) -> None:
+    assert auto.read_switch(node.conn)["enabled"] is True and auto.read_switch(node.conn)["enabled_set"] is False
+    assert node.conn.execute("SELECT COUNT(*) FROM engine_config WHERE key=?",
+                             (auto.ENGINE_CONFIG_KEY_SWITCH,)).fetchone()[0] == 0, "nobody wrote the switch"
+    sched = looks(on=None)
+    assert sched.look()["decision"] == "ingest_busy"
+    started = sched.look(QUIET)
+    assert started["decision"] == "started" and started["since"] == _day(node.now, auto.FIRST_WINDOW_DAYS)
+    assert sched.ended(started["run_id"])["state"] == "done"
+    assert sorted(model.entries()) == FIRST_WINDOW_HITS
+    described = auto.describe(node.conn)
+    assert described["enabled"] is True and described["enabled_set"] is False and described["changed_at"] is None
+
+
+def test_a_switch_value_that_is_not_true_or_false_reads_as_the_default(node) -> None:
+    for raw in ('{}', '{"enabled": "no"}', '{"enabled": 0}', 'not json'):
+        node.conn.execute("INSERT OR REPLACE INTO engine_config (key, value) VALUES (?, ?)",
+                          (auto.ENGINE_CONFIG_KEY_SWITCH, raw))
+        assert auto.read_switch(node.conn)["enabled"] is auto.DEFAULT_ENABLED is True, raw
+
+
+def test_the_owners_off_is_kept_and_a_look_then_starts_nothing(node, model, looks) -> None:
     sched = looks(on=False)
-    assert auto.read_switch(node.conn)["enabled"] is False
+    assert auto.read_switch(node.conn)["enabled"] is False and auto.read_switch(node.conn)["enabled_set"] is True
     before = node.conn.total_changes
     for after in (0, QUIET, GAP, 86400):
         assert sched.look(after) == {"decision": "off"}
@@ -781,6 +803,7 @@ def test_a_run_a_crash_cut_short_reads_as_interrupted_and_is_done_over(node, mod
 
 
 def test_the_status_says_what_the_last_look_did_and_when_the_next_may_start(node, model, looks) -> None:
+    auto.set_switch(node.conn, False, now=node.now)           # an owner who turned it off
     off = auto.describe(node.conn)
     assert off["enabled"] is False and off["last"] is None and off["next"] == {"state": "off", "not_before": None}
     assert (off["quiet_s"], off["min_gap_s"], off["first_window_days"], off["max_window_days"]) == (
@@ -853,6 +876,7 @@ def test_the_switch_is_in_the_census_as_the_owners_and_reading_it_is_a_read() ->
 
 
 def test_reading_the_switch_needs_no_yes_and_setting_it_does_for_off_as_for_on(door, node) -> None:
+    auto.set_switch(node.conn, False, now=node.now)           # an owner who turned it off
     with door.socket() as client:
         read = client.get(AUTO)
         assert read.status_code == 200 and read.json()["enabled"] is False
@@ -878,6 +902,7 @@ def test_reading_the_switch_needs_no_yes_and_setting_it_does_for_off_as_for_on(d
 
 
 def test_a_body_that_is_not_the_switch_is_refused_and_changes_nothing(door, node) -> None:
+    auto.set_switch(node.conn, False, now=node.now)           # an owner who turned it off
     with door.socket() as client:
         for body in ({}, {"enabled": "yes"}, {"enabled": True, "pack_ids": [JOY]}, {"enabled": True, "quiet_s": 1},
                      {"enabled": True, "min_gap_s": "soon"}, {"quiet_s": 600}):
@@ -887,6 +912,7 @@ def test_a_body_that_is_not_the_switch_is_refused_and_changes_nothing(door, node
 
 
 def test_the_switch_is_refused_over_tcp_and_with_the_socket_gate_switched_off(door, node, monkeypatch) -> None:
+    auto.set_switch(node.conn, False, now=node.now)           # an owner who turned it off
     from topos.auth import require_api_key, resolve_request_principal
     from topos.principal import OWNER_APP, Principal
 
@@ -964,6 +990,7 @@ def test_the_command_end_to_end_over_a_real_owner_socket(node, model, monkeypatc
     from topos.mcp_server import NodeRefused, NodeSocket
 
     app, script = _mounted(node, monkeypatch)
+    auto.set_switch(node.conn, False, now=node.now)           # an owner who turned it off
     socket_path = Path(os.environ["TOPOS_UDS_PATH"])
     uds.clear_owner_confirmation()
     prompts: List[str] = []
@@ -1053,3 +1080,16 @@ def test_switching_off_and_on_while_a_run_works_keeps_the_first_window(node, mod
     sched.ended(started["run_id"])
     state = auto.read_state(node.conn)
     assert "covered" not in state and "base_at" not in state, "the run's end did not bring the old marks back"
+
+
+def test_the_status_line_says_on_by_default_until_the_owner_sets_it() -> None:
+    from topos.cli import packs_cmd
+
+    base = {"kill_switch": False, "quiet_s": 600, "min_gap_s": 3600, "first_window_days": 7,
+            "max_window_days": 30, "last": None, "next": {"state": "waiting_for_records"}}
+    default = packs_cmd._auto({**base, "enabled": True, "enabled_set": False, "changed_at": None})
+    assert packs_cmd._auto_lines(default)[0] == "Automatic catch-up: on (the default)."
+    owners = packs_cmd._auto({**base, "enabled": True, "enabled_set": True, "changed_at": "2026-11-24T20:00:00Z"})
+    assert packs_cmd._auto_lines(owners)[0].startswith("Automatic catch-up: on since ")
+    off = packs_cmd._auto({**base, "enabled": False, "enabled_set": True, "changed_at": "2026-11-24T20:00:00Z"})
+    assert packs_cmd._auto_lines(off)[0].startswith("Automatic catch-up: off.")
