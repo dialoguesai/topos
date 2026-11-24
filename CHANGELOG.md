@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.5.60] — 2026-11-24
+
 ### Changed
 - **Fact packs keep current on every node by default.** `[D]` The automatic catch-up (topos#282) shipped off, so a
   node's switched-on fact packs read new journal entries and messages only when the owner ran
